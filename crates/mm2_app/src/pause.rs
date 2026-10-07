@@ -306,7 +306,8 @@ pub fn pause_input(
             | MenuCommand::FocusAt(_)
             | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
-            | MenuCommand::Erase => {}
+            | MenuCommand::Erase
+            | MenuCommand::Capture(_) => {}
         }
         pause.dirty = true;
     }

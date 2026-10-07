@@ -1,3 +1,48 @@
+# Last iteration — F23-B.1: Controls screen (new-run iteration 21 of this runner)
+
+Selection: previous review passed with no blockers. F23-B (the rebinding
+UI) was the next queued F23 slice and the only place AC01's "remapped
+binding" could be reached by a player — `ControlSettings` existed with no
+screen. Slice: key rebinding + stick tuning UI only; audio, accessibility
+and menu-text isolation (AC03) untouched.
+
+Change: `Screen::Controls`, opened from a new "Driving controls" row on the
+Options screen (`--menu-screen controls` for captures). Each action's
+primary key is the row, its alternate the side entry; Enter listens
+(`MenuShell::capture`), the next key goes through `ControlSettings::rebind`
+— conflict (names the owner), reserved and unbindable keys are refused and
+the screen keeps listening; Esc/Back/pad East cancel; hover and clicks are
+inert while listening and nav keys bind instead of moving focus (`menu_input`
+sends `MenuCommand::Capture`). X/Delete clears a slot (last key refused).
+Stick deadzone, trigger deadzone, sensitivity and inversion cycle in place;
+reset row disabled at the shipped map. Every change saves `controls.json`
+(save failure keeps the change and says so) and emits `MenuEffect::Controls`
+to replace the live resource `vehicle_input` reads. `controls.rs` gained
+`cycled_*`/`slot_label` helpers.
+
+Tests: `tests/menu.rs` +6 (rows; capture rebinds + resource + file + reset;
+alternate via side entry; refusals keep listening/Esc cancels/nothing saved;
+clear + last-key; tuning persists/Back drops capture), `controls.rs` +1
+(step wrapping, off-grid values, ranges); the Options row-list test updated
+for the new row. Rendered: `--menu --menu-screen controls --frames 20
+--screenshot` → `status=pass bytes=2760756` on Metal/Apple M1, PNG inspected
+(local only).
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test
+--locked --workspace` exit 0 (2330 passed, 0 failed; was 2323). No processes
+left running.
+
+Not verified / open: no real keyboard session driving the capture (synthetic
+`ButtonInput` presses; the persisted-remap-drives-the-car path is the
+earlier `tests/input.rs` test); the in-session pause Options row is still
+disabled so controls are reachable only from the main menu; no pad
+rebinding, mouse/wheel rows, audio/accessibility options, AC03 menu/text
+isolation after hot-plug, AC04 display recovery. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — F23-C.1: focus-loss and pad-disconnect evidence (new-run iteration 20 of this runner)
 
 Selection: previous review passed with no blockers and flagged F23-AC02 as

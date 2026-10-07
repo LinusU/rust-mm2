@@ -20,6 +20,7 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::window::PrimaryWindow;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::ImpactFilter;
+use mm2_app::controls::{ControlSettings, DriveAction};
 use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
 use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
@@ -3080,7 +3081,8 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         [
             "Shadows: High",
             "Anti-aliasing: 4x MSAA",
-            "Reset to defaults"
+            "Reset to defaults",
+            "Driving controls"
         ]
     );
     assert_eq!(
@@ -3384,4 +3386,256 @@ fn a_decided_cops_and_robbers_match_offers_play_again() {
     let host = app.world().resource::<CnrHost>();
     assert!(host.game.outcome().is_none());
     assert_eq!(host.game.elapsed_ticks(), 0, "the clock starts over");
+}
+
+/// Open the Controls screen from the root and return the file it saves
+/// to (inside `dir`).
+fn open_controls(app: &mut App, dir: &Path) -> std::path::PathBuf {
+    let path = mm2_app::controls::controls_path(dir);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_controls(ControlSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(app, "Options");
+    press(app, KeyCode::Enter);
+    focus_row(app, "Driving controls");
+    press(app, KeyCode::Enter);
+    assert_eq!(shell(app).screen, menu::Screen::Controls);
+    path
+}
+
+/// The Controls screen lists each action's two keys (the alternate on
+/// the side entry), the stick tuning rows and a reset that is disabled
+/// at the shipped map.
+#[test]
+fn the_controls_screen_lists_every_binding_and_tuning_row() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    open_controls(&mut app, dir.path());
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(
+        rows,
+        [
+            "Accelerate: KeyW",
+            "Brake / reverse: KeyS",
+            "Steer left: KeyA",
+            "Steer right: KeyD",
+            "Handbrake: Space",
+            "Stick deadzone: 5%",
+            "Trigger deadzone: 5%",
+            "Steering sensitivity: 1.00x",
+            "Invert stick steering: Off",
+            "Reset to defaults",
+        ]
+    );
+    let alts: Vec<Option<String>> = shell(&app)
+        .rows
+        .iter()
+        .map(|r| r.side.as_ref().map(|s| s.text.clone()))
+        .collect();
+    assert_eq!(alts[0].as_deref(), Some("Alt: ArrowUp"));
+    assert_eq!(alts[4].as_deref(), Some("Alt: -"));
+    assert_eq!(alts[5], None);
+    assert!(shell(&app).rows[9].enabled.is_err());
+    // Esc leaves for the graphics screen with the Controls row focused.
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
+}
+
+/// Activate listens, the next key binds, the new map reaches the
+/// `ControlSettings` resource and `controls.json` at once, and a
+/// reload from the file gives the same map.
+#[test]
+fn a_captured_key_rebinds_the_action_and_persists() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+
+    focus_row(&mut app, "Accelerate");
+    press(&mut app, KeyCode::Enter);
+    assert!(shell(&app).capture.is_some());
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("press the new key")
+    );
+    press(&mut app, KeyCode::KeyP);
+    assert_eq!(shell(&app).capture, None);
+    assert_eq!(shell(&app).rows[0].text, "Accelerate: KeyP");
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("Accelerate is now KeyP")
+    );
+
+    let live = app.world().resource::<ControlSettings>();
+    assert_eq!(live.key_at(DriveAction::Throttle, 0), Some(KeyCode::KeyP));
+    assert_eq!(
+        live.key_at(DriveAction::Throttle, 1),
+        Some(KeyCode::ArrowUp)
+    );
+    assert_eq!(&ControlSettings::load(&path), live);
+    // The reset row woke up; it restores the shipped map everywhere.
+    assert!(shell(&app).rows[9].enabled.is_ok());
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<ControlSettings>(),
+        &ControlSettings::default()
+    );
+    assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+}
+
+/// The alternate key rebinds through the side entry, independently of
+/// the primary.
+#[test]
+fn the_alternate_slot_rebinds_through_the_side_entry() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    open_controls(&mut app, dir.path());
+    focus_row(&mut app, "Handbrake");
+    press(&mut app, KeyCode::ArrowRight);
+    assert!(shell(&app).side);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).capture, Some((DriveAction::Handbrake, 1)));
+    press(&mut app, KeyCode::KeyB);
+    let live = app.world().resource::<ControlSettings>();
+    assert_eq!(live.key_at(DriveAction::Handbrake, 0), Some(KeyCode::Space));
+    assert_eq!(live.key_at(DriveAction::Handbrake, 1), Some(KeyCode::KeyB));
+}
+
+/// While listening, nav keys bind instead of moving focus; a key
+/// another action owns, a reserved key and an unbindable key are all
+/// refused with the reason and the screen keeps listening; Esc cancels
+/// without changing anything.
+#[test]
+fn capture_refuses_bad_keys_keeps_listening_and_cancels_on_escape() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+    focus_row(&mut app, "Accelerate");
+    press(&mut app, KeyCode::Enter);
+
+    // KeyS belongs to Brake: refused, names the owner, still listening,
+    // and focus did not follow the S (a nav key outside capture).
+    press(&mut app, KeyCode::KeyS);
+    assert_eq!(shell(&app).focus, 0);
+    assert!(shell(&app).capture.is_some());
+    let status = shell(&app).status.clone().unwrap();
+    assert!(
+        status.contains("KeyS") && status.contains("Brake / reverse"),
+        "{status}"
+    );
+    // Reserved (camera C) and unbindable (F1) keys likewise.
+    press(&mut app, KeyCode::KeyC);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("in-game control")
+    );
+    press(&mut app, KeyCode::F1);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("cannot be used")
+    );
+    assert!(shell(&app).capture.is_some());
+    // Hover/click commands are inert while listening.
+    app.world_mut()
+        .resource_mut::<MenuShell>()
+        .pending
+        .push(menu::MenuCommand::FocusAt(3));
+    app.update();
+    assert_eq!(shell(&app).focus, 0);
+    assert!(shell(&app).capture.is_some());
+
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).capture, None);
+    assert_eq!(shell(&app).status.as_deref(), Some("rebinding cancelled"));
+    assert_eq!(shell(&app).screen, menu::Screen::Controls);
+    assert!(
+        app.world()
+            .get_resource::<ControlSettings>()
+            .is_none_or(|c| *c == ControlSettings::default())
+    );
+    assert!(!path.exists(), "nothing was saved");
+}
+
+/// X clears a key slot; an action's last key stays, with the reason.
+#[test]
+fn clearing_a_key_keeps_the_last_one() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+    focus_row(&mut app, "Accelerate");
+    press(&mut app, KeyCode::ArrowRight);
+    press(&mut app, KeyCode::KeyX);
+    assert_eq!(shell(&app).rows[0].side.as_ref().unwrap().text, "Alt: -");
+    assert_eq!(
+        ControlSettings::load(&path).key_at(DriveAction::Throttle, 1),
+        None
+    );
+    assert!(shell(&app).status.as_deref().unwrap().contains("cleared"));
+
+    // Back on the primary, the only key left cannot be cleared.
+    press(&mut app, KeyCode::ArrowLeft);
+    press(&mut app, KeyCode::KeyX);
+    assert_eq!(shell(&app).rows[0].text, "Accelerate: KeyW");
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("at least one key")
+    );
+}
+
+/// The tuning rows step in place, reach the resource and the file, and
+/// leaving the screen mid-capture drops the pending capture.
+#[test]
+fn tuning_rows_apply_and_persist_and_leaving_drops_a_capture() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+    focus_row(&mut app, "Stick deadzone");
+    press(&mut app, KeyCode::ArrowRight);
+    focus_row(&mut app, "Steering sensitivity");
+    press(&mut app, KeyCode::ArrowRight);
+    focus_row(&mut app, "Invert");
+    press(&mut app, KeyCode::Enter);
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(rows[5], "Stick deadzone: 10%");
+    assert_eq!(rows[7], "Steering sensitivity: 1.25x");
+    assert_eq!(rows[8], "Invert stick steering: On");
+    let live = app.world().resource::<ControlSettings>().clone();
+    assert_eq!(live.steer_deadzone, 0.10);
+    assert!(live.invert_steering);
+    assert_eq!(ControlSettings::load(&path), live);
+
+    // Start a capture, then back out with the pad's East button path:
+    // Back cancels the capture first and a second Back leaves.
+    focus_row(&mut app, "Handbrake");
+    press(&mut app, KeyCode::Enter);
+    assert!(shell(&app).capture.is_some());
+    app.world_mut()
+        .resource_mut::<MenuShell>()
+        .pending
+        .push(menu::MenuCommand::Back);
+    app.update();
+    assert_eq!(shell(&app).capture, None);
+    assert_eq!(shell(&app).screen, menu::Screen::Controls);
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
 }

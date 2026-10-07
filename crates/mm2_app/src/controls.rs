@@ -378,6 +378,71 @@ impl ControlSettings {
     }
 }
 
+/// Deadzone values the Controls screen steps through (all inside
+/// [`DEADZONE_RANGE`]).
+pub const DEADZONE_STEPS: [f32; 6] = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30];
+/// Sensitivity values the Controls screen steps through (all inside
+/// [`SENSITIVITY_RANGE`]).
+pub const SENSITIVITY_STEPS: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// The step after (or before) the one nearest `current`, wrapping — a
+/// hand-edited off-grid value moves to a neighbouring step instead of
+/// being stuck.
+fn stepped(steps: &[f32], current: f32, forward: bool) -> f32 {
+    let nearest = steps
+        .iter()
+        .enumerate()
+        .min_by(|a, b| (a.1 - current).abs().total_cmp(&(b.1 - current).abs()))
+        .map_or(0, |(i, _)| i);
+    let next = if forward {
+        (nearest + 1) % steps.len()
+    } else {
+        (nearest + steps.len() - 1) % steps.len()
+    };
+    steps[next]
+}
+
+/// The rebinding screen's editing and display helpers. Each `cycled_*`
+/// returns a copy so the caller decides whether to adopt and save it.
+impl ControlSettings {
+    /// These controls with the stick deadzone stepped.
+    pub fn cycled_steer_deadzone(&self, forward: bool) -> Self {
+        Self {
+            steer_deadzone: stepped(&DEADZONE_STEPS, self.steer_deadzone, forward),
+            ..self.clone()
+        }
+    }
+
+    /// These controls with the trigger deadzone stepped.
+    pub fn cycled_trigger_deadzone(&self, forward: bool) -> Self {
+        Self {
+            trigger_deadzone: stepped(&DEADZONE_STEPS, self.trigger_deadzone, forward),
+            ..self.clone()
+        }
+    }
+
+    /// These controls with the steering sensitivity stepped.
+    pub fn cycled_sensitivity(&self, forward: bool) -> Self {
+        Self {
+            steer_sensitivity: stepped(&SENSITIVITY_STEPS, self.steer_sensitivity, forward),
+            ..self.clone()
+        }
+    }
+
+    /// These controls with the stick inversion flipped.
+    pub fn toggled_inversion(&self) -> Self {
+        Self {
+            invert_steering: !self.invert_steering,
+            ..self.clone()
+        }
+    }
+
+    /// What a key slot shows: the key's name, or `-` when empty.
+    pub fn slot_label(&self, action: DriveAction, slot: usize) -> &'static str {
+        self.key_at(action, slot).and_then(key_name).unwrap_or("-")
+    }
+}
+
 /// The on-disk shape. Every field is optional so a hand-written partial
 /// file keeps the defaults for the rest.
 #[derive(Serialize, Deserialize, Default)]
@@ -752,5 +817,38 @@ mod tests {
         // A number too large for f32 is not the schema at all: the whole
         // file is refused and `load` falls back to the defaults.
         assert!(ControlSettings::from_json(br#"{"steer_sensitivity":1e999}"#).is_err());
+    }
+
+    #[test]
+    fn tuning_steps_wrap_and_an_off_grid_value_moves_to_a_neighbour() {
+        let mut c = ControlSettings::default();
+        for _ in 0..DEADZONE_STEPS.len() {
+            c = c.cycled_steer_deadzone(true);
+        }
+        assert_eq!(c.steer_deadzone, ControlSettings::default().steer_deadzone);
+        assert_eq!(c.cycled_steer_deadzone(false).steer_deadzone, 0.0);
+        assert_eq!(
+            ControlSettings::default()
+                .cycled_sensitivity(false)
+                .steer_sensitivity,
+            0.75
+        );
+        // A hand-edited 0.12 sits nearest 0.10, so forward is 0.15.
+        let odd = ControlSettings {
+            trigger_deadzone: 0.12,
+            ..ControlSettings::default()
+        };
+        assert_eq!(odd.cycled_trigger_deadzone(true).trigger_deadzone, 0.15);
+        for v in DEADZONE_STEPS {
+            assert!((DEADZONE_RANGE.0..=DEADZONE_RANGE.1).contains(&v));
+        }
+        for v in SENSITIVITY_STEPS {
+            assert!((SENSITIVITY_RANGE.0..=SENSITIVITY_RANGE.1).contains(&v));
+        }
+        assert!(
+            ControlSettings::default()
+                .toggled_inversion()
+                .invert_steering
+        );
     }
 }

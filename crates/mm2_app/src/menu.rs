@@ -48,8 +48,13 @@
 //! - [`Screen::Options`] is the graphics-options screen (CTL-4's
 //!   designed counterpart): shadow quality and anti-aliasing, adjusted
 //!   with Left/Right, saved on every change and defaulting to the look
-//!   the game shipped with. Control and audio options (CTL-3/CTL-5)
-//!   are still open.
+//!   the game shipped with. Its "Driving controls" row opens
+//!   [`Screen::Controls`]: each action's two keys rebind by listening
+//!   for the next key ([`MenuShell::capture`]), conflicts and reserved
+//!   keys are refused with the reason, X clears a key, and stick
+//!   deadzone/sensitivity/inversion cycle in place — all saved to
+//!   `controls.json` on every change. Audio options (CTL-5) are still
+//!   open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
 //! pedestrian/cop density options (no consumers — F19/F20), Quick
@@ -75,6 +80,7 @@ use mm2_game::{
 };
 use tracing::{info, warn};
 
+use crate::controls::{ControlSettings, DriveAction, SLOTS};
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 use crate::settings::GraphicsSettings;
@@ -113,6 +119,10 @@ pub enum MenuCommand {
     Type(char),
     /// Erase the last character of a text field (Backspace).
     Erase,
+    /// A key pressed while the Controls screen listens for a new
+    /// binding. Only `menu_input` produces it, and only while
+    /// [`MenuShell::capture`] is set.
+    Capture(KeyCode),
 }
 
 /// The menu's navigation state. Each screen rebuilds its rows from
@@ -186,6 +196,10 @@ pub enum Screen {
     /// and write [`MenuData`]'s settings, so the screen holds no state
     /// of its own.
     Options,
+    /// Driving controls: rebindable keys (two slots per action), stick
+    /// tuning and a reset. Rows read and write [`MenuData`]'s
+    /// [`ControlSettings`]; a pending key capture lives on the shell.
+    Controls,
     /// Condition options for a cruise or a customization-unlocked
     /// event (UI-2, RACE-3/RACE-4). `conditions`/`densities` are the
     /// working picks Left/Right adjusts in place; the `seed_*` fields
@@ -270,6 +284,23 @@ pub enum Action {
     CycleAntialiasing,
     /// Put every graphics setting back to its default.
     ResetGraphics,
+    /// Listen for the key to put in one slot of a driving action.
+    RebindKey {
+        /// The action being rebound.
+        action: DriveAction,
+        /// Which of its [`SLOTS`] keys.
+        slot: usize,
+    },
+    /// Cycle the stick steering deadzone.
+    CycleSteerDeadzone,
+    /// Cycle the trigger deadzone.
+    CycleTriggerDeadzone,
+    /// Cycle the stick steering sensitivity.
+    CycleSensitivity,
+    /// Flip the stick steering direction.
+    ToggleInvertSteering,
+    /// Put every driving control back to the shipped map.
+    ResetControls,
     /// Launch the session the Customize screen configures.
     LaunchCustomize,
     /// Cycle the Cops & Robbers variant.
@@ -378,6 +409,9 @@ pub enum MenuEffect {
     /// Replace the [`GraphicsSettings`] resource — already saved by the
     /// model; the systems in `settings` push it onto lights and cameras.
     Settings(GraphicsSettings),
+    /// Replace the [`ControlSettings`] resource — already saved by the
+    /// model; `vehicle_input` reads the resource every frame.
+    Controls(Box<ControlSettings>),
     /// Exit the process.
     Exit,
 }
@@ -414,6 +448,10 @@ pub struct MenuShell {
     /// mouse path) — drained first every update so every effect still
     /// executes in `menu_input`.
     pub pending: Vec<MenuCommand>,
+    /// The Controls screen is waiting for the key to bind to this
+    /// action's slot. While set, [`Self::apply`] takes only
+    /// [`MenuCommand::Capture`] and `Back` (cancel).
+    pub capture: Option<(DriveAction, usize)>,
     dirty: bool,
     /// Last gamepad nav-axis reading — edge detection for stick moves.
     pad_axis: f32,
@@ -460,6 +498,10 @@ pub struct MenuData {
     /// Where each change is saved. `None` keeps the settings for this
     /// run only (evidence runs never write the user's settings).
     settings_path: Option<PathBuf>,
+    /// The driving controls the Controls screen shows and edits.
+    controls: ControlSettings,
+    /// Where each controls change is saved (`None`: this run only).
+    controls_path: Option<PathBuf>,
 }
 
 impl MenuData {
@@ -482,7 +524,22 @@ impl MenuData {
             cnr_gate: BTreeMap::new(),
             settings: GraphicsSettings::default(),
             settings_path: None,
+            controls: ControlSettings::default(),
+            controls_path: None,
         }
+    }
+
+    /// Start the Controls screen from `controls`, saving every change
+    /// to `path` (`None`: for this run only).
+    pub fn with_controls(mut self, controls: ControlSettings, path: Option<PathBuf>) -> Self {
+        self.controls = controls;
+        self.controls_path = path;
+        self
+    }
+
+    /// The driving controls the Controls screen currently shows.
+    pub fn controls(&self) -> &ControlSettings {
+        &self.controls
     }
 
     /// Start the Options screen from `settings`, saving every change
@@ -700,6 +757,7 @@ impl MenuShell {
             vehicle,
             difficulty,
             pending: Vec::new(),
+            capture: None,
             dirty: true,
             pad_axis: 0.0,
         }
@@ -716,6 +774,7 @@ impl MenuShell {
         // Stale device commands must not fire against the reopened
         // shell — a click queued while a session ran has no screen.
         self.pending.clear();
+        self.capture = None;
         self.dirty = true;
     }
 
@@ -726,10 +785,12 @@ impl MenuShell {
         self.focus = 0;
         self.side = false;
         self.status = None;
+        self.capture = None;
     }
 
     fn pop(&mut self) -> bool {
         if let Some((screen, focus, side)) = self.stack.pop() {
+            self.capture = None;
             self.screen = screen;
             self.focus = focus;
             self.side = side;
@@ -804,6 +865,22 @@ impl MenuShell {
             self.dirty = true;
             return effects;
         }
+        // A pending key capture owns the menu: the next key binds (or
+        // cancels), Back cancels, and everything else — hover, clicks,
+        // nav keys — is inert, so a stray command can never leave the
+        // screen waiting on a key behind the player's back.
+        if let Some((action, slot)) = self.capture {
+            match cmd {
+                MenuCommand::Capture(KeyCode::Escape) | MenuCommand::Back => {
+                    self.capture = None;
+                    self.status = Some("rebinding cancelled".into());
+                }
+                MenuCommand::Capture(key) => self.bind_key(data, action, slot, key, &mut effects),
+                _ => return effects,
+            }
+            self.dirty = true;
+            return effects;
+        }
         match cmd {
             // Vertical moves keep the column, so walking a list of
             // options stays on the options.
@@ -850,9 +927,16 @@ impl MenuShell {
                 }
             }
             MenuCommand::Delete => {
-                // Only profile rows are deletable; anything else is a
-                // no-op so the key is safe everywhere else.
-                if self.screen == Screen::Profiles
+                // Only profile rows are deletable and key slots
+                // clearable; anything else is a no-op so the key is
+                // safe everywhere else.
+                if self.screen == Screen::Controls {
+                    if let Some(Action::RebindKey { action, slot }) =
+                        self.focused_row().map(|r| r.action.clone())
+                    {
+                        self.clear_key(data, action, slot, &mut effects);
+                    }
+                } else if self.screen == Screen::Profiles
                     && let Some(row) = self.rows.get(self.focus)
                     && let Action::BindProfile(id) = &row.action
                 {
@@ -873,7 +957,7 @@ impl MenuShell {
                 }
             }
             // Row screens carry no text field — typing is inert.
-            MenuCommand::Type(_) | MenuCommand::Erase => {}
+            MenuCommand::Type(_) | MenuCommand::Erase | MenuCommand::Capture(_) => {}
         }
         self.dirty = true;
         effects
@@ -910,6 +994,10 @@ impl MenuShell {
             | Action::CycleOpponents
             | Action::CycleShadows
             | Action::CycleAntialiasing
+            | Action::CycleSteerDeadzone
+            | Action::CycleTriggerDeadzone
+            | Action::CycleSensitivity
+            | Action::ToggleInvertSteering
             | Action::CycleCnrVariant
             | Action::CycleCnrGold
             | Action::CycleCnrLimit) => self.adjust_with(data, &action, true, effects),
@@ -930,6 +1018,17 @@ impl MenuShell {
             Action::ResetGraphics => {
                 self.set_settings(data, GraphicsSettings::default(), effects);
                 self.status = Some("graphics settings reset to the defaults".into());
+            }
+            Action::RebindKey { action, slot } => {
+                self.capture = Some((action, slot));
+                self.status = Some(format!(
+                    "press the new key for {} (Esc cancels)",
+                    action.label()
+                ));
+            }
+            Action::ResetControls => {
+                self.set_controls(data, ControlSettings::default(), effects);
+                self.status = Some("driving controls reset to the defaults".into());
             }
             Action::LaunchCustomize => {
                 let Screen::Customize {
@@ -1089,6 +1188,22 @@ impl MenuShell {
             Action::CycleAntialiasing => {
                 self.set_settings(data, data.settings.cycled_antialiasing(forward), effects);
             }
+            Action::CycleSteerDeadzone => {
+                self.set_controls(data, data.controls.cycled_steer_deadzone(forward), effects);
+            }
+            Action::CycleTriggerDeadzone => {
+                self.set_controls(
+                    data,
+                    data.controls.cycled_trigger_deadzone(forward),
+                    effects,
+                );
+            }
+            Action::CycleSensitivity => {
+                self.set_controls(data, data.controls.cycled_sensitivity(forward), effects);
+            }
+            Action::ToggleInvertSteering => {
+                self.set_controls(data, data.controls.toggled_inversion(), effects);
+            }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
                     Difficulty::Amateur => Difficulty::Professional,
@@ -1174,6 +1289,92 @@ impl MenuShell {
             self.status = Some(format!("settings not saved: {e}"));
         }
         effects.push(MenuEffect::Settings(settings));
+    }
+
+    /// Adopt `controls`: remember them, save them and tell the app
+    /// shell. A write failure keeps the change for this run and says so.
+    fn set_controls(
+        &mut self,
+        data: &mut MenuData,
+        controls: ControlSettings,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        if controls == data.controls {
+            return;
+        }
+        if let Some(path) = &data.controls_path
+            && let Err(e) = controls.save(path)
+        {
+            warn!(path = %path.display(), error = %e, "driving controls not saved");
+            self.status = Some(format!("controls not saved: {e}"));
+        }
+        data.controls = controls.clone();
+        effects.push(MenuEffect::Controls(Box::new(controls)));
+    }
+
+    /// Finish a key capture: bind `key`, or keep listening with the
+    /// refusal (reserved, taken by another action...) on the status
+    /// line so the player can pick another key without re-opening it.
+    fn bind_key(
+        &mut self,
+        data: &mut MenuData,
+        action: DriveAction,
+        slot: usize,
+        key: KeyCode,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        let mut next = data.controls.clone();
+        match next.rebind(action, slot, key) {
+            Ok(()) => {
+                self.capture = None;
+                self.status = Some(format!(
+                    "{} is now {}",
+                    action.label(),
+                    next.slot_label(action, slot)
+                ));
+                self.set_controls_keep_status(data, next, effects);
+            }
+            Err(e) => {
+                self.status = Some(format!(
+                    "{}: {e} - press another key (Esc cancels)",
+                    crate::controls::key_name(key).unwrap_or("that key")
+                ));
+            }
+        }
+    }
+
+    /// Clear one key slot; the last key of an action stays.
+    fn clear_key(
+        &mut self,
+        data: &mut MenuData,
+        action: DriveAction,
+        slot: usize,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        let mut next = data.controls.clone();
+        match next.unbind(action, slot) {
+            Ok(()) => {
+                self.status = Some(format!("{} key {} cleared", action.label(), slot + 1));
+                self.set_controls_keep_status(data, next, effects);
+            }
+            Err(e) => self.status = Some(format!("{}: {e}", action.label())),
+        }
+    }
+
+    /// [`Self::set_controls`] without losing the success message to its
+    /// own save-failure line: a failed save replaces it, which is the
+    /// more important thing to show.
+    fn set_controls_keep_status(
+        &mut self,
+        data: &mut MenuData,
+        controls: ControlSettings,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        let message = self.status.take();
+        self.set_controls(data, controls, effects);
+        if self.status.is_none() {
+            self.status = message;
+        }
     }
 
     /// Cycle one of the Records screen's filters through `None` (all)
@@ -1612,6 +1813,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             rows
         }
         Screen::Options => options_screen_rows(data),
+        Screen::Controls => controls_screen_rows(data),
         Screen::Garage => garage_rows(shell, data, vfs),
         Screen::Paints { car } => paint_rows(shell, data, vfs, car),
         Screen::Profiles => profile_rows(shell, data),
@@ -2073,7 +2275,82 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
             },
             Action::ResetGraphics,
         ),
+        row(
+            "Driving controls".to_string(),
+            Ok(()),
+            Action::Push(Screen::Controls),
+        ),
     ]
+}
+
+/// The Controls screen: each driving action's first key on the row and
+/// its alternate on the side entry, then the stick tuning rows and a
+/// reset that disables itself, with its reason, at the shipped map.
+fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
+    let c = &data.controls;
+    let row = |text: String, enabled: Result<(), String>, action: Action, side: Option<Row>| Row {
+        text,
+        enabled,
+        action,
+        won: None,
+        side: side.map(Box::new),
+    };
+    let mut rows: Vec<Row> = DriveAction::ALL
+        .into_iter()
+        .map(|action| {
+            let slot_row = |slot: usize| {
+                let name = if slot == 0 { "" } else { "Alt: " };
+                row(
+                    format!("{name}{}", c.slot_label(action, slot)),
+                    Ok(()),
+                    Action::RebindKey { action, slot },
+                    None,
+                )
+            };
+            let alt = (SLOTS > 1).then(|| slot_row(1));
+            row(
+                format!("{}: {}", action.label(), c.slot_label(action, 0)),
+                Ok(()),
+                Action::RebindKey { action, slot: 0 },
+                alt,
+            )
+        })
+        .collect();
+    let on_off = |on: bool| if on { "On" } else { "Off" };
+    let tuning = [
+        (
+            format!("Stick deadzone: {:.0}%", c.steer_deadzone * 100.0),
+            Action::CycleSteerDeadzone,
+        ),
+        (
+            format!("Trigger deadzone: {:.0}%", c.trigger_deadzone * 100.0),
+            Action::CycleTriggerDeadzone,
+        ),
+        (
+            format!("Steering sensitivity: {:.2}x", c.steer_sensitivity),
+            Action::CycleSensitivity,
+        ),
+        (
+            format!("Invert stick steering: {}", on_off(c.invert_steering)),
+            Action::ToggleInvertSteering,
+        ),
+    ];
+    rows.extend(
+        tuning
+            .into_iter()
+            .map(|(text, action)| row(text, Ok(()), action, None)),
+    );
+    rows.push(row(
+        "Reset to defaults".to_string(),
+        if *c == ControlSettings::default() {
+            Err("already at the defaults".to_string())
+        } else {
+            Ok(())
+        },
+        Action::ResetControls,
+        None,
+    ));
+    rows
 }
 
 /// The RACE-3 per-event options entry, drawn beside the event's row:
@@ -2534,6 +2811,7 @@ pub fn menu_input(
     // `apply` + effect loop.
     let mut cmds: Vec<MenuCommand> = std::mem::take(&mut shell.pending);
     let name_entry = matches!(shell.screen, Screen::NewProfile { .. });
+    let capturing = shell.capture.is_some();
     // The stream is drained every frame — on other screens typed text
     // is discarded so a nav key's character (WASD all carry text)
     // can't leak into a freshly opened name field. On the entry
@@ -2555,7 +2833,20 @@ pub fn menu_input(
             }
         }
     }
-    if name_entry {
+    if capturing {
+        // The Controls screen is waiting for a key: the first key
+        // pressed this frame is the candidate (Esc cancels in `apply`),
+        // and the pad can only back out — no nav key may fire, or the
+        // key being bound would also move the focus.
+        if let Some(key) = keys.get_just_pressed().min() {
+            cmds.push(MenuCommand::Capture(*key));
+        }
+        if let Some(pad) = pads.iter().next()
+            && pad.just_pressed(GamepadButton::East)
+        {
+            cmds.push(MenuCommand::Back);
+        }
+    } else if name_entry {
         if keys.just_pressed(KeyCode::Enter) {
             cmds.push(MenuCommand::Activate);
         }
@@ -2651,6 +2942,9 @@ pub fn menu_input(
                 }
                 MenuEffect::Settings(settings) => {
                     target.commands.insert_resource(settings);
+                }
+                MenuEffect::Controls(controls) => {
+                    target.commands.insert_resource(*controls);
                 }
                 MenuEffect::Exit => {
                     target.exit.write(AppExit::Success);
@@ -2828,6 +3122,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::NewProfile { .. } => "New driver".to_string(),
         Screen::Records { .. } => "Race records".to_string(),
         Screen::Options => "Graphics options".to_string(),
+        Screen::Controls => "Driving controls - X clears a key".to_string(),
         Screen::Customize { target, .. } => match target {
             CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),
             CustomizeTarget::Event { stem, .. } => format!("Race options - {stem}"),

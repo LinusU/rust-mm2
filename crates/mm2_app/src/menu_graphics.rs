@@ -964,6 +964,9 @@ fn screen_hint(screen: &Screen) -> &'static str {
             "Use Left / Right to tune your session. Select the start button when ready."
         }
         Screen::Options => "Use Left / Right to change a setting. Changes are saved automatically.",
+        Screen::Controls => {
+            "Select a key and press its new key. Right reaches the alternate key, X clears one. Changes are saved automatically."
+        }
         _ => "Select to continue your drive.",
     }
 }

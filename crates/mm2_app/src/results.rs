@@ -227,7 +227,8 @@ pub fn results_input(
             | MenuCommand::FocusAt(_)
             | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
-            | MenuCommand::Erase => {}
+            | MenuCommand::Erase
+            | MenuCommand::Capture(_) => {}
         }
         results.dirty = true;
     }

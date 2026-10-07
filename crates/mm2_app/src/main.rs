@@ -446,7 +446,7 @@ struct Cli {
     menu: bool,
 
     /// Open a menu screen directly for reproducible visual captures.
-    #[arg(long, requires = "menu", value_parser = ["root", "profiles", "races", "garage", "options"])]
+    #[arg(long, requires = "menu", value_parser = ["root", "profiles", "races", "garage", "options", "controls"])]
     menu_screen: Option<String>,
 }
 
@@ -1317,7 +1317,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
     .insert_resource(graphics)
-    .insert_resource(control_settings)
+    .insert_resource(control_settings.clone())
     .insert_resource(settings::SettingsFile(settings_path.clone()))
     .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()
@@ -1870,13 +1870,15 @@ fn main() {
             Some("races") => menu::Screen::EventCity,
             Some("garage") => menu::Screen::Garage,
             Some("options") => menu::Screen::Options,
+            Some("controls") => menu::Screen::Controls,
             _ => menu::Screen::Root,
         };
         app.insert_resource(shell)
             .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
             .insert_resource(
                 menu::MenuData::new(menu_store, has_mods, menu_bound)
-                    .with_settings(graphics, settings_path),
+                    .with_settings(graphics, settings_path)
+                    .with_controls(control_settings, controls_path),
             )
             .add_systems(
                 Update,
