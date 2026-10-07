@@ -3524,8 +3524,8 @@ fn a_missing_wave_counts_and_is_never_substituted() {
     assert!(played.iter().all(|(_, s, ..)| s.contains("timenoon")));
 }
 
-/// A modded table whose `end`/`add` window overflows i64 resolves to
-/// an undrawable range — one counted failure through the production
+/// A modded table whose `add` sits past `end` (here `i64::MAX`)
+/// resolves to an undrawable range — one counted failure through the production
 /// resolve path, never an overflow panic — and the other cue family
 /// still plays.
 #[test]

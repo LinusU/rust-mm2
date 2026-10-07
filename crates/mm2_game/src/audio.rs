@@ -839,23 +839,32 @@ pub fn draw_speaker(announcers: u32, rng: &mut NavRng) -> Option<u32> {
     }
 }
 
-/// The wave suffix a cue row draws — `add + 1 + rng % end`, the
-/// designed reading of the authored `end sufix value`/`sufix add
-/// value` pair (UNK-25): `end` tops a 1-based draw range, `add`
-/// offsets it verbatim (`0` on every live retail weather/time row).
-/// `None` on a non-positive `end` or an `add`/`end` window that
-/// cannot fit `i64` — a modded table's `9223372036854775807`-scale
-/// fields are undrawable, never an overflow panic.
+/// The wave suffix a cue row draws — a seeded pick from `add + 1 ..=
+/// end`: `end` is the *last* wave number the row may name and `add`
+/// the number just before its first (UNK-25, designed reading
+/// grounded in the retail wave inventory). Every weather/time row
+/// authors `add` 0, so those read `1..=end` under any offset reading;
+/// the Cops & Robbers tables are where the readings part. They share
+/// one wave pool per speaker (`as1cops01`–`11`, `al1cops01`–`12`) and
+/// author `ROBGETLOOT 3,0`, `ROBDROPLOOT 6,5`, `COPRECOVERLOOT 11,10`
+/// — a window of `add + 1 ..= add + end` would reach `as1cops21` and
+/// beyond, waves that do not ship, while `add + 1 ..= end` names
+/// exactly the numbered lines each family owns (a single wave where
+/// `end - add` is 1). The london table's fourth column repeats `end`.
+///
+/// `None` when the row names no wave: a non-positive `end`, a
+/// negative `add`, or an `add` at or past `end` — counted failed
+/// downstream, never a guessed range and never an overflow panic on a
+/// modded table's `i64`-scale fields. An undrawable row declines
+/// before drawing, so it never shifts the seeded stream the drawable
+/// rows consume.
 pub fn draw_cue_suffix(end: i64, add: i64, rng: &mut NavRng) -> Option<i64> {
-    // `add + end` is the window's top (draws land `add + 1 ..=
-    // add + end`); with `end >= 1` its checked_add also covers
-    // `add + 1`, so the unchecked sum below is provably in range.
-    // An unrepresentable row declines before drawing, so it never
-    // shifts the seeded stream the drawable rows consume.
-    if end <= 0 || add.checked_add(end).is_none() {
+    if end <= 0 || add < 0 || add >= end {
         return None;
     }
-    Some(add + 1 + (rng.next_u64() % end as u64) as i64)
+    // `0 <= add < end <= i64::MAX`: the width and `add + 1` both fit.
+    let width = (end - add) as u64;
+    Some(add + 1 + (rng.next_u64() % width) as i64)
 }
 
 /// The wave stem a drawn cue names — `<speaker><prefix><NN>` with a
@@ -1470,42 +1479,52 @@ mod tests {
 
     #[test]
     fn the_cue_suffix_draw_stays_inside_the_authored_range() {
-        // `end` tops the 1-based range; `add` offsets verbatim.
+        // `end` is the last wave, `add` the one before the first.
         let mut rng = NavRng::new(5);
         for _ in 0..200 {
             let s = draw_cue_suffix(3, 0, &mut rng).unwrap();
             assert!((1..=3).contains(&s));
         }
-        // `add` shifts the whole window (the C&R/RACELAPS shape).
+        // The C&R shape: `ROBDROPLOOT 6,5` is the single wave 6 and
+        // `COPGETLOOT 9,8` the single wave 9 — never a wave past `end`.
         let mut rng = NavRng::new(5);
+        for _ in 0..50 {
+            assert_eq!(draw_cue_suffix(6, 5, &mut rng), Some(6));
+            assert_eq!(draw_cue_suffix(11, 10, &mut rng), Some(11));
+        }
+        // A wider offset window draws only its own numbers, and every
+        // one of them is eventually drawn.
+        let mut rng = NavRng::new(5);
+        let mut seen = std::collections::BTreeSet::new();
         for _ in 0..200 {
             let s = draw_cue_suffix(10, 8, &mut rng).unwrap();
-            assert!((9..=18).contains(&s));
+            assert!((9..=10).contains(&s));
+            seen.insert(s);
         }
+        assert_eq!(seen.len(), 2);
         assert_eq!(draw_cue_suffix(0, 0, &mut rng), None);
         assert_eq!(draw_cue_suffix(-2, 0, &mut rng), None);
     }
 
     #[test]
-    fn an_unrepresentable_cue_window_is_undrawable_not_a_panic() {
-        // Modded/corrupt tables author `end`/`add` verbatim — a
-        // window whose top `add + end` overflows i64 must degrade to
-        // `None` (counted failed downstream), never panic under
-        // overflow checks, and must not consume a stream draw.
+    fn a_row_that_names_no_wave_is_undrawable_and_burns_no_draw() {
+        // `add` at or past `end`, or negative, leaves an empty window
+        // (a modded or corrupt table): `None`, counted failed
+        // downstream, and the seeded stream is untouched — including
+        // `i64`-scale fields that must neither overflow nor panic.
         let mut rng = NavRng::new(7);
         let mut pristine = NavRng::new(7);
+        assert_eq!(draw_cue_suffix(3, 3, &mut rng), None);
+        assert_eq!(draw_cue_suffix(3, 4, &mut rng), None);
+        assert_eq!(draw_cue_suffix(3, -1, &mut rng), None);
         assert_eq!(draw_cue_suffix(3, i64::MAX, &mut rng), None);
-        assert_eq!(draw_cue_suffix(i64::MAX, 1, &mut rng), None);
         assert_eq!(draw_cue_suffix(i64::MAX, i64::MAX, &mut rng), None);
-        // The undrawable rows burned no draw — the next drawable row
-        // sees the same stream an untouched one does.
         assert_eq!(
             draw_cue_suffix(3, 0, &mut rng),
             draw_cue_suffix(3, 0, &mut pristine)
         );
-        // A representable edge window still draws inside
-        // `add + 1 ..= add + end`.
-        let s = draw_cue_suffix(5, i64::MAX - 5, &mut rng).unwrap();
+        // A representable edge window still draws inside it.
+        let s = draw_cue_suffix(i64::MAX, i64::MAX - 5, &mut rng).unwrap();
         assert!((i64::MAX - 4..=i64::MAX).contains(&s));
     }
 

@@ -183,15 +183,15 @@ impl CueTable {
                         ),
                     });
                 }
-                // The draw lands inside `add + 1 ..= add + end`; a
-                // window whose top overflows `i64` is undrawable —
-                // the same verdict the consumer's draw returns.
-                if row.end > 0 && row.add.checked_add(row.end).is_none() {
+                // The draw lands inside `add + 1 ..= end`; an `add`
+                // at or past `end` leaves no wave to name — the same
+                // verdict the consumer's draw returns.
+                if row.end > 0 && row.add >= row.end {
                     out.push(TableDiagnostic {
                         line: row.line,
                         message: format!(
-                            "cue row {} has an unrepresentable sufix range (end {} add {})",
-                            row.prefix, row.end, row.add
+                            "cue row {} names no wave: sufix add value {} is not below end sufix value {}",
+                            row.prefix, row.add, row.end
                         ),
                     });
                 }
@@ -446,15 +446,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_flags_an_unrepresentable_sufix_range() {
-        // A modded row can author `end`/`add` up to the i64 edge; a
-        // window whose top overflows is undrawable and must surface
-        // as an advisory diagnostic, like the other bad-range legs.
-        let text = "Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nBIG,3,9223372036854775807\nTOP,9223372036854775807,1\nEDGE,5,9223372036854775802\n";
+    fn validate_flags_a_row_that_names_no_wave() {
+        // `add` at or past `end` leaves an empty `add + 1 ..= end`
+        // window — an advisory diagnostic, like the other bad-range
+        // legs. The retail C&R shape (`end` one past `add`) is fine,
+        // and so is an `i64`-scale row whose window is non-empty.
+        let text = "Name prefix/type header,end sufix value,sufix add value
+WEATHER header,,
+BIG,3,9223372036854775807
+SAME,4,4
+SINGLE,6,5
+WIDE,9223372036854775807,1
+";
         let table = CueTable::parse(text).unwrap();
         let issues = table.validate();
-        assert_eq!(issues.len(), 2, "{issues:?}"); // BIG + TOP; EDGE's top fits i64
-        assert!(issues.iter().all(|i| i.message.contains("sufix range")));
+        assert_eq!(issues.len(), 2, "{issues:?}"); // BIG + SAME
+        assert!(issues.iter().all(|i| i.message.contains("names no wave")));
     }
 
     #[test]

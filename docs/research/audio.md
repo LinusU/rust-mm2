@@ -203,8 +203,9 @@ documented (the exe's `weaclr`/`weacldy`/`weafog`/`wearain` +
 measured `.ltNN` order) — so `.selector` maps onto
 `<stem>_prerace` tables. One `COMMENTARY_DOMAIN`-separated `NavRng`
 draws the speaker index once, then per cue a suffix inside the
-authored `1..=end` range with `add` applied (the designed draw
-reading — `add` is 0 on every live retail weather/time row);
+authored window `add + 1 ..= end` (the designed draw reading — `add`
+is 0 on every live retail weather/time row, and the C&R rows only fit
+the shipped waves under this reading, see below);
 `commentary_voices` sequences the decoded clips as bounded
 `SessionEntity`-stamped `Despawn` one-shots (`VoiceKind::Commentary`),
 each after the prior clip's decoded duration + `COMMENTARY_GAP`
@@ -442,9 +443,18 @@ SF / London), `%s_prerace`, the section headers `WEATHER` /
   `<prefix>,<end>,<add>[,extra…]`. A cue row names a wave
   `<speaker><prefix><NN>` — `as1` + `WEARAIN` + `02` →
   `aud/aud11/as1/as1wearain02.11k.wav` — with `NN` inside the
-  authored `1..=end` range. C&R rows add a fourth numeric column and
-  author speaker-qualified prefixes (`AL1\AL1ROBROB` →
-  `al1robrobNN`); `add`/`extra` semantics are unrecovered.
+  authored window `add + 1 ..= end`. C&R rows add a fourth numeric
+  column (london's repeats `end`) and author speaker-qualified
+  prefixes (`AL1\AL1ROBROB` → `al1robrobNN`). **`add` is the number
+  before the first wave** (measured 2026-10-07): the C&R families of
+  one table partition one wave pool per speaker — sf `ROBGETLOOT 3,0`
+  = `as1cops01`–`03`, `COPSTASHLOOT 4,3` = `04`, `COPDROPLOOT 5,4` =
+  `05`, `ROBDROPLOOT 6,5` = `06`, `ROBRECOVERLOOT`/`COPGETLOOT 9,8` =
+  `09`, `ROBSTASHLOOT 10,9` = `10`, `COPRECOVERLOOT 11,10` = `11`; the
+  shipped pool is `as1cops01`–`11` and `as1robrob01`–`10` (london
+  `al1cops01`–`12`, `al1robrob01`–`10`). The earlier `add + 1 + rng %
+  end` reading would name `as1robrob10`–`19` for `ROBROB 10,9`, waves
+  that do not exist. `extra` stays unrecovered.
 - **City registries** `aud/spchdata/<city>.csv` (sf + london) —
   `Num announcers` then `prefix` pairs (`5`/`AS`, `6`/`AL`) naming
   the `as%d`/`al%d` speaker dirs. Speaker dirs present:
