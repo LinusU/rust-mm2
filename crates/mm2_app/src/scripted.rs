@@ -78,6 +78,9 @@ pub struct ScriptedBot {
     /// of the bounded recovery the law attempts (F15 req 6's tracked
     /// recovery actions; the smoke record surfaces it per driver).
     pub escapes: u32,
+    /// Frames to wait before the planner is asked again after it found
+    /// no road line to the objective ([`NAV_REPLAN_FRAMES`]).
+    pub plan_wait: u32,
 }
 
 impl Default for ScriptedBot {
@@ -88,6 +91,7 @@ impl Default for ScriptedBot {
             turn_frames: 0,
             recovery_side: 1.0,
             escapes: 0,
+            plan_wait: 0,
         }
     }
 }
@@ -194,6 +198,18 @@ fn routing_graph<'a>(
 
 /// Arc-length step, metres, between the samples of a nav-planned route.
 const NAV_ROUTE_STEP: f32 = 6.0;
+
+/// Frames a driver waits after the planner found no road line before it
+/// asks again — the car has moved by then, so the endpoints may connect;
+/// asking every frame would re-run the router for nothing.
+const NAV_REPLAN_FRAMES: u32 = 120;
+
+/// Whether a car's nav-planned guide needs (re)planning for `objective`:
+/// it has none, or the one it has was built for an objective that has
+/// since moved more than 2 m (a delivery, a drop, a new round).
+fn guide_stale(guide: Option<&ScriptedRoute>, objective: Vec3) -> bool {
+    guide.is_none_or(|rs| rs.goal.is_some_and(|g| g.distance(objective) > 2.0))
+}
 
 /// A driving line over the city's shared road graph from `from` to
 /// `to` — the F09 route query sampled into the same [`OpponentRoute`]
@@ -890,17 +906,25 @@ pub fn scripted_drive(
         // A Cops & Robbers objective is planned over the road graph
         // and bound as the car's guide; the plan holds until the
         // objective moves (a delivery, a drop, a new round).
-        if race.is_none()
-            && cnr_view.is_some()
-            && bot_route
-                .as_ref()
-                .is_none_or(|rs| rs.goal.is_some_and(|g| g.distance(gate) > 2.0))
-            && let Some(graph) = routing_graph(&mut nav, vfs.as_deref(), &session)
-            && let Some(route) = plan_nav_route(graph, pos.0, gate)
-        {
-            let mut guide = ScriptedRoute::new(route, pos.0, yaw);
-            guide.goal = Some(gate);
-            commands.entity(entity).insert(guide);
+        if race.is_none() && cnr_view.is_some() && guide_stale(bot_route.as_deref(), gate) {
+            if bot.plan_wait > 0 {
+                bot.plan_wait -= 1;
+            } else if let Some(route) = routing_graph(&mut nav, vfs.as_deref(), &session)
+                .and_then(|graph| plan_nav_route(graph, pos.0, gate))
+            {
+                let mut guide = ScriptedRoute::new(route, pos.0, yaw);
+                guide.goal = Some(gate);
+                commands.entity(entity).insert(guide);
+            } else {
+                // No road line: retry later, and stop chasing a guide
+                // built for an objective that is no longer the target
+                // (the car aims straight, as the cruise bot does).
+                bot.plan_wait = NAV_REPLAN_FRAMES;
+                if bot_route.is_some() {
+                    commands.entity(entity).remove::<ScriptedRoute>();
+                    bot_route = None;
+                }
+            }
         }
         let mut target = gate;
         let mut planned = None;
@@ -1269,5 +1293,28 @@ mod cnr_target_tests {
             Side::Solo,
         );
         assert_eq!(cnr_target(&carried_by_stranger, PlayerId(9)), None);
+    }
+
+    /// A guide is replanned when it is missing or its objective moved
+    /// more than 2 m; an authored guide (no goal) is never replanned.
+    #[test]
+    fn a_guide_is_stale_only_when_its_objective_moved() {
+        let objective = Vec3::new(10.0, 0.0, 10.0);
+        let guide = |goal| {
+            let mut g = ScriptedRoute::new(OpponentRoute::default(), Vec3::ZERO, 0.0);
+            g.goal = goal;
+            g
+        };
+        assert!(guide_stale(None, objective));
+        assert!(!guide_stale(Some(&guide(Some(objective))), objective));
+        assert!(!guide_stale(
+            Some(&guide(Some(objective + Vec3::X))),
+            objective
+        ));
+        assert!(guide_stale(
+            Some(&guide(Some(objective + Vec3::X * 3.0))),
+            objective
+        ));
+        assert!(!guide_stale(Some(&guide(None)), objective));
     }
 }

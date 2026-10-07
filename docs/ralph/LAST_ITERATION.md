@@ -1,3 +1,40 @@
+# Last iteration — F27-B.4c review nit: the evidence driver stops re-planning every frame (new-run iteration 28)
+
+Selection: the previous review passed with no blocking findings. Its one
+code finding (non-blocking) was in the `--bot` Cops & Robbers driver: when
+`plan_nav_route` fails (no graph, or endpoints unreachable) while a guide is
+unset or stale, the router was re-queried every frame and a stale guide for
+the previous objective kept being chased. Its other gaps (multi-client
+cycle, contested pickups, impairment, rendered output) are not closable in
+one small unattended change, so I repaired the finding.
+
+Change (`mm2_app::scripted`): `ScriptedBot.plan_wait` + `NAV_REPLAN_FRAMES`
+(120). A failed plan arms the wait (no router query until it runs out) and
+drops a stale guide, so the car aims straight at the objective as the cruise
+bot does instead of chasing the old goal. `guide_stale` factors the
+"missing or objective moved > 2 m" test out of the system; the goal-carrying
+guide still never re-anchors. 1 unit test (`a_guide_is_stale_only_when_its_
+objective_moved`: missing, within 2 m, beyond 2 m, authored guide).
+
+Gates (iteration 28, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` all binaries ok (239 lib,
+767 app, 99 network, 0 failed). Retail evidence, run here with
+`MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`: `network
+two_retail_processes_decide_a_cops_and_robbers_match` is not a skip — 72.9 s,
+host `Delivered` tick 12370 → `Ended(PointLimit, Player(0))`, client
+`driver=parked phase=results`. (The external gate has no retail install, so
+that test skips there; this local run is the only process-level evidence.)
+No processes left running.
+
+Not verified: the failure path of the planner itself with a real unreachable
+objective (only the staleness predicate is unit-tested), a client that
+carries/delivers, contested pickups, impairment/late-join at process level,
+rendered output. Open: commentary, menu-hosted lobby offer, F27-AC01..06.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (decided two-process match): the `--bot` driver plays Cops & Robbers (new-run iteration 27)
 
 Selection: the previous review passed (no blocking findings); its gaps
