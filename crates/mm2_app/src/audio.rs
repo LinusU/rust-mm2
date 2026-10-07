@@ -1483,9 +1483,11 @@ pub fn siren_toggle(
 /// [`Siren`] machine and its loop voice are the same ones the horn
 /// toggle drives, advanced by [`siren_drive`]. A car with no authored
 /// siren binding, or a session with no opponent program, stays silent
-/// and counts a failure once per activation like a failed horn
-/// resolve — never a substitute sound; activations past
-/// [`MAX_SIRENS`] drop.
+/// and counts a failure — never a substitute sound. A failed or refused
+/// activation leaves the car with no [`Siren`], so it is retried (and
+/// counted, and warned) every update while the lights stay on; the
+/// pursuer cap keeps the [`MAX_SIRENS`] refusal essentially
+/// unreachable, and retail ships the opponent program.
 #[allow(clippy::type_complexity)] // two disjoint car queries — the filters are the contract.
 pub fn siren_follow_lights(
     mut commands: Commands,
