@@ -8,6 +8,7 @@ mod audio;
 mod banger;
 mod bot;
 mod breakaway;
+mod build_docs;
 mod camtrack;
 mod cnrvoice;
 mod contracts;

@@ -56,7 +56,9 @@ Vertical-slice stage. What works today:
 
 ## Build & run
 
-Requires a current stable Rust toolchain.
+Requires a current stable Rust toolchain. Platform status, native
+dependencies, release builds without private paths, asset discovery and
+user-data locations are in [docs/building.md](docs/building.md).
 
 ```sh
 cargo build

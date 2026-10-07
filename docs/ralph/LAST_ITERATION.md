@@ -1,3 +1,47 @@
+# Last iteration — F30-B.5: build docs, private-path-free release build (new-run iteration 42 of this runner)
+
+Selection: previous review passed, no blockers, no failing gate. F30-A got five slices in a row
+(instruments); F30 required behaviours 4 and 6 (reproducible build/package instructions; artifacts
+without private paths) and AC03 had nothing. Chosen: the smallest slice that gives both a doc and a
+checkable result.
+
+Finding: a plain build embeds the builder's absolute paths — the debug `mm2` held 8,821
+`/Users/<name>` strings (registry sources, toolchain, checkout). A `--release` build with
+`--remap-path-prefix` for checkout/`$CARGO_HOME`/`$RUSTUP_HOME` still left the rustup toolchain path
+in the Mach-O debug map (`N_OSO` entry naming `libstd`'s rlib); rustc's own strip step fails on this
+machine (`rust-objcopy` cannot load `libLLVM.dylib`, a warning). `strip -S` + ad-hoc `codesign`
+removes it and the stripped binaries run. Cargo's `trim-paths` is nightly-only here (cargo 1.98.1).
+
+Change: `scripts/release-build.sh` (locked release build of mm2/mm2-host/mm2-join/mm2-inspect with
+the remaps, strip on macOS/Linux, then the scan; user RUSTFLAGS kept), `scripts/scan-private-paths.sh`
+(fails exit 1 on `$HOME`/`$CARGO_HOME`/`$RUSTUP_HOME`/checkout root, or `--forbid` strings, in any
+file; exit 2 for usage errors, unreadable files, or no usable pattern; never echoes the path it
+found), `docs/building.md` (platform status table with tested/CI-only/untested labels, MSRV,
+toolchain float, native deps per OS, gates, binaries, asset discovery order, user-data/write paths,
+entry points, not-done list), README link, and a non-gating `build-check` CI job (`cargo check
+--locked --workspace --all-targets` on macos-latest/windows-latest, `continue-on-error`).
+`tests/build_docs.rs` (10 tests in the `app` suite): the doc's MSRV/apt package list/binary set/
+asset search order are read back from `Cargo.toml`, `ci.yml`, the manifests and `app_assets.rs`;
+the scanner on real files (forbidden → 1 and not echoed, clean → 0, multi-file, spaces in path,
+usage/missing/only-"/" patterns → 2, default forbids the checkout). Red-checked: dropping a binary
+from the release script fails the binary-set test.
+
+Evidence: `scripts/release-build.sh` ran end to end on macOS arm64 (first full release build 8m18s;
+before the strip step the scan found `$HOME` and the rustup path in all four binaries; after, `clean`);
+stripped `mm2 --headless --dev-world --frames 30` and `mm2-inspect --help` run (the 30-frame smoke
+verdict is `fail: car never drove`, as for any run that short; the point was that it launches).
+Gates (foreground): fmt --check 0; clippy --locked -D warnings clean; test --locked --workspace
+exit 0 (2443 passed, 0 failed). No processes left running.
+
+Not verified / open: Linux `strip --strip-debug` branch and the Windows build/scan are untested;
+the `build-check` job has never run on a hosted runner (first push will show); no packaging step
+(`.app`/zip/tarball) or artifact-contents check on a package; release-candidate rule/scene tests
+(AC06); no hosted CI job runs the release script; non-ASCII install path unchecked. AC03 advanced
+(documented deps + CI signal, platform claims labelled), AC06 untouched. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — F30-A.5: overload is reported, not felt (new-run iteration 41 of this runner)
 
 Selection: previous review passed, no blockers, no failing gate. F30's required behaviour 3

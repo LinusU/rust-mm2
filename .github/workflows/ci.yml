@@ -44,3 +44,23 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  # Non-gating platform signal (F30): does the workspace compile, tests
+  # included, on the other desktop targets? It is a compile check only —
+  # no window, GPU, audio device or original data — and continue-on-error
+  # keeps an unexplored platform from blocking a merge until it has been
+  # seen green and can be promoted into `test`.
+  build-check:
+    name: build-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check
+        run: cargo check --locked --workspace --all-targets
