@@ -1,3 +1,26 @@
+# Last iteration — F06-C.2: one surface classification for tire, audio and wheel-fx (new-run iteration 2 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`e9a27b6`) passed gates and review with no blockers. Its verification
+gaps named the AC05 inconsistency (an out-of-range `Authored(i)` was neutral to the tire but `None`
+for `sound_index`/`ptx_channels`); that is the smallest ready F06-C slice and needs no new data.
+
+Change: `SurfaceTables::classify` (mm2_content) — `Authored(i)` past the table → `Unspecified`
+(the `_default` block). `tire_surface_for`, `sound_index`, `ptx_channels`, `restitution_for` route
+through it, so all consumers agree. Deliberate behaviour change: such an index now voices and emits
+particles as the `_default` surface instead of silence (conservative-default policy of AC04; the
+index is unreachable by import, only stale/wire-borne). Tests: new
+`every_consumer_sees_one_classification_for_a_dead_index` (content); the audio test that pinned
+silence was split into `a_dead_material_index_voices_as_the_default_surface` (new expectation: same
+skid band as an unmarked collider) and `an_absent_table_stays_silent` (unchanged absent-table leg).
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` 0; `cargo test --locked --workspace` exit 0 (2446 passed, 0 failed).
+First full run caught the audio test above (red-then-adjusted, not weakened: the silent leg became an
+asserted voice). Status: implemented candidate, not independently checked. Synthetic only; no
+original-data, rendered or audio-output evidence. AC05 end-to-end and AC06 remain open.
+
+---
+
 # Last iteration — F06-C.1: surface override independent of textures (new-run iteration 1 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`f4b87ad`) passed gates and review, no blockers. F25/F26/F30 had

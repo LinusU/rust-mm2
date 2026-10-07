@@ -197,13 +197,30 @@ impl SurfaceTables {
         TireSurface { grip, drag }
     }
 
+    /// The classification every consumer of a collider's
+    /// `SurfaceMaterial` reads (F06-AC05): `Authored(i)` stays itself
+    /// while it names a defined material, and an index past the table —
+    /// reachable only through a stale or wire-borne value, never
+    /// through import, where an unmapped name is `Unspecified` — falls
+    /// back to `Unspecified`, the `_default` block. Tire, sound class,
+    /// wheel-particle and restitution lookups all go through this, so a
+    /// dead index can never be neutral to the tire while reading as no
+    /// surface to the audio or particle path.
+    pub fn classify(&self, material: SurfaceMaterial) -> SurfaceMaterial {
+        match material {
+            SurfaceMaterial::Authored(i) if (i as usize) < self.set.defs.len() => material,
+            _ => SurfaceMaterial::Unspecified,
+        }
+    }
+
     /// [`tire_surface`](Self::tire_surface) for a collider's
     /// `SurfaceMaterial`: `Authored(i)` carries its material's
-    /// normalized grip; `Unspecified` carries no component at all — an
+    /// normalized grip; `Unspecified` (and a dead index, see
+    /// [`classify`](Self::classify)) carries no component at all — an
     /// unmarked collider is the neutral reference surface, the same
     /// conservative policy the identity layer applies.
     pub fn tire_surface_for(&self, material: SurfaceMaterial) -> Option<TireSurface> {
-        match material {
+        match self.classify(material) {
             SurfaceMaterial::Authored(i) => Some(self.tire_surface(i)),
             SurfaceMaterial::Unspecified => None,
         }
@@ -235,10 +252,13 @@ impl SurfaceTables {
     /// `sound` field; `Unspecified` reads the `_default` block's —
     /// unmarked colliders inherit the fallback material's class the
     /// same way they inherit its physics. `None` when the index space
-    /// cannot answer (missing `_default`, out-of-range or absent
-    /// `sound` field) — the wheel simply resolves no surface row.
+    /// cannot answer (missing `_default`, absent `sound` field) — the
+    /// wheel simply resolves no surface row. An
+    /// index past the table classifies as `Unspecified` first (see
+    /// [`classify`](Self::classify)), so it reads the `_default` class
+    /// rather than nothing.
     pub fn sound_index(&self, material: SurfaceMaterial) -> Option<u16> {
-        let def = match material {
+        let def = match self.classify(material) {
             SurfaceMaterial::Authored(i) => self.set.defs.get(i as usize)?,
             SurfaceMaterial::Unspecified => self.set.default_def()?,
         };
@@ -252,7 +272,7 @@ impl SurfaceTables {
     /// (F18-B.4): `Authored(i)` reads its material def; `Unspecified`
     /// reads the `_default` block's channels, the same inheritance the
     /// `sound` class applies. `None` when the index space cannot
-    /// answer (missing `_default`, out-of-range index, absent or
+    /// answer (missing `_default`, absent or
     /// malformed fields — the same shapes [`MaterialDef::ptx`] and
     /// `MaterialSet::validate` treat as bad data): the wheel emits no
     /// surface effect, like an authored `-1 -1`. What quantity the
@@ -260,7 +280,7 @@ impl SurfaceTables {
     /// (UNK-23); the runtime's designed reading lives in
     /// `mm2_app::wheel_fx`.
     pub fn ptx_channels(&self, material: SurfaceMaterial) -> Option<PtxChannels> {
-        let def = match material {
+        let def = match self.classify(material) {
             SurfaceMaterial::Authored(i) => self.set.defs.get(i as usize)?,
             SurfaceMaterial::Unspecified => self.set.default_def()?,
         };
@@ -273,7 +293,7 @@ impl SurfaceTables {
     /// unmarked collider keeps Avian's default restitution, the same
     /// conservative policy the identity layer applies.
     pub fn restitution_for(&self, material: SurfaceMaterial) -> Option<f32> {
-        match material {
+        match self.classify(material) {
             SurfaceMaterial::Authored(i) => Some(self.contact_restitution(i)),
             SurfaceMaterial::Unspecified => None,
         }

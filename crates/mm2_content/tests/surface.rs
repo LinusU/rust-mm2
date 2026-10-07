@@ -367,6 +367,52 @@ fn contact_restitution_scales_elasticity_into_the_bounce_cap() {
     );
 }
 
+/// F06-AC05: tire, sound class, wheel particles and restitution read
+/// one classification, so a dead `Authored` index — reachable only
+/// through a stale or wire-borne value — is the `_default` surface to
+/// every consumer rather than neutral to the tire and nothing to the
+/// audio and particle paths.
+#[test]
+fn every_consumer_sees_one_classification_for_a_dead_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(
+        dir.path(),
+        &[(MTL_PATH, MTL_WATER), (CSV_PATH, "texture,physics\n")],
+    );
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+
+    // In range: `water` (index 1) is itself to every consumer.
+    let water = SurfaceMaterial::Authored(1);
+    assert_eq!(tables.classify(water), water);
+    assert_eq!(tables.sound_index(water), Some(1));
+    assert_eq!(tables.ptx_channels(water).unwrap().index, [1, 2]);
+    assert!(tables.tire_surface_for(water).is_some());
+    assert!(tables.restitution_for(water).is_some());
+
+    // Past the table (and the explicit `Unspecified`): the `_default`
+    // block's sound class and particle channels, no tire/restitution
+    // override — never a wheel with a neutral tire and no sound row.
+    let default_sound = tables.sound_index(SurfaceMaterial::Unspecified);
+    let default_ptx = tables.ptx_channels(SurfaceMaterial::Unspecified);
+    assert_eq!(default_sound, Some(0));
+    assert!(default_ptx.is_some());
+    for dead in [
+        SurfaceMaterial::Authored(4),
+        SurfaceMaterial::Authored(u16::MAX),
+    ] {
+        assert_eq!(tables.classify(dead), SurfaceMaterial::Unspecified);
+        assert_eq!(tables.sound_index(dead), default_sound);
+        assert_eq!(tables.ptx_channels(dead), default_ptx);
+        assert_eq!(tables.tire_surface_for(dead), None);
+        assert_eq!(tables.restitution_for(dead), None);
+    }
+    // The last defined index (`dragless`, 3) is not dead.
+    assert_eq!(
+        tables.classify(SurfaceMaterial::Authored(3)),
+        SurfaceMaterial::Authored(3)
+    );
+}
+
 #[test]
 fn an_absent_pair_returns_none() {
     let dir = tempfile::tempdir().unwrap();

@@ -1616,9 +1616,13 @@ fn a_surface_switch_rebuilds_the_skid_after_the_dwell() {
     assert_eq!((r.skids, r.rolling, r.failed), (1, 1, 0));
 }
 
+/// F06-AC05: a collider whose material index the table cannot answer
+/// (a stale or wire-borne value — import never produces one) is the
+/// `_default` surface to the audio path, exactly as it is to the tire
+/// and particle paths, rather than a wheel that sounds nothing while
+/// its tire reads neutral.
 #[test]
-fn an_unresolvable_surface_and_an_absent_table_stay_silent() {
-    // A collider whose material index the table cannot answer.
+fn a_dead_material_index_voices_as_the_default_surface() {
     let dir = surface_dir();
     let mut app = surface_app(dir.path());
     let (car, collider) = surface_car(&mut app, true, SurfaceMaterial::Authored(9));
@@ -1626,10 +1630,16 @@ fn an_unresolvable_surface_and_an_absent_table_stay_silent() {
     for _ in 0..4 {
         app.update();
     }
-    assert_eq!(voices(&mut app), 0);
-    let r = app.world().resource::<AudioReport>();
-    assert_eq!((r.voices, r.failed), (0, 0), "no fabricated row");
+    assert_eq!(
+        surface_voices(&mut app),
+        [(SurfaceRole::Skid(0), 22050, false, car)],
+        "the `_default` row's covering band, as an unmarked collider sounds"
+    );
+    assert_eq!(app.world().resource::<AudioReport>().failed, 0);
+}
 
+#[test]
+fn an_absent_table_stays_silent() {
     // No authored table at all — `load` refuses and the system idles.
     let dir = fixture_dir();
     let mut vfs = Vfs::new();
