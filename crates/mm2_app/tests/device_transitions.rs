@@ -236,3 +236,82 @@ fn unplugging_the_first_pad_hands_driving_to_the_next() {
         "the surviving pad takes over"
     );
 }
+
+/// Controller ownership (F23-AC03): an idle first pad — a spare
+/// controller, a wheel that registers as a gamepad — must not mute the
+/// pad actually being driven, whichever order the entities were
+/// spawned in, and the two pads' axes never mix.
+#[test]
+fn an_idle_first_pad_does_not_shadow_the_pad_in_use() {
+    let (mut app, _window) = drive_app();
+    let idle = connect_pad(&mut app);
+    let held = connect_pad(&mut app);
+    pad_axis(&mut app, held, GamepadAxis::LeftStickX, -1.0);
+    pad_trigger(&mut app, held, GamepadButton::RightTrigger2, 0.75);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (0.75, -1.0),
+        "the pad in use drives past the idle one"
+    );
+
+    // Both deflected: exactly one pad owns the frame — no mixing of the
+    // first one's stick with the second one's trigger.
+    pad_axis(&mut app, idle, GamepadAxis::LeftStickX, 1.0);
+    app.update();
+    let vi = player_input(&mut app);
+    let owner_is_idle = vi.steering == 1.0;
+    let (throttle, steering) = if owner_is_idle {
+        (0.0, 1.0)
+    } else {
+        (0.75, -1.0)
+    };
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (throttle, steering),
+        "one pad owns the car, never a mix"
+    );
+
+    // The idle pad going away changes nothing for the driver.
+    disconnect_pad(&mut app, idle);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.steering), (0.75, -1.0));
+}
+
+/// Menu-navigation keys and the pause overlay never drive the car: W/S
+/// and the arrows are both driving keys and menu focus keys, so a held
+/// one while `Paused` (the overlay owns them) or at `Results` must read
+/// as a neutral input, and driving resumes cleanly on `Playing`.
+#[test]
+fn menu_navigation_keys_do_not_drive_while_paused_or_at_results() {
+    let (mut app, window) = drive_app();
+    key(&mut app, window, KeyCode::KeyW, ButtonState::Pressed);
+    key(&mut app, window, KeyCode::ArrowLeft, ButtonState::Pressed);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.steering), (1.0, -1.0), "keys drive live");
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    assert_neutral(player_input(&mut app), "the pause overlay owns the keys");
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.steering), (1.0, -1.0), "resumes cleanly");
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Results)
+        .unwrap();
+    app.update();
+    assert_neutral(player_input(&mut app), "results own the keys");
+}

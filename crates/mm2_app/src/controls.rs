@@ -331,11 +331,18 @@ impl ControlSettings {
     }
 
     /// Normalize raw device state into a [`VehicleInput`]: the bound keys
-    /// first, then the first connected pad's analog axes on top (a
+    /// first, then the analog axes of the pad being driven with on top (a
     /// stick/trigger past its deadzone outranks the keys, the precedence
-    /// the game has always had). Pure — callers own the context gates
-    /// (focus, camera, session phase).
-    pub fn drive_input(&self, keys: &ButtonInput<KeyCode>, pad: Option<&Gamepad>) -> VehicleInput {
+    /// the game has always had). Of several connected pads the first one
+    /// actually deflected, triggered or holding the handbrake owns the
+    /// car this frame — an idle spare pad must not mute the one in the
+    /// player's hands, and two pads never mix axes. Pure — callers own
+    /// the context gates (focus, camera, session phase).
+    pub fn drive_input<'a>(
+        &self,
+        keys: &ButtonInput<KeyCode>,
+        pads: impl IntoIterator<Item = &'a Gamepad>,
+    ) -> VehicleInput {
         let mut input = VehicleInput::default();
         if self.pressed(DriveAction::Throttle, keys) {
             input.throttle = 1.0;
@@ -353,28 +360,42 @@ impl ControlSettings {
             input.handbrake = 1.0;
         }
 
-        if let Some(pad) = pad {
-            if let Some(x) = pad.get(GamepadAxis::LeftStickX)
-                && x.abs() > self.steer_deadzone
-            {
-                let steer = (x * self.steer_sensitivity).clamp(-1.0, 1.0);
-                input.steering = if self.invert_steering { -steer } else { steer };
-            }
-            if let Some(rt) = pad.get(GamepadButton::RightTrigger2)
-                && rt > self.trigger_deadzone
-            {
-                input.throttle = rt;
-            }
-            if let Some(lt) = pad.get(GamepadButton::LeftTrigger2)
-                && lt > self.trigger_deadzone
-            {
-                input.brake = lt;
-            }
-            if pad.pressed(GamepadButton::South) {
-                input.handbrake = 1.0;
+        for pad in pads {
+            if self.apply_pad(&mut input, pad) {
+                break;
             }
         }
         input
+    }
+
+    /// Lay `pad`'s analog state over `input`; whether the pad is being
+    /// used at all (past a deadzone, or South held).
+    fn apply_pad(&self, input: &mut VehicleInput, pad: &Gamepad) -> bool {
+        let mut used = false;
+        if let Some(x) = pad.get(GamepadAxis::LeftStickX)
+            && x.abs() > self.steer_deadzone
+        {
+            let steer = (x * self.steer_sensitivity).clamp(-1.0, 1.0);
+            input.steering = if self.invert_steering { -steer } else { steer };
+            used = true;
+        }
+        if let Some(rt) = pad.get(GamepadButton::RightTrigger2)
+            && rt > self.trigger_deadzone
+        {
+            input.throttle = rt;
+            used = true;
+        }
+        if let Some(lt) = pad.get(GamepadButton::LeftTrigger2)
+            && lt > self.trigger_deadzone
+        {
+            input.brake = lt;
+            used = true;
+        }
+        if pad.pressed(GamepadButton::South) {
+            input.handbrake = 1.0;
+            used = true;
+        }
+        used
     }
 }
 

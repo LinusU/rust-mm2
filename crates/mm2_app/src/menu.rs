@@ -81,6 +81,7 @@ use mm2_game::{
 use tracing::{info, warn};
 
 use crate::controls::{ControlSettings, DriveAction, SLOTS};
+use crate::input::pad_nav;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 use crate::settings::GraphicsSettings;
@@ -2833,6 +2834,10 @@ pub fn menu_input(
             }
         }
     }
+    // Every connected pad answers (`input::pad_nav`); the stick latch is
+    // read on every screen so a held stick never fires a stale edge when
+    // the screen changes under it.
+    let nav = pad_nav(pads.iter(), &mut shell.pad_axis);
     if capturing {
         // The Controls screen is waiting for a key: the first key
         // pressed this frame is the candidate (Esc cancels in `apply`),
@@ -2841,9 +2846,7 @@ pub fn menu_input(
         if let Some(key) = keys.get_just_pressed().min() {
             cmds.push(MenuCommand::Capture(*key));
         }
-        if let Some(pad) = pads.iter().next()
-            && pad.just_pressed(GamepadButton::East)
-        {
+        if nav.back {
             cmds.push(MenuCommand::Back);
         }
     } else if name_entry {
@@ -2853,13 +2856,11 @@ pub fn menu_input(
         if keys.just_pressed(KeyCode::Escape) {
             cmds.push(MenuCommand::Back);
         }
-        if let Some(pad) = pads.iter().next() {
-            if pad.just_pressed(GamepadButton::South) {
-                cmds.push(MenuCommand::Activate);
-            }
-            if pad.just_pressed(GamepadButton::East) {
-                cmds.push(MenuCommand::Back);
-            }
+        if nav.accept {
+            cmds.push(MenuCommand::Activate);
+        }
+        if nav.back {
+            cmds.push(MenuCommand::Back);
         }
     } else {
         if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
@@ -2883,37 +2884,18 @@ pub fn menu_input(
         if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX) {
             cmds.push(MenuCommand::Delete);
         }
-        if let Some(pad) = pads.iter().next() {
-            if pad.just_pressed(GamepadButton::DPadUp) {
-                cmds.push(MenuCommand::Up);
+        for (pressed, cmd) in [
+            (nav.up, MenuCommand::Up),
+            (nav.down, MenuCommand::Down),
+            (nav.left, MenuCommand::Left),
+            (nav.right, MenuCommand::Right),
+            (nav.accept, MenuCommand::Activate),
+            (nav.back, MenuCommand::Back),
+            (nav.delete, MenuCommand::Delete),
+        ] {
+            if pressed {
+                cmds.push(cmd);
             }
-            if pad.just_pressed(GamepadButton::DPadDown) {
-                cmds.push(MenuCommand::Down);
-            }
-            if pad.just_pressed(GamepadButton::DPadLeft) {
-                cmds.push(MenuCommand::Left);
-            }
-            if pad.just_pressed(GamepadButton::DPadRight) {
-                cmds.push(MenuCommand::Right);
-            }
-            if pad.just_pressed(GamepadButton::South) {
-                cmds.push(MenuCommand::Activate);
-            }
-            if pad.just_pressed(GamepadButton::East) {
-                cmds.push(MenuCommand::Back);
-            }
-            if pad.just_pressed(GamepadButton::West) {
-                cmds.push(MenuCommand::Delete);
-            }
-            // Left-stick nav on edge transitions, so holding the stick
-            // doesn't run the list.
-            let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
-            if y > 0.6 && shell.pad_axis <= 0.6 {
-                cmds.push(MenuCommand::Up);
-            } else if y < -0.6 && shell.pad_axis >= -0.6 {
-                cmds.push(MenuCommand::Down);
-            }
-            shell.pad_axis = y;
         }
     }
     for cmd in cmds {

@@ -45,6 +45,7 @@ use mm2_game::{
 use crate::cnr::{CnrHost, participant_id};
 use crate::cnrhud::{match_view, result_lines};
 use crate::cnrnet::CnrReplica;
+use crate::input::pad_nav;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::netdrive::NetPlayer;
 use crate::opponents::OpponentDriver;
@@ -186,26 +187,16 @@ pub fn results_input(
     if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
         cmds.push(MenuCommand::Back);
     }
-    if let Some(pad) = pads.iter().next() {
-        if pad.just_pressed(GamepadButton::DPadUp) {
-            cmds.push(MenuCommand::Up);
+    let nav = pad_nav(pads.iter(), &mut results.pad_axis);
+    for (pressed, cmd) in [
+        (nav.up, MenuCommand::Up),
+        (nav.down, MenuCommand::Down),
+        (nav.accept, MenuCommand::Activate),
+        (nav.back || nav.start, MenuCommand::Back),
+    ] {
+        if pressed {
+            cmds.push(cmd);
         }
-        if pad.just_pressed(GamepadButton::DPadDown) {
-            cmds.push(MenuCommand::Down);
-        }
-        if pad.just_pressed(GamepadButton::South) {
-            cmds.push(MenuCommand::Activate);
-        }
-        if pad.just_pressed(GamepadButton::East) || pad.just_pressed(GamepadButton::Start) {
-            cmds.push(MenuCommand::Back);
-        }
-        let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
-        if y > 0.6 && results.pad_axis <= 0.6 {
-            cmds.push(MenuCommand::Up);
-        } else if y < -0.6 && results.pad_axis >= -0.6 {
-            cmds.push(MenuCommand::Down);
-        }
-        results.pad_axis = y;
     }
     for cmd in cmds {
         match cmd {

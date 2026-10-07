@@ -44,6 +44,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{HudMap, Session, SessionEntity, SessionPhase};
 
+use crate::input::pad_nav;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::session::SessionControl;
 use crate::settings::{GraphicsSettings, SettingsFile};
@@ -224,33 +225,18 @@ pub fn pause_input(
     if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
         cmds.push(MenuCommand::Back);
     }
-    if let Some(pad) = pads.iter().next() {
-        if pad.just_pressed(GamepadButton::DPadUp) {
-            cmds.push(MenuCommand::Up);
+    let nav = pad_nav(pads.iter(), &mut pause.pad_axis);
+    for (pressed, cmd) in [
+        (nav.up, MenuCommand::Up),
+        (nav.down, MenuCommand::Down),
+        (nav.left, MenuCommand::Left),
+        (nav.right, MenuCommand::Right),
+        (nav.accept, MenuCommand::Activate),
+        (nav.back || nav.start, MenuCommand::Back),
+    ] {
+        if pressed {
+            cmds.push(cmd);
         }
-        if pad.just_pressed(GamepadButton::DPadDown) {
-            cmds.push(MenuCommand::Down);
-        }
-        if pad.just_pressed(GamepadButton::DPadLeft) {
-            cmds.push(MenuCommand::Left);
-        }
-        if pad.just_pressed(GamepadButton::DPadRight) {
-            cmds.push(MenuCommand::Right);
-        }
-        if pad.just_pressed(GamepadButton::South) {
-            cmds.push(MenuCommand::Activate);
-        }
-        if pad.just_pressed(GamepadButton::East) || pad.just_pressed(GamepadButton::Start) {
-            cmds.push(MenuCommand::Back);
-        }
-        // Left-stick nav on edge transitions, same as the menu.
-        let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
-        if y > 0.6 && pause.pad_axis <= 0.6 {
-            cmds.push(MenuCommand::Up);
-        } else if y < -0.6 && pause.pad_axis >= -0.6 {
-            cmds.push(MenuCommand::Down);
-        }
-        pause.pad_axis = y;
     }
     for cmd in cmds {
         // Rows are rebuilt per command: a change relabels them, resetting

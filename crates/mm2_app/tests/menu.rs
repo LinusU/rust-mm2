@@ -3639,3 +3639,129 @@ fn tuning_rows_apply_and_persist_and_leaving_drops_a_capture() {
     press(&mut app, KeyCode::Escape);
     assert_eq!(shell(&app).screen, menu::Screen::Options);
 }
+
+/// A connected pad with no events behind it — the mocking surface bevy
+/// documents (`digital_mut`/`analog_mut`); these apps run no
+/// `InputPlugin`, so edges are managed by hand like the keyboard's.
+fn spawn_pad(app: &mut App) -> Entity {
+    app.world_mut().spawn(Gamepad::default()).id()
+}
+
+/// Press `button` on `pad` for exactly one update.
+fn pad_press(app: &mut App, pad: Entity, button: GamepadButton) {
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .digital_mut()
+        .press(button);
+    app.update();
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .digital_mut()
+        .reset_all();
+}
+
+fn set_pad_stick_y(app: &mut App, pad: Entity, y: f32) {
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .analog_mut()
+        .set(GamepadAxis::LeftStickY, y);
+    app.update();
+}
+
+/// F23-AC03 hot-plug/ownership leg on the main menu: an idle first pad
+/// (a spare controller, a wheel that registers as a gamepad) must not
+/// shadow the pad the player holds; unplugging it, or every pad, leaves
+/// navigation working, and a pad plugged in later answers.
+#[test]
+fn any_connected_pad_navigates_the_main_menu_through_hot_plug() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    let idle = spawn_pad(&mut app);
+    let held = spawn_pad(&mut app);
+    let start = shell(&app).focus;
+
+    pad_press(&mut app, held, GamepadButton::DPadDown);
+    assert_eq!(shell(&app).focus, start + 1, "the second pad navigates");
+    // Stick edges come from the pad that is actually deflected.
+    set_pad_stick_y(&mut app, held, 1.0);
+    assert_eq!(shell(&app).focus, start, "the second pad's stick moves up");
+    set_pad_stick_y(&mut app, held, 1.0);
+    assert_eq!(
+        shell(&app).focus,
+        start,
+        "a held stick does not run the list"
+    );
+    set_pad_stick_y(&mut app, held, 0.0);
+
+    // The idle pad is unplugged mid-menu: the held one still answers.
+    app.world_mut().despawn(idle);
+    pad_press(&mut app, held, GamepadButton::DPadDown);
+    assert_eq!(shell(&app).focus, start + 1, "survivor keeps navigating");
+
+    // Every pad gone: the keyboard is unaffected, and a pad plugged in
+    // afterwards works without a restart of the screen.
+    app.world_mut().despawn(held);
+    press(&mut app, KeyCode::ArrowDown);
+    assert_eq!(shell(&app).focus, start + 2);
+    let late = spawn_pad(&mut app);
+    pad_press(&mut app, late, GamepadButton::DPadUp);
+    assert_eq!(shell(&app).focus, start + 1, "a newly plugged pad answers");
+
+    // Accept/Back come from any pad too: Options opens, East leaves.
+    let other = spawn_pad(&mut app);
+    focus_row(&mut app, "Options");
+    pad_press(&mut app, other, GamepadButton::South);
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
+    pad_press(&mut app, other, GamepadButton::East);
+    assert_ne!(shell(&app).screen, menu::Screen::Options);
+}
+
+/// A stick held down when its pad is unplugged must not leave a stale
+/// latch: the next pad pushing down fires its own edge.
+#[test]
+fn a_stick_held_through_an_unplug_does_not_poison_the_edge_latch() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    let first = spawn_pad(&mut app);
+    let start = shell(&app).focus;
+    set_pad_stick_y(&mut app, first, -1.0);
+    assert_eq!(shell(&app).focus, start + 1);
+    app.world_mut().despawn(first);
+    app.update();
+
+    let second = spawn_pad(&mut app);
+    set_pad_stick_y(&mut app, second, -1.0);
+    assert_eq!(
+        shell(&app).focus,
+        start + 2,
+        "the new pad's push is a fresh edge"
+    );
+}
+
+/// The pause overlay answers any connected pad — Down moves the focus
+/// and `Start` on the second pad resumes.
+#[test]
+fn the_pause_menu_answers_any_pad() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+
+    let _idle = spawn_pad(&mut app);
+    let held = spawn_pad(&mut app);
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    let focus = |a: &App| a.world().resource::<PauseMenu>().focus;
+    assert_eq!(focus(&app), 0);
+    pad_press(&mut app, held, GamepadButton::DPadDown);
+    assert_eq!(focus(&app), 1, "the second pad moves the pause focus");
+    pad_press(&mut app, held, GamepadButton::Start);
+    assert_eq!(phase(&app), SessionPhase::Playing, "Start resumes");
+}

@@ -635,3 +635,39 @@ fn results_phase_ignores_stray_keys() {
         "stray keys do not drop the screen"
     );
 }
+
+/// F23-AC03: the results rows answer any connected pad, not just the
+/// first — an idle spare pad does not shadow the one in the player's
+/// hands, and `South` on it issues the focused row's intent.
+#[test]
+fn results_rows_answer_any_connected_pad() {
+    let def = race_def(0);
+    let mut app = results_app(event_config(), def.clone(), None, None);
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2);
+    drive_to_finish(&mut app, &def, car, 0.0);
+    assert_eq!(phase(&app), SessionPhase::Results);
+
+    let _idle = app.world_mut().spawn(Gamepad::default()).id();
+    let held = app.world_mut().spawn(Gamepad::default()).id();
+    let tap = |app: &mut App, button: GamepadButton| {
+        app.world_mut()
+            .get_mut::<Gamepad>(held)
+            .unwrap()
+            .digital_mut()
+            .press(button);
+        app.update();
+        app.world_mut()
+            .get_mut::<Gamepad>(held)
+            .unwrap()
+            .digital_mut()
+            .reset_all();
+    };
+    tap(&mut app, GamepadButton::DPadDown);
+    assert_eq!(app.world().resource::<ResultsMenu>().focus, 1);
+    tap(&mut app, GamepadButton::South);
+    assert!(
+        app.world().resource::<SessionControl>().restart,
+        "South on the second pad activates the focused row"
+    );
+}

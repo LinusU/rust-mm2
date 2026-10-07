@@ -19,9 +19,9 @@ use crate::session::{self, SpawnPoint};
 /// documented but not yet transcribed into the rules ledger — so
 /// these are designed assignments over the same controls the
 /// documented keys drive (HUD-3/CTL-1), not a claimed original map.
-/// Every binding is additive: the key keeps working, the first
-/// connected pad answers — the same first-pad rule
-/// [`vehicle_input`] uses for steering. The fullscreen pause map
+/// Every binding is additive: the key keeps working, any connected pad
+/// answers (driving follows the first pad in use, see
+/// [`ControlSettings::drive_input`]). The fullscreen pause map
 /// (`Q`), headlights (`L`), the `F1`/`F4` debug keys and the
 /// fly-camera axes stay keyboard-only: `Start` is already the
 /// menu-owned pause and no designed button is left that doesn't
@@ -77,7 +77,66 @@ pub fn control_just_pressed(
     button: GamepadButton,
 ) -> bool {
     windows_focused(windows)
-        && (keys.just_pressed(key) || pads.iter().next().is_some_and(|p| p.just_pressed(button)))
+        && (keys.just_pressed(key) || pads.iter().any(|p| p.just_pressed(button)))
+}
+
+/// Stick deflection past which a menu stick push counts as a nav press.
+const NAV_STICK: f32 = 0.6;
+
+/// The pad edges a menu-like screen (main menu, pause, results) reads
+/// this frame, merged over **every** connected pad: an idle first pad —
+/// a spare controller, a wheel that registers as a gamepad — must not
+/// shadow the one the player is holding, and unplugging a pad leaves the
+/// rest answering (F23-AC03's hot-plug leg). Each screen maps the edges
+/// it has rows for and ignores the rest.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PadNav {
+    /// D-pad up, or the left stick pushed up past the edge latch.
+    pub up: bool,
+    /// D-pad down, or the left stick pushed down past the edge latch.
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    /// `South`.
+    pub accept: bool,
+    /// `East`.
+    pub back: bool,
+    /// `West`.
+    pub delete: bool,
+    /// `Start` — the pause/results screens' second `Back`.
+    pub start: bool,
+}
+
+/// Read the pad edges from every connected pad. `latch` is the screen's
+/// stored last stick Y: the stick navigates on *edge* transitions so
+/// holding it doesn't run the list. The strongest deflection among the
+/// pads is the stick value, and with no pad connected the latch resets
+/// to neutral — a pad plugged in with the stick already held then fires
+/// once, never a stale suppressed edge.
+pub fn pad_nav<'a>(pads: impl IntoIterator<Item = &'a Gamepad>, latch: &mut f32) -> PadNav {
+    let mut nav = PadNav::default();
+    let mut y = 0.0_f32;
+    for pad in pads {
+        nav.up |= pad.just_pressed(GamepadButton::DPadUp);
+        nav.down |= pad.just_pressed(GamepadButton::DPadDown);
+        nav.left |= pad.just_pressed(GamepadButton::DPadLeft);
+        nav.right |= pad.just_pressed(GamepadButton::DPadRight);
+        nav.accept |= pad.just_pressed(GamepadButton::South);
+        nav.back |= pad.just_pressed(GamepadButton::East);
+        nav.delete |= pad.just_pressed(GamepadButton::West);
+        nav.start |= pad.just_pressed(GamepadButton::Start);
+        let pad_y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
+        if pad_y.abs() > y.abs() {
+            y = pad_y;
+        }
+    }
+    if y > NAV_STICK && *latch <= NAV_STICK {
+        nav.up = true;
+    } else if y < -NAV_STICK && *latch >= -NAV_STICK {
+        nav.down = true;
+    }
+    *latch = y;
+    nav
 }
 
 /// Presence enables the parked driver: `--parked` inserts it, and
@@ -107,7 +166,7 @@ pub fn parked_drive(mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>)
     }
 }
 
-/// Fill `VehicleInput` on the player vehicle from keyboard and the first
+/// Fill `VehicleInput` on the player vehicle from keyboard and the
 /// connected gamepad (gamepad axes take precedence when non-neutral),
 /// through the player's [`ControlSettings`] — the bound keys, stick and
 /// trigger deadzones, steering sensitivity and inversion.
@@ -144,8 +203,8 @@ pub fn vehicle_input(
 
     // A harness app that never inserted the settings drives the shipped map.
     let input = match controls {
-        Some(controls) => controls.drive_input(&keys, gamepads.iter().next()),
-        None => ControlSettings::default().drive_input(&keys, gamepads.iter().next()),
+        Some(controls) => controls.drive_input(&keys, gamepads.iter()),
+        None => ControlSettings::default().drive_input(&keys, gamepads.iter()),
     };
 
     for mut vi in &mut vehicles {

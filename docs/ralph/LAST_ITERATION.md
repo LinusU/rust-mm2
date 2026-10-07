@@ -1,3 +1,51 @@
+# Last iteration — F23-C.2: any connected pad answers (new-run iteration 22 of this runner)
+
+Selection: previous review passed with no blockers. Of its open items the
+pause-menu route to Controls would mean a second hand-rolled copy of the
+Controls screen in `pause.rs`, so I took the smaller AC03 leg first
+("gamepad focus remains usable after hot-plug", controller ownership).
+Audit found every menu-like screen and driving used `pads.iter().next()`:
+an idle first pad (spare controller, a wheel that registers as a gamepad)
+silently shadowed the pad the player held, and the stick edge latch kept a
+stale value across an unplug.
+
+Change: `input::pad_nav(pads, &mut latch) -> PadNav` merges the D-pad /
+South / East / West / Start edges over every connected pad and takes the
+strongest left-stick deflection for the edge-triggered stick nav; with no
+pad the latch resets to neutral. `menu_input`, `pause_input` and
+`results_input` now use it (their three copies of the pad block are gone).
+`ControlSettings::drive_input` takes the pads and the first pad actually in
+use (stick past deadzone, trigger past deadzone, or South) owns the frame —
+never a mix of two pads' axes. `control_just_pressed` uses `any` pad.
+Behaviour with one pad is unchanged.
+
+Tests (+6): `menu`: any pad navigates the main menu through hot plug (idle
++ held pad, stick edges, unplug the idle one, unplug all → keys, plug a
+late pad, South/East on another pad); a stick held through an unplug does
+not poison the latch; the pause menu answers the second pad (Down, Start
+resumes). `results`: rows answer a second pad. `device_transitions`: an
+idle first pad does not shadow the pad in use / no axis mixing; W and Left
+held while `Paused` or at `Results` read neutral and resume cleanly.
+Mutation check: reverting to first-pad-only (`take(1)` in `pad_nav`, break
+after the first pad in `drive_input`) fails 4 of the 5 pad-ownership tests
+(the latch test guards the reset, not the ownership).
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` exit 0 (2336 passed, 0 failed; was 2330).
+No processes left running.
+
+Not verified / open: synthetic `Gamepad`/`RawGamepadEvent` state only — no
+physical pad or real hot-plug; with two pads deflected at once the first in
+entity order owns driving (a choice, not an original rule). AC03's "text
+entry never drives" has no live text field in-session (only the profile
+name screen, already isolated by `menu_input`), pause-menu route to
+Controls, pad rebinding, mouse/wheel rows, audio/accessibility options and
+AC04 display recovery remain open. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F23-B.1: Controls screen (new-run iteration 21 of this runner)
 
 Selection: previous review passed with no blockers. F23-B (the rebinding
