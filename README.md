@@ -261,7 +261,10 @@ build profile (`debug` here means debug assertions are on — measure a
 renderer reported, the content fingerprints (the structural catalog hash
 and the gameplay-byte hash with its file/byte counts) and mounted mods,
 the scene and settings the run named, and the post-warm-up percentile
-timings. A field the process could not observe is `null`. The report is
+timings, plus the live entity and audio-voice counts (sampled every 30
+frames; a soak that leaks shows `last` climbing past `first`; the CSV
+carries both as `entities` and `voices`). A field the process could not
+observe is `null`. The report is
 local evidence — it embeds nothing from the install except hashes and
 counts — and a run is only comparable with another that has the same
 commit, build, hardware, fingerprints and settings.

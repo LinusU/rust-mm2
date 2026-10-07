@@ -1,3 +1,28 @@
+# Last iteration — F30-A.4: live audio voices in the perf log (new-run iteration 40 of this runner)
+
+Selection: previous review passed, no blockers. Its gaps left voices, draw calls, GPU memory,
+queue depth and bandwidth columns absent. Voices are the one a local, headless-safe change can
+add: every authored voice carries `AudioVoice` whether or not a device attached a sink, and
+AC02 names "no unbounded entity/voice/queue growth".
+
+Change: `perf.rs` `sample_voices` counts `AudioVoice` entities on the entity sampler's 30-frame
+cadence; every CSV row gains a `voices` column (after `entities`), the summary prints
+`live voices first/last/max`, and the report gains `timings.live_voices` (same first/last/max
+past warm-up). README's profiling section names both counts. 2 new tests (growth stats with
+warm-up churn excluded; sampler counts only `AudioVoice` entities, off-cadence is not counted,
+despawn lowers it) and the CSV test now checks `voices` and `entities` by header name.
+
+Gates (foreground, exit statuses checked): fmt --check 0; clippy --locked -D warnings clean;
+test --locked --workspace exit 0 (2429 passed, 0 failed). No processes left running.
+
+Not verified / open: no soak was run, so AC02's bounded voice growth is not demonstrated — this
+is an instrument. Draw calls, GPU memory, queue depth, bandwidth columns; release baseline;
+windowed proof. The last value can be up to 29 frames stale (carry-forward sampling). AC01
+advanced, AC02 gains an instrument only. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F30-A.3: live-entity growth in the perf log (new-run iteration 39 of this runner)
 
 Selection: previous review passed with one cosmetic nit (WINDOW_SIZE/FIXED_HZ were wedged

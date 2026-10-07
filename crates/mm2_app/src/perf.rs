@@ -22,7 +22,9 @@
 //! Each row also carries the live-entity count (sampled every
 //! [`ENTITY_SAMPLE_EVERY`] frames), and the summary and report give its
 //! first, last and peak value past warm-up — a soak that leaks entities
-//! shows `last` well above `first` (F30-AC02's growth signal).
+//! shows `last` well above `first` (F30-AC02's growth signal). Live audio
+//! voices (the `AudioVoice` entities, counted whether or not an output
+//! device attached a sink) are sampled and reported the same way.
 //!
 //! The recorder writes one CSV row per frame when the app drops and
 //! prints a percentile summary, so a person can play the event and hand
@@ -51,6 +53,8 @@ use bevy::ecs::entity::Entities;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
 use mm2_game::Mm2Vfs;
+
+use crate::audio::AudioVoice;
 use serde_json::{Value, json};
 
 /// Schema tag of the JSON report; bump when a field changes meaning.
@@ -123,6 +127,8 @@ struct Row {
     contacts: u32,
     /// Live entities at the most recent sample ([`ENTITY_SAMPLE_EVERY`]).
     entities: u32,
+    /// Live audio voices (`AudioVoice` entities) at the same sample.
+    voices: u32,
 }
 
 /// Aggregates over the post-warm-up frames, in milliseconds.
@@ -154,6 +160,11 @@ struct Stats {
     entities_first: u32,
     entities_max: u32,
     entities_last: u32,
+    /// The same three readings for live audio voices: a loop or one-shot
+    /// that never despawns shows as `last` climbing past `first`.
+    voices_first: u32,
+    voices_max: u32,
+    voices_last: u32,
 }
 
 /// The recorder's state — present only when `--perf-log` was given.
@@ -174,6 +185,7 @@ struct PerfLog {
     solver: Duration,
     contacts: u32,
     entities: u32,
+    voices: u32,
     context: RunContext,
     content: Option<ContentFingerprint>,
     /// Filled by [`capture_adapter`] once the renderer exists; stays
@@ -200,6 +212,7 @@ impl PerfLog {
             solver: Duration::ZERO,
             contacts: 0,
             entities: 0,
+            voices: 0,
         }
     }
 
@@ -220,6 +233,7 @@ impl PerfLog {
                 solver: self.solver,
                 contacts: self.contacts,
                 entities: self.entities,
+                voices: self.voices,
             });
         }
         self.frame += 1;
@@ -281,6 +295,9 @@ impl PerfLog {
             entities_first: rows[0].entities,
             entities_max: rows.iter().map(|r| r.entities).max().unwrap_or(0),
             entities_last: rows[rows.len() - 1].entities,
+            voices_first: rows[0].voices,
+            voices_max: rows.iter().map(|r| r.voices).max().unwrap_or(0),
+            voices_last: rows[rows.len() - 1].voices,
         })
     }
 
@@ -304,7 +321,8 @@ impl PerfLog {
              perf: mean ms per frame: fixed {mfx:.2} update {mup:.2} render {mrn:.2} \
              | avian ms per fixed step: broad {sb:.2} narrow {sn:.2} solver {ss:.2} \
              | fixed steps per frame {spf:.2} | max contacts {mc} \
-             | live entities first {ef} last {el} max {em}",
+             | live entities first {ef} last {el} max {em} \
+             | live voices first {vf} last {vl} max {vm}",
             n = st.frames,
             median = st.median,
             p95 = st.p95,
@@ -333,6 +351,9 @@ impl PerfLog {
             ef = st.entities_first,
             el = st.entities_last,
             em = st.entities_max,
+            vf = st.voices_first,
+            vl = st.voices_last,
+            vm = st.voices_max,
         )
     }
 
@@ -398,6 +419,12 @@ impl PerfLog {
                     "last": st.entities_last,
                     "max": st.entities_max,
                 },
+                "live_voices": {
+                    "sample_every_frames": ENTITY_SAMPLE_EVERY,
+                    "first": st.voices_first,
+                    "last": st.voices_last,
+                    "max": st.voices_max,
+                },
                 "worst_frame": {
                     "frame": st.worst.frame,
                     "total_ms": ms(st.worst.total),
@@ -460,13 +487,13 @@ impl PerfLog {
         let mut out = BufWriter::new(File::create(&self.path)?);
         writeln!(
             out,
-            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities"
+            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices"
         )?;
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         for r in &self.rows {
             writeln!(
                 out,
-                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{}",
+                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{}",
                 r.frame,
                 ms(r.total),
                 ms(r.fixed),
@@ -477,7 +504,8 @@ impl PerfLog {
                 ms(r.narrow),
                 ms(r.solver),
                 r.contacts,
-                r.entities
+                r.entities,
+                r.voices
             )?;
         }
         out.flush()
@@ -548,6 +576,15 @@ fn fixed_step_physics(
 fn sample_entities(entities: &Entities, mut log: ResMut<PerfLog>) {
     if log.frame.is_multiple_of(ENTITY_SAMPLE_EVERY) {
         log.entities = entities.count_spawned();
+    }
+}
+
+/// Count live audio voices on the same cadence. Every authored voice
+/// carries [`AudioVoice`] whether or not an output device attached a sink,
+/// so a headless soak counts them too.
+fn sample_voices(voices: Query<(), With<AudioVoice>>, mut log: ResMut<PerfLog>) {
+    if log.frame.is_multiple_of(ENTITY_SAMPLE_EVERY) {
+        log.voices = voices.iter().count() as u32;
     }
 }
 
@@ -626,7 +663,7 @@ pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
         .add_systems(RunFixedMainLoop, fixed_loop_end.in_set(AfterFixedMainLoop))
         .add_systems(FixedFirst, fixed_step)
         .add_systems(FixedLast, fixed_step_physics)
-        .add_systems(Update, (capture_adapter, sample_entities))
+        .add_systems(Update, (capture_adapter, sample_entities, sample_voices))
         .add_systems(Last, frame_main_end);
 }
 
@@ -647,6 +684,7 @@ mod tests {
             solver: Duration::ZERO,
             contacts: 0,
             entities: 0,
+            voices: 0,
         }
     }
 
@@ -839,7 +877,8 @@ mod tests {
                 _ => 1_200,
             };
         }
-        let live = &log.report()["timings"]["live_entities"];
+        let report = log.report();
+        let live = &report["timings"]["live_entities"];
         assert_eq!(live["first"], 1_000);
         assert_eq!(live["max"], 1_500);
         assert_eq!(live["last"], 1_200);
@@ -852,11 +891,67 @@ mod tests {
     }
 
     #[test]
+    fn voice_growth_is_reported_first_last_and_peak() {
+        let mut log = long_log(RunContext::default());
+        for (i, r) in log.rows.iter_mut().enumerate() {
+            r.voices = match i {
+                // Warm-up voices must not set the baseline or the peak.
+                0..=119 => 90,
+                120..=159 => 12,
+                160..=179 => 30,
+                _ => 20,
+            };
+        }
+        let report = log.report();
+        let live = &report["timings"]["live_voices"];
+        assert_eq!(live["first"], 12);
+        assert_eq!(live["max"], 30);
+        assert_eq!(live["last"], 20);
+        let s = log.summary();
+        assert!(s.contains("live voices first 12 last 20 max 30"), "{s}");
+    }
+
+    #[test]
+    fn the_voice_sampler_counts_audio_voice_entities_on_the_cadence() {
+        use crate::audio::VoiceKind;
+        let mut app = App::new();
+        app.insert_resource(PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_voices_test.csv"),
+            RunContext::default(),
+        ))
+        .add_systems(Update, sample_voices);
+        let voices: Vec<Entity> = (0..4)
+            .map(|_| {
+                app.world_mut()
+                    .spawn(AudioVoice {
+                        kind: VoiceKind::Horn,
+                    })
+                    .id()
+            })
+            .collect();
+        // An entity that is not a voice never counts.
+        app.world_mut().spawn_empty();
+        app.world_mut().resource_mut::<PerfLog>().frame = 1;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().voices, 0);
+        app.world_mut().resource_mut::<PerfLog>().frame = ENTITY_SAMPLE_EVERY;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().voices, 4);
+        for e in voices.into_iter().take(3) {
+            app.world_mut().despawn(e);
+        }
+        app.world_mut().resource_mut::<PerfLog>().frame = 2 * ENTITY_SAMPLE_EVERY;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().voices, 1);
+    }
+
+    #[test]
     fn the_csv_has_an_entities_column_matching_its_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = PerfLog::new(dir.path().join("e.csv"), RunContext::default());
         let mut r = row(0, 16, 1);
         r.entities = 321;
+        r.voices = 7;
         log.rows.push(r);
         log.write_csv().unwrap();
         let text = std::fs::read_to_string(&log.path).unwrap();
@@ -864,8 +959,10 @@ mod tests {
         let header: Vec<_> = lines.next().unwrap().split(',').collect();
         let cells: Vec<_> = lines.next().unwrap().split(',').collect();
         assert_eq!(header.len(), cells.len());
-        assert_eq!(header.last(), Some(&"entities"));
-        assert_eq!(cells.last(), Some(&"321"));
+        assert_eq!(header.last(), Some(&"voices"));
+        assert_eq!(cells.last(), Some(&"7"));
+        let at = |name: &str| header.iter().position(|h| *h == name).unwrap();
+        assert_eq!(cells[at("entities")], "321");
     }
 
     #[test]
