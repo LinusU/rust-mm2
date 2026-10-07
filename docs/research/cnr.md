@@ -208,3 +208,40 @@ synthetic evidence for the rule core only.
   "original-verified" claim for the mode. F27-B's rules for those points are
   **Enhanced policy / Implementation choice** and are labelled as such where
   they land.
+
+## Where the authored sites lie (measured, F27 evidence driver)
+
+`mm2-inspect cnr <install>` now also reports each city's site pool against the
+routable vehicle-lane graph (`city/<city>.bai`, routing build — roads closed to
+ambient classes stay routable). A site counts as *on a lane* when the nearest
+routable vehicle lane passes within 15 m horizontally and 5 m vertically.
+Retail (install `fnv1a64:e91e6cd4b2ae30d9`, 2026-10-07): **sf 12 of 44, london
+14 of 46** sites are on a lane; the rest are in plazas, parks, hillsides or on a
+level no lane serves (SF nearest-lane distances run to ~270 m, and several sites
+sit 10–30 m above or below the lane under them). Where a lane is close, the
+site's `y` is the road surface plus ≈ 2.4 m (seen on the on-lane SF sites), so
+the 3-D pickup/delivery spheres (5 m / 12 m, our implementation of the
+unrecovered original reach) are met by a car on the road.
+
+Consequences, none of them a claim about the original:
+
+* A road-following driver cannot finish most rounds. The `--bot` evidence driver
+  (below) therefore needs a seed whose opening draw is all on lanes; the audit
+  lists them (`seeds 0..4096 whose opening draw is all on lanes`: sf 78, london
+  99 — a later round redraws from the whole pool, so a longer match can still
+  draw an off-lane site).
+* Whether the original keeps sites off the road deliberately (free driving over
+  open ground) is unknown; this audit only measures the data.
+
+### The evidence driver
+
+`mm2 --bot` in a Cops & Robbers session drives the match instead of idling:
+`scripted::cnr_target` picks the gold while it lies free and the car's own
+side's delivery marker once it carries it (nothing while someone else carries
+it or the match is decided — it has no pursuit rule), and the road graph
+(`NavGraph::drive_line` over `load_routing_nav_graph`) plans the line the same
+way `.opp` guides are followed. Unlike a race guide it **never re-anchors**: a
+teleport onto the objective would fake a delivery, so a stuck car keeps only the
+ordinary reverse-and-turn escapes. A hosted session's `--host --seed <n>` selects the
+draw (a local session always uses seed 0). It is an evidence tool, not a
+gameplay feature.

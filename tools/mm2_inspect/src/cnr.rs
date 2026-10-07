@@ -13,7 +13,10 @@
 
 use std::path::Path;
 
-use mm2_content::cnr::{COMMENTARY_CUES, CnrContent};
+use mm2_content::cnr::{COMMENTARY_CUES, CnrContent, CnrSettings};
+use mm2_formats::bai::Bai;
+use mm2_game::gold::GoldMatch;
+use mm2_game::{LaneQuery, NavGraph};
 
 use crate::build_vfs;
 
@@ -63,6 +66,69 @@ fn report(content: &CnrContent) -> Vec<String> {
     issues
 }
 
+/// A site is *on a lane* for the reach audit when the nearest routable
+/// vehicle lane passes within this many metres horizontally...
+const ON_LANE_XZ_M: f32 = 15.0;
+
+/// ...and within this many metres vertically — stacked roads put a
+/// lane directly below or above a site that no car on it can reach
+/// (the pickup is a 5 m sphere, the delivery 12 m).
+const ON_LANE_Y_M: f32 = 5.0;
+
+/// Seeds the reach audit scans for fully lane-connected draws.
+const SEED_SCAN: u64 = 4096;
+
+/// How many matching seeds the reach audit lists.
+const SEEDS_LISTED: usize = 8;
+
+/// How far each authored site sits from the city's routable vehicle
+/// lanes (F27 evidence): the pool is cop waypoints, not road-snapped
+/// markers, so some sites lie where no lane runs (or on a level no
+/// lane serves) and a road-following driver cannot reach a round that
+/// draws one. Reported per city — how many sites are on a lane, and
+/// the first seeds whose three drawn sites all are (the rounds an
+/// evidence driver can finish). Not a rule claim: the original's
+/// players drive anywhere, this only says which sites need to.
+fn report_reach(vfs: &mm2_assets::Vfs, content: &CnrContent) {
+    let logical = format!("city/{}.bai", content.city);
+    let Some(res) = vfs.resolve(&logical) else {
+        println!("  lane reach: {logical} not found");
+        return;
+    };
+    let graph = match vfs.read(&res).map(|b| Bai::parse(&b)) {
+        Ok(Ok(bai)) => NavGraph::build_for_routing(&bai).graph,
+        _ => {
+            println!("  lane reach: {logical} does not parse");
+            return;
+        }
+    };
+    let query = LaneQuery::vehicles(1000.0);
+    let on_lane = |p: [f32; 3]| {
+        graph.nearest_lane(p, &query).is_some_and(|h| {
+            let dxz = (p[0] - h.point[0]).hypot(p[2] - h.point[2]);
+            dxz <= ON_LANE_XZ_M && (p[1] - h.point[1]).abs() <= ON_LANE_Y_M
+        })
+    };
+    let near = content.sites.iter().filter(|p| on_lane(**p)).count();
+    println!(
+        "  lane reach: {near}/{} sites within {ON_LANE_XZ_M} m (horizontal) and {ON_LANE_Y_M} m \
+         (vertical) of a routable vehicle lane",
+        content.sites.len()
+    );
+    let rules = CnrSettings::default().rules(mm2_game::RACE_TICK_HZ);
+    let seeds: Vec<u64> = (0..SEED_SCAN)
+        .filter(|&seed| {
+            GoldMatch::opening_sites(rules, &content.sites, seed)
+                .is_some_and(|draw| draw.iter().all(|p| on_lane(*p)))
+        })
+        .collect();
+    println!(
+        "  seeds 0..{SEED_SCAN} whose opening draw is all on lanes: {} (first {:?})",
+        seeds.len(),
+        &seeds[..seeds.len().min(SEEDS_LISTED)]
+    );
+}
+
 /// Run the audit over every selected city.
 pub fn run(
     dir: &Path,
@@ -80,6 +146,8 @@ pub fn run(
             complete += 1;
         }
         failures.extend(report(&content));
+        report_reach(&vfs, &content);
+        println!();
     }
     println!(
         "cnr: {} cities audited — {} complete, {} with issues ({} issues)",

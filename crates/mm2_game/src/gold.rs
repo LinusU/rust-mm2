@@ -677,6 +677,20 @@ impl GoldMatch {
         self.outcome
     }
 
+    /// The three sites `seed`'s opening draw takes from `pool` —
+    /// gold, hideout, bank — without keeping a match around. The same
+    /// draw [`GoldMatch::new`] makes, so an audit can name the round a
+    /// seed starts. `None` for a pool that cannot seed a round.
+    pub fn opening_sites(rules: GoldRules, pool: &[[f32; 3]], seed: u64) -> Option<[[f32; 3]; 3]> {
+        let id = ObjectId {
+            generation: 1,
+            slot: 1,
+        };
+        let pool = pool.iter().map(|p| Vec3::from(*p)).collect();
+        let sites = Self::new(1, id, rules, pool, seed, &[]).ok()?.sites();
+        Some([sites.gold, sites.hideout, sites.bank].map(|p| p.to_array()))
+    }
+
     /// The current sites.
     pub fn sites(&self) -> Sites {
         Sites {
@@ -1984,6 +1998,34 @@ mod tests {
         };
         assert_eq!(script(11), script(11));
         assert_ne!(script(11).0, script(12).0);
+    }
+
+    #[test]
+    fn opening_sites_name_the_draw_a_match_makes() {
+        let raw: Vec<[f32; 3]> = pool(9).iter().map(|p| p.to_array()).collect();
+        let r = rules(CnrVariant::FreeForAll, EndRule::None);
+        for seed in [0, 1, 7, 1291] {
+            let game = GoldMatch::new(
+                1,
+                ObjectId {
+                    generation: 1,
+                    slot: 1,
+                },
+                r,
+                pool(9),
+                seed,
+                &[],
+            )
+            .unwrap();
+            let s = game.sites();
+            assert_eq!(
+                GoldMatch::opening_sites(r, &raw, seed),
+                Some([s.gold, s.hideout, s.bank].map(|p| p.to_array())),
+                "seed {seed}"
+            );
+        }
+        // A pool that cannot seed a round names no draw.
+        assert_eq!(GoldMatch::opening_sites(r, &raw[..2], 0), None);
     }
 
     #[test]
