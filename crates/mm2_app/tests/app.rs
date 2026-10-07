@@ -54,5 +54,6 @@ mod surface;
 mod texel_fx;
 mod traffic;
 mod trailer;
+mod vfs_audit;
 mod wheel_fx;
 mod write_guard;

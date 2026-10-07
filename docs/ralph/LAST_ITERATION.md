@@ -1,3 +1,24 @@
+# Last iteration — F29-A.1: VFS-only audit of production filesystem reach (new-run iteration 8 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`0ae2006`) passed gates and review, no blockers. Took the audit's priority 4 (F29
+consumer audit, cheap and no new data): F29 requirement 1 says no feature code opens an original install directly.
+
+Change: `crates/mm2_app/tests/vfs_audit.rs` (module added to `tests/app.rs`). Scans `src/` and `examples/` of every
+crate (stops at `#[cfg(test)]`, skips comments) for `std::fs`, `fs::`, `File::open/create`, `read_dir`, `.exists()`,
+`.is_file()`, `.is_dir()`, `canonicalize`, `read_to_string`. Each file with a hit must be in `ALLOWED` with a reason
+(Vfs / UserData / DevOutput / DevInput / OwnAssets); unlisted hits fail, listed files with no hit fail (no rot);
+`mm2_content`, `mm2_net` and `mm2_formats/src` may never be listed; only `mm2_assets` may carry `Vfs`. Scanner
+self-test covers comments, `#[cfg(test)]`, and `Vfs::new` not matching `fs::`. Mutation check: a `std::fs::read` appended
+to `mm2_content/src/lib.rs` failed the audit; reverted. Result on the tree: every production fs reach is the VFS, the
+player's own profile/settings/bindings, dev-requested output, or an explicit dev-input file (`--script`,
+`--vehicle-config`) — no direct original read found, no code changed.
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` 0; `cargo test --locked --workspace` exit 0 (2454 passed, 0 failed). Status: implemented candidate, not independently checked. Source scan only:
+it does not show each consumer honours an override (F29-AC01/AC02/AC05 open), and a read via a path obtained elsewhere
+(e.g. `Resolved.source.path` handed to `std::fs`) in an allowlisted file is not distinguished.
+
+---
+
 # Last iteration — F31-A.1: coverage and gap audit (new-run iteration 7 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`f145ece`) passed gates and review with no blocking findings; its gaps
