@@ -1,3 +1,37 @@
+# Last iteration — F27-B.4c review gaps: the re-plan wait is tested, and the first frame keeps it (new-run iteration 29)
+
+Selection: the previous review passed with no blocking findings; its
+verification gaps named two small, closable items in the `--bot` Cops &
+Robbers driver — the wait/drop-stale-guide path had no test (only the
+`guide_stale` predicate did), and on a car's very first frame the
+`plan_wait` armed on the throwaway `ScriptedBot` value was lost (one extra
+router query). Process-level gaps (client carry, contested pickups,
+impairment, rendering) are not closable in one unattended change.
+
+Change (`mm2_app::scripted`): the wait logic moved out of the system into
+`nav_replan(wait, plan)` → `NavReplan::{Waiting, Planned, Failed}`; the
+planner closure runs only when the wait has run out, and a failure re-arms
+`NAV_REPLAN_FRAMES`. When the car has no `ScriptedBot` yet, a failed plan
+inserts one carrying the armed wait. 1 unit test
+(`a_failed_plan_waits_a_window_before_the_router_is_asked_again`: failure
+arms 120, the next 120 frames never call the planner, the following frame
+does, exactly 2 planner calls). Behaviour is otherwise unchanged.
+
+Gates (iteration 29, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean (a first `drop_non_drop` in the new test was fixed);
+`cargo test --locked --workspace` exit 0 (240 lib, 767 app, 99 network, 0
+failed). Retail two-process decided-match test not re-run (no behaviour
+change on the success path). No processes left running.
+
+Not verified: the system-level failure path with a real unreachable
+objective, the new-bot-insert branch (no test builds the system), a client
+that carries/delivers, contested pickups, impairment/late-join at process
+level, rendered output. Open: commentary, menu-hosted lobby offer,
+F27-AC01..06. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c review nit: the evidence driver stops re-planning every frame (new-run iteration 28)
 
 Selection: the previous review passed with no blocking findings. Its one
