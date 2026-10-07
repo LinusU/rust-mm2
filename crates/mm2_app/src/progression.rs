@@ -118,6 +118,7 @@ pub fn record_session_results(
     ledger: Res<ResultLedger>,
     rewards: Option<Res<EventRewards>>,
     scripted: Option<Res<ScriptedDrive>>,
+    lesson: Option<Res<crate::lesson::LessonDriver>>,
     players: Query<&Player>,
     mut profile: Option<ResMut<ActiveProfile>>,
     mut commands: Commands,
@@ -168,6 +169,13 @@ pub fn record_session_results(
     // never claim a save that did not happen. The refusal is final for
     // the generation, so the ids are consumed the same either way.
     let blocked = match profile.as_ref() {
+        // A lesson's legs each finish through the ordinary race path,
+        // but a leg clear is not an event finish: neither a record nor
+        // an authored reward may come from one (F21-B.5). The lesson's
+        // own pass credit is a separate, not yet designed, consumer.
+        _ if lesson.is_some() => {
+            Some("crash course lesson - leg results are not event records".to_string())
+        }
         None => Some("no driver profile - progress is not saved".to_string()),
         Some(p) if !p.profile.records_progress() => {
             Some("sandbox profile - records and rewards are not kept".to_string())

@@ -1,3 +1,35 @@
+# Last iteration — F21-B.5: lesson isolation + driver teardown (new-run iteration 45)
+
+Selection: the previous review passed with no blocking findings, but named
+two must-fix items before any lesson can launch: per-leg `Finished`
+results still reach `ResultLedger` → `record_session_results` as event
+finishes, and nothing removed `LessonDriver` at teardown. Both are small
+and independent of the (larger) launcher, so I took them.
+
+Change: `record_session_results` takes `Option<Res<LessonDriver>>` and
+blocks while one is present (no `EventRecord`, no authored reward;
+`SessionReport.note` = "crash course lesson - leg results are not event
+records"). `drive_session`'s teardown removes `LessonDriver` next to
+`RaceState`. DSN-75 and the PLAN rows updated.
+
+Tests: `tests/progression.rs::a_lesson_leg_finish_records_nothing`
+(verified to fail with the guard disabled), `tests/race.rs::
+restart_removes_the_lesson_driver`.
+
+Gates (iteration 45, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0 (2292 passed, 0
+failed; was 2290). No processes left running.
+
+Not verified / open: no launcher (no `SessionMode` installs the driver;
+`event_race_setup` still refuses crash rows); no lesson-pass credit
+(separate consumer, design open); per-leg countdown banner/car hold and
+HUD/racestat/nav rebinding to the swapped race are not inspected; no
+UNK-35 evaluators. No original-data run; tests synthetic. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.4: in-session lesson leg driver (new-run iteration 44)
 
 Selection: the previous review passed with no blocking findings. Its gap

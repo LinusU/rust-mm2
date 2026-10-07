@@ -31,8 +31,10 @@
 //! The verdict is the gate-run baseline of [`LegReport::from_gate_run`]
 //! — what a cornering, follow, stop, jump or cop-chase leg additionally
 //! requires is `UNK-35`. Nothing launches a lesson yet: no session mode
-//! installs the driver, the ledger's per-leg finishes are not yet kept
-//! off the event-record path, and no reward is credited.
+//! installs the driver and no reward is credited. The driver is
+//! session state: teardown removes it with the [`RaceState`], and while
+//! it is present `record_session_results` keeps every leg's ledger
+//! entry off the profile (a leg clear is not an event finish).
 
 use bevy::prelude::*;
 use mm2_game::{

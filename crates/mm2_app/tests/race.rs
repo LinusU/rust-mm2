@@ -1153,6 +1153,51 @@ fn restart_removes_the_race_resource() {
     assert_eq!(app.world().resource::<RaceState>().clock, 0);
 }
 
+/// F21-B.5: a lesson's driver is session state — a restart removes it
+/// with the race, so a stale driver cannot outlive the session it
+/// described (the launcher reinstalls leg 0 on the next load).
+#[test]
+fn restart_removes_the_lesson_driver() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    let legs = vec![mm2_content::LessonLeg {
+        filename: "leg".into(),
+        objective: mm2_content::LessonObjective::Maneuver,
+        source: "crash0:leg".into(),
+        definition: def,
+    }];
+    app.insert_resource(mm2_app::lesson::LessonDriver::new(
+        mm2_app::race::LessonSetup {
+            key: mm2_game::EventKey {
+                city: "london".into(),
+                table: mm2_game::EventTableKind::CrashCourse,
+                stem: "lesson1".into(),
+            },
+            run: mm2_game::LessonRun::new(legs.len()).unwrap(),
+            legs,
+        },
+    ));
+    run(&mut app, 3);
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..12 {
+        app.update();
+        if phase(&app) == SessionPhase::Loading {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never re-began the session");
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::lesson::LessonDriver>()
+            .is_none(),
+        "the old lesson driver must not survive the restart"
+    );
+}
+
 /// Quit during the countdown tears the session down like any other —
 /// `Countdown → Unloading → Menu` and an exit request.
 #[test]

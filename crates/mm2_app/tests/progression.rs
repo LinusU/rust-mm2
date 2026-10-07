@@ -681,6 +681,59 @@ fn a_bot_driven_finish_records_nothing() {
     assert!(saved.unlocks.is_empty());
 }
 
+/// A lesson leg's clear reaches the ledger like any race finish, but a
+/// session carrying a `LessonDriver` must not turn it into an event
+/// record or an authored reward — the report says so (F21-B.5).
+#[test]
+fn a_lesson_leg_finish_records_nothing() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Standard);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut app = test_app(event_config(), vfs, car, Some(slot));
+    app.update(); // the session loads and installs the event's `RaceState`
+    let legs = vec![mm2_content::LessonLeg {
+        filename: "leg".into(),
+        objective: mm2_content::LessonObjective::Maneuver,
+        source: "crash0:leg".into(),
+        definition: app
+            .world()
+            .resource::<mm2_game::RaceState>()
+            .definition
+            .clone(),
+    }];
+    app.insert_resource(mm2_app::lesson::LessonDriver::new(race::LessonSetup {
+        key: EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::CrashCourse,
+            stem: "lesson1".into(),
+        },
+        run: mm2_game::LessonRun::new(legs.len()).unwrap(),
+        legs,
+    }));
+
+    let pid = local_player_id(&mut app);
+    inject_result(&mut app, pid, SessionOutcome::Finished { race_ticks: 60 });
+    app.update();
+    app.update();
+
+    let saved = saved_progress(&mut app, &store);
+    assert!(
+        saved.events.is_empty(),
+        "no event record: {:?}",
+        saved.events
+    );
+    assert!(saved.unlocks.is_empty(), "no reward: {:?}", saved.unlocks);
+    let report = app.world().resource::<progression::SessionReport>();
+    assert!(!report.recorded);
+    assert!(
+        report.note.as_deref().is_some_and(|n| n.contains("lesson")),
+        "the results screen is told why: {:?}",
+        report.note
+    );
+}
+
 /// A `--event` launch of a still-locked event runs — the CLI bypasses
 /// the (unbuilt, F17) menu that enforces availability — but the
 /// session's availability surface reports exactly which authored
