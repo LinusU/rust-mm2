@@ -17,8 +17,8 @@ use mm2_app::crowd::{
 use mm2_app::pedestrian::{PedActor, animate_pedestrians};
 use mm2_assets::Vfs;
 use mm2_game::{
-    Mm2Vfs, Player, PlayerControl, PlayerId, Session, SessionConfig, SessionEntity, SessionPhase,
-    WorldMode, despawn_session_entities,
+    Mm2Vfs, Player, PlayerControl, PlayerId, Session, SessionAuthority, SessionConfig,
+    SessionEntity, SessionPhase, WorldMode, despawn_session_entities,
 };
 
 use mm2_game::pedreact::Phase;
@@ -111,9 +111,14 @@ fn config(seed: u64) -> SessionConfig {
     }
 }
 
-fn playing(seed: u64) -> Session {
+fn playing(seed: u64, authority: SessionAuthority) -> Session {
     let mut session = Session::new();
-    session.begin(config(seed)).unwrap();
+    session
+        .begin(SessionConfig {
+            authority,
+            ..config(seed)
+        })
+        .unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     session
@@ -128,6 +133,10 @@ fn mount(dir: &Path) -> Mm2Vfs {
 }
 
 fn app(dir: &Path, seed: u64, density: Option<f32>) -> App {
+    app_as(dir, seed, density, SessionAuthority::Local)
+}
+
+fn app_as(dir: &Path, seed: u64, density: Option<f32>, authority: SessionAuthority) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -137,7 +146,7 @@ fn app(dir: &Path, seed: u64, density: Option<f32>) -> App {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
-        .insert_resource(playing(seed))
+        .insert_resource(playing(seed, authority))
         .insert_resource(mount(dir))
         .add_systems(
             Update,
@@ -732,4 +741,72 @@ fn two_cars_closing_on_one_walker_from_both_ends_still_let_it_dive_and_walk_back
     assert!((at(&app, walker).translation.x - start.x).abs() < 0.3);
     let found = walkers(&mut app);
     assert_eq!(actors(&mut app), found.len());
+}
+
+/// F19-B.5: the crowd is cosmetic, so a `Remote` client fields it too.
+#[test]
+fn a_remote_client_fields_the_same_crowd_a_host_would_for_its_seed() {
+    let tmp = install();
+    let mut local = app(tmp.path(), 11, Some(0.5));
+    let mut client = app_as(tmp.path(), 11, Some(0.5), SessionAuthority::Remote);
+    run(&mut local, 5);
+    run(&mut client, 5);
+    assert_eq!(
+        actors(&mut client),
+        24,
+        "round(0.5 * 48), not an empty city"
+    );
+    assert_eq!(
+        sorted_positions(&mut client),
+        sorted_positions(&mut local),
+        "same density, seed and spawn: the same crowd on either role"
+    );
+    assert!(client.world().resource::<PedCrowd>().is_active());
+
+    // It walks and recycles around the client's own players.
+    let before = sorted_positions(&mut client);
+    run(&mut client, 120);
+    assert_ne!(sorted_positions(&mut client), before, "the crowd walks");
+    let player = Vec3::new(0.0, 0.0, 95.0);
+    move_player(&mut client, player);
+    run(&mut client, 120);
+    let found = walkers(&mut client);
+    assert!(!found.is_empty());
+    for (at, _) in &found {
+        assert!(at.distance(player) <= 91.0, "inside the bubble: {at:?}");
+    }
+    assert!(client.world().resource::<PedCrowd>().recycled > 0);
+    assert_eq!(actors(&mut client), 24, "no orphan figures");
+}
+
+/// A client's copy of a remote car (kinematic, with the replicated
+/// velocity) is a threat like the player's own: the client's walkers
+/// look, dive clear and walk back. (A `Remote` client cannot pause —
+/// MP-6 — so the host-side pause tests cover freezing.)
+#[test]
+fn a_remote_clients_walkers_dive_from_a_replicated_car_and_walk_back() {
+    let tmp = reactive();
+    let mut app = app_as(tmp.path(), 7, Some(0.1), SessionAuthority::Remote);
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -40.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let mut dived = false;
+    for _ in 0..240 {
+        step_car(&mut app, car);
+        app.update();
+        dived |= phase(&app, walker) == Phase::Diving;
+    }
+    assert!(dived, "the client's walker dove from the replicated car");
+    app.world_mut().despawn(car);
+    run(&mut app, 900);
+    assert_eq!(phase(&app, walker), Phase::Walking, "back on its curve");
+    assert!((at(&app, walker).translation.x - start.x).abs() < 0.3);
+    let crowd = app.world().resource::<PedCrowd>();
+    assert!(crowd.alerts >= 1 && crowd.dives >= 1 && crowd.rejoined >= 1);
+    assert_eq!(actors(&mut app), walkers(&mut app).len(), "no actor leaked");
 }

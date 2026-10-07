@@ -38,9 +38,17 @@
 //!   to its curve. There is still no collider — a car that gives a
 //!   walker too little time drives through it.
 //!
+//! - **Networked sessions (F19-B.5).** The crowd is cosmetic — no
+//!   collider, no score, no rule reads it — so no process is its
+//!   authority: the host and every `Remote` client field their own from
+//!   the same density and seed, each around the players that process
+//!   holds (a client's copies of remote cars included), and nothing
+//!   about it travels on the wire. Two processes therefore see
+//!   different walkers; that is a designed trade (DSN-90) for keeping
+//!   the snapshot stream free of a population nobody can collide with.
+//!
 //! Not done here, deliberately: crossings (UNK-42), the original's
-//! sensing rule (UNK-43), pedestrian audio, and replication (a
-//! `Remote` client fields no crowd; the host's is not mirrored).
+//! sensing rule (UNK-43), and pedestrian audio.
 
 use std::sync::Arc;
 
@@ -339,14 +347,14 @@ fn facing(dir: Vec3) -> Option<Quat> {
 }
 
 /// Advance every walker along its sidewalk and pose its figure. Runs
-/// only while the session is `Playing`, on the authority.
+/// only while the session is `Playing`.
 pub fn walk_pedestrians(
     time: Res<Time>,
     session: Res<Session>,
     crowd: Option<ResMut<PedCrowd>>,
     mut walkers: Query<(&mut PedWalk, &mut Transform, Option<&PedReact>)>,
 ) {
-    if !session.is_playing() || !session.authority_role().is_authority() {
+    if !session.is_playing() {
         return;
     }
     let Some(mut crowd) = crowd else {
@@ -380,7 +388,7 @@ pub fn walk_pedestrians(
 /// Let walkers sense approaching cars and react (F19-B.3): stop and
 /// face a car that is heading for them, dive clear when contact is
 /// imminent, then walk back to their curve. Runs only while `Playing`,
-/// on the authority, before [`walk_pedestrians`]; a figure whose
+/// before [`walk_pedestrians`]; a figure whose
 /// archetype lacks the reaction states is left to walk on.
 #[allow(clippy::type_complexity)] // Bevy query tuple: one system, one query.
 pub fn react_pedestrians(
@@ -390,7 +398,7 @@ pub fn react_pedestrians(
     cars: Query<(&Position, &LinearVelocity, &Vehicle)>,
     mut walkers: Query<(&PedWalk, &mut PedReact, &mut PedActor, &mut Transform)>,
 ) {
-    if !session.is_playing() || !session.authority_role().is_authority() {
+    if !session.is_playing() {
         return;
     }
     let Some(mut crowd) = crowd else {
@@ -498,8 +506,7 @@ pub fn react_pedestrians(
 
 /// Recycle walkers that left every player's bubble, then refill toward
 /// the density target. Builds the [`PedCrowd`] on the session's first
-/// `Playing` frame. Runs only while `Playing`, on the authority, and
-/// never beside the `--ped-lab` line-up.
+/// `Playing` frame. Runs only while `Playing` and never beside the `--ped-lab` line-up.
 #[allow(clippy::too_many_arguments)] // Bevy system: the borrows are the contract.
 pub fn maintain_pedestrians(
     mut commands: Commands,
@@ -513,7 +520,7 @@ pub fn maintain_pedestrians(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !session.is_playing() || !session.authority_role().is_authority() {
+    if !session.is_playing() {
         return;
     }
     let (Some(density), Some(vfs), Some(config)) = (density, vfs, session.config()) else {

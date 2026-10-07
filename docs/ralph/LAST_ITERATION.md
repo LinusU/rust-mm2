@@ -1,3 +1,13 @@
+# Last iteration — F19-B.5: the crowd on Remote clients (iteration 4 of the recovery run)
+
+Selection: the F19-B.4 review passed with no blockers. Of F19's open items the only one needing no unknown rule and no GPU was the "`Remote` client has no crowd" gap noted since B.2: all three crowd systems returned early unless the process was the authority, so a multiplayer client's city had empty sidewalks. Spec req 5 lets distant/cosmetic animation stay non-authoritative, and the crowd has no collider, score or rule reader.
+Change: dropped the authority gate from `maintain_pedestrians`/`react_pedestrians`/`walk_pedestrians` (`crates/mm2_app/src/crowd.rs`, docs updated); ledger DSN-90 (designed): each process fields its own crowd, nothing on the wire, so peers see different walkers. Ambient traffic stays host-published (DSN-71) because cars collide.
+Tests (`mm2_app/tests/crowd.rs` +2, `SessionAuthority::Remote`): identical 24-walker crowd to a local session for the same seed, walks, recycles into a moved bubble, no orphans; a walker dives from a replicated-velocity car and walks back. Pause is not tested on a client (MP-6: a Remote client cannot pause). Mutation: restoring the gate fails both new tests.
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings clean (Finished, no warnings); `cargo test --locked --workspace` rc 0, 2633 passed, 0 failed.
+Status: implemented candidate, not independently checked. Open: two-process leg, retail-geometry soak, real-GPU frame time, audio, crossings (UNK-42), sensing rule (UNK-43).
+
+---
+
 # Last iteration — F19-B.4 repair: make the soak's leak assertions real (iteration 3 of the recovery run)
 
 Blocker (review of the previous candidate, implementation-quality): the soak's mesh and entity checks were tautologies — `peak.meshes <= (walkers+4)*ceil(peak.meshes/walkers)` and
