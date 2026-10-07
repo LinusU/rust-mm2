@@ -157,6 +157,8 @@ use mm2_game::{
 };
 use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState};
 
+use crate::settings::{AudioBus, GraphicsSettings};
+
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
 /// exists so a malformed size field can never drive a giant allocation
@@ -959,6 +961,52 @@ pub enum VoiceKind {
     /// drawbridge, ferry or Underground sound
     /// (`crate::object_sound`).
     Object,
+}
+
+impl VoiceKind {
+    /// The volume bus the Options screen scales this voice with
+    /// (F23). Weather and the moving objects are the world's own
+    /// sounds (the original's "City Sounds"); the announcer is
+    /// commentary; everything else is a sound effect.
+    pub fn bus(self) -> AudioBus {
+        match self {
+            Self::Weather | Self::Thunder | Self::Object => AudioBus::City,
+            Self::Commentary => AudioBus::Commentary,
+            Self::RaceCue
+            | Self::Horn
+            | Self::Engine
+            | Self::Impact
+            | Self::Skid
+            | Self::Rolling
+            | Self::Clutch
+            | Self::AmbientEngine
+            | Self::Siren => AudioBus::Effects,
+        }
+    }
+}
+
+/// The linear gain the user's levels put on a voice of `kind` — master
+/// times its bus. An app without settings (a bare test rig) plays the
+/// authored mix, gain 1.
+pub fn voice_gain(settings: Option<&GraphicsSettings>, kind: VoiceKind) -> f32 {
+    settings.map_or(1.0, |s| s.audio.gain(kind.bus()))
+}
+
+/// Scale a voice's initial volume by the user's levels the frame it
+/// spawns. A one-shot never has its volume rewritten, so this is the
+/// only place its gain lands; a looping voice's mixer rewrites its
+/// sink every frame and applies the same [`voice_gain`] there. It runs
+/// in `PostUpdate` ahead of transform propagation, which bevy's own
+/// queued-audio systems run after, so the sink is created at the scaled
+/// volume and never blips at the authored one.
+pub fn level_new_voices(
+    settings: Option<Res<GraphicsSettings>>,
+    mut voices: Query<(&AudioVoice, &mut PlaybackSettings), Added<PlaybackSettings>>,
+) {
+    let settings = settings.as_deref();
+    for (voice, mut playback) in &mut voices {
+        playback.volume *= Volume::Linear(voice_gain(settings, voice.kind));
+    }
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -2128,6 +2176,7 @@ pub fn engine_rigs(
 /// the engines sounding — the cars are live, just not drivable.
 pub fn engine_drive(
     mut report: ResMut<AudioReport>,
+    settings: Option<Res<GraphicsSettings>>,
     cars: Query<&VehicleState>,
     mut voices: Query<(
         &ChildOf,
@@ -2137,6 +2186,7 @@ pub fn engine_drive(
     )>,
 ) {
     report.audible = 0;
+    let bus_gain = voice_gain(settings.as_deref(), VoiceKind::Engine);
     for (parent, mut voice, sink, spatial) in &mut voices {
         let Ok(state) = cars.get(parent.parent()) else {
             // The car despawned and the cascade has not flushed — the
@@ -2147,14 +2197,7 @@ pub fn engine_drive(
         if voice.mix.volume > 0.0 {
             report.audible += 1;
         }
-        if let Some(mut sink) = sink {
-            sink.set_volume(Volume::Linear(voice.mix.volume));
-            sink.set_speed(voice.mix.speed);
-        }
-        if let Some(mut sink) = spatial {
-            sink.set_volume(Volume::Linear(voice.mix.volume));
-            sink.set_speed(voice.mix.speed);
-        }
+        push_mix(voice.mix, bus_gain, sink, spatial);
     }
 }
 
@@ -2255,6 +2298,7 @@ pub fn ambient_engine_rigs(
 /// the street sounding.
 pub fn ambient_engine_drive(
     mut report: ResMut<AudioReport>,
+    settings: Option<Res<GraphicsSettings>>,
     cars: Query<&LinearVelocity>,
     mut voices: Query<(
         &ChildOf,
@@ -2264,6 +2308,7 @@ pub fn ambient_engine_drive(
     )>,
 ) {
     report.ambient_live = 0;
+    let bus_gain = voice_gain(settings.as_deref(), VoiceKind::AmbientEngine);
     for (parent, mut voice, sink, spatial) in &mut voices {
         let Ok(vel) = cars.get(parent.parent()) else {
             // The car despawned and the cascade has not flushed — the
@@ -2274,7 +2319,7 @@ pub fn ambient_engine_drive(
         if voice.mix.volume > 0.0 {
             report.ambient_live += 1;
         }
-        push_mix(voice.mix, sink, spatial);
+        push_mix(voice.mix, bus_gain, sink, spatial);
     }
 }
 
@@ -2325,6 +2370,7 @@ pub fn weather_voices(
     cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
     mut beds: Query<(&mut WeatherVoice, Option<&mut AudioSink>)>,
     voices: Query<&AudioVoice>,
+    settings: Option<Res<GraphicsSettings>>,
 ) {
     let (Some(mut weather), Some(vfs), Some(mut bank)) = (weather, vfs, bank) else {
         return;
@@ -2413,6 +2459,7 @@ pub fn weather_voices(
         weather.interior_mix += (target - weather.interior_mix).clamp(-step, step);
     }
     let mix = weather.interior_mix;
+    let bus_gain = voice_gain(settings.as_deref(), VoiceKind::Weather);
     for (mut bed, sink) in &mut beds {
         let level = match bed.role {
             WeatherRole::Exterior => (1.0 - mix) * RAIN_EXTERIOR_VOLUME,
@@ -2422,7 +2469,7 @@ pub fn weather_voices(
             volume: level,
             speed: 1.0,
         };
-        push_mix(bed.mix, sink, None);
+        push_mix(bed.mix, bus_gain, sink, None);
     }
     // The clap schedule — seeded delays, bounded concurrent voices.
     if session.is_playing() {
@@ -2640,14 +2687,21 @@ fn skid_slots(audio: &SurfaceAudio, idx: u16, report: &mut AudioReport) -> Vec<S
 
 /// Push a computed mix onto whichever sink the device attached — a
 /// plain sink for the player's own rig, [`SpatialAudioSink`] for
-/// everyone else's (the apply half of `engine_drive`'s contract).
-fn push_mix(mix: EngineMix, sink: Option<Mut<AudioSink>>, spatial: Option<Mut<SpatialAudioSink>>) {
+/// everyone else's (the apply half of `engine_drive`'s contract). `gain`
+/// is the user's level for the voice's bus ([`voice_gain`]); the mix on
+/// the component stays the authored one.
+fn push_mix(
+    mix: EngineMix,
+    gain: f32,
+    sink: Option<Mut<AudioSink>>,
+    spatial: Option<Mut<SpatialAudioSink>>,
+) {
     if let Some(mut s) = sink {
-        s.set_volume(Volume::Linear(mix.volume));
+        s.set_volume(Volume::Linear(mix.volume * gain));
         s.set_speed(mix.speed);
     }
     if let Some(mut s) = spatial {
-        s.set_volume(Volume::Linear(mix.volume));
+        s.set_volume(Volume::Linear(mix.volume * gain));
         s.set_speed(mix.speed);
     }
 }
@@ -2842,6 +2896,7 @@ pub fn surface_voices(
         Option<&mut SpatialAudioSink>,
     )>,
     rigs: Query<(), With<SurfaceRig>>,
+    settings: Option<Res<GraphicsSettings>>,
 ) {
     report.skids = 0;
     report.rolling = 0;
@@ -2852,6 +2907,7 @@ pub fn surface_voices(
         return;
     };
     let generation = session.generation();
+    let bus_gain = voice_gain(settings.as_deref(), VoiceKind::Skid);
     let mut live_rigs = rigs.iter().count();
     for (car, vehicle, state, rig_slot, player, remote, mut contact) in &mut cars {
         // The loudest covering skid band and rolling loop —
@@ -2989,7 +3045,7 @@ pub fn surface_voices(
                     if target > 0.0 {
                         report.skids += 1;
                     }
-                    push_mix(voice.mix, sink, spatial);
+                    push_mix(voice.mix, bus_gain, sink, spatial);
                 }
             }
         }
@@ -3081,7 +3137,7 @@ pub fn surface_voices(
                 if voice.mix.volume > 0.0 {
                     report.rolling += 1;
                 }
-                push_mix(voice.mix, sink, spatial);
+                push_mix(voice.mix, bus_gain, sink, spatial);
             }
         }
     }

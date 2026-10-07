@@ -1,7 +1,9 @@
 //! User graphics settings: the render costs a player can trade for
-//! frame time (the Options screen's first slice, F23).
+//! frame time (the Options screen's first slice, F23), plus the audio
+//! volume levels that ride the same machine-level file ([`AudioLevels`]
+//! — the struct's name predates them).
 //!
-//! Two settings, both measured as the cost that decides whether London's
+//! Two graphics settings, both measured as the cost that decides whether London's
 //! "Tower Tour" holds 60 Hz on an M1 at Retina resolution (README,
 //! "Frame-time profiling"):
 //!
@@ -130,7 +132,150 @@ impl Antialiasing {
     }
 }
 
-/// The user's graphics choices. `Default` is the shipped look.
+/// A volume bus: the group of voices one Options row scales. The
+/// original's Audio Options screen separates Sound FX, Commentary,
+/// Music and City Sounds (CTL-5); there is no music player here yet, so
+/// there is no music bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioBus {
+    /// Engines, impacts, tyres, horns, sirens and the race cues.
+    Effects,
+    /// Announcer and Cops & Robbers speech.
+    Commentary,
+    /// The world's own sounds: weather beds, thunder and the moving
+    /// objects' (drawbridge, ferry, Underground) ambience.
+    City,
+}
+
+/// The user's volume levels, in whole percent so the settings stay `Eq`
+/// and the file holds exact numbers. A voice plays at its authored
+/// volume times `master` times its bus (`gain`); `Default` is every
+/// level at 100 — the authored mix the game shipped with.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct AudioLevels {
+    /// Scales every voice.
+    pub master: u8,
+    /// [`AudioBus::Effects`].
+    pub effects: u8,
+    /// [`AudioBus::Commentary`].
+    pub commentary: u8,
+    /// [`AudioBus::City`].
+    pub city: u8,
+}
+
+impl Default for AudioLevels {
+    fn default() -> Self {
+        Self {
+            master: MAX_LEVEL,
+            effects: MAX_LEVEL,
+            commentary: MAX_LEVEL,
+            city: MAX_LEVEL,
+        }
+    }
+}
+
+/// The loudest level: the authored volume, unscaled.
+pub const MAX_LEVEL: u8 = 100;
+/// What one Left/Right/Enter press moves a level by.
+pub const LEVEL_STEP: u8 = 10;
+
+/// One adjustable row of [`AudioLevels`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioLevel {
+    /// The master volume.
+    Master,
+    /// One bus's volume.
+    Bus(AudioBus),
+}
+
+impl AudioLevel {
+    /// Every row, in menu order.
+    pub const ALL: [Self; 4] = [
+        Self::Master,
+        Self::Bus(AudioBus::Effects),
+        Self::Bus(AudioBus::Commentary),
+        Self::Bus(AudioBus::City),
+    ];
+
+    /// The menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Master => "Master volume",
+            Self::Bus(AudioBus::Effects) => "Sound effects volume",
+            Self::Bus(AudioBus::Commentary) => "Commentary volume",
+            Self::Bus(AudioBus::City) => "City sounds volume",
+        }
+    }
+}
+
+impl AudioLevels {
+    /// The level of one row.
+    pub fn get(self, level: AudioLevel) -> u8 {
+        match level {
+            AudioLevel::Master => self.master,
+            AudioLevel::Bus(AudioBus::Effects) => self.effects,
+            AudioLevel::Bus(AudioBus::Commentary) => self.commentary,
+            AudioLevel::Bus(AudioBus::City) => self.city,
+        }
+    }
+
+    /// These levels with one row set, clamped to [`MAX_LEVEL`].
+    pub fn with(mut self, level: AudioLevel, value: u8) -> Self {
+        let value = value.min(MAX_LEVEL);
+        match level {
+            AudioLevel::Master => self.master = value,
+            AudioLevel::Bus(AudioBus::Effects) => self.effects = value,
+            AudioLevel::Bus(AudioBus::Commentary) => self.commentary = value,
+            AudioLevel::Bus(AudioBus::City) => self.city = value,
+        }
+        self
+    }
+
+    /// These levels with one row stepped by [`LEVEL_STEP`], wrapping
+    /// past either end like the other settings' cycles (so Enter always
+    /// does something): up from 100 lands on 0, down from 0 on 100.
+    pub fn stepped(self, level: AudioLevel, forward: bool) -> Self {
+        let now = self.get(level);
+        let next = if forward {
+            if now >= MAX_LEVEL {
+                0
+            } else {
+                now + LEVEL_STEP
+            }
+        } else if now == 0 {
+            MAX_LEVEL
+        } else {
+            now.saturating_sub(LEVEL_STEP)
+        };
+        self.with(level, next)
+    }
+
+    /// The row's text, shared by the main menu and the pause overlay.
+    pub fn row(self, level: AudioLevel) -> String {
+        format!("{}: {}%", level.label(), self.get(level))
+    }
+
+    /// The linear gain a voice on `bus` plays at: `master` × the bus,
+    /// 0.0 to 1.0. Always finite — the levels are clamped on load.
+    pub fn gain(self, bus: AudioBus) -> f32 {
+        let bus = self.get(AudioLevel::Bus(bus));
+        f32::from(self.master) / f32::from(MAX_LEVEL) * (f32::from(bus) / f32::from(MAX_LEVEL))
+    }
+
+    /// Clamp every level to [`MAX_LEVEL`]; whether anything moved. A
+    /// hand-edited file can hold 250, which must not amplify a voice.
+    fn repair(&mut self) -> bool {
+        let before = *self;
+        for level in AudioLevel::ALL {
+            *self = self.with(level, self.get(level));
+        }
+        *self != before
+    }
+}
+
+/// The user's graphics choices and audio levels. `Default` is the
+/// shipped look and the authored mix.
 #[derive(Resource, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct GraphicsSettings {
@@ -138,6 +283,8 @@ pub struct GraphicsSettings {
     pub shadows: ShadowQuality,
     /// Camera anti-aliasing.
     pub antialiasing: Antialiasing,
+    /// Volume levels.
+    pub audio: AudioLevels,
 }
 
 /// Step through every value of a setting, wrapping at both ends —
@@ -169,6 +316,14 @@ impl GraphicsSettings {
         }
     }
 
+    /// These settings with one audio level stepped.
+    pub fn stepped_audio(self, level: AudioLevel, forward: bool) -> Self {
+        Self {
+            audio: self.audio.stepped(level, forward),
+            ..self
+        }
+    }
+
     /// The shadow row's text, shared by the main menu and the pause overlay.
     pub fn shadows_row(&self) -> String {
         format!("Shadows: {}", self.shadows.label())
@@ -192,8 +347,13 @@ impl GraphicsSettings {
                 return Self::default();
             }
         };
-        match serde_json::from_slice(&bytes) {
-            Ok(settings) => settings,
+        match serde_json::from_slice::<Self>(&bytes) {
+            Ok(mut settings) => {
+                if settings.audio.repair() {
+                    warn!(path = %path.display(), "an audio level was above 100; clamped to 100");
+                }
+                settings
+            }
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "graphics settings unparseable; using the defaults");
                 Self::default()
@@ -338,6 +498,12 @@ mod tests {
         let chosen = GraphicsSettings {
             shadows: ShadowQuality::Low,
             antialiasing: Antialiasing::Off,
+            audio: AudioLevels {
+                master: 70,
+                effects: 100,
+                commentary: 0,
+                city: 40,
+            },
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -366,5 +532,98 @@ mod tests {
         let s = GraphicsSettings::load(&path);
         assert_eq!(s.shadows, ShadowQuality::Off);
         assert_eq!(s.antialiasing, Antialiasing::X4);
+    }
+
+    #[test]
+    fn default_levels_are_the_authored_mix() {
+        let levels = AudioLevels::default();
+        for bus in [AudioBus::Effects, AudioBus::Commentary, AudioBus::City] {
+            assert_eq!(levels.gain(bus), 1.0);
+        }
+    }
+
+    #[test]
+    fn gain_is_master_times_the_bus() {
+        let levels = AudioLevels {
+            master: 50,
+            effects: 40,
+            commentary: 0,
+            city: 100,
+        };
+        assert!((levels.gain(AudioBus::Effects) - 0.2).abs() < 1e-6);
+        assert_eq!(levels.gain(AudioBus::Commentary), 0.0);
+        assert!((levels.gain(AudioBus::City) - 0.5).abs() < 1e-6);
+        let silent = AudioLevels {
+            master: 0,
+            ..levels
+        };
+        assert_eq!(silent.gain(AudioBus::City), 0.0);
+    }
+
+    #[test]
+    fn stepping_moves_by_ten_and_wraps_at_both_ends() {
+        let level = AudioLevel::Bus(AudioBus::City);
+        let mut levels = AudioLevels::default();
+        levels = levels.stepped(level, false);
+        assert_eq!(levels.city, 90);
+        assert_eq!(levels.master, 100, "only the stepped row moves");
+        for _ in 0..9 {
+            levels = levels.stepped(level, false);
+        }
+        assert_eq!(levels.city, 0);
+        assert_eq!(levels.stepped(level, false).city, 100, "down from 0 wraps");
+        assert_eq!(levels.stepped(level, true).city, 10);
+        assert_eq!(AudioLevels::default().stepped(level, true).city, 0);
+        // A level a hand edit left off the ten-grid still steps without
+        // overflow and lands back in range.
+        let odd = AudioLevels::default().with(level, 5);
+        assert_eq!(odd.stepped(level, false).city, 0);
+        assert_eq!(odd.stepped(level, true).city, 15);
+    }
+
+    #[test]
+    fn levels_round_trip_and_a_partial_file_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(&path, br#"{"audio":{"commentary":30}}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!(loaded.audio.commentary, 30);
+        assert_eq!(loaded.audio.master, MAX_LEVEL);
+        assert_eq!(loaded.shadows, ShadowQuality::High);
+        // A settings file from before audio levels existed loads at the
+        // authored mix.
+        std::fs::write(&path, br#"{"shadows":"low","antialiasing":"2"}"#).unwrap();
+        assert_eq!(GraphicsSettings::load(&path).audio, AudioLevels::default());
+    }
+
+    #[test]
+    fn an_out_of_range_level_is_clamped_and_a_malformed_one_resets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        // 250 fits a `u8` but must never amplify a voice.
+        std::fs::write(&path, br#"{"shadows":"low","audio":{"master":250}}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!(loaded.audio.master, MAX_LEVEL);
+        assert_eq!(loaded.shadows, ShadowQuality::Low, "the rest survives");
+        assert!(loaded.audio.gain(AudioBus::Effects) <= 1.0);
+        // Not a `u8` at all: the file is unusable, like any other bad
+        // field, and the defaults apply (the next save replaces it).
+        for bad in [
+            &br#"{"audio":{"master":-5}}"#[..],
+            br#"{"audio":{"master":999}}"#,
+            br#"{"audio":{"master":"loud"}}"#,
+            br#"{"audio":{"master":1e30}}"#,
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+        }
+    }
+
+    #[test]
+    fn level_rows_read_as_percent() {
+        let levels = AudioLevels::default().with(AudioLevel::Master, 70);
+        assert_eq!(levels.row(AudioLevel::Master), "Master volume: 70%");
+        // `with` clamps, so a row can never read past 100.
+        assert_eq!(levels.with(AudioLevel::Master, 200).master, MAX_LEVEL);
     }
 }

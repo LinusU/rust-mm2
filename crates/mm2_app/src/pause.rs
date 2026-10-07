@@ -29,13 +29,14 @@
 //!   first `Playing` frame so a `--frames`/`--screenshot` capture
 //!   (which freezes live input) can render the overlay.
 //!
-//! `Options` opens the graphics page in place — the same shadow and
-//! anti-aliasing rows as the main menu, Left/Right to change, saved at
-//! once, applied to the frozen world as it is drawn. Esc there backs out
+//! `Options` opens the graphics page in place — the same shadow,
+//! anti-aliasing and volume rows as the main menu, Left/Right to change,
+//! saved at once, applied to the frozen world as it is drawn. Esc there backs out
 //! to the pause rows rather than resuming. Its "Driving controls" row opens
 //! the rebinding page — each key slot listens for the next key, X clears
 //! one, the stick tuning rows step in place — saved and applied to the
-//! live `ControlSettings` at once. Audio options (F23) are still open.
+//! live `ControlSettings` at once. The volume rows reach running loops
+//! on the next mix and one-shots as they spawn.
 //!
 //! Deferred honestly, like the root menu does: pause is reachable only
 //! from `Playing` — `Countdown` still takes `Esc` as quit (the lifecycle's
@@ -50,7 +51,7 @@ use crate::controls::{ControlItem, ControlSettings, ControlsSave, DriveAction, S
 use crate::input::pad_nav;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::session::SessionControl;
-use crate::settings::{GraphicsSettings, SettingsFile};
+use crate::settings::{AudioLevel, GraphicsSettings, SettingsFile};
 
 /// What an enabled pause row does. Disabled rows carry `Err(reason)`
 /// instead — the reason renders on the row and lands on the status
@@ -70,7 +71,9 @@ enum PauseAction {
     CycleShadows,
     /// Cycle the anti-aliasing.
     CycleAntialiasing,
-    /// Put the graphics settings back to their defaults.
+    /// Step one of the volume levels.
+    CycleAudio(AudioLevel),
+    /// Put the graphics and audio settings back to their defaults.
     ResetGraphics,
     /// Leave the graphics page for the pause rows.
     CloseOptions,
@@ -118,12 +121,20 @@ fn pause_rows(
     match page {
         PausePage::Options => {
             let settings = settings.unwrap_or_default();
-            return vec![
+            let mut rows = vec![
                 row(settings.shadows_row(), Ok(PauseAction::CycleShadows)),
                 row(
                     settings.antialiasing_row(),
                     Ok(PauseAction::CycleAntialiasing),
                 ),
+            ];
+            rows.extend(AudioLevel::ALL.map(|level| {
+                row(
+                    settings.audio.row(level),
+                    Ok(PauseAction::CycleAudio(level)),
+                )
+            }));
+            rows.extend([
                 row(
                     "Reset to defaults".into(),
                     if settings == GraphicsSettings::default() {
@@ -141,7 +152,8 @@ fn pause_rows(
                     },
                 ),
                 row("Back".into(), Ok(PauseAction::CloseOptions)),
-            ];
+            ]);
+            return rows;
         }
         PausePage::Controls => {
             let c = controls.cloned().unwrap_or_default();
@@ -190,7 +202,7 @@ fn pause_rows(
 const OPTIONS_ROW: usize = 2;
 /// Index of the `Driving controls` row on the graphics page — where focus
 /// returns when the controls page closes.
-const CONTROLS_ROW: usize = 3;
+const CONTROLS_ROW: usize = 2 + AudioLevel::ALL.len() + 1;
 
 /// The pause overlay's presentation state — focus, a status line and a
 /// redraw latch. Session flow itself stays in `Session`/`SessionControl`;
@@ -387,6 +399,7 @@ pub fn pause_input(
                     }
                     PauseAction::CycleShadows
                     | PauseAction::CycleAntialiasing
+                    | PauseAction::CycleAudio(_)
                     | PauseAction::ResetGraphics
                     | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
                 },
@@ -462,6 +475,7 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
     let next = match action {
         PauseAction::CycleShadows => settings.cycled_shadows(forward),
         PauseAction::CycleAntialiasing => settings.cycled_antialiasing(forward),
+        PauseAction::CycleAudio(level) => settings.stepped_audio(level, forward),
         PauseAction::ResetGraphics => GraphicsSettings::default(),
         _ => return,
     };
@@ -627,7 +641,7 @@ pub fn pause_present(
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
     let title = match pause.page {
         PausePage::Pause => "Paused",
-        PausePage::Options => "Graphics options",
+        PausePage::Options => "Graphics and audio options",
         PausePage::Controls => "Driving controls",
     };
     lines.push((title.to_string(), 34.0, Color::srgb(0.95, 0.9, 0.6)));

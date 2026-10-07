@@ -22,6 +22,7 @@ use mm2_app::audio::{
     SkidContact, SurfaceAudio, SurfaceContact, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind,
     WaveBank, WeatherAudio, WeatherRole, WeatherVoice, decode_wave,
 };
+use mm2_app::settings::{AudioLevels, GraphicsSettings};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{AmbientEngine, CarAudio, SirenStep};
@@ -4062,4 +4063,128 @@ fn a_session_with_no_opponent_program_counts_the_failure_not_a_substitute() {
     assert!(app.world().get::<Siren>(cop).is_none());
     assert!(siren_voice_parents(&mut app).is_empty());
     assert!(app.world().resource::<AudioReport>().failed >= 1);
+}
+
+/// F23 volume levels: the horn app with the production `level_new_voices`
+/// pass and the user's settings resource.
+fn leveled_horn_app(dir: &Path, audio: AudioLevels) -> App {
+    let mut app = horn_app(dir, false);
+    app.insert_resource(GraphicsSettings { audio, ..default() })
+        .add_systems(
+            PostUpdate,
+            audio::level_new_voices.before(bevy::transform::TransformSystems::Propagate),
+        );
+    app
+}
+
+/// Fire the horn once and read the one-shot's initial playback volume.
+fn horn_volume(app: &mut App) -> f32 {
+    press_enter(app);
+    app.update();
+    app.update();
+    release_enter(app);
+    let world = app.world_mut();
+    let volumes: Vec<Volume> = world
+        .query_filtered::<&PlaybackSettings, With<AudioVoice>>()
+        .iter(world)
+        .map(|s| s.volume)
+        .collect();
+    assert_eq!(volumes.len(), 1, "exactly one horn voice spawned");
+    volumes[0].to_linear()
+}
+
+#[test]
+fn default_levels_play_a_voice_at_its_authored_volume() {
+    let dir = fixture_dir();
+    let mut app = leveled_horn_app(dir.path(), AudioLevels::default());
+    // `car_audio` authors the horn at 0.9.
+    assert!((horn_volume(&mut app) - 0.9).abs() < 1e-6);
+}
+
+#[test]
+fn master_and_bus_levels_scale_a_new_voice_once() {
+    let dir = fixture_dir();
+    let levels = AudioLevels {
+        master: 50,
+        effects: 40,
+        ..AudioLevels::default()
+    };
+    let mut app = leveled_horn_app(dir.path(), levels);
+    let expected = 0.9 * 0.5 * 0.4;
+    assert!((horn_volume(&mut app) - expected).abs() < 1e-6);
+    // Later frames must not scale the same voice again.
+    for _ in 0..3 {
+        app.update();
+    }
+    let world = app.world_mut();
+    let now: Vec<f32> = world
+        .query_filtered::<&PlaybackSettings, With<AudioVoice>>()
+        .iter(world)
+        .map(|s| s.volume.to_linear())
+        .collect();
+    assert!(now.iter().all(|v| (v - expected).abs() < 1e-6), "{now:?}");
+}
+
+#[test]
+fn a_zeroed_bus_silences_its_voices_only() {
+    let dir = fixture_dir();
+    let levels = AudioLevels {
+        effects: 0,
+        ..AudioLevels::default()
+    };
+    let mut app = leveled_horn_app(dir.path(), levels);
+    assert_eq!(horn_volume(&mut app), 0.0, "the horn is a sound effect");
+    // The commentary bus is untouched, and a non-voice entity's
+    // playback is never scaled.
+    let speech = app
+        .world_mut()
+        .spawn((
+            AudioVoice {
+                kind: VoiceKind::Commentary,
+            },
+            PlaybackSettings {
+                volume: Volume::Linear(0.8),
+                ..default()
+            },
+        ))
+        .id();
+    let bystander = app
+        .world_mut()
+        .spawn(PlaybackSettings {
+            volume: Volume::Linear(0.8),
+            ..default()
+        })
+        .id();
+    app.update();
+    for entity in [speech, bystander] {
+        let volume = app.world().get::<PlaybackSettings>(entity).unwrap().volume;
+        assert!((volume.to_linear() - 0.8).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn an_app_without_settings_plays_the_authored_mix() {
+    let dir = fixture_dir();
+    let mut app = horn_app(dir.path(), false);
+    app.add_systems(
+        PostUpdate,
+        audio::level_new_voices.before(bevy::transform::TransformSystems::Propagate),
+    );
+    assert!((horn_volume(&mut app) - 0.9).abs() < 1e-6);
+}
+
+#[test]
+fn every_voice_kind_has_a_bus_and_the_world_sounds_share_one() {
+    use mm2_app::settings::AudioBus;
+    for (kind, bus) in [
+        (VoiceKind::Engine, AudioBus::Effects),
+        (VoiceKind::Siren, AudioBus::Effects),
+        (VoiceKind::RaceCue, AudioBus::Effects),
+        (VoiceKind::Commentary, AudioBus::Commentary),
+        (VoiceKind::Weather, AudioBus::City),
+        (VoiceKind::Thunder, AudioBus::City),
+        (VoiceKind::Object, AudioBus::City),
+    ] {
+        assert_eq!(kind.bus(), bus, "{kind:?}");
+    }
 }

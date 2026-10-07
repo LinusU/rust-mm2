@@ -36,7 +36,8 @@ use mm2_game::object_audio::{ObjectAudioSpec, ObjectAudioState};
 use mm2_game::{Mm2Vfs, Session, SessionEntity, SessionPhase};
 use tracing::warn;
 
-use crate::audio::{AudioReport, AudioVoice, PcmAudio, VoiceKind, WaveBank};
+use crate::audio::{AudioReport, AudioVoice, PcmAudio, VoiceKind, WaveBank, voice_gain};
+use crate::settings::GraphicsSettings;
 use crate::underground::ListenerRooms;
 
 /// A table's max distance lands this many spatial units from the
@@ -177,6 +178,7 @@ pub fn object_sound_voices(
     )>,
     voices: Query<(Entity, &ObjectSoundVoice, &ChildOf)>,
     mut sinks: Query<&mut SpatialAudioSink, With<ObjectSoundVoice>>,
+    settings: Option<Res<GraphicsSettings>>,
 ) {
     if emitters.is_empty() {
         return;
@@ -191,6 +193,7 @@ pub fn object_sound_voices(
     let dt = if running { time.delta_secs() } else { 0.0 };
     let ear = listener.iter().next().map(|g| g.translation());
     let underground = rooms.is_some_and(|r| r.underground);
+    let bus_gain = voice_gain(settings.as_deref(), VoiceKind::Object);
     for (emitter, at, mut sound, transform) in &mut emitters {
         let sound = &mut *sound;
         let admitted = sound.spec.area.admits(underground);
@@ -264,7 +267,7 @@ pub fn object_sound_voices(
             if row.kind.is_positional()
                 && let Ok(mut sink) = sinks.get_mut(*entity)
             {
-                sink.set_volume(Volume::Linear(row_volume(row.volume) * falloff));
+                sink.set_volume(Volume::Linear(row_volume(row.volume) * falloff * bus_gain));
             }
         }
         let scale = PAN_ONLY_EDGE / sound.spec.max_distance.max(1.0);

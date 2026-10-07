@@ -1829,6 +1829,13 @@ fn main() {
             wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
         ),
     )
+    // F23: the Options screen's volume levels reach a voice the frame it
+    // spawns, before bevy's own audio systems (which run after transform
+    // propagation) create its sink; mixers apply the same gain per frame.
+    .add_systems(
+        PostUpdate,
+        audio::level_new_voices.before(bevy::transform::TransformSystems::Propagate),
+    )
     // F16-B: drain authoritative results into the bound profile —
     // records finishes, grants rewards, saves on change. Inert without
     // an event or a bound profile.

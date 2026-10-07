@@ -45,16 +45,18 @@
 //!   `SessionConfig::customization`; an unchanged pick set launches a
 //!   default run so DRV-6 record eligibility is unaffected by a visit.
 //!
-//! - [`Screen::Options`] is the graphics-options screen (CTL-4's
-//!   designed counterpart): shadow quality and anti-aliasing, adjusted
-//!   with Left/Right, saved on every change and defaulting to the look
-//!   the game shipped with. Its "Driving controls" row opens
+//! - [`Screen::Options`] is the graphics-and-audio options screen
+//!   (CTL-4's and CTL-5's designed counterpart): shadow quality and
+//!   anti-aliasing, then master, sound-effects, commentary and city-sound
+//!   volume in ten-percent steps, adjusted with Left/Right, saved on
+//!   every change and defaulting to the look and mix the game shipped
+//!   with. Its "Driving controls" row opens
 //!   [`Screen::Controls`]: each action's two keys rebind by listening
 //!   for the next key ([`MenuShell::capture`]), conflicts and reserved
 //!   keys are refused with the reason, X clears a key, and stick
 //!   deadzone/sensitivity/inversion cycle in place — all saved to
-//!   `controls.json` on every change. Audio options (CTL-5) are still
-//!   open.
+//!   `controls.json` on every change. The original's other audio rows
+//!   (on/off toggles, device, stereo, quality, balance) are still open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
 //! pedestrian/cop density options (no consumers — F19/F20), Quick
@@ -84,7 +86,7 @@ use crate::controls::{ControlItem, ControlSettings, DriveAction, SLOTS};
 use crate::input::pad_nav;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
-use crate::settings::GraphicsSettings;
+use crate::settings::{AudioLevel, GraphicsSettings};
 
 /// One user intent. Keyboard, gamepad, mouse and tests all produce
 /// these — the model never reads devices.
@@ -193,7 +195,8 @@ pub enum Screen {
         /// Race-type filter.
         table: Option<EventTableKind>,
     },
-    /// Graphics options: shadow quality and anti-aliasing. Rows read
+    /// Graphics and audio options: shadow quality, anti-aliasing and the
+    /// volume levels. Rows read
     /// and write [`MenuData`]'s settings, so the screen holds no state
     /// of its own.
     Options,
@@ -283,7 +286,9 @@ pub enum Action {
     CycleShadows,
     /// Cycle the Options screen's anti-aliasing.
     CycleAntialiasing,
-    /// Put every graphics setting back to its default.
+    /// Step one of the Options screen's volume levels.
+    CycleAudio(AudioLevel),
+    /// Put every graphics and audio setting back to its default.
     ResetGraphics,
     /// Listen for the key to put in one slot of a driving action.
     RebindKey {
@@ -997,6 +1002,7 @@ impl MenuShell {
             | Action::CycleOpponents
             | Action::CycleShadows
             | Action::CycleAntialiasing
+            | Action::CycleAudio(_)
             | Action::CycleSteerDeadzone
             | Action::CycleTriggerDeadzone
             | Action::CycleSensitivity
@@ -1191,6 +1197,9 @@ impl MenuShell {
             }
             Action::CycleAntialiasing => {
                 self.set_settings(data, data.settings.cycled_antialiasing(forward), effects);
+            }
+            Action::CycleAudio(level) => {
+                self.set_settings(data, data.settings.stepped_audio(*level, forward), effects);
             }
             Action::CycleSteerDeadzone => {
                 self.tune_controls(data, ControlItem::SteerDeadzone, forward, effects)
@@ -2256,8 +2265,8 @@ fn cycle_choice<T: PartialEq + Copy>(
     (next > 0).then(|| choices[next - 1])
 }
 
-/// The Options screen: one cycling row per graphics setting plus a
-/// reset that disables itself, with its reason, once nothing differs
+/// The Options screen: one cycling row per graphics setting, one per
+/// volume level, plus a reset that disables itself, with its reason, once nothing differs
 /// from the defaults.
 fn options_screen_rows(data: &MenuData) -> Vec<Row> {
     let s = data.settings;
@@ -2268,24 +2277,28 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         won: None,
         side: None,
     };
-    vec![
+    let mut rows = vec![
         row(s.shadows_row(), Ok(()), Action::CycleShadows),
         row(s.antialiasing_row(), Ok(()), Action::CycleAntialiasing),
-        row(
-            "Reset to defaults".to_string(),
-            if s == GraphicsSettings::default() {
-                Err("already at the defaults".to_string())
-            } else {
-                Ok(())
-            },
-            Action::ResetGraphics,
-        ),
-        row(
-            "Driving controls".to_string(),
-            Ok(()),
-            Action::Push(Screen::Controls),
-        ),
-    ]
+    ];
+    rows.extend(
+        AudioLevel::ALL.map(|level| row(s.audio.row(level), Ok(()), Action::CycleAudio(level))),
+    );
+    rows.push(row(
+        "Reset to defaults".to_string(),
+        if s == GraphicsSettings::default() {
+            Err("already at the defaults".to_string())
+        } else {
+            Ok(())
+        },
+        Action::ResetGraphics,
+    ));
+    rows.push(row(
+        "Driving controls".to_string(),
+        Ok(()),
+        Action::Push(Screen::Controls),
+    ));
+    rows
 }
 
 /// The Controls screen: each driving action's first key on the row and
@@ -3099,7 +3112,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
         Screen::NewProfile { .. } => "New driver".to_string(),
         Screen::Records { .. } => "Race records".to_string(),
-        Screen::Options => "Graphics options".to_string(),
+        Screen::Options => "Graphics and audio options".to_string(),
         Screen::Controls => "Driving controls - X clears a key".to_string(),
         Screen::Customize { target, .. } => match target {
             CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),

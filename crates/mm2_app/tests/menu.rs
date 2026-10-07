@@ -3081,12 +3081,16 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         [
             "Shadows: High",
             "Anti-aliasing: 4x MSAA",
+            "Master volume: 100%",
+            "Sound effects volume: 100%",
+            "Commentary volume: 100%",
+            "City sounds volume: 100%",
             "Reset to defaults",
             "Driving controls"
         ]
     );
     assert_eq!(
-        shell(&app).rows[2].enabled,
+        shell(&app).rows[6].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3137,7 +3141,7 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[2].enabled.is_ok());
+    assert!(shell(&app).rows[6].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
@@ -3147,7 +3151,53 @@ fn option_changes_apply_persist_and_reset() {
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[2].enabled.is_err());
+    assert!(shell(&app).rows[6].enabled.is_err());
+}
+
+/// The volume rows step by ten percent, wrap at both ends, reach the
+/// live `GraphicsSettings` and the file at once, and the reset row puts
+/// them back with the graphics rows.
+#[test]
+fn volume_rows_step_wrap_persist_and_reset() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    focus_row(&mut app, "Master volume");
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[2].text, "Master volume: 90%");
+    assert_eq!(app.world().resource::<GraphicsSettings>().audio.master, 90);
+    assert_eq!(GraphicsSettings::load(&path).audio.master, 90);
+    // Right from the top wraps to silence, Left from silence to the top.
+    press(&mut app, KeyCode::ArrowRight);
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[2].text, "Master volume: 0%");
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[2].text, "Master volume: 100%");
+
+    // Each bus row moves its own level and nothing else.
+    focus_row(&mut app, "City sounds");
+    press(&mut app, KeyCode::ArrowLeft);
+    press(&mut app, KeyCode::ArrowLeft);
+    let audio = GraphicsSettings::load(&path).audio;
+    assert_eq!(
+        (audio.master, audio.effects, audio.commentary, audio.city),
+        (100, 100, 100, 80)
+    );
+    assert_eq!(shell(&app).rows[5].text, "City sounds volume: 80%");
+
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    assert_eq!(shell(&app).rows[5].text, "City sounds volume: 100%");
 }
 
 /// A menu with nowhere to save (an evidence run) still applies the
@@ -3203,6 +3253,7 @@ fn the_reopened_menu_shows_settings_changed_in_game() {
     app.insert_resource(GraphicsSettings {
         shadows: ShadowQuality::Low,
         antialiasing: Antialiasing::X2,
+        ..default()
     });
     app.update();
     assert!(shell(&app).active);
@@ -3840,7 +3891,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..3 {
+    for _ in 0..7 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);

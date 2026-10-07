@@ -1,3 +1,55 @@
+# Last iteration — F23-B.3: audio volume levels (new-run iteration 26 of this runner)
+
+Selection: previous review passed with no blockers; its gaps (no real
+device, unrendered rows) are environment limits, not defects. Operator
+report 6 points at networking, but F23's req 2 audio half had no
+implementation at all (AC05 "audio and graphics controls have actual
+observable effects"), `bevy_audio` is wired, and a volume option is a
+small self-contained slice. Networking items need multi-iteration
+two-process work and were left for a dedicated iteration.
+
+Finding that shaped the design: bevy's `GlobalVolume` only scales a sink
+at creation, and this tree's mixers rewrite `set_volume` every frame, so a
+global master would silently do nothing for loops. Gain is therefore applied
+in two places.
+
+Change: `settings::AudioLevels` (master/effects/commentary/city, `u8`
+percent so `GraphicsSettings` stays `Eq`; `gain(bus)` = master × bus) is a
+field of `GraphicsSettings`, so persistence, the live resource, the menu's
+`set_settings` and the pause page's `adopt` all carry it unchanged. `audio.rs`:
+`VoiceKind::bus`, `voice_gain`, `level_new_voices` (PostUpdate, before
+`TransformSystems::Propagate` — bevy's own queued-audio systems run after it,
+so a sink is never created at the authored volume; registered in `main.rs`),
+and `push_mix` takes the bus gain (`engine_drive`, `ambient_engine_drive`,
+weather beds, `surface_voices`); `object_sound` multiplies its per-frame
+falloff. The `mix` stored on voice components stays the authored value.
+Menu Options screen and pause graphics page gained four rows (pause
+`CONTROLS_ROW` is now derived, 7). Ledger DSN-78, `docs/research/menu.md`.
+
+Tests (+13, 2371 total): settings unit (defaults, gain maths, step/wrap,
+round-trip + pre-audio file, >100 clamp and malformed reset, row text);
+`tests/audio.rs` (default = authored 0.9, master×bus scales once and does not
+compound, zeroed bus silences only its voices, bystander `PlaybackSettings`
+untouched, no settings = authored, bus mapping); `tests/menu.rs`
+(volume rows step/wrap/persist/reset; existing option tests re-indexed);
+`tests/session.rs` (pause volume rows; existing pause tests re-indexed).
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+exit 0; `cargo test --locked --workspace` exit 0 (2371 passed, 0 failed).
+
+Not verified / open: no output device — the sink-side multiply in the mixers
+(`push_mix`, object-sound `set_volume`) is glue that needs a live sink and is
+only covered by the pure gain tests and the spawn-time pass; audibility is
+unheard. An in-flight one-shot keeps its spawn-time level. Rows not rendered.
+Still open for F23: audio on/off toggles, music bus (no music player),
+device/stereo/quality/balance, window/resolution/scaling and display recovery
+(AC04), accessibility options, pad shift buttons, auto-reverse row, pad
+rebinding, mouse driving. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F23-A.2: selectable transmission policy (new-run iteration 25 of this runner)
 
 Selection: previous review passed with no blockers (its gaps: fmt/clippy not

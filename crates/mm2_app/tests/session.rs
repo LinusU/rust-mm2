@@ -1816,8 +1816,9 @@ fn pause_options_change_save_and_back_out() {
     assert_eq!(live.antialiasing, Antialiasing::Off);
     assert_eq!(GraphicsSettings::load(&path), live);
 
-    // Reset restores both and disables itself.
-    press_key(&mut app, KeyCode::ArrowDown);
+    // Reset (below the four volume rows) restores both and disables
+    // itself.
+    pause_focus_row(&mut app, 6);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         *app.world().resource::<GraphicsSettings>(),
@@ -1856,8 +1857,8 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
-    // Back is the last of the page's five rows.
-    for _ in 0..4 {
+    // Back is the last of the page's nine rows.
+    for _ in 0..8 {
         press_key(&mut app, KeyCode::ArrowDown);
     }
     press_key(&mut app, KeyCode::Enter);
@@ -1883,7 +1884,7 @@ fn open_pause_controls(app: &mut App) {
     assert!(phase_is(app, SessionPhase::Paused));
     pause_focus_row(app, 2);
     press_key(app, KeyCode::Enter);
-    pause_focus_row(app, 3);
+    pause_focus_row(app, 7);
     press_key(app, KeyCode::Enter);
     assert_eq!(
         app.world().resource::<PauseMenu>().page,
@@ -2008,7 +2009,7 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     press_key(&mut app, KeyCode::Escape);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Options, 3));
+        assert_eq!((pause.page, pause.focus), (PausePage::Options, 7));
     }
     press_key(&mut app, KeyCode::Escape);
     {
@@ -2030,7 +2031,7 @@ fn pause_driving_controls_row_needs_controls_and_a_pending_capture_dies_with_the
     press_key(&mut app, KeyCode::Escape);
     pause_focus_row(&mut app, 2);
     press_key(&mut app, KeyCode::Enter);
-    pause_focus_row(&mut app, 3);
+    pause_focus_row(&mut app, 7);
     press_key(&mut app, KeyCode::Enter);
     {
         let pause = app.world().resource::<PauseMenu>();
@@ -2154,4 +2155,47 @@ fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
     assert!(app.world().get_resource::<CnrHost>().is_none());
     assert_eq!(count::<With<CnrMarker>>(&mut app), 0);
     assert_eq!(count::<With<CnrScoreboard>>(&mut app), 0);
+}
+
+/// The pause overlay's graphics page carries the volume rows: Left/Right
+/// step the level on the live settings, the file follows at once, and
+/// a level past either end wraps.
+#[test]
+fn pause_volume_rows_change_the_live_levels_and_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(SettingsFile(Some(path.clone())));
+    app.update();
+
+    press_key(&mut app, KeyCode::Escape);
+    pause_focus_row(&mut app, 2);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+
+    // Rows 2..=5 are master, effects, commentary, city.
+    pause_focus_row(&mut app, 3);
+    press_key(&mut app, KeyCode::ArrowLeft);
+    press_key(&mut app, KeyCode::ArrowLeft);
+    let live = *app.world().resource::<GraphicsSettings>();
+    assert_eq!(live.audio.effects, 80);
+    assert_eq!(live.audio.master, 100);
+    assert_eq!(GraphicsSettings::load(&path), live);
+
+    pause_focus_row(&mut app, 4);
+    press_key(&mut app, KeyCode::ArrowRight);
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().audio.commentary,
+        0,
+        "up from 100 wraps to silence"
+    );
+    // The reset row is offered now and restores the levels.
+    pause_focus_row(&mut app, 6);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        *app.world().resource::<GraphicsSettings>(),
+        GraphicsSettings::default()
+    );
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
 }
