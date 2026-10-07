@@ -377,12 +377,12 @@ fn parse_geometry(r: &mut Reader<'_>) -> Result<PkgGeometry, FormatError> {
         });
     }
 
-    let mut sections = Vec::with_capacity(n_sections as usize);
+    let mut sections = r.vec_for(n_sections as usize, 8);
     for _ in 0..n_sections {
         let n_strips = r.u16()?;
         let flags = r.u16()?;
         let shader_offset = r.i32()?;
-        let mut strips = Vec::with_capacity(n_strips as usize);
+        let mut strips = r.vec_for(n_strips as usize, 8);
         for _ in 0..n_strips {
             let prim_type = r.i32()?;
             let n_vertices = r.u32()? as usize;
@@ -394,7 +394,7 @@ fn parse_geometry(r: &mut Reader<'_>) -> Result<PkgGeometry, FormatError> {
                     reason: "implausible vertex count",
                 });
             }
-            let mut vertices = Vec::with_capacity(n_vertices);
+            let mut vertices = r.vec_for(n_vertices, 12);
             for _ in 0..n_vertices {
                 vertices.push(read_vertex(r, fvf)?);
             }
@@ -407,7 +407,7 @@ fn parse_geometry(r: &mut Reader<'_>) -> Result<PkgGeometry, FormatError> {
                     reason: "implausible index count",
                 });
             }
-            let mut indices = Vec::with_capacity(n_indices);
+            let mut indices = r.vec_for(n_indices, 2);
             for _ in 0..n_indices {
                 indices.push(r.u16()?);
             }
@@ -516,7 +516,7 @@ fn parse_shaders(r: &mut Reader<'_>) -> Result<PkgShaders, FormatError> {
             reason: "implausible shader count",
         });
     }
-    let mut shaders = Vec::with_capacity(total);
+    let mut shaders = r.vec_for(total, 1);
     for _ in 0..total {
         let texture = r.lp_string()?;
         let shader = if float_shaders {
@@ -578,7 +578,7 @@ fn parse_xref(r: &mut Reader<'_>) -> Result<Vec<PkgXref>, FormatError> {
             reason: "implausible xref count",
         });
     }
-    let mut refs = Vec::with_capacity(count);
+    let mut refs = r.vec_for(count, 32);
     for _ in 0..count {
         let x_axis = r.vec3()?;
         let y_axis = r.vec3()?;
@@ -659,6 +659,27 @@ mod tests {
             d.extend_from_slice(data);
         }
         d
+    }
+
+    #[test]
+    fn a_geometry_header_claiming_a_maximal_strip_stays_raw_not_reserved() {
+        // 20-byte file header, one section, one strip claiming 4M
+        // vertices (the plausibility ceiling) with nothing behind it.
+        let mut d = Vec::new();
+        for v in [1u32, 0, 0, 1, FVF_XYZ] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+        d.extend_from_slice(&0u16.to_le_bytes()); // flags
+        d.extend_from_slice(&0i32.to_le_bytes()); // shaderOffset
+        d.extend_from_slice(&3i32.to_le_bytes()); // primType
+        d.extend_from_slice(&(1u32 << 22).to_le_bytes()); // nVertices
+        // The container is lenient: a geometry chunk that fails to parse
+        // is kept raw (and warned), never half-built.
+        let data = pkg3(&[("BODY_H", d)]);
+        let pkg = Pkg::parse(&data).unwrap();
+        assert!(pkg.geometries().next().is_none());
+        assert!(matches!(pkg.files[0].data, PkgChunk::Raw(_)));
     }
 
     #[test]

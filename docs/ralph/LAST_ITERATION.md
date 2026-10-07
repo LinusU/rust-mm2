@@ -1,3 +1,21 @@
+# Last iteration — F29-A.12: parser preallocation bounded by the input's own length (new-run iteration 20 of the 2026-10-07 run)
+
+Selection: the iteration-19 review passed with no blockers; PLAN listed "parser count bounds for PKG/other formats" as the open part of
+F29-AC06. Audit: PKG and PSDL already reject implausible counts, but the ceilings are generous (4M vertices/strip, 1M rooms) and every
+loop reserved `Vec::with_capacity(claimed_count)` before the first short read — a header tens of bytes long could reserve hundreds of MB.
+
+Change: `Reader::vec_for::<T>(count, min_item_bytes)` reserves `min(count, remaining / min_item_bytes)`; used at the 15 count-driven
+allocation sites in `pkg.rs` (sections, strips, vertices, indices, shaders, xrefs) and `psdl.rs` (vertices, heights, textures, rooms,
+flags, prop rules, paths, perimeter, density). Well-formed files are unaffected (the `Vec` still grows). Tests: `reader::vec_for_never_reserves_more_than_the_input_could_hold`,
+`psdl::a_header_claiming_maximal_counts_is_refused_by_its_own_length`, `pkg::a_geometry_header_claiming_a_maximal_strip_stays_raw_not_reserved`
+(the PKG container keeps a failing geometry chunk raw by existing design; unchanged).
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2490 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: the allocation bound is proven on the helper, not by measuring allocator use; `tex.rs`/`dave.rs`/`bai.rs`/`pathset.rs` sites
+already have tight count bounds or range checks and were not migrated; no retail run.
+
+---
+
 # Last iteration — F29-A.11: model reference cycles pinned through the prop path (new-run iteration 19 of the 2026-10-07 run)
 
 Selection: the iteration-18 review passed with no blockers; the open F29-A items were AC04 for other families, AC06 reference

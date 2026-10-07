@@ -78,6 +78,20 @@ impl<'a> Reader<'a> {
         &self.data[self.pos..]
     }
 
+    /// An empty `Vec` sized for `count` items of at least `min_item_bytes`
+    /// bytes each, never larger than the unread input could hold.
+    ///
+    /// A count read from a file is a claim, and the parsers' plausibility
+    /// bounds are generous (millions of rooms, vertices). Reserving the
+    /// claimed count up front lets a header a few dozen bytes long ask for
+    /// hundreds of megabytes before the first short read fails; reserving
+    /// what the remaining bytes can actually hold costs nothing for a
+    /// well-formed file (the `Vec` still grows if the minimum was too
+    /// optimistic) and bounds the hostile one by its own length.
+    pub fn vec_for<T>(&self, count: usize, min_item_bytes: usize) -> Vec<T> {
+        Vec::with_capacity(count.min(self.remaining() / min_item_bytes.max(1)))
+    }
+
     /// Read `n` raw bytes.
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], FormatError> {
         if self.remaining() < n {
@@ -183,6 +197,21 @@ mod tests {
         assert_eq!(r.u16().unwrap(), 0x0302);
         assert_eq!(r.u16().unwrap(), 0x1234);
         assert_eq!(r.f32().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn vec_for_never_reserves_more_than_the_input_could_hold() {
+        let data = [0u8; 64];
+        let mut r = Reader::new(&data);
+        // A hostile count against 64 bytes of 12-byte items: at most 5.
+        assert!(r.vec_for::<[f32; 3]>(1 << 22, 12).capacity() < 64);
+        assert!(r.vec_for::<[f32; 3]>(1 << 22, 12).capacity() >= 5);
+        // An honest small count is reserved exactly.
+        assert!(r.vec_for::<u8>(3, 1).capacity() >= 3);
+        r.skip(60).unwrap();
+        assert!(r.vec_for::<u32>(usize::MAX, 4).capacity() <= 1);
+        // A zero minimum size must not divide by zero.
+        assert!(r.vec_for::<u8>(usize::MAX, 0).capacity() <= 4);
     }
 
     #[test]

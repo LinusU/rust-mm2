@@ -198,13 +198,13 @@ impl Psdl {
         let target_size = r.u32()?;
 
         let n_vertices = checked_count(r.u32()?, r.pos() - 4, "nVertices", 1 << 22)?;
-        let mut vertices = Vec::with_capacity(n_vertices);
+        let mut vertices = r.vec_for(n_vertices, 12);
         for _ in 0..n_vertices {
             vertices.push(r.vec3()?);
         }
 
         let n_floats = checked_count(r.u32()?, r.pos() - 4, "nFloats", 1 << 20)?;
-        let mut heights = Vec::with_capacity(n_floats);
+        let mut heights = r.vec_for(n_floats, 4);
         for _ in 0..n_floats {
             heights.push(r.f32()?);
         }
@@ -218,7 +218,7 @@ impl Psdl {
                 reason: "implausible texture count",
             });
         }
-        let mut textures = Vec::with_capacity(n_textures as usize - 1);
+        let mut textures = r.vec_for(n_textures as usize - 1, 1);
         for _ in 0..n_textures - 1 {
             textures.push(r.lp_string()?);
         }
@@ -226,16 +226,16 @@ impl Psdl {
         let n_rooms = checked_count(r.u32()?, r.pos() - 4, "nRooms", 1 << 20)?;
         let junction_count = r.u32()?;
 
-        let mut rooms = Vec::with_capacity(n_rooms.saturating_sub(1));
+        let mut rooms = r.vec_for(n_rooms.saturating_sub(1), 8);
         for _ in 0..n_rooms.saturating_sub(1) {
             rooms.push(parse_room(&mut r)?);
         }
 
-        let mut room_flags = Vec::with_capacity(n_rooms);
+        let mut room_flags = r.vec_for(n_rooms, 1);
         for _ in 0..n_rooms {
             room_flags.push(r.u8()?);
         }
-        let mut prop_rules = Vec::with_capacity(n_rooms);
+        let mut prop_rules = r.vec_for(n_rooms, 1);
         for _ in 0..n_rooms {
             prop_rules.push(r.u8()?);
         }
@@ -246,7 +246,7 @@ impl Psdl {
         let bounds_radius = r.f32()?;
 
         let n_paths = checked_count(r.u32()?, r.pos() - 4, "nPaths", 1 << 20)?;
-        let mut paths = Vec::with_capacity(n_paths);
+        let mut paths = r.vec_for(n_paths, 6);
         for _ in 0..n_paths {
             paths.push(parse_path(&mut r)?);
         }
@@ -297,7 +297,7 @@ fn parse_room(r: &mut Reader<'_>) -> Result<PsdlRoom, FormatError> {
             reason: "implausible room size",
         });
     }
-    let mut perimeter = Vec::with_capacity(n_perimeter);
+    let mut perimeter = r.vec_for(n_perimeter, 4);
     for _ in 0..n_perimeter {
         perimeter.push(PerimeterPoint {
             vertex: r.u16()?,
@@ -411,7 +411,7 @@ fn parse_path(r: &mut Reader<'_>) -> Result<RoomPath, FormatError> {
     let unknown5 = r.u16()?;
     let n_f = r.u8()? as usize;
     let n_b = r.u8()? as usize;
-    let mut density = Vec::with_capacity(n_f + n_b);
+    let mut density = r.vec_for(n_f + n_b, 4);
     for _ in 0..n_f + n_b {
         density.push(r.f32()?);
     }
@@ -443,6 +443,17 @@ fn parse_path(r: &mut Reader<'_>) -> Result<RoomPath, FormatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_header_claiming_maximal_counts_is_refused_by_its_own_length() {
+        let mut d = PSDL_MAGIC.to_vec();
+        d.extend_from_slice(&0u32.to_le_bytes()); // target size
+        d.extend_from_slice(&(1u32 << 22).to_le_bytes()); // nVertices
+        assert!(matches!(
+            Psdl::parse(&d),
+            Err(FormatError::UnexpectedEof { .. })
+        ));
+    }
 
     #[test]
     fn attribute_word_layout() {
