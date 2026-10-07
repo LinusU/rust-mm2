@@ -1,3 +1,29 @@
+# Last iteration — F06-C.4: weather × surface traction in the real force path (new-run iteration 4 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`7a9c28b`) passed gates and review, no blockers. Its open list named
+AC02's end-to-end weather→traction test with two surfaces; it needs no new data.
+
+Change (test only, no production code): `tests/wheel_fx.rs::weather_and_surface_move_traction_in_the_real_force_path`
+(`city_app`/`city_config` gained a weather parameter via `city_app_in`). Four real `load_session_world`
+sessions — `clear`/`rainy` × `testquiet` (friction 1.0) / `testgrass` (0.6), the one road texture
+re-mapped through `city/materials.csv` — settle the session car, slide it sideways at 6 m/s and assert
+(a) every grounded wheel rests on the scenario's material and its applied `surface_grip` equals
+authored grip × `TireConditions.traction` (`WET_TRACTION` for rainy), (b) the four products are
+distinct, (c) the lateral speed still carried six frames later rises monotonically as grip falls.
+Mutation check: replacing the lateral force's `surface_grip` with `conditions.traction` (surface ignored)
+failed (`grip 0.8 kept 5.0579 m/s … grip 0.6 kept 5.0579`); reverted. Finding while writing it: the
+synthetic city has no unmapped collider — its single texture covers road and fan — so a second surface
+comes from re-mapping, not from a neighbouring strip (the previous test's "unmarked sidewalk" comment
+in `one_collider_…` is not true of this fixture; harmless there, nothing asserts it).
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` 0; `cargo test --locked --workspace` exit 0 (2448 passed, 0 failed).
+Status: implemented candidate, not independently checked. Synthetic only; no original-data, rendered
+or audio-output evidence. AC06 (surface state across session config changes, authority-owned when
+networked) and the original-data run remain open.
+
+---
+
 # Last iteration — F06-C.3: one collider drives tire, voice and puff end to end (new-run iteration 3 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`7b02a7d`) passed gates and review, no blockers. Its verification gaps

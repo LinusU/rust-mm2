@@ -264,14 +264,14 @@ fn vfs_of(dir: &Path) -> Vfs {
     vfs
 }
 
-fn city_config() -> mm2_game::SessionConfig {
+fn city_config(weather: u8) -> mm2_game::SessionConfig {
     mm2_game::SessionConfig {
         world: WorldMode::City {
             psdl: "city/test.psdl".into(),
         },
         conditions: mm2_game::SessionConditions {
             time_of_day: TimeOfDay::new(1).unwrap(),
-            weather: Weather::new(0).unwrap(),
+            weather: Weather::new(weather).unwrap(),
         },
         ..mm2_game::SessionConfig::default()
     }
@@ -282,8 +282,13 @@ fn city_config() -> mm2_game::SessionConfig {
 /// and the report) plus the wheel-fx emit/advance pair and unload
 /// reset on a minimal headless app.
 fn city_app(vfs: Vfs) -> App {
+    city_app_in(vfs, 0)
+}
+
+/// `city_app` under one weather selector (`3` is `rainy`).
+fn city_app_in(vfs: Vfs, weather: u8) -> App {
     let mut session = Session::new();
-    session.begin(city_config()).unwrap();
+    session.begin(city_config(weather)).unwrap();
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -1064,4 +1069,113 @@ fn one_collider_drives_the_tire_the_voice_and_the_puff() {
     assert!(skidded > 0, "no skid contact resolved");
     assert!(voiced > 0, "no skid voice sounded");
     assert!(puffed > 0, "no puff emitted");
+}
+
+/// F06-AC02 end to end: two authored surfaces under a dry and a rainy
+/// session, driven through the real `load_session_world` car and
+/// Avian. The synthetic city's one texture is mapped to `testgrass`
+/// (friction 0.6) or `testquiet` (1.0). For each (weather, surface)
+/// pair a car slides sideways at 6 m/s; every grounded wheel's applied
+/// grip must equal the authored surface grip × the session's weather
+/// factor (applied once — not twice, not on the displayed value only),
+/// and the slide speed still left shortly after must fall in the order
+/// of that grip.
+#[test]
+fn weather_and_surface_move_traction_in_the_real_force_path() {
+    use mm2_game::PlayerVehicle;
+    use mm2_vehicle::TireConditions;
+
+    let mut results: Vec<(f32, f32)> = Vec::new(); // (expected grip, slide speed left)
+    for (weather, surface) in [
+        (0, "testquiet"),
+        (3, "testquiet"),
+        (0, "testgrass"),
+        (3, "testgrass"),
+    ] {
+        let tmp = city_install();
+        write_wheel_fx(tmp.path());
+        write(
+            tmp.path(),
+            "city/materials.mtl",
+            MATERIALS_MTL.replace(
+                "friction: 1.0\neffect: none\nsound: 1",
+                "friction: 0.6\neffect: none\nsound: 1",
+            ),
+        );
+        write(
+            tmp.path(),
+            "city/materials.csv",
+            format!("texture,physics\ntest_road,{surface}\n"),
+        );
+        let mut app = city_app_in(vfs_of(tmp.path()), weather);
+        app.insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.0, 10.0), 0.0));
+        app.update();
+        assert!(playing(&mut app));
+
+        let traction = app.world().resource::<TireConditions>().traction;
+        assert_eq!(
+            traction,
+            if weather == 3 {
+                mm2_game::WET_TRACTION
+            } else {
+                1.0
+            },
+            "weather {weather}"
+        );
+        let material = SurfaceMaterial::Authored(material_index(&mut app, surface));
+        let tables = app.world().resource::<mm2_content::SurfaceTables>();
+        let expected = tables.tire_surface_for(material).expect("authored").grip * traction;
+
+        let car = app
+            .world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .single(app.world())
+            .expect("one local car");
+        run(&mut app, 60);
+        app.world_mut()
+            .entity_mut(car)
+            .insert(LinearVelocity(Vec3::new(6.0, 0.0, 0.0)));
+
+        let (mut checked, mut left) = (0, 0.0);
+        for frame in 0..6 {
+            app.update();
+            let state = app.world().get::<VehicleState>(car).unwrap();
+            for w in state.wheels.iter().filter(|w| w.grounded) {
+                let on = w
+                    .contact_entity
+                    .and_then(|e| app.world().get::<SurfaceMaterial>(e))
+                    .copied();
+                assert_eq!(on, Some(material), "{surface}: wheel off the strip");
+                assert!(
+                    (w.surface_grip - expected).abs() < 1e-5,
+                    "{surface} weather {weather}: wheel grip {} vs {expected}",
+                    w.surface_grip
+                );
+                checked += 1;
+            }
+            if frame == 5 {
+                left = app.world().get::<LinearVelocity>(car).unwrap().0.x.abs();
+            }
+        }
+        assert!(checked > 0, "no wheel was grounded");
+        results.push((expected, left));
+    }
+
+    // The four grips are distinct …
+    let mut grips: Vec<f32> = results.iter().map(|r| r.0).collect();
+    grips.sort_by(f32::total_cmp);
+    grips.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert_eq!(grips.len(), 4, "{results:?}");
+    // … and less grip leaves more of the slide.
+    results.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for pair in results.windows(2) {
+        assert!(
+            pair[1].1 > pair[0].1,
+            "grip {} kept {} m/s of slide, grip {} kept {}",
+            pair[0].0,
+            pair[0].1,
+            pair[1].0,
+            pair[1].1
+        );
+    }
 }
