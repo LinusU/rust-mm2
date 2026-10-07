@@ -3,6 +3,7 @@
 
 mod support;
 
+mod app_assets;
 mod audio;
 mod banger;
 mod bot;

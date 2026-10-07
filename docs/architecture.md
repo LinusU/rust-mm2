@@ -126,7 +126,7 @@ logical asset  ──►  resolver (Vfs)  ──►  selected source  ──► 
 | tier          | source                        | priority          |
 |---------------|-------------------------------|-------------------|
 | mods          | `--mods <dir>` subdirs        | `300 + index`     |
-| app assets    | bundled `assets/` dir         | `200`             |
+| app assets    | `assets/` found by `mm2_app::app_assets` (next to the binary, never baked in) | `200`             |
 | loose files   | files inside the install dir  | `100`             |
 | archives      | `*.ar` in the install dir     | `0`               |
 

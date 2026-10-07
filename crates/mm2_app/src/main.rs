@@ -583,11 +583,16 @@ fn main() {
     }
     // The app's own synthetic assets (dev-world textures) sit above the
     // install content but below mods, so a mod can replace them.
-    let app_assets = PathBuf::from("assets");
-    if app_assets.is_dir()
-        && let Err(e) = vfs.mount_dir(&app_assets, mm2_assets::priority::OVERRIDE)
-    {
-        warn!(dir = %app_assets.display(), error = %e, "failed to mount app assets");
+    // Found next to the binary, not through the working directory, so the
+    // app runs the same from any shell location (F30-AC04).
+    match mm2_app::app_assets::locate_for_process() {
+        Some(app_assets) => match vfs.mount_dir(&app_assets, mm2_assets::priority::OVERRIDE) {
+            Ok(()) => info!(dir = %app_assets.display(), "mounted app assets"),
+            Err(e) => warn!(dir = %app_assets.display(), error = %e, "failed to mount app assets"),
+        },
+        None => warn!(
+            "app assets directory not found; the dev world ground falls back to a flat colour"
+        ),
     }
     let mut has_mods = false;
     if let Some(mods) = &cli.mods {

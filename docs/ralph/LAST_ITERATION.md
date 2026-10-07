@@ -1,3 +1,29 @@
+# Last iteration — F30-B.1: app assets independent of the working directory (new-run iteration 33 of this runner)
+
+Selection: previous review passed, no blockers. F26-B has been served by a run of
+test-only slices; F30 (AC04: "packaged app locates its own synthetic assets
+regardless of current working directory") was untouched and `main.rs` mounted
+`PathBuf::from("assets")` — a real cwd dependency (running `target/debug/mm2`
+from any other directory lost the dev ground texture silently).
+
+Change: new `mm2_app::app_assets` (`locate`/`locate_for_process`) searches from the
+executable (`<exe>/assets`, `../Resources/assets`, `../share/rust-mm2/assets`, up
+to four ancestors for a cargo tree) and only then the cwd; a directory counts
+only if it holds `texture/dev_road.png`; no compile-time paths. `main.rs` logs
+`mounted app assets` or warns when none is found. Tests: 10 unit + 2 process-level
+(`tests/app_assets.rs`, spawn `mm2 --headless --dev-world` from a foreign cwd; a
+cwd with a decoy `assets/` does not shadow). Red with the old cwd-only lookup (both
+process tests fail), restored. Docs: `architecture.md` tier table, PLAN F30-B.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0 (2398 passed, 0 failed). No test processes left running.
+
+Not verified / open: no packaging step exists, so the `.app`/prefix layouts are
+unit-proven only; non-ASCII install path untested; AC05 (an explicit
+`--profile-dir` inside the install is not refused) not done. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — F26-B.6: a client that cannot run the changed ad (new-run iteration 32 of this runner)
 
 Selection: previous review passed, no blockers. Its verification gap "a client
