@@ -788,7 +788,7 @@ impl ControlSettings {
                 settings
             }
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "controls unparseable; using the defaults");
+                crate::settings::set_aside(path, &e.to_string(), "controls");
                 Self::default()
             }
         }
@@ -1047,6 +1047,13 @@ mod tests {
         // An action name the schema does not know is not this schema.
         std::fs::write(&path, br#"{"bindings":{"warp":["KeyW"]}}"#).unwrap();
         assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+        // The unusable file was set aside, not left for the next save to
+        // overwrite.
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(path.with_extension("json.bad")).unwrap(),
+            br#"{"bindings":{"warp":["KeyW"]}}"#
+        );
     }
 
     #[test]

@@ -263,6 +263,11 @@ change the primary window live and persist; borderless never switches the
 display's video mode, so there is no mode to get stuck in. `--no-vsync`
 still forces vsync off for a run.
 
+A settings file that is partly wrong still loads: each invalid field keeps
+its default and logs which one, and a file that is not valid JSON is moved
+aside to `settings.json.bad` (likewise `controls.json.bad`) instead of
+being overwritten by the next save.
+
 Beside the CSV, `frames.csv.report.json` (schema `mm2-perf-report/1`)
 makes the numbers reproducible rather than anecdotal: engine commit and
 build profile (`debug` here means debug assertions are on — measure a

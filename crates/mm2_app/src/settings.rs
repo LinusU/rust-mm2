@@ -351,16 +351,6 @@ impl AudioLevels {
         let bus = self.get(AudioLevel::Bus(bus));
         f32::from(self.master) / f32::from(MAX_LEVEL) * (f32::from(bus) / f32::from(MAX_LEVEL))
     }
-
-    /// Clamp every level to [`MAX_LEVEL`]; whether anything moved. A
-    /// hand-edited file can hold 250, which must not amplify a voice.
-    fn repair(&mut self) -> bool {
-        let before = *self;
-        for level in AudioLevel::ALL {
-            *self = self.with(level, self.get(level));
-        }
-        *self != before
-    }
 }
 
 /// The user's graphics choices and audio levels. `Default` is the
@@ -518,9 +508,13 @@ impl GraphicsSettings {
     }
 
     /// Read the settings file. A missing file is the first run and
-    /// yields the defaults silently; an unreadable or unparseable one
-    /// warns and yields the defaults too — a broken settings file must
-    /// never keep the game from starting, and the next save replaces it.
+    /// yields the defaults silently. An invalid piece of an otherwise
+    /// good file warns and falls back on its own — one hand-edited typo
+    /// must not throw away the person's other choices — and a file that
+    /// is not a JSON object at all warns, is set aside as
+    /// `settings.json.bad` (so the next save does not destroy it) and
+    /// yields the defaults. A broken settings file never keeps the game
+    /// from starting.
     pub fn load(path: &Path) -> Self {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -530,18 +524,42 @@ impl GraphicsSettings {
                 return Self::default();
             }
         };
-        match serde_json::from_slice::<Self>(&bytes) {
-            Ok(mut settings) => {
-                if settings.audio.repair() {
-                    warn!(path = %path.display(), "an audio level was above 100; clamped to 100");
+        match Self::from_json(&bytes) {
+            Ok((settings, issues)) => {
+                for issue in issues {
+                    warn!(path = %path.display(), "settings: {issue}");
                 }
                 settings
             }
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "graphics settings unparseable; using the defaults");
+                set_aside(path, &e, "graphics settings");
                 Self::default()
             }
         }
+    }
+
+    /// Parse settings JSON field by field: a field that is missing keeps
+    /// its default silently, one that is present but invalid keeps its
+    /// default and is named in the returned issues, and an out-of-range
+    /// audio level clamps. Only a document that is not a JSON object is
+    /// an error.
+    fn from_json(bytes: &[u8]) -> Result<(Self, Vec<String>), String> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let serde_json::Value::Object(map) = value else {
+            return Err("the document is not a JSON object".into());
+        };
+        let mut issues = Vec::new();
+        let d = Self::default();
+        let out = Self {
+            shadows: pick(&map, "shadows", d.shadows, &mut issues),
+            antialiasing: pick(&map, "antialiasing", d.antialiasing, &mut issues),
+            audio: pick_audio(&map, &mut issues),
+            text_size: pick(&map, "text_size", d.text_size, &mut issues),
+            reduce_flashing: pick(&map, "reduce_flashing", d.reduce_flashing, &mut issues),
+            display: pick(&map, "display", d.display, &mut issues),
+            vsync: pick(&map, "vsync", d.vsync, &mut issues),
+        };
+        Ok((out, issues))
     }
 
     /// Write the settings file, creating its directory. The file is
@@ -550,6 +568,73 @@ impl GraphicsSettings {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         write_json_atomically(path, self)
     }
+}
+
+/// Move an unparseable settings file to `<name>.bad` so the next save
+/// does not destroy what the person had; best effort, always warns.
+pub(crate) fn set_aside(path: &Path, error: &str, what: &str) {
+    let bad = path.with_extension("json.bad");
+    match std::fs::rename(path, &bad) {
+        Ok(()) => {
+            warn!(path = %path.display(), %error, kept = %bad.display(), "{what} unparseable; using the defaults");
+        }
+        Err(rename) => {
+            warn!(path = %path.display(), %error, %rename, "{what} unparseable and could not be set aside; using the defaults");
+        }
+    }
+}
+
+/// One settings field out of a parsed document: absent keeps `default`;
+/// present but invalid keeps it too and records why.
+fn pick<T: serde::de::DeserializeOwned>(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    default: T,
+    issues: &mut Vec<String>,
+) -> T {
+    match map.get(key) {
+        None => default,
+        Some(v) => serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+            issues.push(format!("{key} is invalid ({e}); using the default"));
+            default
+        }),
+    }
+}
+
+/// The audio levels one by one: a whole number above [`MAX_LEVEL`]
+/// clamps (a hand-edited 250 must not amplify a voice), anything that is
+/// not a non-negative whole number keeps that level's default.
+fn pick_audio(
+    map: &serde_json::Map<String, serde_json::Value>,
+    issues: &mut Vec<String>,
+) -> AudioLevels {
+    let mut levels = AudioLevels::default();
+    let Some(audio) = map.get("audio") else {
+        return levels;
+    };
+    let Some(audio) = audio.as_object() else {
+        issues.push("audio is not an object; using the default levels".into());
+        return levels;
+    };
+    for (key, level) in [
+        ("master", AudioLevel::Master),
+        ("effects", AudioLevel::Bus(AudioBus::Effects)),
+        ("commentary", AudioLevel::Bus(AudioBus::Commentary)),
+        ("city", AudioLevel::Bus(AudioBus::City)),
+    ] {
+        let Some(v) = audio.get(key) else { continue };
+        match v.as_u64() {
+            Some(n) if n > u64::from(MAX_LEVEL) => {
+                issues.push(format!("audio {key} is {n}; clamped to {MAX_LEVEL}"));
+                levels = levels.with(level, MAX_LEVEL);
+            }
+            Some(n) => levels = levels.with(level, n as u8),
+            None => issues.push(format!(
+                "audio {key} is not a whole number from 0 to {MAX_LEVEL}; using the default"
+            )),
+        }
+    }
+    levels
 }
 
 /// Write `value` as pretty JSON to `path`, creating its directory. The
@@ -907,6 +992,58 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_field_falls_back_alone_and_the_rest_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(
+            &path,
+            br#"{"shadows":"ultra","antialiasing":"x2","text_size":"huge","reduce_flashing":"yes",
+                "display":"exclusive","vsync":false,"audio":{"master":40,"effects":"loud","commentary":-3,"city":250}}"#,
+        )
+        .unwrap();
+        let s = GraphicsSettings::load(&path);
+        let d = GraphicsSettings::default();
+        assert_eq!(s.shadows, d.shadows, "unknown shadow quality");
+        assert_eq!(s.antialiasing, Antialiasing::X2, "valid field kept");
+        assert_eq!(s.text_size, d.text_size);
+        assert_eq!(s.reduce_flashing, d.reduce_flashing);
+        assert_eq!(s.display, d.display, "an unknown display mode is windowed");
+        assert!(!s.vsync, "valid field kept");
+        assert_eq!(s.audio.master, 40, "valid level kept");
+        assert_eq!(s.audio.effects, MAX_LEVEL, "text level uses its default");
+        assert_eq!(
+            s.audio.commentary, MAX_LEVEL,
+            "negative level uses its default"
+        );
+        assert_eq!(s.audio.city, MAX_LEVEL, "250 clamps");
+        assert!(path.exists(), "a readable object is not moved aside");
+    }
+
+    #[test]
+    fn an_unparseable_file_is_set_aside_not_destroyed_by_the_next_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        for (i, broken) in [&b"{ not json"[..], b"[1,2]", b"", b"\"shadows\""]
+            .into_iter()
+            .enumerate()
+        {
+            std::fs::write(&path, broken).unwrap();
+            assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+            assert!(!path.exists(), "case {i}: the broken file moved away");
+            let kept = path.with_extension("json.bad");
+            assert_eq!(
+                std::fs::read(&kept).unwrap(),
+                broken,
+                "case {i}: kept intact"
+            );
+            // The next save writes a fresh file and leaves the copy alone.
+            GraphicsSettings::default().save(&path).unwrap();
+            assert_eq!(std::fs::read(&kept).unwrap(), broken);
+            assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+        }
+    }
+
+    #[test]
     fn a_partial_file_keeps_the_defaults_for_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let path = settings_path(dir.path());
@@ -1050,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_level_is_clamped_and_a_malformed_one_resets() {
+    fn an_out_of_range_level_is_clamped_and_a_malformed_one_keeps_its_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = settings_path(dir.path());
         // 250 fits a `u8` but must never amplify a voice.
@@ -1059,17 +1196,25 @@ mod tests {
         assert_eq!(loaded.audio.master, MAX_LEVEL);
         assert_eq!(loaded.shadows, ShadowQuality::Low, "the rest survives");
         assert!(loaded.audio.gain(AudioBus::Effects) <= 1.0);
-        // Not a `u8` at all: the file is unusable, like any other bad
-        // field, and the defaults apply (the next save replaces it).
+        // Not a whole percent: that one level keeps its default and the
+        // others (and the other settings) survive.
         for bad in [
-            &br#"{"audio":{"master":-5}}"#[..],
-            br#"{"audio":{"master":999}}"#,
-            br#"{"audio":{"master":"loud"}}"#,
-            br#"{"audio":{"master":1e30}}"#,
+            &br#"{"shadows":"low","audio":{"master":-5,"city":30}}"#[..],
+            br#"{"shadows":"low","audio":{"master":"loud","city":30}}"#,
+            br#"{"shadows":"low","audio":{"master":1e30,"city":30}}"#,
+            br#"{"shadows":"low","audio":{"master":2.5,"city":30}}"#,
         ] {
             std::fs::write(&path, bad).unwrap();
-            assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+            let loaded = GraphicsSettings::load(&path);
+            assert_eq!(loaded.audio.master, MAX_LEVEL);
+            assert_eq!(loaded.audio.city, 30);
+            assert_eq!(loaded.shadows, ShadowQuality::Low);
         }
+        // `audio` itself the wrong shape: all four levels default.
+        std::fs::write(&path, br#"{"shadows":"low","audio":[50]}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!(loaded.audio, AudioLevels::default());
+        assert_eq!(loaded.shadows, ShadowQuality::Low);
     }
 
     #[test]

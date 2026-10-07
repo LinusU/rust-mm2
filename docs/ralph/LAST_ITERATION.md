@@ -1,3 +1,23 @@
+# Last iteration — F23 AC04: invalid-settings recovery (new-run iteration 27 of the 2026-10-07 run)
+
+Selection: the iteration-26 review passed with no blockers. F23-AC04 (invalid settings rejected/recovered without a corrupt profile)
+had only whole-file fallback for `settings.json`: one bad field (unknown shadow value, `"audio":{"master":"loud"}`) threw away every other
+choice, and an unparseable file was silently overwritten by the next save. `controls.json` already repaired per piece.
+
+Change: `GraphicsSettings::from_json` parses field by field (`pick`, `pick_audio`): invalid field keeps its default and warns by name,
+audio levels are individual (>100 clamps, other junk keeps that level's default). A non-object/unparseable file is moved to
+`settings.json.bad` via `settings::set_aside` (also used by `ControlSettings::load` for `controls.json.bad`) and the defaults apply.
+`AudioLevels::repair` removed (superseded). DSN-83 added (DSN-82 wording fixed), README paragraph, PLAN F23-A note.
+
+Tests: `settings::an_invalid_field_falls_back_alone_and_the_rest_survives`, `settings::an_unparseable_file_is_set_aside_not_destroyed_by_the_next_save`,
+`settings::an_out_of_range_level_is_clamped_and_a_malformed_one_keeps_its_default` (was "resets"), `controls::a_missing_or_broken_file_loads_the_defaults` extended.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace`
+2509 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no real-display start from a corrupt file;
+display-mode recovery (invalid resolution) still N/A since only borderless/windowed exist. AC04 advanced, not closed.
+
+---
+
 # Last iteration — F23-B.6 review follow-up: CLI overrides stay out of settings.json (new-run iteration 26 of the 2026-10-07 run)
 
 Selection: the iteration-25 review passed with no blockers but flagged a non-blocking persistence side effect: `--no-vsync` (like
