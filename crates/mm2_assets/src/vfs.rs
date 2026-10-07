@@ -214,37 +214,65 @@ impl Vfs {
             .filter(|p| p.join(MANIFEST_FILE).is_file())
             .collect();
         dirs.sort();
+        // All or nothing: a directory scan that fails part-way must not
+        // leave its earlier mods mounted, or the caller (which reports "no
+        // mods" on an error) and the VFS would disagree about the content.
+        let (sources_before, mods_before) = (self.sources.len(), self.mod_ids.len());
         let mut manifests = Vec::new();
         for (i, dir) in dirs.iter().enumerate() {
-            manifests.push(self.mount_mod(dir, base_priority + i as i32)?);
+            match self.mount_mod(dir, base_priority + i as i32) {
+                Ok(manifest) => manifests.push(manifest),
+                Err(e) => {
+                    self.truncate(sources_before, mods_before);
+                    return Err(e);
+                }
+            }
         }
         Ok(manifests)
     }
 
+    /// Drop every source mounted after the first `sources` (and the mod ids
+    /// recorded after the first `mods`), then rebuild the path indexes so
+    /// they describe exactly the sources that remain.
+    fn truncate(&mut self, sources: usize, mods: usize) {
+        self.sources.truncate(sources);
+        self.mod_ids.truncate(mods);
+        self.index.clear();
+        self.providers.clear();
+        for idx in 0..self.sources.len() {
+            self.index_source(idx);
+        }
+    }
+
     fn push(&mut self, source: Box<dyn Source>, priority: i32) {
         let seq = self.sources.len();
-        let idx = self.sources.len();
-        for logical in source.list() {
-            self.providers.entry(logical.clone()).or_default().push(idx);
-            match self.index.get(&logical) {
-                Some(&winner) if !self.beats(idx, priority, seq, winner) => {}
-                _ => {
-                    self.index.insert(logical, idx);
-                }
-            }
-        }
         self.sources.push(Mounted {
             source,
             priority,
             seq,
         });
+        self.index_source(seq);
     }
 
-    /// Does candidate (idx, priority, seq) beat the current winner?
-    /// Note: at call time the candidate isn't in `sources` yet.
-    fn beats(&self, idx: usize, priority: i32, seq: usize, winner: usize) -> bool {
+    /// Record source `idx`'s paths in the provider lists and the winner
+    /// index. Sources must be indexed in mount order.
+    fn index_source(&mut self, idx: usize) {
+        let (priority, seq) = (self.sources[idx].priority, self.sources[idx].seq);
+        for logical in self.sources[idx].source.list() {
+            self.providers.entry(logical.clone()).or_default().push(idx);
+            match self.index.get(&logical) {
+                Some(&winner) if !self.beats(priority, seq, winner) => {}
+                _ => {
+                    self.index.insert(logical, idx);
+                }
+            }
+        }
+    }
+
+    /// Does a candidate with this priority and mount sequence beat the
+    /// current winner?
+    fn beats(&self, priority: i32, seq: usize, winner: usize) -> bool {
         let w = &self.sources[winner];
-        let _ = idx;
         priority > w.priority || (priority == w.priority && seq > w.seq)
     }
 
@@ -783,7 +811,10 @@ mod tests {
             b"[mod]\nid = \"other\"\n",
         );
 
+        let base = tmp.path().join("base");
+        write(&base, "texture/x.tex", b"base");
         let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
         let err = vfs.mount_mods_dir(&mods, priority::MOD).unwrap_err();
         match &err {
             AssetsError::DuplicateModId { id, first, second } => {
@@ -797,21 +828,76 @@ mod tests {
             msg.contains("a_pack") && msg.contains("b_pack_copy"),
             "{msg}"
         );
-        // The refused copy contributed nothing; the first mount stands.
+        // The directory scan is all or nothing: the refused copy and the mod
+        // mounted before it are both gone, and the base mounted earlier
+        // serves its own content again (indexes rebuilt, not left stale).
         assert_eq!(vfs.source_count(), 1);
         let r = vfs.resolve("texture/x.tex").unwrap();
-        assert_eq!(vfs.read(&r).unwrap(), b"a_pack");
+        assert_eq!(vfs.read(&r).unwrap(), b"base");
+        assert!(vfs.explain("texture/x.tex").unwrap().candidates.len() == 1);
+        assert!(vfs.conflicts().is_empty());
 
-        // The same holds when mounting one at a time, and a distinct id is
-        // still accepted afterwards.
+        // Mounting one at a time keeps the first mount and still accepts a
+        // distinct id afterwards.
         let mut vfs = Vfs::new();
         vfs.mount_mod(&mods.join("a_pack"), priority::MOD).unwrap();
         assert!(matches!(
             vfs.mount_mod(&mods.join("b_pack_copy"), priority::MOD),
             Err(AssetsError::DuplicateModId { .. })
         ));
+        assert_eq!(vfs.source_count(), 1);
+        let r = vfs.resolve("texture/x.tex").unwrap();
+        assert_eq!(vfs.read(&r).unwrap(), b"a_pack");
         vfs.mount_mod(&mods.join("c_other"), priority::MOD + 1)
             .unwrap();
+    }
+
+    #[test]
+    fn a_failed_mods_directory_scan_mounts_none_of_its_mods() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        // Sorted order: `a_good` mounts (and shadows the base), then
+        // `b_bad`'s oversize manifest fails the scan.
+        write(&mods.join("a_good"), "mod.toml", b"[mod]\nid = \"good\"\n");
+        write(&mods.join("a_good"), "texture/x.tex", b"good");
+        write(&mods.join("b_bad"), "mod.toml", b"[mod]\nid = \"bad\"\n");
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(mods.join("b_bad").join("mod.toml"))
+            .unwrap();
+        f.set_len(crate::manifest::MAX_MANIFEST_SIZE + 1).unwrap();
+        drop(f);
+        let base = tmp.path().join("base");
+        write(&base, "texture/x.tex", b"base");
+
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
+        assert!(matches!(
+            vfs.mount_mods_dir(&mods, priority::MOD),
+            Err(AssetsError::TooLarge { .. })
+        ));
+        assert_eq!(vfs.source_count(), 1);
+        let r = vfs.resolve("texture/x.tex").unwrap();
+        assert_eq!(vfs.read(&r).unwrap(), b"base");
+        assert!(vfs.conflicts().is_empty());
+
+        // The rolled-back mod's id is free again: fixing the bad mod and
+        // rescanning mounts both without a spurious duplicate.
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(mods.join("b_bad").join("mod.toml"))
+            .unwrap();
+        f.set_len(0).unwrap();
+        drop(f);
+        fs::write(
+            mods.join("b_bad").join("mod.toml"),
+            b"[mod]\nid = \"bad\"\n",
+        )
+        .unwrap();
+        let manifests = vfs.mount_mods_dir(&mods, priority::MOD).unwrap();
+        assert_eq!(manifests.len(), 2);
+        let r = vfs.resolve("texture/x.tex").unwrap();
+        assert_eq!(vfs.read(&r).unwrap(), b"good");
     }
 
     #[test]

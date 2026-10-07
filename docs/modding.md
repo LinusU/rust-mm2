@@ -42,7 +42,11 @@ Every subdirectory of the mods dir that contains a `mod.toml` is mounted, in
 sorted directory order. Mods listed later win over earlier ones on conflict.
 A mod `id` names exactly one mod: if two directories declare the same id (a
 copied or renamed mod folder), mounting fails with an error naming both
-directories rather than merging them — remove or re-id one.
+directories rather than merging them — remove or re-id one. Any failure in
+the scan (duplicate id, bad or oversize manifest) mounts none of the mods:
+the game starts with the install alone and the menu, lobby and handshake
+report no mods, matching what is actually mounted (`mm2-host`, `mm2-join` and
+`mm2-inspect` exit non-zero instead).
 Restart-based loading only — hot reload is not implemented.
 
 ## Resolution rules

@@ -1,3 +1,23 @@
+# Last iteration — F29-A.8: a failed mods-directory scan mounts none of its mods (new-run iteration 15 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`fa2c4cb`) passed gates and review, no blockers. Its integration note: `mount_mods` failing
+part-way (now likelier with `DuplicateModId`) left the earlier mods mounted in the `Vfs` while `mm2` reported `has_mods=false` and
+no `mod_ids`, so menu/lobby/handshake disagreed with the content actually served. Repaired before new feature work. Not done:
+case-insensitive id comparison (reviewer's other note; ids are exact strings, unchanged).
+
+Change: `Vfs::mount_mods_dir` is all-or-nothing — on any mod's error it truncates the sources and mod ids it added and rebuilds the
+`index`/`providers` maps (`index_source` factored out of `push`; `beats` lost its unused `idx`). The rolled-back ids are free to
+mount again. `mm2` keeps its warn-and-continue (now "running with none"), which is now truthful; `mm2-host`/`mm2-join`/`mm2-inspect`
+still exit non-zero. Tests: `vfs::tests::a_failed_mods_directory_scan_mounts_none_of_its_mods` (good mod then oversize manifest:
+source_count back to the base alone, base content serves, no conflicts, fixing the manifest and rescanning mounts both);
+`a_mod_id_declared_twice_is_refused_not_merged` now expects the scan to roll back the first mod too and checks the rebuilt
+index. `docs/modding.md` states it.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2475 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: same as F29-A.7 (no two-process or retail run, AC04/AC06 remainders); `mm2`'s own startup path is not subprocess-tested.
+
+---
+
 # Last iteration — F29-A.7: a mod id declared twice is refused (new-run iteration 14 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`f3bf7d0`) passed gates and review, no blockers. Its gap list noted duplicate mod ids "share

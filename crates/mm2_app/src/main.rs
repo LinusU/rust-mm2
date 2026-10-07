@@ -668,7 +668,9 @@ fn main() {
                     info!(mod_id = %m.id, dir = %mods.display(), "mounted mod");
                 }
             }
-            Err(e) => warn!(dir = %mods.display(), error = %e, "failed to mount mods"),
+            Err(e) => {
+                warn!(dir = %mods.display(), error = %e, "failed to mount mods; running with none")
+            }
         }
     }
 
