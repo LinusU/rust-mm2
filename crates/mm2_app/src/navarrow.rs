@@ -562,12 +562,25 @@ pub fn nav_target_input(
     windows: Query<&Window>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut players: Query<(&Position, &RaceProgress, &mut TargetSelection)>,
 ) {
     use crate::input::{control_just_pressed, pad};
-    let dir = if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyX, pad::TARGET_NEXT) {
+    // A manual gearbox takes the shoulders for shifting (F23-A.3), so
+    // only the keys cycle the arrow then.
+    let bumpers_shift = controls
+        .as_deref()
+        .is_some_and(|c| c.pad_shifts(session.authority_role().is_authority()));
+    let pressed = |key: KeyCode, button| {
+        if bumpers_shift {
+            keys.just_pressed(key)
+        } else {
+            control_just_pressed(&keys, &pads, &windows, key, button)
+        }
+    };
+    let dir = if pressed(KeyCode::KeyX, pad::TARGET_NEXT) {
         1
-    } else if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyZ, pad::TARGET_PREV) {
+    } else if pressed(KeyCode::KeyZ, pad::TARGET_PREV) {
         -1
     } else {
         return;

@@ -417,3 +417,89 @@ fn manual_transmission_is_inert_on_a_predicted_session() {
     tap(&mut app, KeyCode::KeyG);
     assert_eq!(player_input(&mut app).forced_gear, None);
 }
+
+/// One pad-button edge: press for one update, then end it like the
+/// event loop's `clear` would.
+fn pad_tap(app: &mut App, button: GamepadButton) {
+    press(app, button);
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().release(button);
+        pad.digital_mut().clear();
+    }
+}
+
+/// F23-A.3: a gamepad-only driver on the manual box shifts with the
+/// shoulders — right up, left down, one gear per press, clamped — and an
+/// automatic box ignores them.
+#[test]
+fn the_pad_shoulders_shift_a_manual_gearbox() {
+    use mm2_app::controls::ControlSettings;
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.world_mut().spawn(Gamepad::default());
+    spawn_geared_player(&mut app, 2);
+    app.insert_resource(ControlSettings::default());
+
+    pad_tap(&mut app, input::pad::SHIFT_UP);
+    assert_eq!(player_input(&mut app).forced_gear, None, "automatic");
+
+    app.insert_resource(ControlSettings::default().toggled_transmission());
+    app.update();
+    assert_eq!(player_input(&mut app).forced_gear, Some(2));
+    pad_tap(&mut app, input::pad::SHIFT_UP);
+    assert_eq!(player_input(&mut app).forced_gear, Some(3));
+    pad_tap(&mut app, input::pad::SHIFT_UP);
+    assert_eq!(player_input(&mut app).forced_gear, Some(4));
+    // Held across frames: one press is one gear.
+    press(&mut app, input::pad::SHIFT_UP);
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().clear();
+    }
+    app.update();
+    assert_eq!(player_input(&mut app).forced_gear, Some(5));
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().release_all();
+        pad.digital_mut().clear();
+    }
+    for _ in 0..3 {
+        pad_tap(&mut app, input::pad::SHIFT_UP);
+    }
+    assert_eq!(player_input(&mut app).forced_gear, Some(5), "top gear");
+    for _ in 0..7 {
+        pad_tap(&mut app, input::pad::SHIFT_DOWN);
+    }
+    assert_eq!(player_input(&mut app).forced_gear, Some(0), "first gear");
+}
+
+/// An unfocused window mutes the shoulders like every other pad control:
+/// the gear a held pad shifted while the window was away does not count.
+#[test]
+fn an_unfocused_window_ignores_the_pad_shift() {
+    use mm2_app::controls::ControlSettings;
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.world_mut().spawn(Gamepad::default());
+    let window = app
+        .world_mut()
+        .spawn(Window {
+            focused: false,
+            ..default()
+        })
+        .id();
+    spawn_geared_player(&mut app, 2);
+    app.insert_resource(ControlSettings::default().toggled_transmission());
+    pad_tap(&mut app, input::pad::SHIFT_UP);
+    assert_eq!(player_input(&mut app).forced_gear, None, "no command");
+    app.world_mut().get_mut::<Window>(window).unwrap().focused = true;
+    app.update();
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(2),
+        "the missed press never counted"
+    );
+}

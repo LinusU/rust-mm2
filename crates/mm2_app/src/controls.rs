@@ -374,6 +374,17 @@ impl ControlSettings {
         self.keys(action).any(|k| keys.pressed(k))
     }
 
+    /// Whether this process pins the gearbox from the player's shift
+    /// presses: the manual policy, on a session this process is the
+    /// authority for (the wire carries no gear, so a predicted car stays
+    /// automatic). While true the pad's shoulders shift and
+    /// `input::pad::TARGET_PREV`/`TARGET_NEXT` yield to them — no free
+    /// button is left, and the keyboard's `Z`/`X` still cycle the nav
+    /// arrow.
+    pub fn pad_shifts(&self, authority: bool) -> bool {
+        authority && self.transmission == TransmissionPolicy::Manual
+    }
+
     /// The `(up, down)` shift keys pressed this frame — edges, not holds,
     /// so one press is one gear.
     pub fn shift_edges(&self, keys: &ButtonInput<KeyCode>) -> (bool, bool) {

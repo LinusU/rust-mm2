@@ -10,7 +10,7 @@ use mm2_game::{PlayerVehicle, RaceState, Session};
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
-use crate::controls::{ControlSettings, TransmissionPolicy};
+use crate::controls::ControlSettings;
 use crate::manual_gear::ManualGear;
 use crate::session::{self, SpawnPoint};
 
@@ -49,10 +49,18 @@ pub mod pad {
     pub const HUD: GamepadButton = GamepadButton::DPadUp;
     /// Opponent indicators (`I`).
     pub const INDICATORS: GamepadButton = GamepadButton::DPadDown;
-    /// Nav-arrow target backward (`Z`).
+    /// Nav-arrow target backward (`Z`). Yields to [`SHIFT_DOWN`] while
+    /// the pad is shifting a manual gearbox.
     pub const TARGET_PREV: GamepadButton = GamepadButton::LeftTrigger;
-    /// Nav-arrow target forward (`X`).
+    /// Nav-arrow target forward (`X`). Yields to [`SHIFT_UP`] while the
+    /// pad is shifting a manual gearbox.
     pub const TARGET_NEXT: GamepadButton = GamepadButton::RightTrigger;
+    /// Manual gearbox: down one gear (`B`). The same shoulder as
+    /// [`TARGET_PREV`]; see `ControlSettings::pad_shifts`.
+    pub const SHIFT_DOWN: GamepadButton = GamepadButton::LeftTrigger;
+    /// Manual gearbox: up one gear (`G`). The same shoulder as
+    /// [`TARGET_NEXT`]; see `ControlSettings::pad_shifts`.
+    pub const SHIFT_UP: GamepadButton = GamepadButton::RightTrigger;
 }
 
 /// Every window focused — headless runs own none and count as
@@ -181,7 +189,7 @@ type DrivenCar = (
 /// connected gamepad (gamepad axes take precedence when non-neutral),
 /// through the player's [`ControlSettings`] — the bound keys, stick and
 /// trigger deadzones, steering sensitivity and inversion. Under the
-/// manual [`TransmissionPolicy`] it also pins the gearbox through
+/// manual [`TransmissionPolicy`](crate::controls::TransmissionPolicy) it also pins the gearbox through
 /// `forced_gear` — only where this process is the authority: the wire
 /// carries no gear, so a predicted (`Remote`) car pinned locally would
 /// diverge from the host's automatic one.
@@ -231,12 +239,13 @@ pub fn vehicle_input(
         }
     };
     let input = controls.drive_input(&keys, gamepads.iter());
-    let manual_box = controls.transmission == TransmissionPolicy::Manual
-        && session.authority_role().is_authority();
+    let manual_box = controls.pad_shifts(session.authority_role().is_authority());
     if !manual_box {
         manual.release();
     }
-    let (shift_up, shift_down) = controls.shift_edges(&keys);
+    let (key_up, key_down) = controls.shift_edges(&keys);
+    let shift_up = key_up || gamepads.iter().any(|p| p.just_pressed(pad::SHIFT_UP));
+    let shift_down = key_down || gamepads.iter().any(|p| p.just_pressed(pad::SHIFT_DOWN));
 
     for (car, mut vi, state, vehicle) in &mut vehicles {
         *vi = input;

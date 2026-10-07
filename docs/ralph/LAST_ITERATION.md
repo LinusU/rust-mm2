@@ -1,3 +1,25 @@
+# Last iteration — F23-A.3: pad shift buttons for the manual gearbox (new-run iteration 30 of the 2026-10-07 run)
+
+Selection: the iteration-29 review passed with no blockers. F23 req 1 asks for a selectable transmission policy, but the Manual box
+(DSN-77) only shifted from keyboard keys, so a gamepad-only player who picked Manual had no way to change gear. Smallest concrete gap in
+code already there, so I closed it rather than add another option row.
+
+Change: `input::pad::SHIFT_UP`/`SHIFT_DOWN` (right/left bumper). `ControlSettings::pad_shifts(authority)` is the one test for "this process
+pins the gearbox" (manual policy + authoritative session) and `vehicle_input` now ORs the pad edges into the key edges. The bumpers are
+the same buttons as the nav-arrow target cycle and no free pad button exists, so while `pad_shifts` holds `nav_target_input` ignores the
+pad leg (keys `X`/`Z` still cycle); automatic or a predicted client keeps the bumpers on the arrow. Devices record + research note + DSN-77
+updated. Not rebindable (pad rebinding open).
+
+Tests (+3): `input::the_pad_shoulders_shift_a_manual_gearbox` (automatic ignores; seeded from car; one gear per press, held doesn't repeat;
+clamped both ends), `input::an_unfocused_window_ignores_the_pad_shift`, `race::a_manual_gearbox_takes_the_bumpers_from_the_arrow`
+(pad no longer cycles under manual, key does, automatic returns the bumper).
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings clean (Finished, no diagnostics);
+`cargo test --locked --workspace` exit 0, 2521 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no
+hardware pad or real-window check; pad shift buttons not rebindable; auto-reverse policy, mouse/wheel and pad rebinding remain open.
+
+---
+
 # Last iteration — F23-B.8: flip recovery assist option (new-run iteration 29 of the 2026-10-07 run)
 
 Selection: the iteration-28 review passed with no blockers. Its one nit (the new menu test sat between the text-size test's doc comment

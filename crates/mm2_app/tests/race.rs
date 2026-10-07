@@ -1975,6 +1975,39 @@ fn arrow_pick_cycles_through_the_pad() {
     assert_eq!(picked(&app), Some(2), "LT steps backward like Z");
 }
 
+/// F23-A.3: a manual gearbox takes the shoulders for shifting, so the
+/// pad no longer cycles the arrow — the keys still do, and an automatic
+/// gearbox (or a predicted session, where manual is inert) hands the
+/// shoulders back.
+#[test]
+fn a_manual_gearbox_takes_the_bumpers_from_the_arrow() {
+    use mm2_app::controls::ControlSettings;
+
+    let def = RaceDefinition {
+        checkpoints: vec![cp(-100.0, 0.0), cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, -50.0));
+    app.world_mut().spawn(Gamepad::default());
+    app.insert_resource(ControlSettings::default().toggled_transmission());
+    run(&mut app, 3);
+    let picked = |app: &App| app.world().get::<TargetSelection>(car).unwrap().picked;
+
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    pad_press(&mut app, GamepadButton::LeftTrigger);
+    assert_eq!(picked(&app), None, "manual: the shoulders shift, not aim");
+    press(&mut app, KeyCode::KeyX);
+    run(&mut app, 1);
+    end_press(&mut app, KeyCode::KeyX);
+    assert_eq!(picked(&app), Some(2), "the key still cycles");
+
+    app.insert_resource(ControlSettings::default());
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(picked(&app), Some(0), "automatic gives the shoulder back");
+}
+
 /// The arrow is already live while the race counts down — the
 /// original's arrow works before the start too (RACE-6 names no
 /// phase gate).
