@@ -445,6 +445,64 @@ fn a_conflict_explanation_names_the_mod_the_consumer_loaded() {
     }
 }
 
+/// F29 req 4 (dependency diagnostics): tracing a production load names the
+/// files it pulled in and the source that served each, so a mod author can
+/// see that a replacement is live for exactly the consumer it targets — and
+/// that a bystander never touched it.
+#[test]
+fn a_traced_load_names_the_mod_files_each_consumer_pulled_in() {
+    let f = fixture();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(&f.base, 0).unwrap();
+    for (i, m) in [&f.texture, &f.handling, &f.prop, &f.audio]
+        .iter()
+        .enumerate()
+    {
+        vfs.mount_mod(m, 300 + i as i32).unwrap();
+    }
+
+    let (_, vpt) = vfs.trace_reads(|| load_vehicle(&vfs, "vpt", 0).unwrap());
+    assert_eq!(vpt.from_mod("tune"), ["tune/vehicle/vpt.vehcarsim"]);
+    assert!(vpt.from_mod("prop").is_empty() && vpt.from_mod("cue").is_empty());
+    // The base files the car also needs are credited to the install.
+    assert!(
+        vpt.by_origin().keys().any(|k| k.starts_with("original")),
+        "{}",
+        vpt.render()
+    );
+
+    // The bystander car reads the same loader's files but none of the mod's.
+    let (_, vpu) = vfs.trace_reads(|| load_vehicle(&vfs, "vpu", 0).unwrap());
+    assert!(vpu.from_mod("tune").is_empty(), "{}", vpu.render());
+    assert!(
+        vpu.accesses
+            .iter()
+            .any(|a| a.logical == "tune/vehicle/vpu.vehcarsim"),
+        "vpu's own tune was read from the install"
+    );
+
+    let (_, skin) = vfs.trace_reads(|| skin_pixels(&vfs, "vpt_skin"));
+    assert_eq!(skin.from_mod("skin"), ["texture/vpt_skin.png"]);
+    let (_, bystander) = vfs.trace_reads(|| skin_pixels(&vfs, "vpu_skin"));
+    assert!(bystander.from_mod("skin").is_empty());
+
+    let (_, city) = vfs.trace_reads(|| city_vertices(&vfs));
+    assert_eq!(city.from_mod("prop"), ["geometry/testprop.pkg"]);
+    assert!(
+        city.accesses.iter().any(|a| a.logical == "city/test.psdl"),
+        "the city's own geometry is traced too"
+    );
+
+    let (_, wave) = vfs.trace_reads(|| cue(&vfs, "roadskid1"));
+    assert_eq!(
+        wave.from_mod("cue"),
+        ["aud/aud22/surfaces/roadskid1.22k.wav"]
+    );
+    let (_, grass) = vfs.trace_reads(|| cue(&vfs, "grassskid"));
+    assert!(grass.from_mod("cue").is_empty());
+    assert!(!grass.accesses.is_empty());
+}
+
 /// A mod mounted over `base` that carries one broken file at `logical`.
 fn broken_mod(root: &Path, id: &str, logical: &str, bytes: &[u8]) -> std::path::PathBuf {
     let d = root.join(id);

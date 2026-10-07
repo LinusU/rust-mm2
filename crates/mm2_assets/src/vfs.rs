@@ -3,9 +3,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::manifest::{MANIFEST_FILE, ModManifest};
 use crate::source::{ArchiveSource, DirSource, ResolvedSource, Source};
+use crate::trace::{Access, ReadTrace};
 use crate::{AssetsError, normalize_path};
 
 /// A resolved logical path: which source serves it and where it lives.
@@ -58,6 +60,8 @@ pub struct Vfs {
     /// rollback) and never reused, so a value read earlier names exactly
     /// one mount set. See [`Vfs::revision`].
     revision: u64,
+    /// Reads recorded for the open [`Vfs::trace_reads`] call, if any.
+    trace: Mutex<Option<Vec<Access>>>,
 }
 
 /// Why the winning source of a logical path won.
@@ -383,31 +387,80 @@ impl Vfs {
     /// the resolution — never a newer mount that now wins the same logical
     /// path.
     pub fn read(&self, resolved: &Resolved) -> Result<Vec<u8>, AssetsError> {
-        let mounted = self
+        let result = self
             .sources
             .get(resolved.source_index)
-            .ok_or_else(|| AssetsError::NotFound(resolved.logical.clone()))?;
-        mounted.source.read(&resolved.logical)
+            .ok_or_else(|| AssetsError::NotFound(resolved.logical.clone()))
+            .and_then(|mounted| mounted.source.read(&resolved.logical));
+        self.record(&resolved.logical, Some(&resolved.source), &result);
+        result
     }
 
     /// Read by logical path directly (normalized like [`resolve`](Self::resolve)).
     pub fn read_logical(&self, logical: &str) -> Result<Vec<u8>, AssetsError> {
         let logical =
             normalize_path(logical).ok_or_else(|| AssetsError::InvalidPath(logical.to_string()))?;
-        let idx = self
-            .index
-            .get(&logical)
-            .ok_or(AssetsError::NotFound(logical.clone()))?;
-        self.sources[*idx].source.read(&logical)
+        let Some(&idx) = self.index.get(&logical) else {
+            let miss = Err(AssetsError::NotFound(logical.clone()));
+            self.record(&logical, None, &miss);
+            return miss;
+        };
+        let result = self.sources[idx].source.read(&logical);
+        if self.tracing() {
+            let source = self.sources[idx].source.provenance(&logical);
+            self.record(&logical, Some(&source), &result);
+        }
+        result
     }
 
     /// Read and resolve in one step, returning bytes + provenance.
     pub fn read_path(&self, path: &str) -> Result<(Vec<u8>, Resolved), AssetsError> {
-        let resolved = self
-            .resolve(path)
-            .ok_or_else(|| AssetsError::NotFound(path.to_string()))?;
+        let Some(resolved) = self.resolve(path) else {
+            let miss = Err(AssetsError::NotFound(path.to_string()));
+            if let Some(logical) = normalize_path(path) {
+                self.record(&logical, None, &miss);
+            }
+            return Err(AssetsError::NotFound(path.to_string()));
+        };
         let bytes = self.read(&resolved)?;
         Ok((bytes, resolved))
+    }
+
+    /// Run `f` and report every read it made through this VFS: which
+    /// logical paths a load pulled in and which source served each. A read
+    /// that names a path no source provides is recorded as a miss, so an
+    /// optional file read that way shows up as `(not found)`; a caller that
+    /// only [`resolve`](Self::resolve)s a path and finds nothing never
+    /// reads, and leaves no trace. A trace opened inside another also lands in the
+    /// outer one. Reads from other threads during the call are included.
+    pub fn trace_reads<R>(&self, f: impl FnOnce() -> R) -> (R, ReadTrace) {
+        let outer = self.trace.lock().unwrap().replace(Vec::new());
+        let result = f();
+        let accesses = self.trace.lock().unwrap().take().unwrap_or_default();
+        *self.trace.lock().unwrap() = outer.map(|mut outer| {
+            outer.extend(accesses.iter().cloned());
+            outer
+        });
+        (result, ReadTrace { accesses })
+    }
+
+    fn tracing(&self) -> bool {
+        self.trace.lock().unwrap().is_some()
+    }
+
+    fn record(
+        &self,
+        logical: &str,
+        source: Option<&ResolvedSource>,
+        result: &Result<Vec<u8>, AssetsError>,
+    ) {
+        if let Some(log) = self.trace.lock().unwrap().as_mut() {
+            log.push(Access {
+                logical: logical.to_string(),
+                source: source.cloned(),
+                len: result.as_ref().ok().map(Vec::len),
+            });
+        }
     }
 
     /// All logical paths currently resolvable, sorted.
@@ -873,6 +926,75 @@ mod tests {
         assert_eq!(vfs.read(&r).unwrap(), b"a_pack");
         vfs.mount_mod(&mods.join("c_other"), priority::MOD + 1)
             .unwrap();
+    }
+
+    #[test]
+    fn a_trace_names_the_source_of_every_read_and_every_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write(&base, "tune/a.txt", b"base-a");
+        write(&base, "tune/b.txt", b"base-b");
+        let mods = tmp.path().join("mods");
+        write(&mods.join("pack"), "mod.toml", b"[mod]\nid = \"pack\"\n");
+        write(&mods.join("pack"), "tune/a.txt", b"mod-a-longer");
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
+        vfs.mount_mods_dir(&mods, priority::MOD).unwrap();
+
+        // Nothing is recorded outside a trace.
+        vfs.read_logical("tune/b.txt").unwrap();
+        let ((), trace) = vfs.trace_reads(|| {
+            assert_eq!(vfs.read_logical("Tune/A.txt").unwrap(), b"mod-a-longer");
+            vfs.read_logical("tune/b.txt").unwrap();
+            vfs.read_logical("tune/b.txt").unwrap();
+            assert!(vfs.read_logical("tune/absent.txt").is_err());
+            vfs.read_path("tune/a.txt").unwrap();
+            assert!(vfs.read_path("tune/also_absent.txt").is_err());
+            // A pinned resolution is traced through the source it pins.
+            let r = vfs.resolve("tune/b.txt").unwrap();
+            vfs.read(&r).unwrap();
+        });
+        assert_eq!(trace.from_mod("pack"), ["tune/a.txt"]);
+        assert_eq!(trace.missing(), ["tune/absent.txt", "tune/also_absent.txt"]);
+        let groups = trace.by_origin();
+        let original = groups
+            .iter()
+            .find(|(k, _)| k.starts_with("original"))
+            .expect("an original group");
+        assert_eq!(original.1.len(), 1, "a file read thrice is listed once");
+        assert_eq!(original.1[0].logical, "tune/b.txt");
+        assert_eq!(original.1[0].len, Some(6));
+        assert_eq!(groups.len(), 3, "{groups:?}");
+        assert!(trace.render().contains("mod `pack`: 1 file(s)"));
+
+        // The trace closed with the call: later reads are not recorded.
+        let ((), again) = vfs.trace_reads(|| {});
+        assert!(again.accesses.is_empty());
+    }
+
+    #[test]
+    fn a_nested_trace_reports_to_both_and_a_failed_read_has_no_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write(&base, "tune/a.txt", b"a");
+        write(&base, "tune/b.txt", b"b");
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
+        let ((), outer) = vfs.trace_reads(|| {
+            vfs.read_logical("tune/a.txt").unwrap();
+            let ((), inner) = vfs.trace_reads(|| {
+                vfs.read_logical("tune/b.txt").unwrap();
+            });
+            assert_eq!(inner.accesses.len(), 1);
+            assert_eq!(inner.accesses[0].logical, "tune/b.txt");
+            // A source that vanished after mounting fails the read.
+            fs::remove_file(base.join("tune/a.txt")).unwrap();
+            assert!(vfs.read_logical("tune/a.txt").is_err());
+        });
+        let logicals: Vec<_> = outer.accesses.iter().map(|a| a.logical.as_str()).collect();
+        assert_eq!(logicals, ["tune/a.txt", "tune/b.txt", "tune/a.txt"]);
+        assert_eq!(outer.accesses[2].len, None);
+        assert!(outer.accesses[2].source.is_some(), "served, then failed");
     }
 
     #[test]

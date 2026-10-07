@@ -211,3 +211,24 @@ fn mods_classifies_each_mod_by_the_files_it_wins() {
             .contains("0 mod(s), 0 change gameplay")
     );
 }
+
+#[test]
+fn deps_shows_which_source_served_the_files_a_failed_load_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "tune/vehicle/vpt.vehcarsim", b"install");
+    write(&install, "geometry/vpt.pkg", b"not a package");
+    mod_dir(&mods, "retune", &["tune/vehicle/vpt.vehcarsim"]);
+    let (install, mods) = (install.to_str().unwrap(), mods.to_str().unwrap());
+
+    // The synthetic car is not loadable, but the report names what the
+    // loader read before it gave up, and who served it.
+    let out = inspect(&["--mods", mods, "deps", install, "vpt"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("mod `retune`: 1 file(s)\n  tune/vehicle/vpt.vehcarsim"),
+        "{text}"
+    );
+    assert!(text.contains("load failed after"), "{text}");
+}

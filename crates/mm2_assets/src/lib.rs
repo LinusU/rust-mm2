@@ -18,6 +18,7 @@ pub mod fingerprint;
 mod manifest;
 mod mount;
 mod source;
+mod trace;
 mod vfs;
 
 pub use error::AssetsError;
@@ -27,6 +28,7 @@ pub use mount::{
     override_summary,
 };
 pub use source::{ResolvedSource, SourceKind};
+pub use trace::{Access, ReadTrace};
 pub use vfs::{Candidate, Explanation, Resolved, Vfs, WinReason};
 
 /// Well-known source priority tiers. The exact ordering of original archives

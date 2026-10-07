@@ -189,6 +189,17 @@ the byte-level identity of gameplay content.
     the inspector alike — logs the same summary at mount: `warn` for a mod
     conflict, `info` for a mod overriding original content.
   Use `mm2-inspect list` + `lookup` to verify which file is live.
+- `mm2-inspect [--mods <dir>] deps <install> <car> [--paint N]
+  [--expect-mod <id>]` loads a car through the production loader with the
+  VFS tracing every read (`Vfs::trace_reads`), then lists the files the load
+  pulled in grouped by the source that served them — `mod <id>` or the
+  original install — plus any path read that no source provides. A load
+  that fails still prints what it read first. `--expect-mod` exits non-zero
+  unless the load read at least one file from that mod, which is how a pack
+  proves it is live for a car. The trace covers reads of paths that exist or
+  were asked for by name; an optional file the loader only `resolve`s and
+  finds absent leaves no entry. Tracing is per call and nests; nothing is
+  recorded outside one.
 
 ## Portable cities with multiple PSDL parts
 
