@@ -1022,6 +1022,28 @@ impl PedSkin {
         self.bones_needed
     }
 
+    /// How many drawn triangles have a winding-order normal on the same
+    /// side as the authored corner normals — a measurable check of the
+    /// front-face convention over a deformed pose. Returns
+    /// `(agreeing, counted)`; degenerate triangles are not counted.
+    pub fn winding_agreement(&self, deform: &PedDeform) -> (usize, usize) {
+        let mut agree = 0;
+        let mut total = 0;
+        for tri in &self.tris {
+            let [a, b, c] = tri.map(|i| deform.positions[i as usize]);
+            let geometric = (b - a).cross(c - a);
+            if geometric.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            let authored: Vec3 = tri.iter().map(|&i| deform.normals[i as usize]).sum();
+            total += 1;
+            if geometric.dot(authored) > 0.0 {
+                agree += 1;
+            }
+        }
+        (agree, total)
+    }
+
     /// Rigid-skin every corner: `position' = t + r · position`,
     /// `normal' = r · normal`, where `(t, r)` is the corner bone's
     /// world transform — [`PedRig::world_transforms`] output over the

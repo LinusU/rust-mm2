@@ -250,3 +250,21 @@ retail), and the optional 4th `packet` header int (UNK-41).
 - All 66 binary clips parse; 18 are unreferenced by every state model
   (dive/ground/run-back variants — preserved, reported).
 - `--strict` exits 0 on the retail corpus.
+
+## Triangle winding and the on-screen lab (F19-A.5)
+
+Measured on retail: of the 963 non-degenerate `.mod` triangles at the
+bind pose, 941 (97.7 %) have a counter-clockwise geometric normal on the
+same side as the authored corner normals, so the authored `tri` order is
+the front face with no flip — the same identity convention the vehicle
+importer uses (`-Z` forward, `+Y` up, no mirror). `mm2-inspect peds`
+prints the count and raises an issue when an archetype is mostly the
+other way round. The 22 disagreeing triangles are unexplained (strip
+winding is still unrecovered, UNK-41).
+
+`--ped-lab` (`mm2_app::pedestrian`) puts one figure per stock archetype
+in front of the player, each in a different paint job, stepping through
+nine authored states in place (root horizontal drift removed). Retail
+`pedmodel_*.shaders` author colour only, so the figures are flat-coloured
+clothing, not textured. A rendered capture of the line-up on retail
+`sf` was inspected locally (not committed: original content).

@@ -26,6 +26,7 @@ pub mod lesson_def;
 pub mod model;
 pub mod nav;
 pub mod opponents;
+pub mod ped;
 pub mod police;
 pub mod race_def;
 pub mod rewards;
@@ -72,6 +73,7 @@ pub use opponents::{
     EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
     RosterSummary, audit_roster, event_aimap, opponent_roster, opponent_roster_from_aimap,
 };
+pub use ped::{PedArchetype, PedLoadError};
 pub use police::{
     ExtraPolice, PoliceBuild, PoliceEntry, PoliceReport, PoliceSummary, cruise_police_roster,
     police_roster, police_roster_from_aimap,

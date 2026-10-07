@@ -1,3 +1,27 @@
+# Last iteration — F19-A.5: pedestrian skins on screen (new-run iteration 37 of the 2026-10-07 run)
+
+Selection: the iteration-36 review passed with no blockers. Five audio-audit slices in a row had moved only inventory; `docs/coverage-audit.md`
+§4/§5 names pedestrians as one of the two scope holes ("no runtime") and F19-AC02 needs the assembled deforming meshes on screen, not domain
+types. I took the smallest visible leg: load an archetype through the VFS, build Bevy meshes, animate through the authored state machine, and
+look at it on retail data. Ruled out for this slice: sidewalk movement/density (needs F09-B pedestrian lanes, F19-B) and any "ambient crowd" —
+the only spawner is an explicit `--ped-lab` evidence view so nothing static masquerades as population.
+
+Change: `mm2_content::ped::PedArchetype` (loader, strict), `mm2_app::pedestrian` (mesh split, `PedActor`, animate/tour/lab-spawn systems),
+`DevOverrides.ped_lab` + `--ped-lab`, `PedSkin::winding_agreement`, `mm2-inspect peds` winding line (retail 941/963 agree → authored winding is
+front face). Docs: PLAN F19-A.5 row, ledger PED-1 sentence, `docs/research/pedanim.md` winding/lab section.
+
+Evidence: retail `mm2 --mm2-path <retail> --city sf --car vpbug --parked --ped-lab --no-hud --frames 400 --screenshot x.png` → `smoke=visual status=pass`;
+I viewed the PNG (four figures in distinct clothing, one mid-arm-raise, none inside-out). Local only, not committed. Not a listening/play test,
+and not an original-fidelity comparison (shading/lighting vs the original unchecked).
+
+Tests (+13): `mm2_content::ped` 6, `mm2_app::pedestrian` unit 3, `tests/pedestrian.rs` 4 (through the production lab systems on a synthetic install,
+a world-layer ground collider and a player; mutation-checked by disabling the mesh write → the deform test fails).
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` exit 0, 2578 passed,
+0 failed; retail `mm2-inspect peds --strict` rc 0. Status: implemented candidate, not independently checked. F19-A stays active; F19-B (movement, density,
+reactions, audio) untouched. `--ped-lab` is ignored by `--headless`.
+
+---
+
 # Last iteration — F08-A.4 review nits (new-run iteration 36 of the 2026-10-07 run)
 
 Selection: the iteration-35 review passed with no blockers; I took its two non-blocking nits as a small repair rather than start a new slice.

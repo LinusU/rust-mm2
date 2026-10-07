@@ -751,6 +751,13 @@ pub struct DevOverrides {
     /// cannot change a run's outcome — so like `--nav` it stays out of
     /// `record_eligibility`.
     pub police_debug: bool,
+    /// `--ped-lab`: line the stock pedestrian archetypes up in front of
+    /// the local player, each stepping through the authored animation
+    /// states in place (F19-A.5; how a `--frames`/`--screenshot` capture
+    /// inspects the F19-AC02 skins). A diagnostic view, not a crowd:
+    /// the figures never touch the vehicle or the session rules, so
+    /// like `--police-debug` it stays out of `record_eligibility`.
+    pub ped_lab: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

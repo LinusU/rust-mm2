@@ -22,9 +22,9 @@ use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, controls, damage,
     damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
-    netdrive, oppind, opponents, pause, perf, police, police_debug, precip, profile, progression,
-    pvs, race, racestat, racetime, recovery, results, scripted, sequence, session, settings, smoke,
-    spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip, profile,
+    progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence, session,
+    settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -376,6 +376,12 @@ struct Cli {
     /// the planned route.
     #[arg(long)]
     police_debug: bool,
+
+    /// Line the stock pedestrian archetypes up in front of the player,
+    /// each stepping through the authored animation states in place
+    /// (F19-A.5 evidence view — not a crowd and not gameplay).
+    #[arg(long)]
+    ped_lab: bool,
 
     /// Highlight a route between two BAI road indices `<from>:<to>` on
     /// the nav overlay (implies --nav).
@@ -1012,6 +1018,7 @@ fn main() {
             mirror: cli.mirror,
             no_hud: cli.no_hud,
             police_debug: cli.police_debug,
+            ped_lab: cli.ped_lab,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -1252,6 +1259,7 @@ fn main() {
         && !cli.no_hud
         && !cli.nav
         && !cli.police_debug
+        && !cli.ped_lab
         && cli.nav_route.is_none()
         && !cli.bot
         && !cli.parked
@@ -1929,6 +1937,18 @@ fn main() {
     .add_systems(
         Update,
         police_debug::draw_police_debug.run_if(police_debug::enabled),
+    )
+    // F19-A.5: pedestrian figures animate while the session plays; the
+    // `--ped-lab` line-up spawns and tours them only when asked.
+    .init_resource::<pedestrian::PedLabSpawned>()
+    .add_systems(
+        Update,
+        (
+            pedestrian::spawn_ped_lab.run_if(pedestrian::lab_enabled),
+            pedestrian::advance_ped_lab.run_if(pedestrian::lab_enabled),
+            pedestrian::animate_pedestrians,
+        )
+            .chain(),
     )
     // F18-A.4: the `.sky` dome re-centres on the active camera and
     // advances its authored rotation. F18-A.5's room-PVS culling

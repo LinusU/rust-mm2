@@ -36,6 +36,7 @@ mod navarrow;
 mod navarrow3d;
 mod oppind;
 mod opponents;
+mod pedestrian;
 mod police;
 mod precip;
 mod profile;

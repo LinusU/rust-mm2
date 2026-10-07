@@ -88,6 +88,11 @@ pub struct PedsReport {
     /// Deform calls that produced finite skinned geometry — the bind
     /// pose plus every cleanly sampled window frame.
     pub skin_samples: u64,
+    /// Bind-pose triangles whose winding agrees with the authored
+    /// normals, and the triangles counted (degenerate ones excluded).
+    pub winding_agree: u64,
+    /// See [`PedsReport::winding_agree`].
+    pub winding_total: u64,
     /// Per-archetype rows, sorted by stem.
     pub archetypes: Vec<Archetype>,
     /// Parsed clips no state model references.
@@ -383,6 +388,16 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
                                      not a plausible standing figure"
                                 ));
                             }
+                            let (agree, total) = skin.winding_agreement(&d);
+                            r.winding_agree += agree as u64;
+                            r.winding_total += total as u64;
+                            // A mesh drawn mostly back-face-out would
+                            // vanish under backface culling.
+                            if total > 0 && agree * 2 < total {
+                                r.issues.push(format!(
+                                    "anim/{stem}.mod: only {agree}/{total} triangle windings agree with the authored normals"
+                                ));
+                            }
                             r.skin_samples += 1;
                         }
                         Ok(_) => r
@@ -531,8 +546,8 @@ pub fn print_report(r: &PedsReport) {
         r.poses_sampled
     );
     println!(
-        "skins: {} assembled, {} deform samples",
-        r.skins, r.skin_samples
+        "skins: {} assembled, {} deform samples, bind-pose winding agrees on {}/{} triangles",
+        r.skins, r.skin_samples, r.winding_agree, r.winding_total
     );
     println!("\narchetypes:");
     for a in &r.archetypes {
