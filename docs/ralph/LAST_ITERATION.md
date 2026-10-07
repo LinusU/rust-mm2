@@ -1,3 +1,25 @@
+# Last iteration — F30-A.2: perf report settings follow the app's own constants (new-run iteration 38 of this runner)
+
+Selection: previous review passed, no blockers. Its verification gaps named one concrete
+defect I can fix locally: `settings.window` / `settings.fixed_hz` were hard-coded strings in
+`main.rs` mirroring literals used for the window and `Time::<Fixed>`, so they would go stale
+silently. The remaining gaps (release baseline, extra columns, windowed proof, Windows/Linux
+CPU probes) need hardware/time not available in one small slice and stay open.
+
+Change: `WINDOW_SIZE` and `FIXED_HZ` constants in `main.rs` feed the `WindowPlugin`, the
+`Time::<Fixed>` resource and the report's settings rows (`window_label`). 1 unit test
+(`report_label_tests`) pins the row format.
+
+Gates (foreground, exit statuses checked): fmt --check pass; clippy --locked -D warnings
+exit 0; test --locked --workspace exit 0 (2424 passed, 0 failed). No test processes left running.
+
+Not verified / open: the test pins the formatting, not that the window really opens at that
+size (needs a window); menu-mode report does not name the later-launched city/event; release
+baseline, memory/draw-call/voice/bandwidth columns, AC02 soak. AC01 still advanced, not
+complete. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F30-A.1: the benchmark report (new-run iteration 37 of this runner)
 
 Selection: previous review passed, no blockers, no failing gate. The F30-B write-guard

@@ -1337,7 +1337,7 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "rust-mm2".into(),
-                    resolution: (1280, 720).into(),
+                    resolution: WINDOW_SIZE.into(),
                     present_mode: if cli.no_vsync {
                         bevy::window::PresentMode::Immediate
                     } else {
@@ -1350,7 +1350,7 @@ fn main() {
             .disable::<bevy::log::LogPlugin>(),
     )
     .add_plugins(PhysicsPlugins::default())
-    .insert_resource(Time::<Fixed>::from_hz(120.0))
+    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
     .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
     .insert_resource(ClearColor(Color::srgb(0.5, 0.65, 0.85)))
     .insert_resource(session)
@@ -2201,8 +2201,8 @@ fn main() {
             ),
             ("msaa".to_string(), format!("{:?}", graphics.antialiasing)),
             ("shadows".to_string(), format!("{:?}", graphics.shadows)),
-            ("window".to_string(), "1280x720".to_string()),
-            ("fixed_hz".to_string(), "120".to_string()),
+            ("window".to_string(), window_label(WINDOW_SIZE)),
+            ("fixed_hz".to_string(), FIXED_HZ.to_string()),
         ];
         perf::enable(
             &mut app,
@@ -2365,6 +2365,19 @@ fn smoke_test(
 
 /// Directory (relative to the working directory, gitignored) that
 /// Cmd/Ctrl+P screenshots are saved to.
+/// The primary window's size in logical pixels; the perf report's
+/// `settings.window` row is formatted from this same value.
+const WINDOW_SIZE: (u32, u32) = (1280, 720);
+
+/// The fixed-step rate (Hz); the perf report's `settings.fixed_hz` row
+/// is formatted from this same value.
+const FIXED_HZ: f64 = 120.0;
+
+/// `1280x720` — how the perf report names a window size.
+fn window_label((w, h): (u32, u32)) -> String {
+    format!("{w}x{h}")
+}
+
 const SCREENSHOT_DIR: &str = "screenshots";
 
 /// Where Cmd/Ctrl+P screenshots go: [`SCREENSHOT_DIR`] unless that is inside
@@ -2648,5 +2661,21 @@ mod capture_input_tests {
             (writes.keyboard, writes.evidence, writes.opponent),
             (1, 2, 2)
         );
+    }
+}
+
+#[cfg(test)]
+mod report_label_tests {
+    use super::*;
+
+    #[test]
+    fn the_report_names_the_window_and_step_rate_the_app_runs_at() {
+        assert_eq!(window_label((1280, 720)), "1280x720");
+        assert_eq!(
+            window_label(WINDOW_SIZE),
+            format!("{}x{}", WINDOW_SIZE.0, WINDOW_SIZE.1)
+        );
+        // `f64`'s Display drops a whole number's fraction: the row reads `120`.
+        assert_eq!(FIXED_HZ.to_string(), "120");
     }
 }
