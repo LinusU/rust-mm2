@@ -1,3 +1,20 @@
+# Last iteration — F29-A.6: provenance summary keys on source kind (new-run iteration 13 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`7bd1e0f`) passed gates and review, no blockers; its minor findings: `override_summary` told
+install from mods by the in-band label "install", so a mod whose manifest id is `install` was conflated with the install (its
+override of original content skipped by the info log, rows merged), and the strict test named "clean mods" covered only the
+no-mods case. Repaired before new feature work.
+
+Change: `OverrideSummary` gains `winner_is_mod` / `shadowed_is_mod`; groups are keyed on (label, is-mod) and `mount_mods` tests
+`winner_is_mod`, not the label. Tests: `mount::tests::a_mod_named_install_is_not_the_install`; `conflicts.rs`
+`conflicts_without_mods_passes_strict` (renamed) and new `clean_mods_that_only_override_the_install_pass_strict`. Duplicate mod
+ids still share a row (same id = same label; mount order still ranks them in `explain`).
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2472 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: unchanged from F29-A.5 (log lines unasserted, no two-process or retail run, AC04/AC06 remainders).
+
+---
+
 # Last iteration — F29-A.5: explainable conflict provenance (new-run iteration 12 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`172df44`) passed gates and review, no blockers; its open list names F29-AC03 (conflicts have

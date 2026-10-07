@@ -135,7 +135,7 @@ pub fn mount_mods(vfs: &mut Vfs, mods_dir: &Path) -> Result<Vec<ModManifest>, As
                 example = %o.example,
                 "mod conflict: the later-mounted mod wins"
             );
-        } else if o.winner != INSTALL_LABEL {
+        } else if o.winner_is_mod {
             tracing::info!(
                 winner = %o.winner,
                 shadowed = %o.shadowed,
@@ -155,10 +155,16 @@ pub const INSTALL_LABEL: &str = "install";
 /// How many logical paths one source takes from another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverrideSummary {
-    /// Mod id of the winning source, or [`INSTALL_LABEL`].
+    /// Mod id of the winning source, or [`INSTALL_LABEL`]. Display only: a
+    /// mod may be named `install`, so test [`Self::winner_is_mod`] instead.
     pub winner: String,
-    /// Mod id of the shadowed source, or [`INSTALL_LABEL`].
+    /// Mod id of the shadowed source, or [`INSTALL_LABEL`]; see
+    /// [`Self::shadowed_is_mod`].
     pub shadowed: String,
+    /// The winner is a mod (decided by source kind, not by `winner`).
+    pub winner_is_mod: bool,
+    /// The shadowed source is a mod.
+    pub shadowed_is_mod: bool,
     /// Logical paths the winner takes from the shadowed source.
     pub paths: usize,
     /// First such path in sorted order.
@@ -172,17 +178,23 @@ pub struct OverrideSummary {
 /// by pair. A path shadowing several sources counts once per shadowed
 /// source. Shared by the game's mount log and `mm2-inspect conflicts`.
 pub fn override_summary(vfs: &Vfs) -> Vec<OverrideSummary> {
-    let mut groups: BTreeMap<(String, String), OverrideSummary> = BTreeMap::new();
+    // Keyed on source kind plus label, so a mod whose id is "install" stays
+    // distinct from the install itself.
+    type Side = (String, bool);
+    let mut groups: BTreeMap<(Side, Side), OverrideSummary> = BTreeMap::new();
     for ex in vfs.conflicts() {
-        let label = |c: &crate::Candidate| {
-            c.source
-                .label
-                .clone()
-                .unwrap_or_else(|| INSTALL_LABEL.to_string())
+        let side = |c: &crate::Candidate| -> Side {
+            (
+                c.source
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| INSTALL_LABEL.to_string()),
+                c.source.is_mod(),
+            )
         };
-        let winner = label(&ex.candidates[0]);
+        let winner = side(&ex.candidates[0]);
         for shadowed in &ex.candidates[1..] {
-            let shadowed_label = label(shadowed);
+            let shadowed_side = side(shadowed);
             if !ex.candidates[0].source.is_mod() && !shadowed.source.is_mod() {
                 // Two non-mod sources (archives, loose files) are one
                 // "install" side; that is original-content layering, not
@@ -190,11 +202,13 @@ pub fn override_summary(vfs: &Vfs) -> Vec<OverrideSummary> {
                 continue;
             }
             groups
-                .entry((winner.clone(), shadowed_label.clone()))
+                .entry((winner.clone(), shadowed_side.clone()))
                 .and_modify(|o| o.paths += 1)
                 .or_insert_with(|| OverrideSummary {
-                    winner: winner.clone(),
-                    shadowed: shadowed_label,
+                    winner: winner.0.clone(),
+                    shadowed: shadowed_side.0.clone(),
+                    winner_is_mod: winner.1,
+                    shadowed_is_mod: shadowed_side.1,
                     paths: 1,
                     example: ex.logical.clone(),
                     between_mods: ex.candidates[0].source.is_mod() && shadowed.source.is_mod(),
@@ -241,6 +255,8 @@ mod tests {
         let row = |w: &str, s: &str, paths, example: &str, between| OverrideSummary {
             winner: w.into(),
             shadowed: s.into(),
+            winner_is_mod: w != INSTALL_LABEL,
+            shadowed_is_mod: s != INSTALL_LABEL,
             paths,
             example: example.into(),
             between_mods: between,
@@ -255,6 +271,37 @@ mod tests {
                 row("beta", INSTALL_LABEL, 1, "texture/a.tex", false),
             ]
         );
+    }
+
+    #[test]
+    fn a_mod_named_install_is_not_the_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (base, mods) = (tmp.path().join("base"), tmp.path().join("mods"));
+        write(&base, "texture/a.tex", b"base");
+        write(&base, "texture/b.tex", b"base");
+        mod_dir(&mods, "install", &["texture/a.tex", "texture/b.tex"]);
+        mod_dir(&mods, "other", &["texture/b.tex"]);
+
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &base, &InstallMount::default()).unwrap();
+        mount_mods(&mut vfs, &mods).unwrap();
+
+        let got: Vec<_> = override_summary(&vfs)
+            .into_iter()
+            .map(|o| (o.winner_is_mod, o.shadowed_is_mod, o.between_mods, o.paths))
+            .collect();
+        // `install` (the mod) takes a.tex from the real install; `other`
+        // takes b.tex from both the mod `install` and the real install.
+        // The two rows naming "install" as shadowed stay separate.
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(
+            got.iter()
+                .filter(|r| **r == (true, false, false, 1))
+                .count(),
+            2,
+            "{got:?}"
+        );
+        assert!(got.contains(&(true, true, true, 1)), "{got:?}");
     }
 
     #[test]

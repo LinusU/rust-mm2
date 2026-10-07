@@ -114,13 +114,36 @@ fn conflicts_lists_overrides_and_strict_fails_on_mod_conflicts() {
 }
 
 #[test]
-fn conflicts_without_mods_or_with_clean_mods_passes_strict() {
+fn conflicts_without_mods_passes_strict() {
     let f = fixture();
     let out = inspect(&["conflicts", "--strict", &f.install]);
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
         text.contains("0 conflicting path(s), 0 between mods"),
+        "{text}"
+    );
+}
+
+#[test]
+fn clean_mods_that_only_override_the_install_pass_strict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "texture/shared.png", b"install");
+    // Two mods touching disjoint paths; one replaces original content.
+    mod_dir(&mods, "alpha", &["texture/shared.png"]);
+    mod_dir(&mods, "beta", &["tune/b.txt"]);
+    let (install, mods) = (install.to_str().unwrap(), mods.to_str().unwrap());
+
+    let out = inspect(&["--mods", mods, "conflicts", "--strict", install]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("override alpha over install: 1 path(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 conflicting path(s), 0 between mods"),
         "{text}"
     );
 }
