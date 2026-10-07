@@ -88,9 +88,13 @@ fn two_leg_setup(first_limit: Option<u32>) -> LessonSetup {
 }
 
 fn lesson_app(setup: LessonSetup) -> (App, Entity) {
+    lesson_app_with(setup, SessionConfig::default())
+}
+
+fn lesson_app_with(setup: LessonSetup, config: SessionConfig) -> (App, Entity) {
     let driver = LessonDriver::new(setup);
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session.begin(config).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Countdown).unwrap();
     let generation = session.generation();
@@ -335,4 +339,118 @@ fn a_timed_out_leg_fails_the_lesson_and_ends_the_session() {
     // The failed lesson does not move on to leg 1.
     assert_eq!(race(&app).definition.time_limit_ticks, Some(20));
     assert_eq!(driver(&app).run().stale_reports(), 0);
+}
+
+/// F21-B.9 end to end: the lesson's legs are cleared by the production
+/// `advance_race` + `drive_lesson` systems and the profile credit is made
+/// by the production `record_session_results` — no hand-fed `observe`
+/// and no injected ledger entry. Both legs' own finishes reach the
+/// ledger and must not become records; the pass is one record on the
+/// lesson key with the sum of the legs' clear times, and the authored
+/// reward grants once.
+#[test]
+fn clearing_every_leg_credits_the_profile_once_through_the_production_systems() {
+    use mm2_app::profile::{ActiveProfile, ProfileRequest};
+    use mm2_app::progression::{EventRewards, SessionReport, record_session_results};
+    use mm2_game::{
+        AvailabilityTable, Difficulty, ProfileKind, ProfileStore, RewardRequirement, RewardRule,
+        RewardTable, Unlock, VehicleSelection, WorldMode,
+    };
+
+    let setup = two_leg_setup(None);
+    let key = setup.key.clone();
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/testcity.psdl".to_string(),
+        },
+        vehicle: VehicleSelection {
+            id: Some("vpt".to_string()),
+            paint: 0,
+        },
+        ..SessionConfig::default()
+    };
+    let (mut app, car) = lesson_app_with(setup, config);
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let profile = mm2_app::profile::resolve(
+        &store,
+        &ProfileRequest::Create {
+            name: "driver".to_string(),
+            rank: Difficulty::Amateur,
+            kind: ProfileKind::Standard,
+        },
+    )
+    .unwrap()
+    .expect("a created profile binds");
+    let profile_id = profile.profile.id.clone();
+    app.insert_resource(profile);
+    app.insert_resource(EventRewards {
+        key: key.clone(),
+        table: RewardTable {
+            per_event: vec![(
+                key.clone(),
+                RewardRule {
+                    family: EventTableKind::CrashCourse,
+                    requirement: RewardRequirement::Event(3),
+                    unlock: Unlock::Vehicle("vpreward".into()),
+                    message: "lesson reward".into(),
+                    line: 1,
+                },
+            )],
+            ..RewardTable::default()
+        },
+        availability: AvailabilityTable::default(),
+    });
+    app.add_systems(
+        FixedLast,
+        record_session_results
+            .after(drive_lesson)
+            .run_if(resource_exists::<ActiveProfile>),
+    );
+
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(-50.0, 0.0, 0.0),
+        Vec3::new(50.0, 0.0, 0.0),
+    );
+    // Mid-lesson the first leg's finish is in the ledger, yet nothing
+    // reached the profile.
+    assert_eq!(driver(&app).run().current_leg(), Some(1));
+    run(&mut app, 4);
+    let saved = store.load(&profile_id).unwrap().profile.progress;
+    assert!(saved.events.is_empty() && saved.unlocks.is_empty());
+
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(250.0, 0.0, 0.0),
+        Vec3::new(350.0, 0.0, 0.0),
+    );
+    run(&mut app, 10);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    let total = driver(&app)
+        .pass()
+        .expect("the lesson passed")
+        .total_ticks();
+    assert!(total > 0);
+
+    let saved = store.load(&profile_id).unwrap().profile.progress;
+    assert_eq!(
+        saved.events.len(),
+        1,
+        "only the lesson key: {:?}",
+        saved.events
+    );
+    let record = &saved.events[0];
+    assert_eq!(record.key, key);
+    assert!(record.is_beaten());
+    assert_eq!(record.finishes, 1, "one pass, one count");
+    assert_eq!(record.best_race_ticks, Some(total));
+    assert!(saved.unlocks.contains("vehicle:vpreward"));
+    assert_eq!(saved.unlocks.len(), 1);
+    let report = app.world().resource::<SessionReport>();
+    assert!(report.recorded);
+    assert_eq!(report.granted, vec!["lesson reward".to_string()]);
 }

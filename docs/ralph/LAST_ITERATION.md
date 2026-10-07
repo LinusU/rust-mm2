@@ -1,3 +1,30 @@
+# Last iteration — F21-B.9 follow-up: end-to-end pass-credit test (new-run iteration 17 of this runner)
+
+Selection: previous review passed with no blockers; its first verification
+gap was that no test ran the real `drive_lesson`/`advance_race` path
+through to the profile credit (the progression tests hand-fed
+`LessonDriver::observe` and injected the ledger entry). Closed that with a
+test; no production code changed.
+
+Change: `crates/mm2_app/tests/lesson_drive.rs` — `lesson_app` now wraps
+`lesson_app_with(setup, config)`; new test
+`clearing_every_leg_credits_the_profile_once_through_the_production_systems`
+runs a two-leg lesson on a bound Standard profile with
+`record_session_results` scheduled after `drive_lesson`: the first leg's
+ledger finish leaves the profile empty, the last clear records exactly
+one beaten record on the lesson key (finishes 1, best ticks = the driver's
+summed pass ticks) and grants the `crash` reward once. Mutation check:
+disabling the lesson branch in `record_session_results` makes it fail.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0 (2302 passed, 0 failed; was 2301). No processes left running.
+
+Not verified / open: unchanged — no retail/windowed lesson pass, no
+lesson results-screen text, per-difficulty credit unverified,
+instruction flow, pathset/vehicle restore, UNK-35 evaluators. Status:
+test-only candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.9: lesson-pass credit (new-run iteration 16 of this runner)
 
 Selection: previous review passed with no blockers. Its gap list named
