@@ -411,6 +411,11 @@ impl Vfs {
         v
     }
 
+    /// Manifest ids of the mounted mods, in mount order.
+    pub fn mod_ids(&self) -> impl Iterator<Item = &str> {
+        self.mod_ids.iter().map(|(id, _)| id.as_str())
+    }
+
     /// Number of mounted sources.
     pub fn source_count(&self) -> usize {
         self.sources.len()

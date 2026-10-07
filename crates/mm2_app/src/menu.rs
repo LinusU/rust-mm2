@@ -486,8 +486,12 @@ pub struct MenuData {
     /// `--no-profile` or an unopenable root.
     store: Option<ProfileStore>,
     /// `--mods` was mounted — carried into launched `SessionConfig`s so
-    /// modded sessions stay record-ineligible.
+    /// gameplay-modded sessions stay record-ineligible.
     has_mods: bool,
+    /// Every mounted mod is cosmetic-only (F29 req 5), so `has_mods`
+    /// alone does not cost the session its records. `false` until the
+    /// startup classification says otherwise.
+    mods_cosmetic_only: bool,
     /// The menu's view of the bound driver — synced from the
     /// `ActiveProfile` resource by `menu_watch` and updated by bind/
     /// unbind effects inside `apply`, so gating and labels reflect the
@@ -532,6 +536,7 @@ impl MenuData {
         Self {
             store,
             has_mods,
+            mods_cosmetic_only: false,
             bound,
             scanned: false,
             cities: Vec::new(),
@@ -569,6 +574,13 @@ impl MenuData {
     /// out of the settings file the Options screen saves.
     pub fn with_run_overrides(mut self, overrides: RunOverrides) -> Self {
         self.settings_overrides = overrides;
+        self
+    }
+
+    /// Record that every mounted mod is cosmetic-only (the startup
+    /// classification, `mm2_content::fingerprint::mods_cosmetic_only`).
+    pub fn with_mods_cosmetic_only(mut self, yes: bool) -> Self {
+        self.mods_cosmetic_only = yes;
         self
     }
 
@@ -1495,6 +1507,7 @@ impl MenuShell {
             vehicle: vehicle.clone(),
             customization,
             mods_active: data.has_mods,
+            mods_cosmetic_only: data.mods_cosmetic_only,
             ..SessionConfig::default()
         };
         let car = match &vehicle.id {

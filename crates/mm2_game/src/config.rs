@@ -52,11 +52,18 @@ pub struct SessionConfig {
     /// Who owns game-rule authority for the session.
     pub authority: SessionAuthority,
     /// Mod content was mounted for this session (`--mods`). Mods are
-    /// legitimate content, but a result produced under them is not
-    /// comparable to a stock-content record — progression eligibility
-    /// treats a modded session conservatively until F29 can classify
-    /// per-mod impact (designed policy, not an original rule).
+    /// legitimate content, but a result produced under gameplay-changing
+    /// ones is not comparable to a stock-content record (designed
+    /// policy, not an original rule); see [`Self::mods_cosmetic_only`].
     pub mods_active: bool,
+    /// Every mounted mod is cosmetic-only — it wins no file the
+    /// gameplay fingerprint hashes (`mm2_content::fingerprint::
+    /// mods_cosmetic_only`, F29 req 5). Only the session builder that
+    /// holds the VFS can know, and it must say so: the default `false`
+    /// keeps an unclassified modded session record-ineligible, so a
+    /// caller that forgets to classify fails safe. Meaningless unless
+    /// `mods_active`.
+    pub mods_cosmetic_only: bool,
     /// Local-only developer overrides — never progression- or
     /// network-legal.
     pub dev: DevOverrides,
@@ -77,6 +84,7 @@ impl Default for SessionConfig {
             vehicle: VehicleSelection::default(),
             authority: SessionAuthority::Local,
             mods_active: false,
+            mods_cosmetic_only: false,
             dev: DevOverrides::default(),
         }
     }

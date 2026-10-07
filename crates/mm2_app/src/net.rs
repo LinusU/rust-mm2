@@ -22,8 +22,10 @@
 //!   [`Message::SetVehicle`](mm2_net::Message::SetVehicle) and this
 //!   module's [`encode_pick`]/[`decode_pick`]/[`vehicle_validator`]
 //!   helpers;
-//! - `mods_active` — whether *this* process mounted mods is a local
-//!   fact the session builder stamps on its own;
+//! - `mods_active` / `mods_cosmetic_only` — whether *this* process
+//!   mounted mods (and whether they were all cosmetic) is a local fact
+//!   the session builder stamps on its own; a networked session is
+//!   record-ineligible either way;
 //! - `dev` — developer overrides are never network-legal, so
 //!   [`advertise`] refuses a config carrying any rather than dropping
 //!   them silently.
@@ -1396,6 +1398,7 @@ impl HostLink {
         config.authority = SessionAuthority::Host;
         config.vehicle = self.config.vehicle.clone();
         config.mods_active = self.config.mods_active;
+        config.mods_cosmetic_only = self.config.mods_cosmetic_only;
         config.validate()?;
         check_session(vfs, &config)?;
         let ad = advertise(&config)?;
@@ -2045,6 +2048,7 @@ impl SessionParams {
             vehicle: VehicleSelection::default(),
             authority: SessionAuthority::Remote,
             mods_active: false,
+            mods_cosmetic_only: false,
             dev: DevOverrides::default(),
         })
     }

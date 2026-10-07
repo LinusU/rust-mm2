@@ -535,9 +535,10 @@ fn a_timed_out_result_records_nothing() {
     assert!(saved.unlocks.is_empty());
 }
 
-/// Modded sessions are conservatively ineligible (designed policy —
-/// DRV-6's default-conditions rule extended until per-mod impact is
-/// classified).
+/// A session under mods that change gameplay content — or under mods
+/// nobody classified — is ineligible (designed policy: DRV-6's
+/// default-conditions rule extended to content; `mods_cosmetic_only`
+/// defaults to the safe `false`).
 #[test]
 fn a_modded_session_records_nothing() {
     let tmp = install();
@@ -557,6 +558,29 @@ fn a_modded_session_records_nothing() {
     let saved = saved_progress(&mut app, &store);
     assert!(saved.events.is_empty());
     assert!(saved.unlocks.is_empty());
+}
+
+/// A session whose mods are all cosmetic-only (F29 req 5: textures, audio,
+/// menu art — nothing the gameplay fingerprint hashes) is comparable to
+/// stock, so its finish records and grants exactly like a stock one.
+#[test]
+fn a_cosmetic_only_modded_session_still_records() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Standard);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut config = event_config();
+    config.mods_active = true;
+    config.mods_cosmetic_only = true;
+    let mut app = test_app(config, vfs, car, Some(slot));
+    app.update();
+
+    drive_to_finish(&mut app);
+
+    let saved = saved_progress(&mut app, &store);
+    assert_eq!(saved.events.len(), 1, "the finish is recorded");
+    assert!(saved.unlocks.contains("vehicle:vpreward"));
 }
 
 /// The dev world is a rig, not a recordable session — even a real

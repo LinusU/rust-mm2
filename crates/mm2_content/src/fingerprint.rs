@@ -118,6 +118,91 @@ pub fn gameplay(vfs: &Vfs) -> Result<GameplayFingerprint, AssetsError> {
     Ok(out)
 }
 
+/// What one mounted mod does to the session, by the files it actually
+/// wins (F29 req 5). Derived from the same [`is_gameplay_path`] split the
+/// [`gameplay`] fingerprint hashes, so "cosmetic-only" means exactly "this
+/// mod cannot move the fingerprint".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModReport {
+    /// The manifest id.
+    pub id: String,
+    /// Logical paths this mod wins that feed the simulation or its rules.
+    pub gameplay: usize,
+    /// Logical paths this mod wins that the fingerprint ignores (textures,
+    /// audio, menu art, sky/lighting, and unclassified loose files).
+    pub cosmetic: usize,
+    /// Paths this mod provides but another source wins — no effect.
+    pub shadowed: usize,
+    /// First gameplay path the mod wins, in sorted order.
+    pub example: Option<String>,
+}
+
+impl ModReport {
+    /// Whether the mod wins no gameplay path. A mod that wins nothing at
+    /// all (empty, or fully shadowed) is cosmetic-only too: it changes
+    /// nothing.
+    pub fn is_cosmetic_only(&self) -> bool {
+        self.gameplay == 0
+    }
+}
+
+/// One report per mounted mod, in mount order. Only winning files count:
+/// a gameplay file a later mod replaces is credited to the later mod.
+/// Unlike [`gameplay`] this reads no file contents — it is a path
+/// classification, so a mod that rewrites a gameplay file with identical
+/// bytes is still reported as gameplay (conservative).
+pub fn mod_reports(vfs: &Vfs) -> Vec<ModReport> {
+    let mut reports: Vec<ModReport> = vfs
+        .mod_ids()
+        .map(|id| ModReport {
+            id: id.to_string(),
+            gameplay: 0,
+            cosmetic: 0,
+            shadowed: 0,
+            example: None,
+        })
+        .collect();
+    if reports.is_empty() {
+        return reports;
+    }
+    let slot = |reports: &[ModReport], label: &str| reports.iter().position(|r| r.id == label);
+    for logical in vfs.list() {
+        let Some(label) = vfs.resolve(&logical).and_then(|r| r.source.label) else {
+            continue;
+        };
+        let Some(i) = slot(&reports, &label) else {
+            continue;
+        };
+        if is_gameplay_path(&logical) {
+            reports[i].gameplay += 1;
+            reports[i].example.get_or_insert(logical);
+        } else {
+            reports[i].cosmetic += 1;
+        }
+    }
+    for ex in vfs.conflicts() {
+        for loser in &ex.candidates[1..] {
+            if let Some(i) = loser
+                .source
+                .label
+                .as_deref()
+                .and_then(|l| slot(&reports, l))
+            {
+                reports[i].shadowed += 1;
+            }
+        }
+    }
+    reports
+}
+
+/// Whether every mounted mod is cosmetic-only (vacuously true with no
+/// mods). The session's record-eligibility gate reads this: a result
+/// under a texture or soundtrack mod is comparable to stock, one under a
+/// tuning or world mod is not.
+pub fn mods_cosmetic_only(vfs: &Vfs) -> bool {
+    mod_reports(vfs).iter().all(ModReport::is_cosmetic_only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +312,160 @@ mod tests {
         let modded = gameplay(&vfs).unwrap();
         assert_ne!(stock.hash, modded.hash);
         assert_eq!(modded.files, 1, "only the tune file is gameplay");
+    }
+
+    /// A mod's `(relative path, bytes)` files.
+    type Files<'a> = &'a [(&'a str, &'a [u8])];
+
+    /// Mount `mods` (id → files) over a stock tree of one tuning file, one
+    /// texture and one city file.
+    fn modded(tmp: &Path, mods: &[(&str, Files)]) -> Vfs {
+        let base = tmp.join("base");
+        write(&base, "tune/x.csv", b"stock");
+        write(&base, "texture/x.tex", b"stock-tex");
+        write(&base, "city/sf.psdl", b"city");
+        let dir = tmp.join("mods");
+        for (id, files) in mods {
+            let m = dir.join(id);
+            write(&m, "mod.toml", format!("[mod]\nid = \"{id}\"\n").as_bytes());
+            for (rel, bytes) in *files {
+                write(&m, rel, bytes);
+            }
+        }
+        let mut vfs = vfs_of(&base);
+        if !mods.is_empty() {
+            vfs.mount_mods_dir(&dir, mm2_assets::priority::MOD).unwrap();
+        }
+        vfs
+    }
+
+    fn stock(tmp: &Path) -> GameplayFingerprint {
+        gameplay(&modded(tmp, &[])).unwrap()
+    }
+
+    #[test]
+    fn no_mods_report_nothing_and_count_as_cosmetic_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = modded(tmp.path(), &[]);
+        assert!(mod_reports(&vfs).is_empty());
+        assert!(mods_cosmetic_only(&vfs));
+    }
+
+    #[test]
+    fn a_texture_audio_and_sky_mod_is_cosmetic_only_and_leaves_the_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = modded(
+            tmp.path(),
+            &[(
+                "paint",
+                &[
+                    ("texture/x.tex", b"new-tex"),
+                    ("aud/horn.wav", b"horn"),
+                    ("city/day.sky", b"sky"),
+                    ("notes.txt", b"unclassified"),
+                ],
+            )],
+        );
+        let r = &mod_reports(&vfs)[0];
+        assert_eq!(
+            (r.id.as_str(), r.gameplay, r.cosmetic, r.shadowed),
+            ("paint", 0, 4, 0)
+        );
+        assert!(r.example.is_none());
+        assert!(mods_cosmetic_only(&vfs));
+        assert_eq!(
+            gameplay(&vfs).unwrap(),
+            stock(tmp.path()),
+            "cosmetic-only moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_tuning_or_world_mod_is_gameplay_and_moves_the_fingerprint() {
+        for (rel, what) in [
+            ("tune/x.csv", "replaces"),
+            ("tune/new.csv", "adds"),
+            ("city/sf.bai", "adds"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let vfs = modded(
+                tmp.path(),
+                &[("tuning", &[("texture/x.tex", b"t"), (rel, b"edited")])],
+            );
+            let r = &mod_reports(&vfs)[0];
+            assert_eq!((r.gameplay, r.cosmetic), (1, 1), "{what} {rel}");
+            assert_eq!(r.example.as_deref(), Some(rel));
+            assert!(!r.is_cosmetic_only() && !mods_cosmetic_only(&vfs));
+            assert_ne!(
+                gameplay(&vfs).unwrap().hash,
+                stock(tmp.path()).hash,
+                "{what} {rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_winning_files_count_and_a_later_mod_takes_the_credit() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Mounted in sorted directory order: `a-tuning` first, `b-paint` wins ties.
+        let vfs = modded(
+            tmp.path(),
+            &[
+                (
+                    "a-tuning",
+                    &[("tune/x.csv", b"first"), ("texture/x.tex", b"first-tex")],
+                ),
+                (
+                    "b-paint",
+                    &[("tune/x.csv", b"second"), ("texture/x.tex", b"second-tex")],
+                ),
+            ],
+        );
+        let reports = mod_reports(&vfs);
+        let ids: Vec<_> = reports.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a-tuning", "b-paint"], "mount order");
+        // `b-paint` (despite the name) wins both files; `a-tuning` is wholly shadowed.
+        assert_eq!(
+            (
+                reports[0].gameplay,
+                reports[0].cosmetic,
+                reports[0].shadowed
+            ),
+            (0, 0, 2)
+        );
+        assert_eq!(
+            (
+                reports[1].gameplay,
+                reports[1].cosmetic,
+                reports[1].shadowed
+            ),
+            (1, 1, 0)
+        );
+        assert!(!mods_cosmetic_only(&vfs));
+    }
+
+    #[test]
+    fn one_gameplay_mod_among_cosmetic_ones_makes_the_set_gameplay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = modded(
+            tmp.path(),
+            &[
+                ("a-skin", &[("texture/x.tex", b"skin")]),
+                ("b-bounds", &[("bound/x.bnd", b"hull")]),
+            ],
+        );
+        let reports = mod_reports(&vfs);
+        assert!(reports[0].is_cosmetic_only());
+        assert!(!reports[1].is_cosmetic_only());
+        assert!(!mods_cosmetic_only(&vfs));
+    }
+
+    #[test]
+    fn an_empty_mod_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = modded(tmp.path(), &[("empty", &[])]);
+        let r = &mod_reports(&vfs)[0];
+        assert_eq!((r.gameplay, r.cosmetic, r.shadowed), (0, 0, 0));
+        assert!(mods_cosmetic_only(&vfs));
     }
 }

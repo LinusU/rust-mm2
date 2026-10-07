@@ -170,3 +170,44 @@ fn a_duplicate_mod_id_fails_the_inspector_naming_both_directories() {
         "{err}"
     );
 }
+
+#[test]
+fn mods_classifies_each_mod_by_the_files_it_wins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "texture/shared.png", b"install");
+    write(&install, "tune/car.txt", b"install");
+    mod_dir(&mods, "a-paint", &["texture/shared.png", "aud/horn.wav"]);
+    mod_dir(&mods, "b-tuning", &["tune/car.txt"]);
+    let (install, mods) = (install.to_str().unwrap(), mods.to_str().unwrap());
+
+    let out = inspect(&["--mods", mods, "mods", install]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("cosmetic-only a-paint: wins 0 gameplay + 2 cosmetic path(s), 0 shadowed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("GAMEPLAY      b-tuning: wins 1 gameplay + 0 cosmetic path(s), 0 shadowed, first gameplay path tune/car.txt"),
+        "{text}"
+    );
+    assert!(
+        text.contains("2 mod(s), 1 change gameplay content"),
+        "{text}"
+    );
+
+    // `--expect-cosmetic` turns the gameplay mod into a failure.
+    let strict = inspect(&["--mods", mods, "mods", install, "--expect-cosmetic"]);
+    assert!(!strict.status.success());
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("1 mod(s) change gameplay"));
+
+    // No mods: nothing to classify, nothing to fail.
+    let none = inspect(&["mods", install, "--expect-cosmetic"]);
+    assert!(none.status.success(), "{none:?}");
+    assert!(
+        String::from_utf8(none.stdout)
+            .unwrap()
+            .contains("0 mod(s), 0 change gameplay")
+    );
+}

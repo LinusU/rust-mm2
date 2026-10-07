@@ -115,6 +115,37 @@ You never need to know which archive or physical file shipped the original.
 Anything without a dedicated importer yet still resolves correctly through
 the VFS — the limitation is on the import side, not resolution.
 
+## Gameplay versus cosmetic mods
+
+What a mod changes decides what it costs (F29 req 5). `mm2_content::
+fingerprint::is_gameplay_path` is the one classifier: `tune/`, `bound/`,
+`geometry/`, `race/`, `anim/`, `players/` and every `city/` file except
+skies, lighting and visibility sets feed the simulation or its rules;
+`texture/`, `aud/`, `jpg/`, `city/*.sky|ldef|lmap|ltNN|cpvs|pvs|pvshist` and
+unprefixed loose files are cosmetic. A mod is judged by the files it
+**wins** — a gameplay file a later mod replaces is credited to that later
+mod, and a mod that wins nothing changes nothing.
+
+- A **gameplay** mod moves the multiplayer gameplay fingerprint (peers must
+  run the same mods to join) and makes the run **record-ineligible**: no
+  records, no unlocks (`Ineligible::ModContent`).
+- A **cosmetic-only** mod (a repaint, a sound swap, menu art) moves neither;
+  its runs record and unlock exactly like stock.
+- This is a path classification, not a content diff: a gameplay-family file
+  rewritten with identical bytes still counts as gameplay (conservative).
+  The split is an implementation choice naming the families *this engine's*
+  simulation reads, not an original rule; a new consumer with gameplay
+  effect (e.g. an audio cue with a gameplay trigger) must move its family
+  into the gameplay set.
+- A session whose mods nobody classified fails safe: `SessionConfig::
+  mods_cosmetic_only` defaults to `false`, so `mods_active` alone keeps the
+  run record-ineligible.
+
+`mm2-inspect --mods <dir> mods <install>` prints each mod's verdict, counts
+and first gameplay path; `--expect-cosmetic` exits non-zero if any mod
+changes gameplay (for a pack advertised as cosmetic). The game logs the same
+verdict per mod at startup.
+
 ## Debugging
 
 - Mount logs print each source, its entry count and priority at startup.

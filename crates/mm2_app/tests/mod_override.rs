@@ -307,6 +307,42 @@ fn the_gameplay_fingerprint_separates_physics_edits_from_cosmetic_ones() {
     assert_ne!(tune, prop);
 }
 
+/// F29 req 5: the per-mod classification agrees with what the consumers
+/// and the fingerprint observed — the texture and cue mods are
+/// cosmetic-only (record-eligible, join-compatible), the tuning and prop
+/// mods are gameplay — and the session verdict follows the worst mod.
+#[test]
+fn each_mod_is_classified_the_way_its_consumer_and_the_fingerprint_see_it() {
+    let f = fixture();
+    let base = observe(&f.base, &[]).fingerprint;
+    for (m, gameplay) in [
+        (&f.texture, false),
+        (&f.audio, false),
+        (&f.handling, true),
+        (&f.prop, true),
+    ] {
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&f.base, 0).unwrap();
+        vfs.mount_mod(m, 300).unwrap();
+        let reports = fingerprint::mod_reports(&vfs);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(!reports[0].is_cosmetic_only(), gameplay, "{reports:?}");
+        assert_eq!(fingerprint::mods_cosmetic_only(&vfs), !gameplay);
+        assert_eq!(
+            fingerprint::gameplay(&vfs).unwrap().hash != base,
+            gameplay,
+            "the classification and the fingerprint must agree: {reports:?}"
+        );
+    }
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(&f.base, 0).unwrap();
+    vfs.mount_mod(&f.texture, 300).unwrap();
+    vfs.mount_mod(&f.audio, 301).unwrap();
+    assert!(fingerprint::mods_cosmetic_only(&vfs), "two cosmetic mods");
+    vfs.mount_mod(&f.handling, 302).unwrap();
+    assert!(!fingerprint::mods_cosmetic_only(&vfs), "plus a tuning mod");
+}
+
 /// Mount order: when two mods replace the same file the later one wins,
 /// and swapping the order swaps the winner — the documented last-wins
 /// precedence, observed through the handling consumer.

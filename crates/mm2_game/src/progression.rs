@@ -537,9 +537,10 @@ pub enum Ineligible {
     /// presentation-only overrides — `--cam`, `--nav` — are not listed:
     /// they cannot change a run's outcome.
     DevOverride(&'static str),
-    /// Mod content was mounted — a record under modded content is not
-    /// comparable to stock (conservative policy until F29's per-mod
-    /// classification).
+    /// A mounted mod changes gameplay content (tuning, bounds, geometry,
+    /// world or event data) or was never classified — a record under it
+    /// is not comparable to stock. Cosmetic-only mods (textures, audio,
+    /// menu art, sky/lighting) do not trigger this.
     ModContent,
     /// The session ran under player-customized conditions — not a
     /// default-conditions run (DRV-6). The menu only sets
@@ -561,7 +562,7 @@ impl std::fmt::Display for Ineligible {
             Self::World => write!(f, "not a city session"),
             Self::Vehicle => write!(f, "no catalog vehicle"),
             Self::DevOverride(which) => write!(f, "dev override {which}"),
-            Self::ModContent => write!(f, "mod content mounted"),
+            Self::ModContent => write!(f, "gameplay-changing mod content mounted"),
             Self::Customized => write!(f, "customized conditions"),
             Self::Networked => write!(f, "networked session"),
         }
@@ -583,7 +584,7 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
     if config.vehicle.id.is_none() {
         return Err(Ineligible::Vehicle);
     }
-    if config.mods_active {
+    if config.mods_active && !config.mods_cosmetic_only {
         return Err(Ineligible::ModContent);
     }
     if config.customization.is_some() {

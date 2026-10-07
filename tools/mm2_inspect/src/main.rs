@@ -84,6 +84,17 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Classify each mounted mod (`--mods`) as cosmetic-only or
+    /// gameplay-changing by the files it wins: the same split the
+    /// multiplayer fingerprint hashes and record eligibility reads.
+    Mods {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Exit non-zero when any mod changes gameplay content (for a pack
+        /// that is advertised as cosmetic).
+        #[arg(long)]
+        expect_cosmetic: bool,
+    },
     /// Explain a logical texture lookup: every extension tried, the winning
     /// source and why it won.
     Lookup {
@@ -616,6 +627,10 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             prefix,
             strict,
         } => conflicts(dir, cli.mods.as_deref(), prefix.as_deref(), *strict),
+        Command::Mods {
+            dir,
+            expect_cosmetic,
+        } => mods_cmd(dir, cli.mods.as_deref(), *expect_cosmetic),
         Command::Lookup { dir, stem } => lookup(dir, cli.mods.as_deref(), stem),
         Command::Tex {
             dir,
@@ -1022,6 +1037,51 @@ fn conflicts(
     );
     if strict && mod_conflicts > 0 {
         return Err(format!("{mod_conflicts} path(s) conflict between mods").into());
+    }
+    Ok(())
+}
+
+/// Print each mounted mod's gameplay/cosmetic classification and the
+/// session-level consequence. With `expect_cosmetic`, a gameplay-changing
+/// mod fails the command.
+fn mods_cmd(
+    dir: &Path,
+    mods: Option<&Path>,
+    expect_cosmetic: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let reports = mm2_content::fingerprint::mod_reports(&vfs);
+    for r in &reports {
+        let verdict = if r.is_cosmetic_only() {
+            "cosmetic-only"
+        } else {
+            "GAMEPLAY"
+        };
+        println!(
+            "{verdict:13} {}: wins {} gameplay + {} cosmetic path(s), {} shadowed{}",
+            r.id,
+            r.gameplay,
+            r.cosmetic,
+            r.shadowed,
+            r.example
+                .as_ref()
+                .map(|e| format!(", first gameplay path {e}"))
+                .unwrap_or_default(),
+        );
+    }
+    let gameplay: Vec<_> = reports.iter().filter(|r| !r.is_cosmetic_only()).collect();
+    println!(
+        "{} mod(s), {} change gameplay content{}",
+        reports.len(),
+        gameplay.len(),
+        if gameplay.is_empty() {
+            ": records are kept and multiplayer fingerprints match stock"
+        } else {
+            ": records are not kept and multiplayer peers must run the same mods"
+        }
+    );
+    if expect_cosmetic && !gameplay.is_empty() {
+        return Err(format!("{} mod(s) change gameplay content", gameplay.len()).into());
     }
     Ok(())
 }

@@ -388,8 +388,8 @@ pub fn walk_pedestrians(
 /// Let walkers sense approaching cars and react (F19-B.3): stop and
 /// face a car that is heading for them, dive clear when contact is
 /// imminent, then walk back to their curve. Runs only while `Playing`,
-/// before [`walk_pedestrians`]; a figure whose
-/// archetype lacks the reaction states is left to walk on.
+/// before [`walk_pedestrians`]; a figure whose archetype lacks the
+/// reaction states is left to walk on.
 #[allow(clippy::type_complexity)] // Bevy query tuple: one system, one query.
 pub fn react_pedestrians(
     time: Res<Time>,
@@ -506,7 +506,8 @@ pub fn react_pedestrians(
 
 /// Recycle walkers that left every player's bubble, then refill toward
 /// the density target. Builds the [`PedCrowd`] on the session's first
-/// `Playing` frame. Runs only while `Playing` and never beside the `--ped-lab` line-up.
+/// `Playing` frame. Runs only while `Playing` and never beside the
+/// `--ped-lab` line-up.
 #[allow(clippy::too_many_arguments)] // Bevy system: the borrows are the contract.
 pub fn maintain_pedestrians(
     mut commands: Commands,

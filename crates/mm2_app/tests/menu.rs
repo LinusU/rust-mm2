@@ -325,6 +325,11 @@ fn circuit_install() -> tempfile::TempDir {
 /// the menu resources and the production session/menu systems, minus
 /// the window.
 fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
+    menu_app_with(dir, MenuData::new(store, false, None))
+}
+
+/// [`menu_app`] over a caller-built [`MenuData`] (mods, settings …).
+fn menu_app_with(dir: &Path, data: MenuData) -> App {
     let vfs = vfs_of(dir);
 
     let mut app = App::new();
@@ -377,7 +382,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
             },
             Difficulty::Amateur,
         ))
-        .insert_resource(MenuData::new(store, false, None))
+        .insert_resource(data)
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             Update,
@@ -2769,6 +2774,58 @@ fn unchanged_options_launch_a_default_run() {
         .expect("a launched session has a config");
     assert!(config.customization.is_none());
     assert_eq!(mm2_game::record_eligibility(config), Ok(()));
+}
+
+/// F29 req 5 through the menu: `--mods` reaches the launched session as
+/// `mods_active`, and only a mod set the startup classification found
+/// cosmetic-only keeps the run record-eligible.
+#[test]
+fn a_launched_session_carries_the_mod_classification() {
+    for (cosmetic_only, expected) in [
+        (true, Ok(())),
+        (false, Err(mm2_game::Ineligible::ModContent)),
+    ] {
+        let tmp = install();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        let alice = store
+            .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap();
+        seed_record(
+            &store,
+            &alice.id,
+            EventKey {
+                city: "testcity".into(),
+                table: EventTableKind::Checkpoint,
+                stem: "race0".into(),
+            },
+            120 * 60,
+            Some(1),
+        );
+        let data = MenuData::new(Some(store), true, None).with_mods_cosmetic_only(cosmetic_only);
+        let mut app = menu_app_with(tmp.path(), data);
+        app.update();
+        activate_row(&mut app, "Driver:");
+        activate_row(&mut app, "Alice");
+        press(&mut app, KeyCode::Escape);
+        activate_row(&mut app, "Events");
+        activate_row(&mut app, "testcity");
+        activate_row(&mut app, "Checkpoint");
+        open_options(&mut app, "race0");
+        activate_row(&mut app, "Start race");
+        assert!(run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )));
+        let config = app
+            .world()
+            .resource::<Session>()
+            .config()
+            .expect("a launched session has a config");
+        assert!(config.mods_active);
+        assert_eq!(config.mods_cosmetic_only, cosmetic_only);
+        assert_eq!(mm2_game::record_eligibility(config), expected);
+    }
 }
 
 /// RACE-4: cruise condition options are always open — no beaten

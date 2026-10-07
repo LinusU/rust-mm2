@@ -667,6 +667,9 @@ fn main() {
     };
     let mut has_mods = false;
     let mut mod_ids: Vec<String> = Vec::new();
+    // Stays false (the safe answer) unless the mounted mods were
+    // classified cosmetic-only below.
+    let mut mods_cosmetic_only = false;
     if let Some(mods) = &cli.mods {
         match mount_mods(&mut vfs, mods) {
             Ok(manifests) => {
@@ -675,6 +678,27 @@ fn main() {
                 for m in &manifests {
                     info!(mod_id = %m.id, dir = %mods.display(), "mounted mod");
                 }
+                // F29 req 5: say what each mod can change. Gameplay mods
+                // make records ineligible and move the multiplayer
+                // fingerprint; cosmetic-only ones do neither.
+                let reports = mm2_content::fingerprint::mod_reports(&vfs);
+                for r in &reports {
+                    if r.is_cosmetic_only() {
+                        info!(mod_id = %r.id, cosmetic = r.cosmetic, shadowed = r.shadowed, "mod is cosmetic-only");
+                    } else {
+                        info!(
+                            mod_id = %r.id,
+                            gameplay = r.gameplay,
+                            cosmetic = r.cosmetic,
+                            shadowed = r.shadowed,
+                            example = r.example.as_deref().unwrap_or(""),
+                            "mod changes gameplay content: records are not kept and multiplayer peers must run the same mods"
+                        );
+                    }
+                }
+                mods_cosmetic_only = reports
+                    .iter()
+                    .all(mm2_content::fingerprint::ModReport::is_cosmetic_only);
             }
             Err(e) => {
                 warn!(dir = %mods.display(), error = %e, "failed to mount mods; running with none")
@@ -1020,10 +1044,12 @@ fn main() {
             police_debug: cli.police_debug,
             ped_lab: cli.ped_lab,
         },
-        // Any mounted mod makes records/unlocks ineligible — a result
-        // under modded content is not comparable to stock (designed
-        // conservative policy until per-mod impact classification).
+        // A mounted mod that changes gameplay content makes
+        // records/unlocks ineligible — a result under it is not
+        // comparable to stock (designed policy); cosmetic-only mods
+        // (F29 req 5) leave eligibility alone.
         mods_active: has_mods,
+        mods_cosmetic_only,
         ..SessionConfig::default()
     };
 
@@ -1993,6 +2019,7 @@ fn main() {
             .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
             .insert_resource(
                 menu::MenuData::new(menu_store, has_mods, menu_bound)
+                    .with_mods_cosmetic_only(mods_cosmetic_only)
                     .with_settings(graphics, settings_path)
                     .with_run_overrides(run_overrides)
                     .with_controls(control_settings, controls_path),

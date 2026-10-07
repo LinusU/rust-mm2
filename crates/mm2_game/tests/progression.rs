@@ -385,7 +385,18 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
     config.vehicle.id = Some("vpbug".to_string());
 
     config.mods_active = true;
-    assert_eq!(record_eligibility(&config), Err(Ineligible::ModContent));
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::ModContent),
+        "an unclassified modded session fails safe"
+    );
+    config.mods_cosmetic_only = true;
+    assert_eq!(
+        record_eligibility(&config),
+        Ok(()),
+        "cosmetic-only mods stay comparable to stock"
+    );
+    config.mods_cosmetic_only = false;
     config.mods_active = false;
 
     config.dev.bot_route = Some("evidence.opp".into());
