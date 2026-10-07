@@ -1636,6 +1636,14 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F20-A.2 police evidence: `<spawned>/<authored>` (plus `uns`/`fail`
+    // when a row was refused). Absent on sessions with no authored
+    // police, so those records stay bit-identical.
+    let pol_detail = world_ecs
+        .get_resource::<crate::police::PoliceFleet>()
+        .filter(|f| f.any())
+        .map(|f| format!(" pol={}", f.smoke_detail()))
+        .unwrap_or_default();
     // F22-A.3 HUD-gate evidence, on-activity only like `surf=wet`:
     // `hud=off` when the layer is suppressed (`--no-hud`, or a `H`
     // press a test drove through `ButtonInput`) — the default-on state
@@ -2121,7 +2129,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

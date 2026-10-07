@@ -96,6 +96,10 @@ pub struct EventSetup {
     /// runs, with the failure logged — since a missing `.aimap` never
     /// blocks an otherwise runnable event.
     pub roster: mm2_game::OpponentRoster,
+    /// The event's authored `[Police]` lineup at the session difficulty
+    /// (F20-A.1), read from the same aimap record as `roster`. Degrades
+    /// to empty like `roster` — no cops, the failure logged.
+    pub police: mm2_game::PoliceRoster,
     /// The city's normalized reward surface (F16-B): the authored
     /// `<city>_rewards.csv` rules the result consumer grants unlocks
     /// from, plus the authored family sizes `half`/`all` measure.
@@ -136,8 +140,16 @@ pub fn event_race_setup(
     // reads its `[Opponent]` rows, the ambient setup its traffic
     // overrides. A record that fails degrades both to empty/None —
     // the race still runs, with the failure logged.
-    let (roster, aimap) = match mm2_content::event_aimap(vfs, event, difficulty) {
+    let (roster, police, aimap) = match mm2_content::event_aimap(vfs, event, difficulty) {
         Ok((aimap, picked)) => {
+            let police =
+                match mm2_content::police_roster_from_aimap(event, difficulty, &aimap, &picked) {
+                    Ok(police) => police,
+                    Err(e) => {
+                        warn!(error = %e, "police roster failed to build — no police");
+                        mm2_game::PoliceRoster::default()
+                    }
+                };
             let roster = match mm2_content::opponent_roster_from_aimap(
                 event, difficulty, &aimap, &picked,
             ) {
@@ -147,11 +159,15 @@ pub fn event_race_setup(
                     mm2_game::OpponentRoster::default()
                 }
             };
-            (roster, Some(aimap))
+            (roster, police, Some(aimap))
         }
         Err(e) => {
             warn!(error = %e, "event aimap unreadable — racing without opponents; city ambient defaults apply");
-            (mm2_game::OpponentRoster::default(), None)
+            (
+                mm2_game::OpponentRoster::default(),
+                mm2_game::PoliceRoster::default(),
+                None,
+            )
         }
     };
     let rewards = mm2_content::reward_table(&catalog);
@@ -171,6 +187,7 @@ pub fn event_race_setup(
         },
         pathsets,
         roster,
+        police,
         rewards,
         availability,
         aimap,

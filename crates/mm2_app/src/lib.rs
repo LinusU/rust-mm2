@@ -40,6 +40,7 @@ pub mod oppind;
 pub mod opponents;
 pub mod pause;
 pub mod perf;
+pub mod police;
 pub mod precip;
 pub mod profile;
 pub mod progression;

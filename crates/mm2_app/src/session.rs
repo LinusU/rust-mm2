@@ -48,7 +48,7 @@ use tracing::{debug, error, info, warn};
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual;
 use crate::contracts::ImpactFilter;
-use crate::{city, dev_world, netdrive, opponents, race, scripted};
+use crate::{city, dev_world, netdrive, opponents, police, race, scripted};
 
 /// Where the player vehicle (re)spawns. `origin`/`origin_yaw` are the
 /// pre-seat roam base — the world/authored pose before this
@@ -320,6 +320,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
             commands.remove_resource::<crate::audio::SirenAudio>();
+            commands.remove_resource::<crate::police::PoliceFleet>();
             // F18-B.3: the precipitation ambience binding dies with
             // the session like the other audio state — its voices are
             // `SessionEntity`-stamped and chain-despawn.
@@ -763,6 +764,9 @@ pub fn load_session_world(
         mm2_game::AvailabilityTable,
         Option<mm2_formats::aimap::Aimap>,
     )> = None;
+    // The event's authored police lineup (F20-A.1), fielded beside the
+    // opponents once the world exists.
+    let mut event_police = mm2_game::PoliceRoster::default();
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
     let mut event_key = None;
@@ -770,6 +774,7 @@ pub fn load_session_world(
         match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
             Ok(setup) => {
                 event_key = Some(setup.key);
+                event_police = setup.police;
                 let mut def = setup.definition;
                 let mut roster = setup.roster;
                 // RACE-3's Circuit parenthetical (UI-2): the player's
@@ -1697,6 +1702,22 @@ pub fn load_session_world(
                     nav,
                 );
             }
+            // F20-A.2: the authored police lineup stands at its
+            // staged positions (no pursuit yet — COP-4). Single-player
+            // only, like the opponents; the report records the
+            // authored count either way.
+            let fleet = police::spawn_police(
+                &mut commands,
+                &vfs.0,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                &event_police,
+                config.authority,
+                owner,
+                &mut session,
+            );
+            commands.insert_resource(fleet);
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,

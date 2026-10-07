@@ -43,15 +43,15 @@ const OPP_HEADER: &str =
 /// The same dev-world lane `tests/event.rs` uses: gates at x=110/140/165,
 /// finish at x=180, all at z=140 with a 15 m trigger radius — an
 /// opponent lane at z=146 still sweeps them.
-const COURSE_Z: f32 = 140.0;
+pub(crate) const COURSE_Z: f32 = 140.0;
 
-fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
+pub(crate) fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, contents).unwrap();
 }
 
-fn vfs_of(dir: &Path) -> Vfs {
+pub(crate) fn vfs_of(dir: &Path) -> Vfs {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
     vfs
@@ -61,7 +61,7 @@ fn vfs_of(dir: &Path) -> Vfs {
 /// `tests/support`'s fixture, the same grammar `audio_car` layers
 /// cardata on) plus a retail-style `_opp` tune file unless `opp_mass` is
 /// None — written so the tests can prove an opponent never reads it.
-fn write_car(d: &Path, id: &str, mass: f32, opp_mass: Option<f32>) {
+pub(crate) fn write_car(d: &Path, id: &str, mass: f32, opp_mass: Option<f32>) {
     support::tuned_car(d, id, mass);
     if let Some(m) = opp_mass {
         write(
@@ -85,7 +85,7 @@ fn aimap_with_opponents(rows: &str) -> String {
     format!("[Opponent]\n{n}\n{rows}")
 }
 
-fn waypoint_row(x: f32, z: f32) -> String {
+pub(crate) fn waypoint_row(x: f32, z: f32) -> String {
     format!("{x},0,{z},-90,15,0,0,0,\n")
 }
 
@@ -156,7 +156,7 @@ fn roster_install_rows(rows: &str, extra_files: &[(&str, String)]) -> tempfile::
     tmp
 }
 
-fn event_config() -> SessionConfig {
+pub(crate) fn event_config() -> SessionConfig {
     SessionConfig {
         mode: SessionMode::Event(EventRef {
             city: "testcity".into(),
@@ -247,7 +247,7 @@ fn circuit_config() -> SessionConfig {
 
 /// The headless_smoke system set plus `opponent_drive` — the real
 /// session/race drivers on a minimal app.
-fn event_app(config: SessionConfig, vfs: Vfs) -> App {
+pub(crate) fn event_app(config: SessionConfig, vfs: Vfs) -> App {
     let mut session = Session::new();
     session.begin(config).unwrap();
 
@@ -319,7 +319,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
     app
 }
 
-fn run(app: &mut App, updates: usize) {
+pub(crate) fn run(app: &mut App, updates: usize) {
     for _ in 0..updates {
         app.update();
     }
@@ -1198,7 +1198,7 @@ fn circuit_race_picks_never_exceed_the_wired_roster() {
     assert_eq!(opponents(&mut app).len(), 2, "no opponent is fabricated");
 }
 
-fn phase(app: &App) -> SessionPhase {
+pub(crate) fn phase(app: &App) -> SessionPhase {
     app.world().resource::<Session>().phase().clone()
 }
 

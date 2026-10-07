@@ -27,6 +27,7 @@ mod navarrow;
 mod navarrow3d;
 mod oppind;
 mod opponents;
+mod police;
 mod precip;
 mod profile;
 mod progression;
