@@ -25,14 +25,19 @@
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use mm2_game::gold::{GoldState, GoldView};
 use mm2_game::{
-    CheckpointRule, ObjectId, ObjectIdentity, OpponentRoster, OpponentRoute, ParticipantState,
-    Player, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryEvent, Session,
-    relative_bearing,
+    CheckpointRule, Mm2Vfs, NavGraph, ObjectId, ObjectIdentity, OpponentRoster, OpponentRoute,
+    OpponentRoutePoint, ParticipantState, Player, PlayerId, PlayerVehicle, RaceDefinition,
+    RaceProgress, RaceState, RecoveryEvent, RouteOptions, Session, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 use tracing::info;
 
+use crate::cnr::{CnrHost, participant_id};
+use crate::cnrhud::match_view;
+use crate::cnrnet::CnrReplica;
+use crate::netdrive::NetPlayer;
 use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, corner_aim_distance, pace, plan_speed,
     sharp_corner_plan, steer_toward,
@@ -136,6 +141,10 @@ pub struct ScriptedRoute {
     /// Bounded re-anchors this session — the observable count, the
     /// same disclosure `OpponentDriver::reanchors` gives AI drivers.
     pub reanchors: u32,
+    /// The objective a nav-planned route ([`plan_nav_route`]) was built
+    /// for — a Cops & Robbers target; the driver re-plans when the
+    /// objective moves. `None` on an authored/explicit guide.
+    pub goal: Option<Vec3>,
     /// Handling-derived planner limits, cached for this session-owned car.
     limits: Option<CarLimits>,
 }
@@ -155,9 +164,63 @@ impl ScriptedRoute {
             recoveries: 0,
             progress_stamp: 0,
             reanchors: 0,
+            goal: None,
             limits: None,
         }
     }
+}
+
+/// The session city's routing graph, loaded once per city and kept in
+/// the driver's local state — a networked Cops & Robbers session fields
+/// no ambient traffic ([`crate::traffic::fields_ambient_traffic`]), so
+/// the traffic resource's graph is not there to borrow. `None` for a
+/// non-city world or a city whose aimap does not load (the driver then
+/// aims straight, as the cruise bot does).
+fn routing_graph<'a>(
+    cache: &'a mut Option<(String, Option<NavGraph>)>,
+    vfs: Option<&Mm2Vfs>,
+    session: &Session,
+) -> Option<&'a NavGraph> {
+    let mm2_game::WorldMode::City { psdl } = &session.config()?.world else {
+        return None;
+    };
+    let city = crate::net::city_stem(psdl)?;
+    if cache.as_ref().is_none_or(|(c, _)| c != city) {
+        let graph = vfs.and_then(|v| mm2_content::load_routing_nav_graph(&v.0, city).ok());
+        *cache = Some((city.to_string(), graph.map(|b| b.graph)));
+    }
+    cache.as_ref().and_then(|(_, g)| g.as_ref())
+}
+
+/// Arc-length step, metres, between the samples of a nav-planned route.
+const NAV_ROUTE_STEP: f32 = 6.0;
+
+/// A driving line over the city's shared road graph from `from` to
+/// `to` — the F09 route query sampled into the same [`OpponentRoute`]
+/// shape the authored guides use, so the bounded re-anchor and the
+/// handling-derived pace apply unchanged. Only an evidence driver
+/// plans this (a Cops & Robbers objective has no authored line; the
+/// straight line to a gold site crosses buildings). `None` when the
+/// graph cannot connect the endpoints — the caller falls back to the
+/// straight aim rather than inventing connectivity.
+pub fn plan_nav_route(graph: &NavGraph, from: Vec3, to: Vec3) -> Option<OpponentRoute> {
+    let line = graph
+        .drive_line(from, to, &RouteOptions::default(), NAV_ROUTE_STEP)
+        .ok()?;
+    (line.len() >= 2).then(|| OpponentRoute {
+        points: line
+            .into_iter()
+            .map(|position| OpponentRoutePoint {
+                position,
+                brake: 0.0,
+                forward_offset: 0.0,
+                side_offset: 0.0,
+                target_speed: 0.0,
+                speed_start: 0.0,
+                side_start: 0.0,
+            })
+            .collect(),
+    })
 }
 
 /// Load an explicit diagnostic guide without wiring a fake opponent. Unlike
@@ -677,6 +740,29 @@ pub fn drive_target(definition: &RaceDefinition, progress: &RaceProgress) -> Opt
     }
 }
 
+/// Where a Cops & Robbers match wants `me` to drive: the gold while it
+/// lies free, the car's own side's delivery marker once `me` carries it
+/// (F27 evidence driver). `None` when the match is decided, `me` is not
+/// seated, or someone else carries the gold — the bot has no pursuit
+/// rule, so it coasts rather than chase a carrier it cannot ram on
+/// purpose. The same [`GoldView`] a HUD reads, so a client's bot follows
+/// the host's replica exactly as its readout does.
+pub fn cnr_target(view: &GoldView, me: PlayerId) -> Option<Vec3> {
+    if view.outcome.is_some() {
+        return None;
+    }
+    match view.state {
+        GoldState::Carried { by } if by == me => {
+            let side = view.standings.iter().find(|s| s.player == me)?.side;
+            Some(view.sites.target(side.delivery_target()))
+        }
+        GoldState::Carried { .. } => None,
+        GoldState::Resting { at } | GoldState::Dropped { at, .. } => {
+            view.standings.iter().any(|s| s.player == me).then_some(at)
+        }
+    }
+}
+
 /// Write [`VehicleInput`] on the player vehicle from the live race
 /// objective every frame. Scheduled `after` [`crate::input::vehicle_input`]
 /// and gated on [`ScriptedDrive`], so while `--bot` is on the bot
@@ -703,10 +789,16 @@ pub fn scripted_drive(
     bodies: Query<&RigidBody>,
     colliders: Query<&ColliderOf>,
     water: Option<Res<crate::water::CityWater>>,
+    cnr_host: Option<Res<CnrHost>>,
+    cnr_replica: Option<Res<CnrReplica>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    mut nav: Local<Option<(String, Option<NavGraph>)>>,
     mut cars: Query<
         (
             Entity,
             &ObjectIdentity,
+            &Player,
+            Option<&NetPlayer>,
             &mut VehicleInput,
             &Position,
             &Rotation,
@@ -742,8 +834,23 @@ pub fn scripted_drive(
             }
         }
     }
-    for (entity, id, mut input, pos, rot, vehicle, vstate, progress, bot, mut bot_route) in
-        &mut cars
+    // A Cops & Robbers match is the objective when no race runs: the
+    // gold, then the delivery marker (F27 evidence driver).
+    let cnr_view = match_view(cnr_host.as_deref(), cnr_replica.as_deref());
+    for (
+        entity,
+        id,
+        player,
+        net,
+        mut input,
+        pos,
+        rot,
+        vehicle,
+        vstate,
+        progress,
+        bot,
+        mut bot_route,
+    ) in &mut cars
     {
         let racing = progress.is_some_and(|p| {
             matches!(
@@ -761,6 +868,8 @@ pub fn scripted_drive(
             } else {
                 None
             }
+        } else if let Some(view) = &cnr_view {
+            cnr_target(view, participant_id(player, net))
         } else {
             Some(pos.0 + rot.0 * Vec3::NEG_Z * 200.0)
         };
@@ -778,6 +887,21 @@ pub fn scripted_drive(
                 &mut fresh
             }
         };
+        // A Cops & Robbers objective is planned over the road graph
+        // and bound as the car's guide; the plan holds until the
+        // objective moves (a delivery, a drop, a new round).
+        if race.is_none()
+            && cnr_view.is_some()
+            && bot_route
+                .as_ref()
+                .is_none_or(|rs| rs.goal.is_some_and(|g| g.distance(gate) > 2.0))
+            && let Some(graph) = routing_graph(&mut nav, vfs.as_deref(), &session)
+            && let Some(route) = plan_nav_route(graph, pos.0, gate)
+        {
+            let mut guide = ScriptedRoute::new(route, pos.0, yaw);
+            guide.goal = Some(gate);
+            commands.entity(entity).insert(guide);
+        }
         let mut target = gate;
         let mut planned = None;
         if let Some(rs) = bot_route.as_mut() {
@@ -798,7 +922,15 @@ pub fn scripted_drive(
             // un-cleared triggers, off occupied participant poses
             // (F15-B.11 parity with `opponent_drive`) and over ground
             // the probe can see.
-            if session.authority_role().is_authority() && pos.0.is_finite() {
+            //
+            // A nav-planned Cops & Robbers guide (`goal` set) never
+            // re-anchors: the teleport lands on the route's chased
+            // leg, which can be the objective itself — a delivery the
+            // car did not drive. The bot only counts as evidence for a
+            // match it drove, so a stuck car keeps the ordinary
+            // reverse-and-turn escapes and the match stands or falls
+            // on them.
+            if rs.goal.is_none() && session.authority_role().is_authority() && pos.0.is_finite() {
                 if pos.0.distance(rs.reanchor_pos) >= REANCHOR_DIST {
                     rs.reanchor_pos = pos.0;
                     rs.reanchor_frames = 0;
@@ -1038,5 +1170,104 @@ mod speed_limit_tests {
         limit_evidence_speed(&mut input, -5.0, 8.0);
         assert_eq!(input.brake, 1.0);
         assert_eq!(input.steering, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod cnr_target_tests {
+    use super::*;
+    use mm2_game::gold::{CnrVariant, EndReason, EndRule, Outcome, Side, Sites, Standing, Winner};
+
+    const ME: PlayerId = PlayerId(1);
+    const OTHER: PlayerId = PlayerId(2);
+
+    fn view(variant: CnrVariant, state: GoldState, me_side: Side) -> GoldView {
+        let row = |player, side| Standing {
+            player,
+            side,
+            score: 0,
+            connected: true,
+        };
+        GoldView {
+            generation: 1,
+            variant,
+            end: EndRule::None,
+            round: 0,
+            revision: 1,
+            elapsed: 0,
+            state,
+            sites: Sites {
+                gold: Vec3::new(1.0, 0.0, 0.0),
+                hideout: Vec3::new(0.0, 0.0, 20.0),
+                bank: Vec3::new(0.0, 0.0, 30.0),
+            },
+            outcome: None,
+            standings: vec![row(ME, me_side), row(OTHER, Side::Cops)],
+        }
+    }
+
+    /// Free gold is the objective, whether it rests or was dropped.
+    #[test]
+    fn free_gold_is_the_target() {
+        let at = Vec3::new(5.0, 1.0, 5.0);
+        for state in [
+            GoldState::Resting { at },
+            GoldState::Dropped {
+                at,
+                by: Some(OTHER),
+                free_at: 0,
+            },
+        ] {
+            let v = view(CnrVariant::FreeForAll, state, Side::Solo);
+            assert_eq!(cnr_target(&v, ME), Some(at));
+        }
+    }
+
+    /// A carrier heads for its own side's marker: robbers the hideout,
+    /// cops the bank.
+    #[test]
+    fn a_carrier_heads_for_its_sides_marker() {
+        let carried = GoldState::Carried { by: ME };
+        let robber = view(CnrVariant::CopsVsRobbers, carried, Side::Robbers);
+        assert_eq!(cnr_target(&robber, ME), Some(robber.sites.hideout));
+        let cop = view(CnrVariant::CopsVsRobbers, carried, Side::Cops);
+        assert_eq!(cnr_target(&cop, ME), Some(cop.sites.bank));
+    }
+
+    /// The bot has no pursuit rule: gold in someone else's car, a
+    /// decided match and an unseated car all leave it with no target.
+    #[test]
+    fn nothing_to_chase_leaves_no_target() {
+        let other = view(
+            CnrVariant::FreeForAll,
+            GoldState::Carried { by: OTHER },
+            Side::Solo,
+        );
+        assert_eq!(cnr_target(&other, ME), None);
+
+        let mut decided = view(
+            CnrVariant::FreeForAll,
+            GoldState::Resting { at: Vec3::ZERO },
+            Side::Solo,
+        );
+        decided.outcome = Some(Outcome {
+            reason: EndReason::PointLimit,
+            winner: Winner::Player(ME),
+            at_tick: 9,
+        });
+        assert_eq!(cnr_target(&decided, ME), None);
+
+        let resting = view(
+            CnrVariant::FreeForAll,
+            GoldState::Resting { at: Vec3::ZERO },
+            Side::Solo,
+        );
+        assert_eq!(cnr_target(&resting, PlayerId(9)), None);
+        let carried_by_stranger = view(
+            CnrVariant::FreeForAll,
+            GoldState::Carried { by: PlayerId(9) },
+            Side::Solo,
+        );
+        assert_eq!(cnr_target(&carried_by_stranger, PlayerId(9)), None);
     }
 }

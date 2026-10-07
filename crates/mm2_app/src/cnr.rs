@@ -57,6 +57,7 @@ use mm2_game::{
     RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, SessionMode, SessionPhase,
     VehicleDamage,
 };
+use tracing::info;
 
 use crate::city::{MovableModels, WorldFloor, v3};
 use crate::cnrnet::CnrReplica;
@@ -427,6 +428,11 @@ pub fn cnr_host_step(
     }
 
     for event in game.drain_events() {
+        info!(
+            tick = game.elapsed_ticks(),
+            ?event,
+            "cops and robbers event"
+        );
         out.write(CnrEvent(event));
     }
 }
