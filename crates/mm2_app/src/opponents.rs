@@ -93,7 +93,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    BreakPartSpec, CheckpointRule, DamageSignals, DamageSpec, NavGraph, ObjectIdentity,
+    BreakPartSpec, CheckpointRule, DamageSignals, DamageSpec, NavGraph, ObjectId, ObjectIdentity,
     OpponentRoster, OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl,
     RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, RouteGateLine, RouteOptions, Session,
     SessionEntity, SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage,
@@ -898,6 +898,111 @@ pub fn driving_route(
     }
 }
 
+/// Everything a spawned AI vehicle carries beyond its physics body, all
+/// from the authored [`VehicleDef`]: damage bounds, smoke/spark rigs,
+/// stuck thresholds, audio bindings, breakaway parts, water/out-of-bounds
+/// recovery anchored at the spawn pose, and the visible model. Shared by
+/// the racing opponents and the police (F20-A.2) so both field the same
+/// authored car; the roster-specific components stay with the callers.
+/// `pos` is the final (lifted) spawn position.
+#[allow(clippy::too_many_arguments)]
+pub fn equip_authored_vehicle(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    vehicle: Entity,
+    def: &mm2_content::VehicleDef,
+    object: ObjectId,
+    pos: Vec3,
+    yaw: f32,
+) {
+    // Authored damage bounds when the vehicle ships them — the
+    // same spec the player accumulates against (F05-B.1); no
+    // authored record means undamageable, never a fabricated one.
+    if let Some(d) = &def.damage {
+        commands
+            .entity(vehicle)
+            .insert(VehicleDamage::new(DamageSpec::from(d)));
+        // F05-B.6: the same authored smoke rig the player gets —
+        // seeded from the opponent's object id.
+        commands.entity(vehicle).insert(VehicleSmoke::new(
+            d,
+            SmokePolicy::default(),
+            (object.generation << 32) | object.slot as u64,
+        ));
+        // F05-B.8: the authored record owns the impact-spark
+        // renderer too (DSN-26) — same seed domain.
+        commands.entity(vehicle).insert(VehicleSparks::new(
+            SparkPolicy::default(),
+            (object.generation << 32) | object.slot as u64,
+        ));
+    }
+    // Same for the authored stuck thresholds (F05-B.2).
+    if let Some(s) = &def.stuck {
+        commands
+            .entity(vehicle)
+            .insert(VehicleStuck::new(StuckSpec::from(s)));
+    }
+    // And the authored audio bindings (F07-B.2): the opponent-side
+    // cardata table — `engine_rigs` resolves its stems through the
+    // session's `WaveBank` into spatial loop voices. Same absence
+    // policy as the player: no record, no component.
+    if let Some(a) = &def.audio {
+        commands
+            .entity(vehicle)
+            .insert(VehicleAudio { spec: a.clone() });
+    }
+    // And the authored breakaway inventory (F05-B.3): only
+    // `dgbangerdata`-backed BREAK chunks, so authoredless cars
+    // detach nothing.
+    if !def.breaks.is_empty() {
+        commands.entity(vehicle).insert(VehicleBreaks::new(
+            def.breaks
+                .iter()
+                .map(|b| BreakPartSpec {
+                    name: b.name.clone(),
+                    def: b.def.clone(),
+                })
+                .collect(),
+        ));
+    }
+    // Water/out-of-bounds recovery (F05-B.5) — the designed policy
+    // rides on every participant, anchored at its spawn pose.
+    commands
+        .entity(vehicle)
+        .insert(VehicleRecovery::with_anchor(
+            RecoveryPolicy::default(),
+            pos,
+            yaw,
+        ));
+    let missing = car_visual::spawn_vehicle_model(
+        commands,
+        vfs,
+        &def.model,
+        0,
+        meshes,
+        images,
+        materials,
+        vehicle,
+        // F05-B.9: the authored record gates the texel rig —
+        // same seed domain as the opponent's smoke/sparks.
+        def.damage
+            .as_ref()
+            .map(|d| (d, (object.generation << 32) | object.slot as u64)),
+    );
+    if !missing.is_empty() {
+        warn!(car = %def.id, "opponent missing textures: {}", missing.join(", "));
+    }
+    if def.trailer.is_some() {
+        // Trailer rigs are not wired for opponents yet — the roster
+        // vehicle still spawns and races on its own (no retail
+        // roster wires a hauler).
+        info!(car = %def.id, "opponent vehicle has a trailer; spawned without it");
+    }
+}
+
 /// Spawn every roster entry that loads as a real participant: its own
 /// authored vehicle (opponent tuning preferred), a session-minted
 /// `ObjectId`/`PlayerId`, `PlayerControl::Ai`, the session's authority
@@ -1038,93 +1143,13 @@ pub fn spawn_opponents(
                 Visibility::Visible,
             ))
             .id();
-        // Authored damage bounds when the vehicle ships them — the
-        // same spec the player accumulates against (F05-B.1); no
-        // authored record means undamageable, never a fabricated one.
-        if let Some(d) = &def.damage {
-            commands
-                .entity(vehicle)
-                .insert(VehicleDamage::new(DamageSpec::from(d)));
-            // F05-B.6: the same authored smoke rig the player gets —
-            // seeded from the opponent's object id.
-            commands.entity(vehicle).insert(VehicleSmoke::new(
-                d,
-                SmokePolicy::default(),
-                (object.generation << 32) | object.slot as u64,
-            ));
-            // F05-B.8: the authored record owns the impact-spark
-            // renderer too (DSN-26) — same seed domain.
-            commands.entity(vehicle).insert(VehicleSparks::new(
-                SparkPolicy::default(),
-                (object.generation << 32) | object.slot as u64,
-            ));
-        }
-        // Same for the authored stuck thresholds (F05-B.2).
-        if let Some(s) = &def.stuck {
-            commands
-                .entity(vehicle)
-                .insert(VehicleStuck::new(StuckSpec::from(s)));
-        }
-        // And the authored audio bindings (F07-B.2): the opponent-side
-        // cardata table — `engine_rigs` resolves its stems through the
-        // session's `WaveBank` into spatial loop voices. Same absence
-        // policy as the player: no record, no component.
-        if let Some(a) = &def.audio {
-            commands
-                .entity(vehicle)
-                .insert(VehicleAudio { spec: a.clone() });
-        }
-        // And the authored breakaway inventory (F05-B.3): only
-        // `dgbangerdata`-backed BREAK chunks, so authoredless cars
-        // detach nothing.
-        if !def.breaks.is_empty() {
-            commands.entity(vehicle).insert(VehicleBreaks::new(
-                def.breaks
-                    .iter()
-                    .map(|b| BreakPartSpec {
-                        name: b.name.clone(),
-                        def: b.def.clone(),
-                    })
-                    .collect(),
-            ));
-        }
-        // Water/out-of-bounds recovery (F05-B.5) — the designed policy
-        // rides on every participant, anchored at its spawn pose.
-        commands
-            .entity(vehicle)
-            .insert(VehicleRecovery::with_anchor(
-                RecoveryPolicy::default(),
-                pos,
-                yaw,
-            ));
+        equip_authored_vehicle(
+            commands, vfs, meshes, images, materials, vehicle, &def, object, pos, yaw,
+        );
         // Route-bound Ordered progress (DSN-45) — only present on
         // Circuit definitions with a resolvable route.
         if let Some(line) = route_line {
             commands.entity(vehicle).insert(line);
-        }
-        let missing = car_visual::spawn_vehicle_model(
-            commands,
-            vfs,
-            &def.model,
-            0,
-            meshes,
-            images,
-            materials,
-            vehicle,
-            // F05-B.9: the authored record gates the texel rig —
-            // same seed domain as the opponent's smoke/sparks.
-            def.damage
-                .as_ref()
-                .map(|d| (d, (object.generation << 32) | object.slot as u64)),
-        );
-        if !missing.is_empty() {
-            warn!(car = %def.id, "opponent missing textures: {}", missing.join(", "));
-        }
-        if def.trailer.is_some() {
-            // Trailer rigs are not wired for opponents yet — the roster
-            // vehicle still spawns and races on its own (no retail
-            // roster wires a hauler).
-            info!(car = %def.id, "opponent vehicle has a trailer; spawned without it");
         }
         spawned += 1;
     }
