@@ -1,3 +1,43 @@
+# Last iteration — F20-B.3b: Cruise roam cops (new-run iteration 37)
+
+Selection: the previous review passed with no blocking findings; its
+gaps (overlay unseen, retail evidence is the implementer's claim) stay
+disclosed. The F20 spec's remaining slice is Cruise cops and density.
+`mm2_content::cruise_police_roster` already built the `roam` lineup and
+was tested, but nothing consumed it — Cruise fielded no cops. I took the
+fielding alone; the density option (B.3c) needs a new `Densities` field,
+menu row and a semantics decision, so it stays queued.
+
+Changes:
+- `mm2_app::police`: `cruise_roster` (logs and returns an empty roster
+  when a city ships no readable roam record) and `insert_fleet` (fleet,
+  policy, report, and the road graph only when cops spawned — the event
+  path now shares it).
+- `session.rs`: the free-roam arm fields the roam lineup for
+  `SessionMode::Cruise` + city world + local authority only.
+- Ledger COP-13 (implementation choice: the whole lineup is fielded
+  because the retail activation rule is unknown, COP-7).
+- Tests (`tests/police.rs`, real `load_session_world`, synthetic city):
+  6 new — lineup/graph/ownership, no roam record, Host/Remote none, dev
+  world none, in-sight chase vs far control, restart refield.
+
+Retail, local (`--headless --frames 1800`): sf `pol=19/19`, london
+`pol=20/20`, `status=pass` (spawn at its default: `pur=0/0/0`);
+`--city sf --spawn=59,1.5,95,0` `status=pass pur=1/1/1,nr2`.
+A first spawn guess left the car under the world (`status=fail`,
+`wheels=0/4`) — an off-road spawn point, not a cop effect; not kept.
+
+Gates (iteration 37, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean (exit 0); `cargo test --locked --workspace` exit 0 (2247
+passed, 0 failed; was 2241). No processes left running.
+
+Not verified: no capture/listen of a Cruise chase; cost of ~20 extra cars
+beyond the smoke; roam activation and cop density unknown/open.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F20-B.3a: police debug overlay and loader coverage (new-run iteration 36)
 
 Selection: the previous review passed with no blocking findings. Its

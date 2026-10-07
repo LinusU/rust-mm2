@@ -1724,14 +1724,7 @@ pub fn load_session_world(
             // F20-B.2: the chase routes over the same graph, handed to
             // the police only when there are cops to route — a copless
             // event keeps no second copy of the city's roads.
-            if fleet.spawned > 0
-                && let Some(graph) = nav_owned
-            {
-                commands.insert_resource(police::PoliceNav(graph));
-            }
-            commands.insert_resource(fleet);
-            commands.insert_resource(mm2_game::PursuitPolicy::default());
-            commands.insert_resource(police::PursuitReport::default());
+            police::insert_fleet(&mut commands, fleet, nav_owned);
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,
@@ -1836,6 +1829,45 @@ pub fn load_session_world(
                 .expect("Ready → Countdown is a legal transition");
         }
         None => {
+            // F20-B.3b: free-roam Cruise fields its city's authored
+            // `roam` police lineup, standing at its posts until the
+            // pursuit system sees the player (COP-7/COP-13). Not
+            // Cops & Robbers, not a dev world, not a networked
+            // session (spawn_police fields none off the local authority).
+            if world_ok
+                && matches!(config.mode, SessionMode::Cruise)
+                && config.authority == SessionAuthority::Local
+                && let WorldMode::City { psdl } = &config.world
+            {
+                let stem = std::path::Path::new(psdl)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(psdl.as_str());
+                let roster =
+                    police::cruise_roster(&vfs.0, &stem.to_ascii_lowercase(), config.difficulty);
+                let fleet = police::spawn_police(
+                    &mut commands,
+                    &vfs.0,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    &roster,
+                    config.authority,
+                    owner,
+                    &mut session,
+                );
+                let graph = if fleet.spawned > 0 {
+                    mm2_content::load_routing_nav_graph(&vfs.0, stem)
+                        .map(|b| b.graph)
+                        .map_err(
+                            |e| warn!(error = %e, "nav graph failed to load — cops chase straight"),
+                        )
+                        .ok()
+                } else {
+                    None
+                };
+                police::insert_fleet(&mut commands, fleet, graph);
+            }
             session
                 .transition(SessionPhase::Playing)
                 .expect("Ready → Playing is a legal transition");

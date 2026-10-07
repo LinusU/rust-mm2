@@ -1,5 +1,7 @@
 //! Single-player police on the road (F20-A.2): the event's authored
-//! `[Police]` lineup fielded as real, session-owned cars.
+//! `[Police]` lineup — or, in free-roam Cruise, the city's authored
+//! `roam` lineup (F20-B.3b, ledger COP-13) — fielded as real,
+//! session-owned cars.
 //!
 //! [`spawn_police`] turns each [`PoliceSpec`] of the session's
 //! [`PoliceRoster`] (the F20-A.1 content producer) into a physics car:
@@ -207,6 +209,36 @@ pub fn spawn_police(
         );
     }
     fleet
+}
+
+/// The Cruise lineup of a city (F20-B.3b): the authored `roam` record's
+/// `[Police]` rows for the session's difficulty. A city that ships no
+/// readable `roam` record (a mod city, a dev install) fields no cops —
+/// logged, never padded or borrowed from another city.
+pub fn cruise_roster(vfs: &Vfs, city: &str, difficulty: mm2_game::Difficulty) -> PoliceRoster {
+    match mm2_content::cruise_police_roster(vfs, city, difficulty) {
+        Ok(roster) => roster,
+        Err(e) => {
+            info!(%city, error = %e, "no Cruise police lineup");
+            PoliceRoster::default()
+        }
+    }
+}
+
+/// Insert the session's police resources after [`spawn_police`]: the
+/// fleet report, the pursuit policy and report, and — only when cops
+/// were fielded and the city's routing graph loaded — the graph the
+/// chase routes over. A copless session keeps no second copy of the
+/// roads. Shared by the event and Cruise load paths.
+pub fn insert_fleet(commands: &mut Commands, fleet: PoliceFleet, graph: Option<NavGraph>) {
+    if fleet.spawned > 0
+        && let Some(graph) = graph
+    {
+        commands.insert_resource(PoliceNav(graph));
+    }
+    commands.insert_resource(fleet);
+    commands.insert_resource(PursuitPolicy::default());
+    commands.insert_resource(PursuitReport::default());
 }
 
 /// Height (m) above a body origin the sight line is cast from/to — a

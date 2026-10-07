@@ -805,3 +805,144 @@ fn the_debug_overlay_runs_only_when_the_session_asked_and_survives_a_live_chase(
         app.world_mut().run_system_once(enabled).unwrap()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cruise cops (F20-B.3b): the city's `roam` lineup through the real loader
+// ---------------------------------------------------------------------------
+
+/// A Cruise session on the synthetic city (`city/test.psdl`, so the
+/// roam record is `race/test/roam.aimap`), with `roam` authored when
+/// given. The player spawns at the harness's origin pose.
+fn cruise_install(roam: Option<&str>) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", crate::traffic::synthetic_psdl());
+    write(d, "city/test.bai", crate::traffic::bai_bytes());
+    write_car(d, "vpcop", 1500.0, None);
+    if let Some(rows) = roam {
+        let n = rows.lines().filter(|l| !l.trim().is_empty()).count();
+        write(d, "race/test/roam.aimap", format!("[Police]\n{n}\n{rows}"));
+    }
+    tmp
+}
+
+fn cruise_config(authority: SessionAuthority) -> SessionConfig {
+    SessionConfig {
+        world: mm2_game::WorldMode::City {
+            psdl: "city/test.psdl".into(),
+        },
+        authority,
+        ..SessionConfig::default()
+    }
+}
+
+fn cruise_app(roam: Option<&str>, authority: SessionAuthority) -> (tempfile::TempDir, App) {
+    let tmp = cruise_install(roam);
+    let mut app = event_app(cruise_config(authority), vfs_of(tmp.path()));
+    app.add_systems(Update, police_pursuit);
+    app.update();
+    (tmp, app)
+}
+
+/// The harness spawns the Cruise player at (0, _, 100): cop 0 stands
+/// 30 m beyond it in the open, cop 1 is 135 m off the other end of the
+/// synthetic ground — past the 90 m notice range.
+const ROAM: &str = "vpcop 0 0 130 0 0 15 0.5 50\nvpcop 0 0 -35 180 0 15 0.5 50\n";
+
+#[test]
+fn a_cruise_city_fields_its_roam_lineup_with_the_road_graph() {
+    let (_tmp, app) = cruise_app(Some(ROAM), SessionAuthority::Local);
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "Cruise has no countdown"
+    );
+    let fleet = app.world().resource::<PoliceFleet>();
+    assert_eq!((fleet.authored, fleet.spawned), (2, 2));
+    let owned = app
+        .world()
+        .iter_entities()
+        .filter(|e| e.contains::<PoliceCar>() && e.contains::<SessionEntity>())
+        .count();
+    assert_eq!(owned, 2, "session-owned like every other car");
+    assert!(
+        app.world().get_resource::<PoliceNav>().is_some(),
+        "the city's roads are handed to the cops"
+    );
+    assert!(app.world().get_resource::<PursuitReport>().is_some());
+}
+
+#[test]
+fn a_cruise_city_with_no_roam_record_fields_no_police() {
+    let (_tmp, app) = cruise_app(None, SessionAuthority::Local);
+    let fleet = app.world().resource::<PoliceFleet>();
+    assert_eq!((fleet.authored, fleet.spawned), (0, 0));
+    assert!(!fleet.any(), "nothing authored, so the smoke stays silent");
+    assert!(app.world().get_resource::<PoliceNav>().is_none());
+}
+
+#[test]
+fn a_networked_cruise_fields_no_police() {
+    for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+        let (_tmp, app) = cruise_app(Some(ROAM), authority);
+        assert!(
+            app.world().get_resource::<PoliceFleet>().is_none(),
+            "{authority:?}: MP-4 fields no cops, and Cruise adds no exception"
+        );
+    }
+}
+
+#[test]
+fn a_dev_world_cruise_fields_no_police() {
+    let tmp = cruise_install(Some(ROAM));
+    let mut app = event_app(SessionConfig::default(), vfs_of(tmp.path()));
+    app.update();
+    assert!(app.world().get_resource::<PoliceFleet>().is_none());
+}
+
+#[test]
+fn a_cruising_player_in_sight_is_chased_and_a_distant_one_is_not() {
+    let (_tmp, mut app) = cruise_app(Some(ROAM), SessionAuthority::Local);
+    let (near, far) = (cop_at(&mut app, 0), cop_at(&mut app, 1));
+    run(&mut app, 600);
+    assert!(
+        matches!(phase_of(&app, near), PursuitPhase::Pursuing(_)),
+        "{:?}",
+        phase_of(&app, near)
+    );
+    assert_eq!(phase_of(&app, far), PursuitPhase::Idle);
+    assert!(app.world().get::<EmergencyLights>(near).is_some());
+    let report = app.world().resource::<PursuitReport>();
+    assert_eq!((report.committed, report.peak), (1, 1));
+}
+
+#[test]
+fn restarting_a_cruise_refields_the_roam_lineup() {
+    let (_tmp, mut app) = cruise_app(Some(ROAM), SessionAuthority::Local);
+    let before: Vec<Entity> = cops(&mut app);
+    assert_eq!(before.len(), 2);
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..30 {
+        app.update();
+        if phase(&app) == SessionPhase::Playing
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Playing");
+    let after = cops(&mut app);
+    assert_eq!(after.len(), 2, "exactly the authored lineup, no duplicates");
+    for e in &after {
+        assert_eq!(app.world().get::<SessionEntity>(*e).unwrap().0, 2);
+    }
+    for e in before {
+        assert!(
+            app.world().get_entity(e).is_err(),
+            "the old generation's cop is gone"
+        );
+    }
+    assert_eq!(app.world().resource::<PoliceFleet>().spawned, 2);
+}
