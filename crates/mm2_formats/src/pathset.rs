@@ -233,7 +233,7 @@ impl Pathset {
         }
         let current_path = r.u32()?;
 
-        let mut paths = Vec::with_capacity(n_paths);
+        let mut paths = r.vec_for(n_paths, 6);
         for _ in 0..n_paths {
             paths.push(parse_path(&mut r)?);
         }
@@ -310,7 +310,7 @@ fn parse_path(r: &mut Reader<'_>) -> Result<Path, FormatError> {
     }
     let selection = r.u32()?;
 
-    let mut points = Vec::with_capacity(n_points);
+    let mut points = r.vec_for(n_points, 16);
     for _ in 0..n_points {
         let attributes = r.u32()?;
         let position = r.vec3()?;
@@ -416,6 +416,28 @@ mod tests {
         assert!(matches!(
             Pathset::parse(&d),
             Err(FormatError::BadMagic { .. })
+        ));
+    }
+
+    #[test]
+    fn a_header_claiming_maximal_counts_is_refused_by_its_own_length() {
+        let mut d = PATHSET_MAGIC.to_vec();
+        d.extend_from_slice(&(MAX_PATHS as u32).to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            Pathset::parse(&d),
+            Err(FormatError::UnexpectedEof { .. })
+        ));
+        // One path claiming the maximum point count with no points behind it.
+        let mut d = PATHSET_MAGIC.to_vec();
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        d.extend_from_slice(&[0u8; NAME_LEN]);
+        d.extend_from_slice(&(MAX_POINTS as u32).to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            Pathset::parse(&d),
+            Err(FormatError::UnexpectedEof { .. })
         ));
     }
 

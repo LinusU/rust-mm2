@@ -1,3 +1,23 @@
+# Last iteration — F29-A.13: remaining count-driven reservations bounded by the input (new-run iteration 21 of the 2026-10-07 run)
+
+Selection: the iteration-20 review passed; its stated gap was that `tex.rs`/`dave.rs`/`bai.rs`/`pathset.rs` and other `with_capacity`
+sites were not audited, leaving F29-AC06 "parser counts" open. Audit of every `Vec::with_capacity` in `mm2_formats`: `lmap`, `cpvs`,
+`dave` (entry table range-checked first), `bnd` (n is a literal 3/4), `tex` (palette <= 256, mips u8-sized), and `waypoints`/`spchdata`/
+`crashdata` (sized by already-parsed cells) are bounded by the input before reserving. Unbounded by the input: `bai.rs` roads (u16 x a
+large `Road`), intersections, intersection road lists, culling room lists (cap 1M rooms) and per-room lists; `pathset.rs` paths and points;
+`ped.rs` anim samples (cap 1M floats).
+
+Change: those eight sites now use `Reader::vec_for(count, min_item_bytes)` (min sizes 8/18/4/2/2, 6, 16, 4 — each <= the real item).
+Tests: `bai::a_header_claiming_maximal_counts_is_refused_by_its_own_length` (65535 roads/intersections, and a culling block claiming the
+maximum room count), `pathset::a_header_claiming_maximal_counts_is_refused_by_its_own_length` (4096 paths; one path claiming 65536
+points). As before these pin the refusal path; the cap itself is proven on the helper only. Parse results for well-formed files unchanged.
+
+Gates (foreground): fmt 0; clippy (-D warnings) clean; `cargo test --locked --workspace` 2492 passed, 0 failed. Status: implemented
+candidate, not independently checked. Not shown: no allocator measurement, no retail run; `mm2_assets` reads (`read_bounded`, `inflate_entry`)
+were already capped by an explicit limit. AC06's decompression-limit and archive-traversal legs are covered elsewhere per PLAN.
+
+---
+
 # Last iteration — F29-A.12: parser preallocation bounded by the input's own length (new-run iteration 20 of the 2026-10-07 run)
 
 Selection: the iteration-19 review passed with no blockers; PLAN listed "parser count bounds for PKG/other formats" as the open part of

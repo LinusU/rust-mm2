@@ -499,12 +499,12 @@ impl Bai {
         let n_intersections = r.u16()? as usize;
         let n_roads = r.u16()? as usize;
 
-        let mut roads = Vec::with_capacity(n_roads);
+        let mut roads = r.vec_for(n_roads, 8);
         for _ in 0..n_roads {
             roads.push(parse_road(&mut r)?);
         }
 
-        let mut intersections = Vec::with_capacity(n_intersections);
+        let mut intersections = r.vec_for(n_intersections, 18);
         for _ in 0..n_intersections {
             intersections.push(parse_intersection(&mut r)?);
         }
@@ -855,7 +855,7 @@ fn parse_intersection(r: &mut Reader<'_>) -> Result<Intersection, FormatError> {
     let room = r.u16()?;
     let center = r.vec3()?;
     let n_roads = r.u16()? as usize;
-    let mut roads = Vec::with_capacity(n_roads);
+    let mut roads = r.vec_for(n_roads, 4);
     for _ in 0..n_roads {
         roads.push(r.u32()?);
     }
@@ -878,10 +878,10 @@ fn parse_culling(r: &mut Reader<'_>) -> Result<Culling, FormatError> {
         });
     }
     let read_lists = |r: &mut Reader<'_>| -> Result<Vec<Vec<u16>>, FormatError> {
-        let mut out = Vec::with_capacity(n_rooms as usize);
+        let mut out = r.vec_for(n_rooms as usize, 2);
         for _ in 0..n_rooms {
             let n = r.u16()? as usize;
-            let mut list = Vec::with_capacity(n);
+            let mut list = r.vec_for(n, 2);
             for _ in 0..n {
                 list.push(r.u16()?);
             }
@@ -1098,6 +1098,29 @@ mod tests {
         assert!(matches!(
             Bai::parse(&d),
             Err(FormatError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn a_header_claiming_maximal_counts_is_refused_by_its_own_length() {
+        // 65535 roads and intersections announced by a 8-byte file: the
+        // first short read fails; nothing sized by the claim is reserved.
+        let mut d = Vec::new();
+        d.extend_from_slice(BAI_MAGIC);
+        d.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        d.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        assert!(matches!(
+            Bai::parse(&d),
+            Err(FormatError::UnexpectedEof { .. })
+        ));
+        // A culling block claiming the maximum room count, then a list
+        // claiming 65535 entries, with no bytes behind either.
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&MAX_CULL_ROOMS.to_le_bytes());
+        tail.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        assert!(matches!(
+            parse_culling(&mut Reader::new(&tail)),
+            Err(FormatError::UnexpectedEof { .. })
         ));
     }
 

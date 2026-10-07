@@ -722,7 +722,7 @@ impl PedAnim {
                 value: frames as u64 * floats_per_frame as u64,
                 reason: "implausible clip size",
             })?;
-        let mut samples = Vec::with_capacity(total);
+        let mut samples = r.vec_for(total, 4);
         for _ in 0..total {
             samples.push(r.f32()?);
         }
