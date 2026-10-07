@@ -31,6 +31,8 @@
 
 use std::fmt;
 
+use crate::ParticipantState;
+
 /// Why a leg ended the attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegFailure {
@@ -64,6 +66,44 @@ pub struct LegReport {
     pub leg: u32,
     /// What happened.
     pub result: LegResult,
+}
+
+impl LegReport {
+    /// The gate-run baseline's verdict (`DSN-72`): read one leg's
+    /// participant the way the shared race runtime ends it — reaching
+    /// the last gate clears the leg on its race clock, the time limit
+    /// expiring fails it, and a vehicle disabled while still racing
+    /// fails it (`DMG-2`: a lesson restarts). `None` while the leg is
+    /// still undecided.
+    ///
+    /// A terminal race state wins over `disabled`: a finish landing
+    /// as the car is wrecked is still a finish (the same inclusive
+    /// reading `DSN-7` gives the deadline). This is the *baseline*
+    /// verdict, not a family evaluator's — what a cornering, follow,
+    /// stop, jump or cop-chase leg additionally requires is open
+    /// (`UNK-35`).
+    pub fn from_gate_run(
+        attempt: u32,
+        leg: u32,
+        state: &ParticipantState,
+        disabled: bool,
+    ) -> Option<Self> {
+        let result = match state {
+            ParticipantState::Finished { race_ticks, .. } => {
+                LegResult::Cleared { ticks: *race_ticks }
+            }
+            ParticipantState::TimedOut { .. } => LegResult::Failed(LegFailure::TimedOut),
+            ParticipantState::AwaitingStart | ParticipantState::Racing if disabled => {
+                LegResult::Failed(LegFailure::Disabled)
+            }
+            ParticipantState::AwaitingStart | ParticipantState::Racing => return None,
+        };
+        Some(Self {
+            attempt,
+            leg,
+            result,
+        })
+    }
 }
 
 /// Where a lesson is.

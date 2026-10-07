@@ -1,3 +1,35 @@
+# Last iteration — F21-B.3: lesson setup + gate-run verdict adapter (new-run iteration 43)
+
+Selection: the previous review passed with no blocking findings. F21-B.2's
+sequencer had no consumer and no way to turn a real race outcome or a
+`crash:N` row into its inputs. The full session driver (swap `RaceState`
+per leg, reseat on retry, reward credit) is too broad for one change, so I
+took the two pure joints it needs: how a leg's gate run becomes a report,
+and how a Crash row becomes legs + sequencer.
+
+Change: `LegReport::from_gate_run` (finish → `Cleared` on the race clock,
+expiry → `Failed(TimedOut)`, disabled while racing → `Failed(Disabled)`,
+undecided → `None`, finish beats a late disable) and
+`mm2_app::race::lesson_race_setup` → `LessonSetup{key, legs, run}` via the
+production catalog (DSN-74, designed). `event_race_setup` is untouched and
+still refuses Crash rows.
+
+Tests: `mm2_game` `tests/lesson.rs` +4, `mm2_app` `tests/lesson_setup.rs` +4
+(registered in `tests/app.rs`).
+
+Gates (iteration 43, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0 (2281 passed, 0
+failed; was 2273). No processes left running.
+
+Not verified / open: nothing launches a lesson — no `RaceState` per leg, no
+world restore on retry, no reward credit, no instruction flow; family
+evaluators (UNK-35) unrecovered, so the verdict is the gate-run baseline
+only. No original-data (retail) run this iteration; tests are synthetic.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.2: lesson leg sequencer (new-run iteration 42)
 
 Selection: the previous review passed with no blocking findings; its one

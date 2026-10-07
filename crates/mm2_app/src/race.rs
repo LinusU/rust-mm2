@@ -194,6 +194,72 @@ pub fn event_race_setup(
     })
 }
 
+/// Why a Crash Course row cannot become a lesson run.
+#[derive(Debug, thiserror::Error)]
+pub enum LessonSetupError {
+    /// Catalog lookup failed (unknown row, wrong city, missing records).
+    #[error("event resolve failed: {0}")]
+    Resolve(#[from] mm2_content::EventResolveError),
+    /// The row resolves but is not a Crash Course lesson.
+    #[error("{0:?}[{1}] is not a Crash Course row")]
+    NotCrashCourse(mm2_game::EventTableKind, usize),
+    /// A sub-event could not become a runnable leg — the whole lesson
+    /// is refused rather than shortened.
+    #[error("lesson legs failed: {0}")]
+    Legs(#[from] mm2_content::LessonBuildError),
+    /// The lesson has no legs to run.
+    #[error(transparent)]
+    NoLegs(#[from] mm2_game::NoLegs),
+}
+
+/// A Crash Course lesson's runnable setup (F21-B): the stable save
+/// identity, the legs in authored order and the sequencer over them.
+/// Each leg's `definition` is what the shared race runtime runs; the
+/// session loader feeds the finish/expiry/disable verdict back through
+/// [`mm2_game::LegReport::from_gate_run`] into `run`.
+pub struct LessonSetup {
+    /// The lesson's stable identity (city + table + file stem).
+    pub key: mm2_game::EventKey,
+    /// The legs, in authored order (`DSN-72`).
+    pub legs: Vec<mm2_content::LessonLeg>,
+    /// The sequencer over `legs` (`DSN-73`), on its first attempt.
+    pub run: mm2_game::LessonRun,
+}
+
+/// Resolve a Crash Course `EventRef` into its lesson legs and
+/// sequencer: catalog scan → dependency-checked resolve → the lesson
+/// view of the row → one `RaceDefinition` per sub-event at
+/// `difficulty`. This is the Crash Course counterpart of
+/// [`event_race_setup`], which still refuses these rows; nothing
+/// launches a lesson from it yet (no session driver), and a leg's
+/// clear is the gate-run baseline, not a family evaluator (`UNK-35`).
+pub fn lesson_race_setup(
+    vfs: &Vfs,
+    event_ref: &EventRef,
+    difficulty: Difficulty,
+) -> Result<LessonSetup, LessonSetupError> {
+    let catalog = mm2_content::EventCatalog::scan(vfs, &event_ref.city);
+    let event = catalog.resolve(event_ref)?;
+    if event.event_ref.table != mm2_game::EventTableKind::CrashCourse {
+        return Err(LessonSetupError::NotCrashCourse(
+            event.event_ref.table,
+            event.event_ref.index,
+        ));
+    }
+    let lesson = mm2_content::crash_lesson(vfs, &catalog, event);
+    let legs = mm2_content::lesson_legs(&catalog, &lesson, difficulty)?;
+    let run = mm2_game::LessonRun::new(legs.len())?;
+    Ok(LessonSetup {
+        key: mm2_game::EventKey {
+            city: event.event_ref.city.clone(),
+            table: event.event_ref.table,
+            stem: event.stem.clone(),
+        },
+        legs,
+        run,
+    })
+}
+
 /// Marker on a session-owned checkpoint/finish marker entity —
 /// [`update_checkpoint_markers`] reads it to reflect per-participant
 /// progress on the mesh.

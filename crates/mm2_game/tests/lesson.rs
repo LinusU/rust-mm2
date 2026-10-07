@@ -3,8 +3,8 @@
 //! counters, and a pass that is credited exactly once.
 
 use mm2_game::{
-    LegFailure, LegReport, LegResult, LessonPass, LessonPhase, LessonRun, NoLegs, ReportEffect,
-    RetryError, StaleReason,
+    LegFailure, LegReport, LegResult, LessonPass, LessonPhase, LessonRun, NoLegs, ParticipantState,
+    PlayerId, ReportEffect, ResultId, RetryError, StaleReason,
 };
 
 fn clear(attempt: u32, leg: u32, ticks: u64) -> LegReport {
@@ -214,4 +214,84 @@ fn stale_reports_are_counted_across_attempts() {
     run.retry().unwrap();
     run.report(clear(1, 0, 1));
     assert_eq!(run.stale_reports(), 2);
+}
+
+fn result_id() -> ResultId {
+    ResultId {
+        generation: 1,
+        participant: PlayerId(0),
+        event: None,
+        sequence: 0,
+    }
+}
+
+#[test]
+fn a_gate_run_leg_clears_on_its_finish_and_fails_on_its_deadline() {
+    let finished = ParticipantState::Finished {
+        race_ticks: 480,
+        result: result_id(),
+    };
+    assert_eq!(
+        LegReport::from_gate_run(2, 1, &finished, false),
+        Some(clear(2, 1, 480))
+    );
+    let expired = ParticipantState::TimedOut {
+        race_ticks: 600,
+        result: result_id(),
+    };
+    assert_eq!(
+        LegReport::from_gate_run(2, 1, &expired, false),
+        Some(fail(2, 1, LegFailure::TimedOut))
+    );
+}
+
+#[test]
+fn an_undecided_gate_run_reports_nothing_until_the_car_is_disabled() {
+    for state in [ParticipantState::AwaitingStart, ParticipantState::Racing] {
+        assert_eq!(LegReport::from_gate_run(1, 0, &state, false), None);
+        assert_eq!(
+            LegReport::from_gate_run(1, 0, &state, true),
+            Some(fail(1, 0, LegFailure::Disabled)),
+            "a disabled car fails the leg it is still racing"
+        );
+    }
+}
+
+#[test]
+fn a_finish_is_not_undone_by_a_late_disable() {
+    let finished = ParticipantState::Finished {
+        race_ticks: 90,
+        result: result_id(),
+    };
+    assert_eq!(
+        LegReport::from_gate_run(1, 0, &finished, true),
+        Some(clear(1, 0, 90))
+    );
+}
+
+#[test]
+fn gate_run_verdicts_drive_a_lesson_through_a_failed_attempt_and_a_pass() {
+    let mut run = LessonRun::new(2).unwrap();
+    let finish = |ticks| ParticipantState::Finished {
+        race_ticks: ticks,
+        result: result_id(),
+    };
+    let leg0 = LegReport::from_gate_run(run.attempt(), 0, &finish(100), false).unwrap();
+    assert_eq!(run.report(leg0), ReportEffect::Advanced { next_leg: 1 });
+    let wrecked =
+        LegReport::from_gate_run(run.attempt(), 1, &ParticipantState::Racing, true).unwrap();
+    assert_eq!(run.report(wrecked), ReportEffect::Failed);
+    assert_eq!(run.take_pass(), None);
+    let attempt = run.retry().unwrap();
+    for (leg, ticks) in [(0, 110), (1, 200)] {
+        let report = LegReport::from_gate_run(attempt, leg, &finish(ticks), false).unwrap();
+        run.report(report);
+    }
+    assert_eq!(
+        run.take_pass(),
+        Some(LessonPass {
+            attempt: 2,
+            leg_ticks: vec![110, 200],
+        })
+    );
 }
