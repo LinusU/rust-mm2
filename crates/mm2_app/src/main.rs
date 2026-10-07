@@ -585,14 +585,42 @@ fn main() {
     // install content but below mods, so a mod can replace them.
     // Found next to the binary, not through the working directory, so the
     // app runs the same from any shell location (F30-AC04).
-    match mm2_app::app_assets::locate_for_process() {
-        Some(app_assets) => match vfs.mount_dir(&app_assets, mm2_assets::priority::OVERRIDE) {
+    let app_assets_dir = mm2_app::app_assets::locate_for_process();
+    match &app_assets_dir {
+        Some(app_assets) => match vfs.mount_dir(app_assets, mm2_assets::priority::OVERRIDE) {
             Ok(()) => info!(dir = %app_assets.display(), "mounted app assets"),
             Err(e) => warn!(dir = %app_assets.display(), error = %e, "failed to mount app assets"),
         },
         None => warn!(
             "app assets directory not found; the dev world ground falls back to a flat colour"
         ),
+    }
+    // F30-AC05: the app's own writes (profile store, perf log, screenshot)
+    // never go into the original installation or the app's directory.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let write_guards = mm2_app::write_guard::protected_dirs(
+        cli.mm2_path.as_deref(),
+        app_assets_dir.as_deref(),
+        exe_dir.as_deref(),
+    );
+    let cwd = std::env::current_dir().ok();
+    let guard_write = |what: &'static str, path: &Path| {
+        if let Err(refusal) = mm2_app::write_guard::check(what, path, &write_guards, cwd.as_deref())
+        {
+            error!(error = %refusal, "write destination refused");
+            std::process::exit(2);
+        }
+    };
+    if let Some(dir) = &cli.profile_dir {
+        guard_write("the profile store", dir);
+    }
+    if let Some(path) = &cli.perf_log {
+        guard_write("the performance log", path);
+    }
+    if let Some(path) = &cli.screenshot {
+        guard_write("a screenshot", path);
     }
     let mut has_mods = false;
     if let Some(mods) = &cli.mods {

@@ -1,3 +1,28 @@
+# Last iteration — F30-B.2: app writes stay out of the install (new-run iteration 34 of this runner)
+
+Selection: previous review passed, no blockers. It named F30-AC05 as explicitly
+open (an explicit `--profile-dir` inside the install was not refused); smallest
+ready item of F30.
+
+Change: new `mm2_app::write_guard` (`protected_dirs`, `check`, `resolve`).
+`main.rs` guards `--profile-dir`, `--perf-log`, `--screenshot` against the
+`--mm2-path` install, the located app assets and the exe directory; a hit logs
+the reason and exits 2 before anything is created. Paths are compared resolved
+(symlinks followed, `..` folded, missing tail judged by deepest existing
+ancestor). Tests: 10 unit + 3 process (`tests/write_guard.rs`); red with the
+profile-dir check removed, restored. Docs: `architecture.md` ("Where the app
+writes"), PLAN F30-B.2.
+
+Gates (foreground, exit statuses checked): fmt exit 0; clippy --locked -D warnings exit 0; test --locked --workspace exit 0 (2411 passed, 0 failed). No test processes left running.
+
+Not verified / open: default (OS user-data) profile root not re-checked against
+the protected dirs; logs/caches the app does not write yet; no packaged bundle;
+macOS/Windows/Linux real paths untested (Unix symlink tests only). AC05 is
+therefore advanced, not complete. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F30-B.1: app assets independent of the working directory (new-run iteration 33 of this runner)
 
 Selection: previous review passed, no blockers. F26-B has been served by a run of

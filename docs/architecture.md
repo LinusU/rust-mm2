@@ -136,6 +136,18 @@ logical asset  ──►  resolver (Vfs)  ──►  selected source  ──► 
 and later mounts win ties. The same `mount_install`/`mount_mods` functions
 serve `mm2_app` and `mm2-inspect`, so both see identical resolution.
 
+## Where the app writes (F30-AC05)
+
+Everything the VFS mounts is read-only. The app's own writes go to user
+locations: the profile store defaults to the OS user-data directory
+(`ProfileStore::default_root`), and the explicit destinations `--profile-dir`,
+`--perf-log` and `--screenshot` are checked by `mm2_app::write_guard` before
+anything is created. A destination inside the `--mm2-path` install, the located
+app assets or the executable's directory (judged on resolved paths: symlinks
+followed, `..` folded) is a usage error, exit 2, with the reason logged.
+Not covered: the default root is not re-checked against those directories, and
+`--vehicle-config`/`--bot-route` are inputs, not writes.
+
 ## Vehicle simulation
 
 - One dynamic `RigidBody` (chassis) + four raycast wheels. Wheel probes use
