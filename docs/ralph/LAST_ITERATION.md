@@ -1,3 +1,20 @@
+# Last iteration — F19-B.4: crowd soak and multi-car edge (new-run iteration 42)
+
+Selection: the iteration-41 review passed with no blockers. F19's remaining ACs that need no unknown rule are AC05 (fixed-seed soak within actor/animation
+budgets) and the spec's edge cases (two players approaching, nearby actor culled); crossings (UNK-42) and the original sensing rule (UNK-43) stay blocked.
+
+Change: tests only, no production change — `mm2_app/tests/crowd.rs` +3 (soak within budgets, soak replays identically from the seed, walker between two cars).
+The soak found nothing to fix: walkers == actors <= 48 every tick, meshes = 2 per figure (96 settled / 100 peak), entities flat at 189, 371 recycled / 419 spawned,
+109 alerts / 212 dives, all poses finite. Mutation check: dropping the recycle despawn fails the soak (64 actors = `MAX_PED_ACTORS` ceiling holds, the 48 target does not).
+
+Evidence: `cargo test -p mm2_app --test app crowd` 15 passed. Retail `sf --frames 3000` rc 0 `peds=24/24 psp=71 prec=47 pdrop=0 puns=0 pwary=0 pdive=0` (113 s wall, includes
+startup and rendering — not a frame-time measurement). Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` rc 0, 2631 passed, 0 failed.
+
+Not done: frame-time budget on a real GPU, soak on retail geometry (needs a car driving the real sidewalks), audio, crossings, Remote-client crowd.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F19-B.3: pedestrian reactions to cars (new-run iteration 41)
 
 Selection: the iteration-40 review (F19-B.2) passed with no blockers; F19-B's remaining list opened with reactions/avoidance (F19-AC03, req 4)

@@ -574,3 +574,144 @@ fn a_pause_freezes_a_walker_mid_dive() {
     assert_eq!(at(&app, walker), frozen, "paused mid-dive");
     assert_eq!(phase(&app, walker), Phase::Diving);
 }
+
+/// Every count a soak bounds, sampled after one frame.
+#[derive(Debug, PartialEq)]
+struct Census {
+    walkers: usize,
+    actors: usize,
+    meshes: usize,
+    entities: usize,
+    finite: bool,
+}
+
+fn census(app: &mut App) -> Census {
+    let found = walkers(app);
+    Census {
+        walkers: found.len(),
+        actors: actors(app),
+        meshes: app.world().resource::<Assets<Mesh>>().len(),
+        entities: app.world_mut().query::<Entity>().iter(app.world()).count(),
+        finite: found.iter().all(|(t, _)| t.is_finite()),
+    }
+}
+
+/// One minute of driving up and down the road at 20 m/s with a car
+/// running on the sidewalk line 20 m ahead, so the crowd recycles
+/// constantly and the reactions fire. Returns the peak census, the
+/// final one and the end state's fingerprint.
+fn soak(dir: &Path, seed: u64) -> (Census, Census, Vec<[i32; 3]>, [u64; 4]) {
+    let mut app = app(dir, seed, Some(1.0));
+    run(&mut app, 3);
+    let car = spawn_car(&mut app, Vec3::new(8.5, 0.0, -70.0), Vec3::ZERO);
+    let first = census(&mut app);
+    let mut peak = Census {
+        walkers: 0,
+        actors: 0,
+        meshes: 0,
+        entities: 0,
+        finite: true,
+    };
+    for tick in 0..3600u32 {
+        // A triangle wave: 90 m out, 90 m back, 9 s per leg.
+        let leg = (tick as f32 / 60.0 * 20.0) % 360.0;
+        let z = if leg < 180.0 { leg - 90.0 } else { 270.0 - leg };
+        let player = Vec3::new(0.0, 0.0, z);
+        move_player(&mut app, player);
+        let ahead = if leg < 180.0 { 1.0 } else { -1.0 };
+        let mut e = app.world_mut().entity_mut(car);
+        e.get_mut::<Position>().unwrap().0 = Vec3::new(8.5, 0.0, z + 20.0 * ahead);
+        e.get_mut::<LinearVelocity>().unwrap().0 = Vec3::new(0.0, 0.0, 20.0 * ahead);
+        app.update();
+        let now = census(&mut app);
+        assert_eq!(now.walkers, now.actors, "tick {tick}: no orphan actors");
+        assert!(now.finite, "tick {tick}: every walker stays finite");
+        peak = Census {
+            walkers: peak.walkers.max(now.walkers),
+            actors: peak.actors.max(now.actors),
+            meshes: peak.meshes.max(now.meshes),
+            entities: peak.entities.max(now.entities),
+            finite: peak.finite && now.finite,
+        };
+    }
+    assert!(first.walkers > 0 && first.meshes > 0, "{first:?}");
+    let crowd = app.world().resource::<PedCrowd>();
+    let counters = [
+        crowd.recycled as u64,
+        crowd.spawned as u64,
+        crowd.alerts,
+        crowd.dives,
+    ];
+    let last = census(&mut app);
+    (peak, last, sorted_positions(&mut app), counters)
+}
+
+#[test]
+fn a_crowded_minute_of_driving_stays_finite_and_inside_the_actor_and_mesh_budgets() {
+    let tmp = reactive();
+    let (peak, last, _, [recycled, spawned, alerts, dives]) = soak(tmp.path(), 5);
+    // density 1.0 is the walk policy's cap (48), itself under the
+    // actor ceiling.
+    assert!(peak.walkers <= 48, "{peak:?}");
+    assert!(peak.walkers <= mm2_app::pedestrian::MAX_PED_ACTORS);
+    assert!(last.walkers >= 24, "the bubble is kept populated: {last:?}");
+    // Meshes belong to live figures: the peak is the cap × the
+    // per-figure groups, so dropped handles really free their meshes.
+    let groups = peak.meshes.div_ceil(peak.walkers.max(1));
+    assert!(
+        peak.meshes <= (peak.walkers + 4) * groups.max(1) && last.meshes <= peak.meshes,
+        "meshes follow the live crowd: {peak:?} {last:?}"
+    );
+    assert!(
+        peak.entities - last.entities < 200 && last.entities <= peak.entities,
+        "no entity accumulation: {peak:?} {last:?}"
+    );
+    // The soak really recycled and really provoked reactions.
+    assert!(recycled > 100 && spawned > recycled, "{recycled} {spawned}");
+    assert!(alerts > 0 && dives > 0, "{alerts} {dives}");
+}
+
+#[test]
+fn a_crowded_minute_replays_identically_from_the_same_seed() {
+    let tmp = reactive();
+    let a = soak(tmp.path(), 5);
+    let b = soak(tmp.path(), 5);
+    assert_eq!(a.1, b.1);
+    assert_eq!(a.2, b.2, "the same seed, the same crowd after a minute");
+    assert_eq!(a.3, b.3, "and the same counters");
+}
+
+#[test]
+fn two_cars_closing_on_one_walker_from_both_ends_still_let_it_dive_and_walk_back() {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), 7, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let ahead = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, 50.0),
+        Vec3::new(0.0, 0.0, -15.0),
+    );
+    let behind = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -50.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let mut dived = false;
+    for _ in 0..300 {
+        step_car(&mut app, ahead);
+        step_car(&mut app, behind);
+        app.update();
+        dived |= phase(&app, walker) == Phase::Diving;
+        assert!(at(&app, walker).translation.is_finite());
+    }
+    app.world_mut().despawn(ahead);
+    app.world_mut().despawn(behind);
+    run(&mut app, 900);
+    assert!(dived, "a walker caught between two cars still dives");
+    assert_eq!(phase(&app, walker), Phase::Walking, "and recovers");
+    assert!((at(&app, walker).translation.x - start.x).abs() < 0.3);
+    let found = walkers(&mut app);
+    assert_eq!(actors(&mut app), found.len());
+}
