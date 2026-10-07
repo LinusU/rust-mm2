@@ -946,3 +946,88 @@ fn restarting_a_cruise_refields_the_roam_lineup() {
     }
     assert_eq!(app.world().resource::<PoliceFleet>().spawned, 2);
 }
+
+// ---------- F20-C.2: a long chase stays bounded (AC04) ----------
+
+/// Four cops ringed around the player's start, a cap of two, and a
+/// target that keeps moving for a minute of game time: at every frame
+/// the pursuer count is the cap's or less and agrees with the cops'
+/// own phases, the light bar rides exactly the pursuing cops, nobody
+/// leaks or flies off the map, and the wedged-car escapes and
+/// deliberate turn-arounds stay inside what their own timers allow.
+#[test]
+fn a_long_chase_keeps_the_pursuers_capped_and_the_recovery_bounded() {
+    use mm2_app::police::PoliceDrive;
+
+    let rows = "vpcop 0 0 140 -90 0 15 0.5 50\nvpcop 120 0 140 90 0 15 0.5 50\n\
+                vpcop 60 0 200 0 0 15 0.5 50\nvpcop 60 0 80 180 0 15 0.5 50\n";
+    let (_tmp, mut app) = pursuit_app(rows);
+    const CAP: usize = 2;
+    app.world_mut().resource_mut::<PursuitPolicy>().max_pursuers = CAP;
+    let player = local_car(&mut app);
+    run_to_racing(&mut app);
+
+    let frames = 60 * 60;
+    let mut most_pursuing = 0;
+    for frame in 0..frames {
+        // The target keeps circling the start at ~12 m/s, ground-bound,
+        // so there is always something to chase and nothing to catch.
+        let a = frame as f32 / 60.0 * 0.4;
+        let at = Vec3::new(60.0 + 30.0 * a.cos(), 1.5, 140.0 + 30.0 * a.sin());
+        *app.world_mut().get_mut::<Position>(player).unwrap() = Position(at);
+        *app.world_mut().get_mut::<LinearVelocity>(player).unwrap() = LinearVelocity::ZERO;
+        app.update();
+
+        let cars = cops(&mut app);
+        assert_eq!(cars.len(), 4, "frame {frame}: no cop leaked or vanished");
+        let pursuing: Vec<Entity> = cars
+            .iter()
+            .copied()
+            .filter(|&c| matches!(phase_of(&app, c), PursuitPhase::Pursuing(_)))
+            .collect();
+        assert!(
+            pursuing.len() <= CAP,
+            "frame {frame}: {} pursuing",
+            pursuing.len()
+        );
+        assert_eq!(
+            app.world().resource::<PursuitReport>().pursuing as usize,
+            pursuing.len(),
+            "frame {frame}: the report agrees with the cops' phases"
+        );
+        for &c in &cars {
+            assert_eq!(
+                app.world().get::<EmergencyLights>(c).is_some(),
+                pursuing.contains(&c),
+                "frame {frame}: signals exactly on the pursuing cops"
+            );
+            let p = pos_of(&app, c);
+            assert!(
+                p.is_finite() && p.distance(Vec3::new(60.0, 0.0, 140.0)) < 600.0,
+                "frame {frame}: a cop left the map: {p:?}"
+            );
+        }
+        most_pursuing = most_pursuing.max(pursuing.len());
+    }
+
+    assert_eq!(most_pursuing, CAP, "the cap was reached and never exceeded");
+    let report = app.world().resource::<PursuitReport>();
+    assert_eq!(report.peak as usize, CAP);
+    // Past one commit per cop, every commit follows a give-up: the cap
+    // holds pursuers back, it does not make the machine churn.
+    assert!(
+        report.committed <= 4 + report.gave_up,
+        "chases flapped: {report:?}"
+    );
+    // One escape/turn-around needs at least its detection window plus
+    // both halves of the manoeuvre, so no cop can exceed that rate.
+    let per_manoeuvre = 90 + 72 + 45;
+    for c in cops(&mut app) {
+        let drive = app.world().get::<PoliceDrive>(c).unwrap();
+        let total = (drive.bot.escapes + drive.turnarounds) as usize;
+        assert!(
+            total <= frames / per_manoeuvre + 1,
+            "a cop recovered {total} times in {frames} frames"
+        );
+    }
+}

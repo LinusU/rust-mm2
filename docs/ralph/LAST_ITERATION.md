@@ -1,3 +1,36 @@
+# Last iteration — F20-C.2: long-chase bound test (new-run iteration 39)
+
+Selection: the previous review passed with no blocking findings. Of F20's
+open items, AC03 outcome semantics are unknown (UNK-9) and the density
+option needs a new `Densities` field plus a semantics decision, so I took
+AC04 ("active pursuer count and stuck recovery remain bounded during a
+long chase"), which had only short-chase tests. Test-only slice; no
+production change, no ledger change (it asserts the existing COP-9/COP-11
+enhanced-policy numbers).
+
+Test (`tests/police.rs`): four cops ringed around the start, cap 2, a
+target circling at ~12 m/s for 3600 frames. Per frame: pursuer count ≤
+cap and equal to both the cops' `Pursuing` phases and
+`PursuitReport.pursuing`; `EmergencyLights` exactly on pursuing cops; four
+cops always present; positions finite and within 600 m. At the end: peak
+== cap (it was reached), commits past one per cop each follow a give-up,
+and per-cop `escapes + turnarounds` ≤ frames / 207 + 1. Observed: peak 2,
+committed 4, gave_up 2, per-cop recoveries 0–7.
+
+Gates (iteration 39, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0 (2251 passed,
+0 failed; was 2250). No processes left running.
+
+Not verified: synthetic flat ground, teleported target, no road graph —
+not a retail chase; I did not run a mutation check that the test fails if
+the cap were not enforced (the cap lives in the pure `Pursuit::step`
+gate, covered by its own unit tests). Open for F20: outcome/bust
+semantics (UNK-9), density option (B.3c). Status: implemented candidate,
+not independently checked.
+
+---
+
 # Last iteration — F20-C.1: cops recover like opponents (new-run iteration 38)
 
 Selection: the previous review passed with no blocking findings; its
