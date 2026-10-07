@@ -1293,6 +1293,48 @@ carries or delivers (the client never moves), a contested pickup, any
 impairment, a rendered screen, or a process-level check of the client's
 carrier mass.
 
+## Rematch within one lobby (F26-B.1, no wire change)
+
+A hosted lobby already loops: the host's `Cancel` (the operator's
+`cancel`, or the auto-cancel when its own session ends) clears every
+ready flag, keeps picks and reopens joins; the next `start` mints the
+next generation for the same sockets. Two gaps stopped that being a
+rematch that actually plays, both found by the two-process leg
+`net_drive::two_mm2_processes_play_a_rematch_without_reconnecting`:
+
+- **Readiness was one-shot.** `--ready` (both `mm2 --join` and
+  `mm2-join`) only readied once at join, so after a `Cancel` an
+  unattended client stayed unready and the host's start gate (every
+  connected player ready) refused round 2. `--ready` now means *stay
+  ready*: `LobbyLink::keep_ready` / `mm2-join` re-send `ready` on every
+  `Cancel`. The host clears readiness before it sends `Cancel`, so the
+  answer always lands after the reset. A client without `--ready` still
+  presses `Enter` in the windowed lobby.
+- **A stale `quit` cancelled round 2 on arrival.** `Session` teardown
+  leaves `SessionControl::quit` queued past `Unloading → Menu` by
+  design (the `Menu` arm consumes it a frame later). A `Start` that
+  lands in that window begins the next session in the same frame, so
+  the flag outlived the dead session and quit the new one as it went
+  live; on the host, the `Menu` auto-cancel then ended the round for
+  everybody (`event=cancelled generation=2` right after
+  `event=started generation=2`). `net::begin_wired` now owns every
+  wire-driven begin (client direct/parked, host direct/parked) and
+  clears the queued `quit`/`restart`/`pause` of the session it replaces;
+  a refused begin leaves them alone.
+
+Evidence: unit tests for `begin_wired` (clears on success, untouched on
+refusal), two `net_app` legs over the real link (a keep-ready client
+readies again after `Cancel`; one without it stays unready), and the
+three-process loopback leg: host + one `--ready` client, round 1 played
+until the host spawned the client's seat, `cancel`, the client readies
+unprompted, `start` → generation 2, the client's cap record reads
+`mp=gen2 phase=playing` with inputs sent and snapshots applied, then a
+clean `left cause=quit` / lobby close. Not covered: rematch with a
+changed city/mode (F26-AC05's second half — the host advertises one
+session per lobby today), per-stage stale-message checks beyond the
+existing `RemoteSnaps::reset` at `Start`, LAN/Internet scope, windowed
+lobby UI.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

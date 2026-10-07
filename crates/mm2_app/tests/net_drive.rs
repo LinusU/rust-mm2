@@ -206,9 +206,15 @@ fn moved_m(line: &str) -> f64 {
 /// included — is what prints. Returns the decoded field so a leg can
 /// assert counters beyond the convergence floor.
 fn assert_client_drove(rec: &str, min_remotes: u64) -> NetField {
+    assert_client_drove_round(rec, min_remotes, 1)
+}
+
+/// [`assert_client_drove`] for the `round`-th session of one lobby —
+/// the record's `mp=gen<n>` names the generation the client is in.
+fn assert_client_drove_round(rec: &str, min_remotes: u64, round: u64) -> NetField {
     assert_eq!(field(rec, "status"), "pass", "{rec}");
     assert_eq!(field(rec, "phase"), "playing", "{rec}");
-    assert_eq!(field(rec, "mp"), "gen1", "{rec}");
+    assert_eq!(field(rec, "mp"), format!("gen{round}"), "{rec}");
     assert!(
         moved_m(rec) > 0.0,
         "the client drove its predicted seat: {rec}"
@@ -324,6 +330,43 @@ fn two_mm2_processes_drive_one_session_over_loopback() {
         assert!(host.until("event=left").contains("cause=quit"));
     }
 
+    quit_and_assert_host_drove(host);
+}
+
+/// F26-AC05's rematch leg at process level: one lobby, two sessions.
+/// The host closes round 1 with `cancel` (the roster returns to the
+/// lobby and every ready flag clears), the client — which asked for
+/// `--ready` once, on the command line — readies itself again, and
+/// `start` mints generation 2 for the *same* two processes without a
+/// reconnect. The client's cap record then names `gen2`, driving and
+/// applying snapshots; the host's names the clean lobby close. The
+/// round boundary is gated on the host spawning the client's seat
+/// (`remote participant spawned`), so round 1 really ran before it was
+/// cancelled, and round 2's second spawn is the fresh world's.
+#[test]
+fn two_mm2_processes_play_a_rematch_without_reconnecting() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let addr = listening_addr(&host);
+    let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 4500));
+    start_when_ready(&mut host, 1);
+    host.until("remote participant spawned");
+
+    host.cmd("cancel");
+    host.until("event=cancelled generation=1");
+    // Nobody pressed anything: the readiness came from the client's
+    // `--ready`, after the host's cancel cleared it.
+    host.until("ready=true");
+    host.cmd("start");
+    host.until("event=started generation=2");
+    host.until("remote participant spawned");
+
+    // The cap lands whenever the client's frame budget runs out, which
+    // on a loaded machine is later than the idle-time default allows.
+    let rec = alice.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove_round(&rec, 1, 2);
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(host.until("event=left").contains("cause=quit"));
     quit_and_assert_host_drove(host);
 }
 

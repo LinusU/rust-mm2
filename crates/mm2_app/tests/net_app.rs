@@ -446,6 +446,76 @@ fn a_cancel_returns_the_session_to_the_lobby() {
     host.shutdown();
 }
 
+/// Run one started-then-cancelled round with the client's readiness
+/// policy as given, and report whether the host saw it ready again
+/// once the cancelled session was back at the lobby (F26-AC05's rematch
+/// leg: the host's `Cancel` clears every ready flag, so a client that
+/// stays silent never passes the next `start` gate).
+fn readied_again_after_cancel(keep_ready: bool) -> bool {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, link, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    let id = link.player_id();
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link.keep_ready(keep_ready));
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    host.cancel().unwrap();
+
+    // Spin on the condition under a bound: the app reaches `Menu` once
+    // it drained the `Cancel`, and by then any answer is on the wire.
+    let mut readied = false;
+    let mut cancelled = false;
+    for _ in 0..400 {
+        app.update();
+        while let Ok(event) = host.try_recv() {
+            match event {
+                HostEvent::Cancelled { .. } => cancelled = true,
+                // The cancel's own reset is not an event; only the
+                // client's answer is a `ReadyChanged`.
+                HostEvent::ReadyChanged {
+                    id: who,
+                    ready: true,
+                } if who == id && cancelled => readied = true,
+                _ => {}
+            }
+        }
+        if readied || (cancelled && !keep_ready && session_phase(&app) == SessionPhase::Menu) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    if !keep_ready && !readied {
+        // The silent client's absence needs a moment on the wire to mean
+        // anything: a `ReadyChanged` would have followed the drain.
+        while let Ok(event) = host.recv_timeout(Duration::from_millis(300)) {
+            if matches!(event, HostEvent::ReadyChanged { id: who, ready: true } if who == id) {
+                readied = true;
+            }
+        }
+    }
+    assert!(cancelled, "the host never reported the cancel");
+    host.shutdown();
+    readied
+}
+
+#[test]
+fn a_keep_ready_client_readies_again_for_the_next_round() {
+    assert!(readied_again_after_cancel(true));
+}
+
+#[test]
+fn a_client_without_keep_ready_stays_unready_after_a_cancel() {
+    assert!(!readied_again_after_cancel(false));
+}
+
 /// A `Start` drained while a session is still live cannot legally
 /// `Menu → Loading` — it parks in `pending_start`, asks the lifecycle
 /// for teardown, and begins only once `Menu` returns. (The host's own

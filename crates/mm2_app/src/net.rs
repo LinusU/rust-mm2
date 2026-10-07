@@ -341,6 +341,10 @@ pub struct LobbyLink {
     leaving: Option<Instant>,
     /// The pump reported `Closed` — the link is dead.
     pub closed: bool,
+    /// Re-ready after every `Cancel` — the host resets readiness when it
+    /// closes a session, so a client that asked to be ready (`--ready`)
+    /// would otherwise sit out the rematch with no one to press `Enter`.
+    keep_ready: bool,
 }
 
 impl LobbyLink {
@@ -371,7 +375,16 @@ impl LobbyLink {
             dev,
             leaving: None,
             closed: false,
+            keep_ready: false,
         })
+    }
+
+    /// Stay ready across rounds: send `ready` again each time the host
+    /// closes a session (and so clears the roster's flags). The caller
+    /// still sends the first `ready` itself.
+    pub fn keep_ready(mut self, on: bool) -> Self {
+        self.keep_ready = on;
+        self
     }
 
     /// The roster id the host minted for us.
@@ -561,7 +574,12 @@ pub fn drive_lobby(
                 snaps.push_cnr(generation, &frame)
             }
             LobbyEvent::Message(Message::Cancel { generation }) => {
-                cancel(&mut lobby, &mut session, &mut control, generation)
+                cancel(&mut lobby, &mut session, &mut control, generation);
+                // The host cleared every ready flag before it sent this,
+                // so our answer lands after the reset, never before it.
+                if link.keep_ready && !link.leaving() {
+                    let _ = link.ctl.set_ready(true);
+                }
             }
             LobbyEvent::Closed(reason) => {
                 link.closed = true;
@@ -619,7 +637,7 @@ pub fn drive_lobby(
     if *session.phase() == SessionPhase::Menu {
         if lobby.pending_exit.is_none()
             && let Some((generation, config)) = lobby.pending_start.take()
-            && let Err(e) = session.begin_generation(config, generation)
+            && let Err(e) = begin_wired(&mut session, &mut control, config, generation)
         {
             // `accept` + `check_session` already ran, so a refusal
             // here means the lifecycle rejected the begin itself.
@@ -653,6 +671,25 @@ fn refuse(link: &mut LobbyLink, lobby: &mut LobbyState, why: String) {
     lobby.pending_start = None;
     lobby.pending_exit = Some(1);
     link.leave();
+}
+
+/// Begin the lobby's session under the wire's generation. The intents a
+/// finished session's teardown left queued die with it: `quit` survives
+/// `Unloading → Menu` by design (the `Menu` arm of `drive_session`
+/// consumes it next frame), but a parked or immediate `Start` begins in
+/// that very frame, so the stale flag would quit the new session the
+/// moment it went live — a rematch cancelled on arrival.
+fn begin_wired(
+    session: &mut Session,
+    control: &mut SessionControl,
+    config: SessionConfig,
+    generation: u64,
+) -> Result<(), mm2_game::SessionError> {
+    session.begin_generation(config, generation)?;
+    control.quit = false;
+    control.restart = false;
+    control.pause = false;
+    Ok(())
 }
 
 /// `Start` → the existing session lifecycle. The advertised config is
@@ -714,7 +751,7 @@ fn start(
     // session tears down belong to it and must not be wiped.
     snaps.reset();
     if *session.phase() == SessionPhase::Menu {
-        if let Err(e) = session.begin_generation(config, generation) {
+        if let Err(e) = begin_wired(session, control, config, generation) {
             lobby.notice = Some(format!("started session was refused: {e}"));
             lobby.pending_exit = Some(1);
             link.leave();
@@ -1318,7 +1355,7 @@ pub fn drive_host(
     if *session.phase() == SessionPhase::Menu {
         if lobby.pending_exit.is_none()
             && let Some((generation, config)) = lobby.pending_start.take()
-            && let Err(e) = session.begin_generation(config, generation)
+            && let Err(e) = begin_wired(&mut session, &mut control, config, generation)
         {
             // The advertised config was flag-time gated, so a refusal
             // here is lifecycle-internal — end the lobby's session
@@ -1369,7 +1406,7 @@ fn host_started(
         return;
     }
     if *session.phase() == SessionPhase::Menu {
-        if let Err(e) = session.begin_generation(link.config.clone(), generation) {
+        if let Err(e) = begin_wired(session, control, link.config.clone(), generation) {
             lobby.notice = Some(format!("hosted session could not begin: {e}"));
             link.cancel_sent = true;
             let _ = link.ctl.cancel();
@@ -1732,6 +1769,41 @@ mod tests {
     use super::*;
     use mm2_game::SpawnPose;
     use serde_json::json;
+
+    /// The rematch race: a cancelled session's teardown leaves its
+    /// `quit` queued (the `Menu` arm of `drive_session` consumes it a
+    /// frame later), and a `Start` landing in that window begins the
+    /// next session at once. The new session must not inherit the dead
+    /// one's intents — a stale `quit` would end it the moment it went
+    /// live (found by the two-process rematch leg, `net_drive`).
+    #[test]
+    fn a_wired_begin_drops_the_previous_sessions_queued_intents() {
+        let mut session = Session::default();
+        let mut control = SessionControl {
+            quit: true,
+            restart: true,
+            pause: true,
+        };
+        begin_wired(&mut session, &mut control, SessionConfig::default(), 4).unwrap();
+        assert_eq!(*session.phase(), SessionPhase::Loading);
+        assert_eq!(session.wire_generation(), 4);
+        assert!(!control.quit && !control.restart && !control.pause);
+    }
+
+    /// A refused begin changes nothing: the intents belong to the
+    /// session that is still there.
+    #[test]
+    fn a_refused_wired_begin_keeps_the_queued_intents() {
+        let mut session = Session::default();
+        let mut control = SessionControl {
+            quit: true,
+            ..Default::default()
+        };
+        // Generation 0 is the at-rest value no lobby mints.
+        assert!(begin_wired(&mut session, &mut control, SessionConfig::default(), 0).is_err());
+        assert!(control.quit);
+        assert_eq!(*session.phase(), SessionPhase::Menu);
+    }
 
     fn city_event_config() -> SessionConfig {
         SessionConfig {

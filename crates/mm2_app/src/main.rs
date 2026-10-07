@@ -411,7 +411,8 @@ struct Cli {
     driver: Option<String>,
 
     /// Mark ready as soon as the lobby admits us — with it the host's
-    /// `start` can fire immediately.
+    /// `start` can fire immediately — and again whenever the host
+    /// closes a session, so the next round can start unattended.
     #[arg(long, requires = "join")]
     ready: bool,
 
@@ -976,7 +977,7 @@ fn main() {
         }
         let hello = mm2_net::hello(smoke::COMMIT.to_string(), driver, fingerprint.hash);
         let link = match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
-            Ok(link) => link,
+            Ok(link) => link.keep_ready(cli.ready),
             Err(e) => {
                 error!(peer = %addr, error = %e, "join failed");
                 std::process::exit(1);

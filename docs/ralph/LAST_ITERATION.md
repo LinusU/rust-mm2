@@ -1,3 +1,52 @@
+# Last iteration — F26-B.1: lobby rematch (new-run iteration 27 of this runner)
+
+Selection: previous review passed with no blockers (its gaps are
+no-audio-device / unrendered rows, environment limits). Operator report 6
+says keep working on networking, and recent iterations had drifted to
+F20/F21/F23. F26 req 6 / AC05 (lobby → session → result → rematch → lobby)
+had no process-level evidence at all and `grep rematch` found nothing in
+code, so I wrote the two-round leg first and let it find what was broken.
+
+Found and fixed (both shipped by the leg, neither visible to the
+in-process tests):
+1. `--ready` readied once at join. The host's `Cancel` clears every ready
+   flag, so an unattended client could never pass round 2's start gate.
+   `LobbyLink::keep_ready` (set from `--ready` in `main.rs`) and `mm2-join`
+   now re-send `ready` on each `Cancel`; the host resets before it sends
+   `Cancel`, so the answer lands after the reset.
+2. A stale `SessionControl::quit`. Teardown leaves `quit` queued past
+   `Unloading → Menu` (the Menu arm consumes it next frame by design); a
+   `Start` in that window begins the next session in the same frame, and the
+   old flag quit the new one as it went live; the host's Menu auto-cancel
+   then ended round 2 for everybody (`event=cancelled generation=2`
+   straight after `started generation=2`). New `net::begin_wired` owns the
+   four wire-driven begins (client direct/parked, host direct/parked) and
+   clears quit/restart/pause on success only. Diagnosed by logging phase and
+   intents per frame in `drive_host`; that debug code is removed.
+
+Tests (+5): `net::tests` `begin_wired` x2; `net_app`
+`a_keep_ready_client_readies_again_for_the_next_round` and its negative;
+`net_drive::two_mm2_processes_play_a_rematch_without_reconnecting`
+(host + `--ready` client, round 1 gated on the host spawning the seat,
+`cancel`, unprompted re-ready, `start` → gen 2, client cap record reads
+`mp=gen2 phase=playing`, clean quit). Confirmed red with the quit-clear
+commented out (fails 3/3), green with it (3 full network-suite runs, 102/102).
+A first draft of the process leg failed under the parallel workspace run
+(client frame budget 3000 too tight on a loaded machine); the budget is
+4500 and the record wait is `until_within(120 s)`.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+exit 0; `cargo test --locked --workspace` exit 0 (2376 passed, 0 failed). No test
+processes left running.
+
+Not verified / open: rematch with a *changed* city/mode (the host advertises
+one session per lobby today), windowed results→lobby UI, late join/reconnect
+policy, LAN/Internet. Loopback, one machine, synthetic dev world only.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F23-B.3: audio volume levels (new-run iteration 26 of this runner)
 
 Selection: previous review passed with no blockers; its gaps (no real

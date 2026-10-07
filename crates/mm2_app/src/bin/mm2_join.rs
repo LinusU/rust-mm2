@@ -27,7 +27,8 @@
 //! `vehicle <id>[:<paint>]` (a bare `vehicle` picks the dev car),
 //! `ready`, `unready`, `quit` (a clean leave). A closed stdin means
 //! unattended participation. `--vehicle`/`--ready` do the same once at
-//! startup.
+//! startup, and `--ready` readies again after every `cancelled` so the
+//! next round can start.
 //!
 //! Every advertised session — the lobby's `Session` and the running
 //! one inside `Start` — is decoded and checked against *this* install
@@ -94,7 +95,8 @@ struct Cli {
     #[arg(long, value_name = "id[:paint]")]
     vehicle: Option<String>,
 
-    /// Mark ready right after joining (sent after `--vehicle`).
+    /// Mark ready right after joining (sent after `--vehicle`) and again
+    /// after each cancelled session.
     #[arg(long)]
     ready: bool,
 }
@@ -279,7 +281,12 @@ fn main() {
                 }
             },
             Ok(Message::Cancel { generation }) => {
-                println!("event=cancelled generation={generation}")
+                println!("event=cancelled generation={generation}");
+                // The host cleared readiness with the session — stay in
+                // the next round unattended.
+                if cli.ready {
+                    let _ = ctl.set_ready(true);
+                }
             }
             // The host→client set is closed — `join` consumed the
             // Welcome and the variants above are everything else it
