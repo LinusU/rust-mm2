@@ -955,10 +955,204 @@ pub enum HostCommand {
     /// a changed city, mode, difficulty or conditions) — see
     /// [`HostLink::set_session`] for what is gated and kept.
     Session(Box<SessionConfig>),
+    /// An operator's *edit* of the advertised session (the stdin
+    /// `session city=sf event=blitz:2 …` word): applied to the link's
+    /// current config when drained, then handled exactly like
+    /// [`Self::Session`] — same gates, same refusal notice.
+    Change(SessionChange),
     /// End the running session — everyone returns to the lobby.
     Cancel,
     /// Shut the lobby down and exit the app.
     Quit,
+}
+
+/// The operator-facing edit of a hosted lobby's next-round session —
+/// `key=value` words in the `--host` flags' vocabulary (`city`,
+/// `event`, `cnr`/`gold`/`limit`, `difficulty`, `weather`, `tod`,
+/// `seed`). Every unnamed field keeps the link's current value, so an
+/// operator changes one thing at a time without restating the rest.
+/// Parsing is pure and never touches the lobby; [`Self::apply`] builds
+/// the config [`HostLink::set_session`] then gates.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionChange {
+    world: Option<WorldMode>,
+    mode: Option<ModeChange>,
+    difficulty: Option<Difficulty>,
+    weather: Option<Weather>,
+    time_of_day: Option<TimeOfDay>,
+    seed: Option<u64>,
+}
+
+/// The mode a [`SessionChange`] names — the table/row stays unresolved
+/// until the change is applied, because the event's city is the
+/// session's (possibly just-changed) world.
+#[derive(Debug, Clone, PartialEq)]
+enum ModeChange {
+    Cruise,
+    Event(String),
+    CopsAndRobbers(CnrSettings),
+}
+
+impl SessionChange {
+    /// Parse the words after `session`. Unknown keys, repeated keys,
+    /// malformed values and an empty list are named errors — an
+    /// operator typo must never silently re-advertise something else.
+    pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        let mut change = Self::default();
+        let mut seen: Vec<&str> = Vec::new();
+        let (mut cnr, mut gold, mut limit) = (None, None, None);
+        let mut event = None;
+        let mut cruise = false;
+        for word in words {
+            let (key, value) = word
+                .split_once('=')
+                .ok_or_else(|| format!("expected key=value, got {word:?}"))?;
+            if seen.contains(&key) {
+                return Err(format!("{key} given twice"));
+            }
+            seen.push(key);
+            match key {
+                "city" => {
+                    change.world = Some(match value.to_ascii_lowercase().as_str() {
+                        "dev" | "dev-world" => WorldMode::DevWorld,
+                        stem if !stem.is_empty()
+                            && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+                        {
+                            WorldMode::City {
+                                psdl: format!("city/{stem}.psdl"),
+                            }
+                        }
+                        _ => return Err(format!("invalid city {value:?}")),
+                    });
+                }
+                "event" => match value {
+                    "none" | "cruise" => cruise = true,
+                    _ => event = Some(value.to_string()),
+                },
+                "cnr" => cnr = Some(value),
+                "gold" => gold = Some(value),
+                "limit" => limit = Some(value),
+                "difficulty" => {
+                    change.difficulty = Some(match value.to_ascii_lowercase().as_str() {
+                        "amateur" => Difficulty::Amateur,
+                        "pro" | "professional" => Difficulty::Professional,
+                        _ => return Err(format!("unknown difficulty {value:?}: amateur|pro")),
+                    });
+                }
+                "weather" => {
+                    change.weather = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid weather {value:?}"))
+                            .and_then(|v| Weather::new(v).map_err(|e| e.to_string()))?,
+                    );
+                }
+                "tod" => {
+                    change.time_of_day = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid tod {value:?}"))
+                            .and_then(|v| TimeOfDay::new(v).map_err(|e| e.to_string()))?,
+                    );
+                }
+                "seed" => {
+                    change.seed = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid seed {value:?}"))?,
+                    );
+                }
+                other => return Err(format!("unknown key {other:?}")),
+            }
+        }
+        if seen.is_empty() {
+            return Err(
+                "nothing to change: city= event= cnr= gold= limit= difficulty= weather= tod= seed="
+                    .to_string(),
+            );
+        }
+        if (gold.is_some() || limit.is_some()) && cnr.is_none() {
+            return Err("gold=/limit= need cnr=<variant>".to_string());
+        }
+        if usize::from(cruise) + usize::from(event.is_some()) + usize::from(cnr.is_some()) > 1 {
+            return Err("event=, event=none and cnr= each name the mode; give one".to_string());
+        }
+        change.mode = if let Some(variant) = cnr {
+            Some(ModeChange::CopsAndRobbers(CnrSettings::parse(
+                variant, gold, limit,
+            )?))
+        } else if let Some(event) = event {
+            Some(ModeChange::Event(event))
+        } else if cruise {
+            Some(ModeChange::Cruise)
+        } else {
+            None
+        };
+        Ok(change)
+    }
+
+    /// The config this edit asks for on top of `base`. `fresh_seed`
+    /// stands in for an unnamed seed: a changed round should not replay
+    /// the last round's seed-rolled world (name `seed=` to repeat it).
+    /// A named event is read against the *resulting* city; an event
+    /// session whose city changes without a new `event=` is refused
+    /// rather than silently pointing the old row at another city.
+    pub fn apply(&self, base: &SessionConfig, fresh_seed: u64) -> Result<SessionConfig, String> {
+        let mut config = base.clone();
+        if let Some(world) = &self.world {
+            config.world = world.clone();
+        }
+        let city = match &config.world {
+            WorldMode::City { psdl } => psdl
+                .strip_prefix("city/")
+                .and_then(|p| p.strip_suffix(".psdl"))
+                .unwrap_or("london")
+                .to_string(),
+            // The CLI's `--event` over the dev world resolves London's
+            // tables (the developer/test rig).
+            WorldMode::DevWorld => "london".to_string(),
+        };
+        match &self.mode {
+            Some(ModeChange::Cruise) => config.mode = SessionMode::Cruise,
+            Some(ModeChange::CopsAndRobbers(settings)) => {
+                config.mode = SessionMode::CopsAndRobbers(*settings);
+            }
+            Some(ModeChange::Event(arg)) => {
+                let event = EventRef::parse(arg, &city).ok_or_else(|| {
+                    format!("invalid event {arg:?}: expected checkpoint|blitz|circuit|crash:<row>")
+                })?;
+                config.mode = SessionMode::Event(event);
+            }
+            None => {
+                if self.world.is_some() && matches!(base.mode, SessionMode::Event(_)) {
+                    return Err(
+                        "an event belongs to its city: name event=<table>:<row> (or event=none) with the new city"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if let Some(difficulty) = self.difficulty {
+            config.difficulty = difficulty;
+        }
+        if let Some(weather) = self.weather {
+            config.conditions.weather = weather;
+        }
+        if let Some(time_of_day) = self.time_of_day {
+            config.conditions.time_of_day = time_of_day;
+        }
+        config.seed = self.seed.unwrap_or(fresh_seed);
+        Ok(config)
+    }
+}
+
+/// A clock-minted seed — what `--host` uses unless `--seed` is given,
+/// and what a [`SessionChange`] without `seed=` re-advertises.
+pub fn fresh_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// Why a hosted lobby refused to re-advertise the next round's session
@@ -986,22 +1180,31 @@ pub enum SetSessionError {
     Net(#[from] NetError),
 }
 
-/// Feed stdin `start`/`cancel`/`quit` lines into a hosted lobby — the
-/// same operator surface `mm2-host` documents. A closed stdin just
-/// ends the thread; unknown lines are named on stderr, never queued.
+/// Feed stdin `start`/`cancel`/`quit`/`session …` lines into a hosted
+/// lobby — `mm2-host`'s operator words plus the in-app host's
+/// [`SessionChange`] edit. A closed stdin just ends the thread;
+/// unknown or malformed lines are named on stderr, never queued.
 pub fn stdin_commands(tx: Sender<HostCommand>) {
     let _ = thread::Builder::new()
         .name("mm2-host-stdin".to_string())
         .spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 let Ok(line) = line else { return };
-                let command = match line.trim() {
-                    "start" => HostCommand::Start,
-                    "cancel" => HostCommand::Cancel,
-                    "quit" => HostCommand::Quit,
-                    "" => continue,
-                    other => {
-                        eprintln!("error: unknown command {other:?}");
+                let mut words = line.split_whitespace();
+                let command = match words.next() {
+                    Some("start") => HostCommand::Start,
+                    Some("cancel") => HostCommand::Cancel,
+                    Some("quit") => HostCommand::Quit,
+                    Some("session") => match SessionChange::parse(words) {
+                        Ok(change) => HostCommand::Change(change),
+                        Err(e) => {
+                            eprintln!("error: session: {e}");
+                            continue;
+                        }
+                    },
+                    None => continue,
+                    Some(_) => {
+                        eprintln!("error: unknown command {:?}", line.trim());
                         continue;
                     }
                 };
@@ -1320,14 +1523,35 @@ pub fn drive_host(
                     let _ = link.ctl.start(link.late_join);
                 }
             }
-            HostCommand::Session(next) => {
+            HostCommand::Session(_) | HostCommand::Change(_) => {
                 if link.leaving {
                     continue;
                 }
+                let next = match command {
+                    HostCommand::Session(next) => Ok(*next),
+                    HostCommand::Change(change) => change.apply(&link.config, fresh_seed()),
+                    _ => unreachable!("matched above"),
+                };
                 let running = lobby.generation.is_some();
-                match link.set_session(&vfs.0, &next, running) {
-                    Ok(()) => lobby.advertised = Some(link.ad.clone()),
-                    Err(e) => lobby.notice = Some(format!("next session refused: {e}")),
+                let verdict = next
+                    .and_then(|next| {
+                        link.set_session(&vfs.0, &next, running)
+                            .map_err(|e| e.to_string())
+                    })
+                    .map(|()| link.ad.clone());
+                match verdict {
+                    Ok(ad) => {
+                        if link.log_events {
+                            println!("event=session_changed summary={:?}", ad.summary);
+                        }
+                        lobby.advertised = Some(ad);
+                    }
+                    Err(e) => {
+                        if link.log_events {
+                            println!("event=session_refused reason={e:?}");
+                        }
+                        lobby.notice = Some(format!("next session refused: {e}"));
+                    }
                 }
             }
             HostCommand::Cancel => {
@@ -1849,6 +2073,146 @@ mod tests {
     use super::*;
     use mm2_game::SpawnPose;
     use serde_json::json;
+
+    fn change(line: &str) -> Result<SessionChange, String> {
+        SessionChange::parse(line.split_whitespace())
+    }
+
+    /// The operator's words become exactly the fields they name; every
+    /// unnamed field keeps the host's current value (the vehicle pick,
+    /// the conditions the operator did not touch) and only the seed is
+    /// re-rolled.
+    #[test]
+    fn a_session_edit_changes_only_what_it_names() {
+        let base = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/london.psdl".into(),
+            },
+            difficulty: Difficulty::Professional,
+            conditions: SessionConditions {
+                time_of_day: TimeOfDay::new(2).unwrap(),
+                weather: Weather::new(1).unwrap(),
+            },
+            seed: 7,
+            ..SessionConfig::default()
+        };
+        let next = change("city=SF event=blitz:3 weather=3")
+            .unwrap()
+            .apply(&base, 99)
+            .unwrap();
+        assert_eq!(
+            next.world,
+            WorldMode::City {
+                psdl: "city/sf.psdl".into()
+            }
+        );
+        assert_eq!(
+            next.mode,
+            SessionMode::Event(EventRef {
+                city: "sf".into(),
+                table: EventTableKind::Blitz,
+                index: 3
+            })
+        );
+        assert_eq!(next.conditions.weather.get(), 3);
+        // Untouched: difficulty and time of day.
+        assert_eq!(next.difficulty, Difficulty::Professional);
+        assert_eq!(next.conditions.time_of_day.get(), 2);
+        // Unnamed seed → the caller's fresh one; a named one wins.
+        assert_eq!(next.seed, 99);
+        let again = change("seed=5 difficulty=amateur")
+            .unwrap()
+            .apply(&base, 99)
+            .unwrap();
+        assert_eq!((again.seed, again.difficulty), (5, Difficulty::Amateur));
+        assert_eq!(again.world, base.world);
+    }
+
+    /// Cops & Robbers rides the `--cnr` vocabulary, `event=none` returns
+    /// to cruise, and an event reads the dev world as London (the CLI's
+    /// `--event` default).
+    #[test]
+    fn a_session_edit_picks_the_mode_in_the_cli_vocabulary() {
+        let base = SessionConfig::default();
+        let cnr = change("cnr=cops gold=half limit=5m")
+            .unwrap()
+            .apply(&base, 1)
+            .unwrap();
+        assert_eq!(
+            cnr.mode,
+            SessionMode::CopsAndRobbers(
+                CnrSettings::parse("cops", Some("half"), Some("5m")).unwrap()
+            )
+        );
+        let back = change("event=none").unwrap().apply(&cnr, 1).unwrap();
+        assert_eq!(back.mode, SessionMode::Cruise);
+        let dev_event = change("event=race:0").unwrap().apply(&base, 1).unwrap();
+        assert_eq!(
+            dev_event.mode,
+            SessionMode::Event(EventRef {
+                city: "london".into(),
+                table: EventTableKind::Checkpoint,
+                index: 0
+            })
+        );
+    }
+
+    /// An event session cannot be moved to another city by accident: the
+    /// row belongs to its city, so the operator must name the new one.
+    #[test]
+    fn moving_an_event_session_to_another_city_needs_a_new_event() {
+        let base = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/london.psdl".into(),
+            },
+            mode: SessionMode::Event(EventRef::parse("blitz:1", "london").unwrap()),
+            ..SessionConfig::default()
+        };
+        let err = change("city=sf").unwrap().apply(&base, 1).unwrap_err();
+        assert!(err.contains("belongs to its city"), "{err}");
+        // Cruise has no row to strand, so a bare city change is fine.
+        let cruise = SessionConfig::default();
+        assert!(change("city=sf").unwrap().apply(&cruise, 1).is_ok());
+    }
+
+    /// Typos never re-advertise something else: unknown/repeated keys,
+    /// bad values, out-of-range selectors, conflicting modes and the
+    /// empty edit are all named errors, and a city stem cannot smuggle a
+    /// path into the VFS lookup.
+    #[test]
+    fn a_malformed_session_edit_is_named_not_guessed() {
+        for bad in [
+            "",
+            "city",
+            "colour=red",
+            "weather=4",
+            "weather=x",
+            "tod=9",
+            "seed=-1",
+            "difficulty=hard",
+            "seed=1 seed=2",
+            "gold=half",
+            "limit=5m",
+            "cnr=cops event=blitz:1",
+            "event=none cnr=cops",
+            "cnr=nonsense",
+            "city=../x",
+            "city=a/b",
+            "city=",
+        ] {
+            assert!(change(bad).is_err(), "{bad:?} should be refused");
+        }
+        // A well-formed word with a malformed event only fails on apply,
+        // where the city it belongs to is known.
+        let c = change("event=blitz").unwrap();
+        assert!(c.apply(&SessionConfig::default(), 1).is_err());
+        assert!(
+            change("event=banana:1")
+                .unwrap()
+                .apply(&SessionConfig::default(), 1)
+                .is_err()
+        );
+    }
 
     /// The rematch race: a cancelled session's teardown leaves its
     /// `quit` queued (the `Menu` arm of `drive_session` consumes it a

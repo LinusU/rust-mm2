@@ -370,6 +370,45 @@ fn two_mm2_processes_play_a_rematch_without_reconnecting() {
     quit_and_assert_host_drove(host);
 }
 
+/// F26-AC05's changed rematch at process level, through the operator's
+/// own surface: the host's stdin `session …` word. Mid-round it is
+/// refused (the running round's peers are never handed another ad);
+/// after `cancel` it re-advertises rainy weather, the same client
+/// process (no reconnect) re-readies and plays generation 2 under it —
+/// its cap record carries the wet-road `traction=0.8` round 1 never
+/// had — and a malformed word is named on stderr without touching the
+/// advertisement. Dev world over loopback: the retail city/mode change
+/// is the in-process `net_app` leg's fixture, not this one.
+#[test]
+fn a_session_edit_typed_on_the_host_reaches_the_next_round() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let addr = listening_addr(&host);
+    let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 4500));
+    start_when_ready(&mut host, 1);
+    host.until("remote participant spawned");
+
+    host.cmd("session weather=3");
+    let refused = host.until("event=session_refused");
+    assert!(refused.contains("a session is running"), "{refused}");
+
+    host.cmd("cancel");
+    host.until("event=cancelled generation=1");
+    host.until("ready=true");
+    host.cmd("session weather=3 seed=4242");
+    host.until("event=session_changed");
+    host.cmd("start");
+    host.until("event=started generation=2");
+    host.until("remote participant spawned");
+
+    let rec = alice.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove_round(&rec, 1, 2);
+    assert!(rec.contains("traction=0.8"), "round 2 is not wet: {rec}");
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
 /// F26-AC02's late-join leg at process level (req 4): the host starts
 /// generation 1 *alone* (the empty-roster start gate passes, the open
 /// cruise policy admits joiners — MP-5), plays on, and only then does a

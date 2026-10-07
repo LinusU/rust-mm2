@@ -12,7 +12,6 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::*;
 use bevy::audio::AddAudioSource;
@@ -1010,12 +1009,7 @@ fn main() {
     // pick validator, and `advertise` refuses a config carrying dev
     // overrides — never network-legal.
     let mut host_link = if cli.host {
-        session_config.seed = cli.seed.unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0)
-        });
+        session_config.seed = cli.seed.unwrap_or_else(net::fresh_seed);
         if let WorldMode::City { psdl } = &session_config.world
             && vfs.resolve(psdl).is_none()
         {

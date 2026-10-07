@@ -1387,11 +1387,37 @@ the caller's; the start's late-join policy follows the new mode.
 new conditions/seed; mid-round change refused, unresolvable city refused,
 the peer receives the new ad and `Start` carries it under generation 2,
 the host seat begins it, and a newcomer is now refused `SessionStarted`
-(red when the late-join update is removed). *No operator surface yet*: the
-stdin words and lobby keys do not build a config (no windowed host menu
-picks a mode), so today only code can send the command. Not covered: a
-retail city change, a client that cannot run the new ad (it leaves, by
-`refuse`), results→lobby UI, two-process leg.
+(red when the late-join update is removed). Not covered: a retail city
+change, a client that cannot run the new ad (it leaves, by `refuse`),
+results→lobby UI.
+
+#### Operator surface: the stdin `session` word (F26-B.5)
+
+The in-app host's stdin now takes `session key=value …` beside
+`start`/`cancel`/`quit`: `city=<stem>|dev`, `event=<table>:<row>|none`,
+`cnr=<variant> [gold=…] [limit=…]`, `difficulty=amateur|pro`, `weather=0-3`,
+`tod=0-3`, `seed=<n>` — the `--host` flags' vocabulary and parsers
+(`EventRef::parse`, `CnrSettings::parse`, `Weather::new`, `TimeOfDay::new`).
+The words parse to a `SessionChange` (`HostCommand::Change`), a *patch*:
+`drive_host` applies it to the link's **current** config (so a second edit
+keeps what the first set), mints a fresh seed unless `seed=` is named, and
+hands the result to the same `set_session` gates. Typos are named on stderr
+and never queued (unknown/repeated key, bad value, out-of-range selector,
+two modes, `gold=` without `cnr=`, a city stem that is not
+`[A-Za-z0-9_]+`); an event is read against the resulting city, and an event
+session moved to another city without a new `event=` is refused (the row
+belongs to its city). The verdict is a lobby notice and, with host event
+logging, an `event=session_changed summary="…"` / `event=session_refused
+reason="…"` line. Evidence: `SessionChange` unit tests (patch semantics,
+vocabulary, malformed words); `net_app::a_session_edit_from_the_operator_patches_the_advertised_session`
+(two chained edits reach the peer on the wire; a bad event row is refused,
+ad unchanged); `net_drive::a_session_edit_typed_on_the_host_reaches_the_next_round`
+(two processes, dev world, loopback: mid-round `session` refused; after
+`cancel`, `session weather=3` is advertised and the same client process
+plays generation 2 with the wet-road `traction=0.8` its round 1 lacked —
+red with `weather=0`). Still no *windowed* host menu that picks a mode, and
+the summary line does not name conditions, so the process leg proves them
+by the client's traction rather than the ad text.
 
 ## Data-plane budget and bounds (F25-B req 6)
 

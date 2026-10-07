@@ -24,7 +24,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use crate::support;
 
-use mm2_app::net::{self, HostCommand, HostLink, LobbyLink, LobbyState};
+use mm2_app::net::{self, HostCommand, HostLink, LobbyLink, LobbyState, SessionChange};
 use mm2_app::netdrive::{self, NetPlayer, RemotePick};
 use mm2_app::session;
 use mm2_app::session::{SelectedCar, SessionControl, TunedVehicle};
@@ -1238,6 +1238,97 @@ fn a_rematch_can_change_the_session_without_dropping_the_peer() {
         "{err:?}"
     );
     assert!(app.should_exit().is_none());
+}
+
+/// The operator surface of F26-AC05's changed rematch: the stdin
+/// `session key=value …` words parse to a `SessionChange`, which the
+/// host loop applies to the *current* advertisement — so a second edit
+/// keeps what the first one set — and then runs through the same gates
+/// as a full config. A refusal (an event row the install cannot build)
+/// leaves the advertised session as it was.
+#[test]
+fn a_session_edit_from_the_operator_patches_the_advertised_session() {
+    let install = support::event_install();
+    let round_one = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/testcity.psdl".to_string(),
+        },
+        seed: 5,
+        ..SessionConfig::default()
+    };
+    let ad_one = net::advertise(&round_one).unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &round_one);
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+    let edit =
+        |line: &str| HostCommand::Change(SessionChange::parse(line.split_whitespace()).unwrap());
+    let stamped = |config: &SessionConfig| {
+        let mut config = config.clone();
+        config.authority = SessionAuthority::Host;
+        net::advertise(&config).unwrap()
+    };
+
+    // One edit names a mode, a difficulty and a seed.
+    commands
+        .send(edit("event=race:0 difficulty=pro seed=77"))
+        .unwrap();
+    let expected = SessionConfig {
+        mode: SessionMode::Event(support::event(mm2_game::EventTableKind::Checkpoint, 0)),
+        difficulty: mm2_game::Difficulty::Professional,
+        seed: 77,
+        ..round_one.clone()
+    };
+    app.update();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Session(ad) if *ad == stamped(&expected)),
+    );
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().advertised.as_ref() == Some(&stamped(&expected))
+    });
+
+    // A later edit of one field keeps the rest.
+    commands.send(edit("weather=2 seed=78")).unwrap();
+    let foggy = SessionConfig {
+        conditions: mm2_game::SessionConditions {
+            weather: mm2_game::Weather::new(2).unwrap(),
+            ..expected.conditions
+        },
+        seed: 78,
+        ..expected.clone()
+    };
+    app.update();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Session(ad) if *ad == stamped(&foggy)),
+    );
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().advertised.as_ref() == Some(&stamped(&foggy))
+    });
+
+    // An event row the install cannot build is refused by the host's
+    // own gates; the advertisement stays the last good one.
+    app.world_mut().resource_mut::<LobbyState>().notice = None;
+    commands.send(edit("event=blitz:99")).unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().notice.is_some()
+    });
+    let lobby = app.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("next session refused")),
+        "{:?}",
+        lobby.notice
+    );
+    assert_eq!(lobby.advertised.as_ref(), Some(&stamped(&foggy)));
+    assert_ne!(lobby.advertised.as_ref(), Some(&ad_one));
 }
 
 /// `quit` while a hosted session runs: the wire session is cancelled

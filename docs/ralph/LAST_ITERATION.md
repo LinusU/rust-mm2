@@ -1,3 +1,35 @@
+# Last iteration — F26-B.5: operator surface for the changed rematch (new-run iteration 31 of this runner)
+
+Selection: previous review passed with no blockers; its first verification gap
+was that nothing a user can touch builds `HostCommand::Session`, so F26-AC05's
+changed rematch was code-only. Took that gap (breakdown two-process leg is still
+too broad, see PLAN).
+
+Change: stdin `session key=value …` on the in-app host (`city`, `event`, `cnr`
++`gold`/`limit`, `difficulty`, `weather`, `tod`, `seed`; the `--host` flags'
+parsers). It parses to `SessionChange` → `HostCommand::Change`, a *patch*
+applied by `drive_host` to the link's current config (fresh seed unless
+`seed=`), then through the existing `set_session` gates, so a mid-round or
+unrunnable edit is refused and the old ad stays. Malformed words never queue
+(stderr). Event rows are read against the resulting city; moving an event
+session to another city without a new `event=` is refused. With host event
+logging the verdict prints `event=session_changed` / `event=session_refused`.
+`net::fresh_seed()` now backs both `--host`'s default seed and an unnamed edit
+seed. Tests: 4 `SessionChange` units; `net_app::a_session_edit_from_the_operator_patches_the_advertised_session`
+(chained edits reach the peer, bad row refused); `net_drive::a_session_edit_typed_on_the_host_reaches_the_next_round`
+(two processes: mid-round refusal, `cancel`, `session weather=3`, same client
+plays gen 2 with `traction=0.8`; verified red with `weather=0`, 3/3 green).
+Docs: `research/net.md`, DSN-79, PLAN.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0 (after one `clone_on_copy` fix); `cargo test --locked --workspace` exit 0 (2385 passed, 0 failed). No test processes left running.
+
+Not verified / open: no windowed host menu picks a mode; retail-city/two-process
+city change; a client that cannot run the new ad; ad summary does not show
+conditions (proved via client traction); LAN/Internet. Loopback, one machine,
+dev world. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F26-B.4: rematch with a changed session (new-run iteration 30 of this runner)
 
 Selection: previous review passed with no blockers. The breakdown two-process
