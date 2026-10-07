@@ -46,6 +46,15 @@ meaning is separate (ledger MP-9).
       own comment ("Geo File, StartLink, Start Dist, Start Mode, Start
       Lane, Patrol Route") does not match the observed column count;
       tail columns are preserved raw.
+      Measured by `mm2-inspect police` (F20-A.1, ledger COP-5…7): 237
+      rows — 199 `vpcop`, the other 38 on london `crash10`/`crash11` name
+      `vpauditt`/`vpdb7`/`vpmustang99` (Crash Course, F21: the section
+      is not cops-only there); the first tail value spans −270…535 (unnormalised
+      yaw degrees — `535` on london `roam` is 175°); every checkpoint
+      event wires exactly its table row's `Cops` at both difficulties;
+      Blitz/Circuit none; Cruise's `roam` record wires sf 19/20 and
+      london 20/20. `mm2_game::PoliceRoster` carries the rows with the
+      heading reduced to (−180, 180] and the raw tail intact.
     - `[Opponent]` — `geo waypoint-file <tail>`: geo basename
       (`vpcoop`, `vpford`, …), a `*.opp` path record name, then 10
       numbers on 536 rows or 1 number on 1 row
