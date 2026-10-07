@@ -321,6 +321,8 @@ pub fn drive_session(
             commands.remove_resource::<crate::audio::SurfaceAudio>();
             commands.remove_resource::<crate::audio::SirenAudio>();
             commands.remove_resource::<crate::police::PoliceFleet>();
+            commands.remove_resource::<crate::police::PursuitReport>();
+            commands.remove_resource::<mm2_game::PursuitPolicy>();
             // F18-B.3: the precipitation ambience binding dies with
             // the session like the other audio state — its voices are
             // `SessionEntity`-stamped and chain-despawn.
@@ -1703,9 +1705,9 @@ pub fn load_session_world(
                 );
             }
             // F20-A.2: the authored police lineup stands at its
-            // staged positions (no pursuit yet — COP-4). Single-player
-            // only, like the opponents; the report records the
-            // authored count either way.
+            // staged positions until F20-A.3's `police_pursuit` sees a
+            // target. Single-player only, like the opponents; the
+            // report records the authored count either way.
             let fleet = police::spawn_police(
                 &mut commands,
                 &vfs.0,
@@ -1718,6 +1720,8 @@ pub fn load_session_world(
                 &mut session,
             );
             commands.insert_resource(fleet);
+            commands.insert_resource(mm2_game::PursuitPolicy::default());
+            commands.insert_resource(police::PursuitReport::default());
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,

@@ -23,9 +23,9 @@ use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, damage,
     damage_fx, dash, environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive,
-    oppind, opponents, pause, perf, precip, profile, progression, pvs, race, racestat, racetime,
-    recovery, results, scripted, sequence, session, settings, smoke, spark_fx, stuck, texel_fx,
-    traffic, wheel_fx,
+    oppind, opponents, pause, perf, police, precip, profile, progression, pvs, race, racestat,
+    racetime, recovery, results, scripted, sequence, session, settings, smoke, spark_fx, stuck,
+    texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1616,6 +1616,12 @@ fn main() {
             // A penned opponent re-anchors through `ResetVehicle` —
             // ahead of the apply like the other Update writers.
             .before(mm2_vehicle::systems::vehicle_reset),
+    )
+    // F20-A.3: the fielded cops' detect → pursue machine. Frozen with
+    // the other AI in ordinary static captures; no-ops without a fleet.
+    .add_systems(
+        Update,
+        police::police_pursuit.run_if(evidence_capture_input_allowed),
     )
     // F25-B: the trailer reseat follower reads every `ResetVehicle` the
     // frame produced — the FixedLast resolvers, `vehicle_self_right`

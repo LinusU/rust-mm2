@@ -1,3 +1,52 @@
+# Last iteration — F20-A.3: the cops detect, chase and give up (new-run iteration 33)
+
+Selection: the previous review passed with no blocking findings. The
+fielded cops (A.2) stood handbrake-held with no behavior, so I took the
+next queued leg, A.3: the detect → engage → pursue → lost machine. The
+retail rules are unknown (COP-4/UNK-9); the machine follows the only
+documented shape (COP-1 chase on sight, COP-2 escape by leaving sight)
+with disclosed, designed numbers (ledger COP-9) — no stars, bust or
+arrest.
+
+Changes:
+- `mm2_game::police`: pure `Pursuit` (component) / `PursuitPhase` /
+  `PursuitPolicy` (resource; detect 90 m, contact 140 m, reaction 0.75 s,
+  lose 8 s, stand-down 6 s, 4 pursuers) / `Sighting` / `PursuitEvent`;
+  `last_seen` is the only place a chase learns the target's position.
+- `mm2_app::police`: `police_pursuit` (nearest racing `PlayerControl::Local`
+  `PlayerVehicle`; sight ray cast against `GameLayer::World` only; pursuer
+  cap filled in authored order), `chase_input` (reuses the opponents'
+  `steer_toward`/`CarLimits`/`bearing_throttle`/`recovery_input`/
+  `watch_stuck` — no second steering law), `PoliceDrive` component,
+  `PursuitReport`. Scheduled in both the windowed and headless apps;
+  `load_session_world` inserts/`drive_session` removes the policy and
+  report with the fleet. Smoke `pur=<chases>/<given up>/<peak>` beside
+  `pol=` only when cops are fielded.
+- Tests: 8 pure `mm2_game`, 5 pure `mm2_app`, 8 integration in
+  `tests/police.rs`. A finding worth knowing: the shared synthetic test
+  car barely yaws under full lock, so integration cops are authored
+  facing the player; turning is covered by the pure sign test and retail.
+
+Gates (iteration 33, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2204 passed, 0
+failed; was 2182). Retail, local (`/Users/linus/coding/rust-mm2/retail`,
+`--headless --frames 2400`): sf checkpoint 8 `pol=4/4 pur=1/0/1`; `--pro`
+`pol=8/8 pur=2/1/2`; london checkpoint 2 `pol=1/1 pur=0/0/0`; sf
+checkpoint 0 neither field; all `status=pass`. No processes left running.
+
+Not verified: that a chase looks or plays right (headless; straight at the
+goal, not road-aware — a cop can be walled off by geometry the ray does not
+model beyond `World` colliders); every number is designed, not original;
+siren/lights/audio (the `Siren` program on the opponent side is the hook);
+Cruise `roam` cops; a bust/arrest outcome (unknown, none invented); no debug
+route overlay yet (F20 req 6 — state is visible via `pur=` only). Next in
+F20: A.4/B — siren + lights on engage, road-aware chase through the nav
+graph, Cruise cops. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F20-A.2: the event's police stand on the road (new-run iteration 32)
 
 Selection: the previous review passed with no blocking findings (its
