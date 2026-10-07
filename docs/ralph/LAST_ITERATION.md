@@ -1,3 +1,58 @@
+# Last iteration — F20-B.2: a chasing cop follows the road (new-run iteration 35)
+
+Selection: the previous review passed with no blocking findings; its one
+non-blocking note (a doc comment claiming a siren failure is counted
+"once per activation") was corrected in `audio.rs` — it retries every
+update. The handoff queued road-aware chase as F20-B.2, so I took that
+alone (Cruise cops/density/debug overlay stay B.3). Retail pursuit routing
+is unknown (UNK-9), so everything is designed and disclosed (ledger COP-11).
+
+Changes:
+- `mm2_game::police`: `ChaseRoute` (polyline + forward-only cursor,
+  `follow`/`lateral`), `ChaseNav` component (`aim`: direct when the target
+  is in view within 30 m, else a `NavGraph::drive_line` road line to the
+  chase goal — the last-seen point, never the target's true position —
+  re-planned on 25 m goal drift / 30 m off-line, rate-limited 1.5 s, 4 s
+  after a failed query; no graph/line → straight aim reported `Unrouted`).
+- `mm2_app::police`: `PoliceNav` resource (the same `build_for_routing`
+  graph the opponents use, inserted by `load_session_world` only when cops
+  spawned, removed at teardown); `chase_input(aim, goal)` steers for the
+  aim and arrives/stops against the goal, caps pace for a bend, and
+  reverses round (`scripted::begin_turnaround`, shared escape machinery,
+  not counted as a stuck escape) when the aim is >~100° off a slow car;
+  `PursuitReport.planned/unrouted`, smoke `pur=c/g/p[,r<N>][,nr<N>]`.
+- A retail probe (temporary stderr trace, removed) showed the first cut
+  wedged a cop that is released facing away from the road line: its
+  authored heading is not along the road, and full lock into the kerb went
+  nowhere until the stuck detector fired 1.5 s later. The turn-around law
+  fixed that; the cop now reverses round and runs the line at ~15 m/s.
+- Tests: 7 `mm2_game` unit, 3 graph tests in `mm2_game/tests/nav.rs`
+  (route aim vs straight, rate-limit/drift, unreachable-goal bound,
+  off-route re-plan), 4 `mm2_app` unit (aim vs goal, bend cap, turn-around,
+  report format), 3 `tests/police.rs` (cop clears a wall across the
+  straight line along a road bend — and is held by the wall without the
+  graph —, failed-query bound, teardown removes the graph).
+
+Retail, local (`--headless --frames 2400`): sf checkpoint 8 `pol=4/4
+pur=1/1/1,r1` (was `1/0/1`: the cop now turns round, follows the road loop
+and gives up at the 8 s no-contact bound — a behaviour change, not a
+claim of better play), `--pro` `pol=8/8 pur=2/1/2,r9,nr2`, london
+checkpoint 2 `pur=0/0/0`, sf checkpoint 0 no `pol`/`pur`; all
+`status=pass`.
+
+Gates (iteration 35, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean (exit 0); `cargo test --locked --workspace` exit 0 (2231
+passed, 0 failed; was 2215). No processes left running.
+
+Not verified: no capture or listen of a real chase, so how it reads on
+real streets is unseen; level/one-way correctness is only the router's;
+the 8 s lose bound is not scaled to route length; debug route overlay
+(F20 req 6), Cruise cops, bust/arrest outcome all still open. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F20-B.1: a chasing cop runs its siren and light bar (new-run iteration 34)
 
 Selection: the previous review passed with no blocking findings, and
