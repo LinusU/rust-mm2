@@ -298,3 +298,66 @@ fn a_non_crash_row_never_installs_a_lesson_driver() {
     app.update();
     assert!(app.world().get_resource::<LessonDriver>().is_none());
 }
+
+/// Original-content validation (opt-in: `MM2_RETAIL` names an install).
+/// Every Crash Course row of both cities, at both difficulties, loads
+/// through the real `load_session_world` into `Countdown` on leg 0 with
+/// its driver — the denominator is the catalog's own `CrashCourse`
+/// rows, never a hard-coded or parse-filtered list. This proves launch
+/// only: no gate is driven and the family rules stay unrecovered
+/// (UNK-35).
+#[test]
+fn every_retail_lesson_launches_at_both_difficulties() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::Difficulty;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail lesson launch sweep NOT run");
+        return;
+    };
+    let mut expected = 0;
+    let mut launched = 0;
+    let mut failures = Vec::new();
+    for city in ["london", "sf"] {
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        let rows: Vec<EventRef> = catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == EventTableKind::CrashCourse)
+            .map(|e| e.event_ref.clone())
+            .collect();
+        assert!(!rows.is_empty(), "{city}: no Crash Course rows enumerated");
+        for event_ref in rows {
+            for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+                expected += 1;
+                let mut vfs = Vfs::new();
+                mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+                let config = SessionConfig {
+                    mode: SessionMode::Event(event_ref.clone()),
+                    difficulty,
+                    ..SessionConfig::default()
+                };
+                let mut app = event_app(config, vfs);
+                app.update();
+                let label = format!("{city} crash:{} {difficulty:?}", event_ref.index);
+                let driver_ok = app
+                    .world()
+                    .get_resource::<LessonDriver>()
+                    .is_some_and(|d| d.run().phase() == LessonPhase::Running { leg: 0 });
+                if phase(&app) == SessionPhase::Countdown
+                    && driver_ok
+                    && app.world().get_resource::<RaceState>().is_some()
+                {
+                    launched += 1;
+                } else {
+                    failures.push(format!("{label}: phase {:?}", phase(&app)));
+                }
+            }
+        }
+    }
+    eprintln!("retail lessons: expected {expected}, launched {launched}");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(expected, launched);
+}

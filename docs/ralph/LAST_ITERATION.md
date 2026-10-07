@@ -1,3 +1,30 @@
+# Last iteration — F21-B.7: retail lesson launch validation (new-run iteration 47)
+
+Selection: the previous review passed; its first verification gap was
+that `--event crash:<row>` had never run on original data. Retail is
+available locally (`MM2_RETAIL`), so I closed that gap instead of adding
+more unverified code.
+
+Change: no production code. Ran `mm2 --headless --frames 300 --event
+crash:N [--pro]` for all 13 london + 13 sf rows × both difficulties on
+retail (`fnv1a64:e91e6cd4b2ae30d9`): 52/52 loaded leg 0 and reached
+`race=Running`, 0 errors (e.g. london crash:0 4 gates 24 s, crash:1 23
+gates untimed, sf crash:5 23 gates 178 s). The london crash0 parked-car
+`_crash0` pathset is already spawned by the generic path. Added the
+repeatable opt-in test `tests/lesson_launch.rs::
+every_retail_lesson_launches_at_both_difficulties` (denominator = catalog
+CrashCourse rows; prints and returns when `MM2_RETAIL` is unset — the
+external gate has no retail, so it is a no-op there).
+
+Gates (iteration 47, foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0 (2297 passed, 0 failed; was 2296). No processes left running.
+
+Not verified / open: launch only — no leg driven on retail, no windowed
+capture, menu entry, instruction/pass/fail screens, lesson vehicle
+restore, per-leg HUD rebinding, lesson-pass credit, UNK-35 evaluators.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.6: lesson session launch (new-run iteration 46)
 
 Selection: the previous review passed; its gap list said the future
