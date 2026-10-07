@@ -1318,6 +1318,7 @@ fn main() {
     .add_plugins(VehiclePlugin)
     .insert_resource(graphics)
     .insert_resource(control_settings.clone())
+    .insert_resource(controls::ControlsSave(controls_path.clone()))
     .insert_resource(settings::SettingsFile(settings_path.clone()))
     .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()

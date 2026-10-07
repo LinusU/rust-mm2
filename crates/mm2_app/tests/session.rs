@@ -11,8 +11,9 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{CameraMode, ChaseCamera};
 use mm2_app::contracts::{self, ImpactFilter};
+use mm2_app::controls::{ControlSettings, ControlsSave, DriveAction, controls_path};
 use mm2_app::hudmap;
-use mm2_app::pause::{self, PauseMenu, PauseUi};
+use mm2_app::pause::{self, PauseMenu, PausePage, PauseUi};
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{
     self, ErrorText, Hud, SelectedCar, SessionControl, SessionNote, SpawnPoint, TunedVehicle,
@@ -1790,8 +1791,9 @@ fn pause_options_change_save_and_back_out() {
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::Enter);
     assert!(phase_is(&mut app, SessionPhase::Paused));
-    assert!(
-        app.world().resource::<PauseMenu>().options,
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::Options,
         "the page opens"
     );
 
@@ -1834,7 +1836,7 @@ fn pause_options_change_save_and_back_out() {
     assert!(phase_is(&mut app, SessionPhase::Paused));
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert!(!pause.options);
+        assert_eq!(pause.page, PausePage::Pause);
         assert_eq!(pause.focus, 2, "focus returns to the Options row");
     }
     press_key(&mut app, KeyCode::Escape);
@@ -1853,25 +1855,210 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::Enter);
-    assert!(app.world().resource::<PauseMenu>().options);
-    for _ in 0..3 {
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+    // Back is the last of the page's five rows.
+    for _ in 0..4 {
         press_key(&mut app, KeyCode::ArrowDown);
     }
     press_key(&mut app, KeyCode::Enter);
-    assert!(!app.world().resource::<PauseMenu>().options);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Pause);
     assert!(phase_is(&mut app, SessionPhase::Paused));
 
     // Back into the page, then resume with Esc twice; the next pause
     // must show the pause rows at the top, not a stale page.
     press_key(&mut app, KeyCode::Enter);
-    assert!(app.world().resource::<PauseMenu>().options);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
     press_key(&mut app, KeyCode::Escape);
     press_key(&mut app, KeyCode::Escape);
     assert!(phase_is(&mut app, SessionPhase::Playing));
     press_key(&mut app, KeyCode::Escape);
     let pause = app.world().resource::<PauseMenu>();
-    assert!(!pause.options);
+    assert_eq!(pause.page, PausePage::Pause);
     assert_eq!(pause.focus, 0);
+}
+
+/// Pause, open Options, then its Driving controls page.
+fn open_pause_controls(app: &mut App) {
+    press_key(app, KeyCode::Escape);
+    assert!(phase_is(app, SessionPhase::Paused));
+    pause_focus_row(app, 2);
+    press_key(app, KeyCode::Enter);
+    pause_focus_row(app, 3);
+    press_key(app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::Controls,
+        "Options -> Driving controls opens the page"
+    );
+}
+
+/// Walk the pause focus to `row` with the real arrow keys.
+fn pause_focus_row(app: &mut App, row: usize) {
+    while app.world().resource::<PauseMenu>().focus != row {
+        let key = if app.world().resource::<PauseMenu>().focus < row {
+            KeyCode::ArrowDown
+        } else {
+            KeyCode::ArrowUp
+        };
+        press_key(app, key);
+    }
+}
+
+/// F23 AC01 from inside a session: the pause overlay's Driving controls
+/// page listens for a key, refuses reserved and conflicting ones while
+/// still listening, clears a slot (never the last), steps the stick
+/// tuning and resets — each change on the live `ControlSettings` and in
+/// `controls.json` at once — and Esc backs out one page at a time.
+#[test]
+fn pause_driving_controls_rebind_tune_save_and_back_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = controls_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(ControlSettings::default())
+        .insert_resource(ControlsSave(Some(path.clone())));
+    app.update();
+    open_pause_controls(&mut app);
+    let live = |a: &App| a.world().resource::<ControlSettings>().clone();
+    let pause_status = |a: &App| a.world().resource::<PauseMenu>().status.clone();
+
+    // Enter listens; the next key binds, and the file follows.
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().capture,
+        Some((DriveAction::Throttle, 0))
+    );
+    press_key(&mut app, KeyCode::KeyT);
+    assert_eq!(app.world().resource::<PauseMenu>().capture, None);
+    assert_eq!(
+        live(&app).key_at(DriveAction::Throttle, 0),
+        Some(KeyCode::KeyT)
+    );
+    assert_eq!(ControlSettings::load(&path), live(&app));
+    assert_eq!(
+        pause_status(&app).as_deref(),
+        Some("Accelerate is now KeyT")
+    );
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+
+    // A reserved key and another action's key are refused; the page
+    // keeps listening, and nothing changes or is saved.
+    let before = live(&app);
+    press_key(&mut app, KeyCode::Enter);
+    press_key(&mut app, KeyCode::KeyR);
+    assert!(app.world().resource::<PauseMenu>().capture.is_some());
+    assert!(pause_status(&app).unwrap().contains("in-game control"));
+    press_key(&mut app, KeyCode::KeyS);
+    assert!(app.world().resource::<PauseMenu>().capture.is_some());
+    assert!(pause_status(&app).unwrap().contains("Brake / reverse"));
+    assert_eq!(live(&app), before);
+    // Esc cancels the capture without resuming or leaving the page.
+    press_key(&mut app, KeyCode::Escape);
+    assert_eq!(app.world().resource::<PauseMenu>().capture, None);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::Controls
+    );
+
+    // Navigation keys bind while listening instead of moving the focus.
+    press_key(&mut app, KeyCode::Enter);
+    press_key(&mut app, KeyCode::ArrowDown);
+    assert_eq!(app.world().resource::<PauseMenu>().focus, 0);
+    assert_eq!(live(&app), before);
+    assert!(pause_status(&app).unwrap().contains("Brake / reverse"));
+    press_key(&mut app, KeyCode::Escape);
+
+    // X clears the alternate; the last key of an action stays.
+    pause_focus_row(&mut app, 1);
+    press_key(&mut app, KeyCode::KeyX);
+    assert_eq!(live(&app).key_at(DriveAction::Throttle, 1), None);
+    assert_eq!(ControlSettings::load(&path), live(&app));
+    pause_focus_row(&mut app, 0);
+    press_key(&mut app, KeyCode::KeyX);
+    assert_eq!(
+        live(&app).key_at(DriveAction::Throttle, 0),
+        Some(KeyCode::KeyT)
+    );
+    assert!(pause_status(&app).unwrap().contains("at least one key"));
+
+    // Tuning rows step in place (Right and Enter) and persist.
+    pause_focus_row(&mut app, 10);
+    let dz = live(&app).steer_deadzone;
+    press_key(&mut app, KeyCode::ArrowRight);
+    assert_ne!(live(&app).steer_deadzone, dz);
+    pause_focus_row(&mut app, 13);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(live(&app).invert_steering);
+    assert_eq!(ControlSettings::load(&path), live(&app));
+
+    // Reset restores the shipped map and then disables itself.
+    pause_focus_row(&mut app, 14);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(live(&app), ControlSettings::default());
+    assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        pause_status(&app).as_deref(),
+        Some("already at the defaults")
+    );
+
+    // Esc steps back a page at a time: controls -> graphics -> pause ->
+    // game, with the focus landing on the row that opened each page.
+    press_key(&mut app, KeyCode::Escape);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!((pause.page, pause.focus), (PausePage::Options, 3));
+    }
+    press_key(&mut app, KeyCode::Escape);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!((pause.page, pause.focus), (PausePage::Pause, 2));
+    }
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+}
+
+/// A rig with no `ControlSettings` (a bare harness) leaves the Driving
+/// controls row disabled with its reason instead of opening an empty
+/// page, and a capture left pending is dropped when the pause ends.
+#[test]
+fn pause_driving_controls_row_needs_controls_and_a_pending_capture_dies_with_the_pause() {
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default());
+    app.update();
+    press_key(&mut app, KeyCode::Escape);
+    pause_focus_row(&mut app, 2);
+    press_key(&mut app, KeyCode::Enter);
+    pause_focus_row(&mut app, 3);
+    press_key(&mut app, KeyCode::Enter);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!(pause.page, PausePage::Options, "no page without controls");
+        assert_eq!(
+            pause.status.as_deref(),
+            Some("driving controls unavailable")
+        );
+    }
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    // Listening when the session leaves `Paused` (restart/quit) must not
+    // survive into the next pause.
+    app.insert_resource(ControlSettings::default());
+    open_pause_controls(&mut app);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.world().resource::<PauseMenu>().capture.is_some());
+    app.world_mut()
+        .resource_mut::<mm2_app::session::SessionControl>()
+        .restart = true;
+    app.update();
+    app.update();
+    assert!(!phase_is(&mut app, SessionPhase::Paused));
+    let pause = app.world().resource::<PauseMenu>();
+    assert_eq!(pause.capture, None);
+    assert_eq!(pause.page, PausePage::Pause);
 }
 
 /// F27-B.4b: a Cops & Robbers session builds its match while loading,

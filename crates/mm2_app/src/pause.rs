@@ -32,8 +32,10 @@
 //! `Options` opens the graphics page in place — the same shadow and
 //! anti-aliasing rows as the main menu, Left/Right to change, saved at
 //! once, applied to the frozen world as it is drawn. Esc there backs out
-//! to the pause rows rather than resuming. Control and audio options
-//! (F23) are still open.
+//! to the pause rows rather than resuming. Its "Driving controls" row opens
+//! the rebinding page — each key slot listens for the next key, X clears
+//! one, the stick tuning rows step in place — saved and applied to the
+//! live `ControlSettings` at once. Audio options (F23) are still open.
 //!
 //! Deferred honestly, like the root menu does: pause is reachable only
 //! from `Playing` — `Countdown` still takes `Esc` as quit (the lifecycle's
@@ -44,6 +46,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{HudMap, Session, SessionEntity, SessionPhase};
 
+use crate::controls::{ControlItem, ControlSettings, ControlsSave, DriveAction, SLOTS};
 use crate::input::pad_nav;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::session::SessionControl;
@@ -71,6 +74,26 @@ enum PauseAction {
     ResetGraphics,
     /// Leave the graphics page for the pause rows.
     CloseOptions,
+    /// Open the driving-controls page.
+    OpenControls,
+    /// Listen for the next key and bind it to this slot.
+    Rebind(DriveAction, usize),
+    /// Step a controls tuning row, or reset the controls.
+    Tune(ControlItem),
+    /// Leave the controls page for the graphics page.
+    CloseControls,
+}
+
+/// Which page of the pause overlay is showing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PausePage {
+    /// Resume / Restart / Options / Quit.
+    #[default]
+    Pause,
+    /// The graphics rows, and the way on to the controls.
+    Options,
+    /// Rebindable driving keys and stick tuning.
+    Controls,
 }
 
 /// One pause-menu row.
@@ -81,29 +104,68 @@ struct PauseRow {
 
 /// The pause overlay's rows — fixed and small. `has_menu` only changes
 /// the quit row's label: with a `MenuShell` running, quit lands back on
-/// the menu; without one it exits the process. `options` selects the
-/// graphics page; `settings` is `None` in an app that has none (a bare
-/// test rig), which leaves the Options row disabled with its reason.
-fn pause_rows(has_menu: bool, options: bool, settings: Option<GraphicsSettings>) -> Vec<PauseRow> {
+/// the menu; without one it exits the process. `page` selects the rows;
+/// `settings` is `None` in an app that has none (a bare test rig), which
+/// leaves the Options row disabled with its reason, and `controls` is
+/// `None` likewise for the Driving controls row.
+fn pause_rows(
+    has_menu: bool,
+    page: PausePage,
+    settings: Option<GraphicsSettings>,
+    controls: Option<&ControlSettings>,
+) -> Vec<PauseRow> {
     let row = |text: String, enabled: Result<PauseAction, String>| PauseRow { text, enabled };
-    if options {
-        let settings = settings.unwrap_or_default();
-        return vec![
-            row(settings.shadows_row(), Ok(PauseAction::CycleShadows)),
-            row(
-                settings.antialiasing_row(),
-                Ok(PauseAction::CycleAntialiasing),
-            ),
-            row(
-                "Reset to defaults".into(),
-                if settings == GraphicsSettings::default() {
-                    Err("already at the defaults".into())
-                } else {
-                    Ok(PauseAction::ResetGraphics)
-                },
-            ),
-            row("Back".into(), Ok(PauseAction::CloseOptions)),
-        ];
+    match page {
+        PausePage::Options => {
+            let settings = settings.unwrap_or_default();
+            return vec![
+                row(settings.shadows_row(), Ok(PauseAction::CycleShadows)),
+                row(
+                    settings.antialiasing_row(),
+                    Ok(PauseAction::CycleAntialiasing),
+                ),
+                row(
+                    "Reset to defaults".into(),
+                    if settings == GraphicsSettings::default() {
+                        Err("already at the defaults".into())
+                    } else {
+                        Ok(PauseAction::ResetGraphics)
+                    },
+                ),
+                row(
+                    "Driving controls".into(),
+                    if controls.is_some() {
+                        Ok(PauseAction::OpenControls)
+                    } else {
+                        Err("driving controls unavailable".into())
+                    },
+                ),
+                row("Back".into(), Ok(PauseAction::CloseOptions)),
+            ];
+        }
+        PausePage::Controls => {
+            let c = controls.cloned().unwrap_or_default();
+            let mut rows = Vec::new();
+            for action in DriveAction::ALL {
+                for slot in 0..SLOTS {
+                    let name = if slot == 0 { "" } else { " (alt)" };
+                    rows.push(row(
+                        format!("{}{name}: {}", action.label(), c.slot_label(action, slot)),
+                        Ok(PauseAction::Rebind(action, slot)),
+                    ));
+                }
+            }
+            rows.extend(c.tuning_rows().into_iter().map(|r| {
+                let action = match r.item {
+                    ControlItem::Key { action, slot } => PauseAction::Rebind(action, slot),
+                    item => PauseAction::Tune(item),
+                };
+                row(r.text, r.enabled.map(|()| action))
+            }));
+            rows.push(row("Back".into(), Ok(PauseAction::CloseControls)));
+            return rows;
+        }
+        PausePage::Pause => {}
     }
     vec![
         row("Resume".into(), Ok(PauseAction::Resume)),
@@ -126,6 +188,9 @@ fn pause_rows(has_menu: bool, options: bool, settings: Option<GraphicsSettings>)
 /// Index of the `Options` row in the pause rows — where focus returns
 /// when the graphics page closes.
 const OPTIONS_ROW: usize = 2;
+/// Index of the `Driving controls` row on the graphics page — where focus
+/// returns when the controls page closes.
+const CONTROLS_ROW: usize = 3;
 
 /// The pause overlay's presentation state — focus, a status line and a
 /// redraw latch. Session flow itself stays in `Session`/`SessionControl`;
@@ -136,8 +201,11 @@ pub struct PauseMenu {
     pub focus: usize,
     /// Transient line under the rows (a disabled row's reason).
     pub status: Option<String>,
-    /// The graphics page is showing instead of the pause rows.
-    pub options: bool,
+    /// Which page is showing.
+    pub page: PausePage,
+    /// The controls page is waiting for the key to bind to this action's
+    /// slot. While set, only the next key (or Esc/pad East) is read.
+    pub capture: Option<(DriveAction, usize)>,
     /// Set by `pause_input` whenever the state changed; cleared by
     /// `pause_present` after redrawing.
     dirty: bool,
@@ -151,7 +219,8 @@ impl Default for PauseMenu {
         Self {
             focus: 0,
             status: None,
-            options: false,
+            page: PausePage::Pause,
+            capture: None,
             dirty: true,
             pad_axis: 0.0,
         }
@@ -166,13 +235,25 @@ pub struct PauseUi;
 
 /// The optional resources `pause_input` consults — bundled so it stays
 /// under the argument lint. All are optional: a bare test rig has none
-/// of them, and the absence of settings disables the Options row.
+/// of them, and the absence of settings disables the Options row (and of
+/// controls, the Driving controls row).
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct PauseGraphics<'w> {
     menu_shell: Option<Res<'w, MenuShell>>,
     hudmap: Option<Res<'w, HudMap>>,
     settings: Option<ResMut<'w, GraphicsSettings>>,
     file: Option<Res<'w, SettingsFile>>,
+    controls: Option<ResMut<'w, ControlSettings>>,
+    controls_save: Option<Res<'w, ControlsSave>>,
+}
+
+/// What `pause_present` reads besides the pause state itself.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PauseView<'w> {
+    menu_shell: Option<Res<'w, MenuShell>>,
+    hudmap: Option<Res<'w, HudMap>>,
+    settings: Option<Res<'w, GraphicsSettings>>,
+    controls: Option<Res<'w, ControlSettings>>,
 }
 
 /// Pause-phase input. Runs only while `Paused`; every command lands on
@@ -205,47 +286,79 @@ pub fn pause_input(
     }
     let has_menu = graphics.menu_shell.is_some();
     let mut cmds = Vec::new();
-    if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
-        cmds.push(MenuCommand::Up);
-    }
-    if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
-        cmds.push(MenuCommand::Down);
-    }
-    if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
-        cmds.push(MenuCommand::Left);
-    }
-    if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
-        cmds.push(MenuCommand::Right);
-    }
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
-        cmds.push(MenuCommand::Activate);
-    }
-    // Esc/Backspace while paused is Back — resume, or out of the
-    // graphics page.
-    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
-        cmds.push(MenuCommand::Back);
-    }
     let nav = pad_nav(pads.iter(), &mut pause.pad_axis);
-    for (pressed, cmd) in [
-        (nav.up, MenuCommand::Up),
-        (nav.down, MenuCommand::Down),
-        (nav.left, MenuCommand::Left),
-        (nav.right, MenuCommand::Right),
-        (nav.accept, MenuCommand::Activate),
-        (nav.back || nav.start, MenuCommand::Back),
-    ] {
-        if pressed {
-            cmds.push(cmd);
+    if pause.capture.is_some() {
+        // The controls page is waiting for a key: the first key pressed
+        // this frame is the candidate (Esc cancels in the command loop)
+        // and the pad can only back out — no nav key may fire, or the
+        // key being bound would also move the focus.
+        if let Some(key) = keys.get_just_pressed().min() {
+            cmds.push(MenuCommand::Capture(*key));
+        }
+        if nav.back || nav.start {
+            cmds.push(MenuCommand::Back);
+        }
+    } else {
+        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
+            cmds.push(MenuCommand::Up);
+        }
+        if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
+            cmds.push(MenuCommand::Down);
+        }
+        if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
+            cmds.push(MenuCommand::Left);
+        }
+        if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
+            cmds.push(MenuCommand::Right);
+        }
+        if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
+            cmds.push(MenuCommand::Activate);
+        }
+        // Esc/Backspace while paused is Back — resume, or out of a page.
+        if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
+            cmds.push(MenuCommand::Back);
+        }
+        // Only the controls page has a deletable row (a key slot).
+        if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX) {
+            cmds.push(MenuCommand::Delete);
+        }
+        for (pressed, cmd) in [
+            (nav.up, MenuCommand::Up),
+            (nav.down, MenuCommand::Down),
+            (nav.left, MenuCommand::Left),
+            (nav.right, MenuCommand::Right),
+            (nav.accept, MenuCommand::Activate),
+            (nav.back || nav.start, MenuCommand::Back),
+            (nav.delete, MenuCommand::Delete),
+        ] {
+            if pressed {
+                cmds.push(cmd);
+            }
         }
     }
     for cmd in cmds {
+        // A pending key capture owns the page: the next key binds (or
+        // cancels), Back cancels, everything else is inert.
+        if let Some((action, slot)) = pause.capture {
+            match cmd {
+                MenuCommand::Capture(KeyCode::Escape) | MenuCommand::Back => {
+                    pause.capture = None;
+                    pause.status = Some("rebinding cancelled".into());
+                }
+                MenuCommand::Capture(key) => bind_key(action, slot, key, &mut graphics, &mut pause),
+                _ => continue,
+            }
+            pause.dirty = true;
+            continue;
+        }
         // Rows are rebuilt per command: a change relabels them, resetting
-        // disables the reset row, and opening or closing the graphics
-        // page swaps the whole set.
+        // disables the reset row, and opening or closing a page swaps the
+        // whole set.
         let rows = pause_rows(
             has_menu,
-            pause.options,
+            pause.page,
             graphics.settings.as_deref().copied(),
+            graphics.controls.as_deref(),
         );
         match cmd {
             MenuCommand::Up => pause.focus = pause.focus.saturating_sub(1),
@@ -257,20 +370,30 @@ pub fn pause_input(
                         .expect("Paused → Playing is a legal transition"),
                     PauseAction::Restart => control.restart = true,
                     PauseAction::Quit => control.quit = true,
-                    PauseAction::OpenOptions => {
-                        pause.options = true;
-                        pause.focus = 0;
-                        pause.status = None;
+                    PauseAction::OpenOptions => open_page(&mut pause, PausePage::Options, 0),
+                    PauseAction::CloseOptions => {
+                        open_page(&mut pause, PausePage::Pause, OPTIONS_ROW);
                     }
-                    PauseAction::CloseOptions => close_options(&mut pause),
+                    PauseAction::OpenControls => open_page(&mut pause, PausePage::Controls, 0),
+                    PauseAction::CloseControls => {
+                        open_page(&mut pause, PausePage::Options, CONTROLS_ROW);
+                    }
+                    PauseAction::Rebind(action, slot) => {
+                        pause.capture = Some((*action, *slot));
+                        pause.status = Some(format!(
+                            "press the new key for {} (Esc cancels)",
+                            action.label()
+                        ));
+                    }
                     PauseAction::CycleShadows
                     | PauseAction::CycleAntialiasing
-                    | PauseAction::ResetGraphics => adopt(*action, true, &mut graphics, &mut pause),
+                    | PauseAction::ResetGraphics
+                    | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
                 },
                 Some(Err(reason)) => pause.status = Some(reason.clone()),
                 None => {}
             },
-            // Left/Right step a graphics value either way; everywhere
+            // Left/Right step a settings value either way; everywhere
             // else they do nothing.
             MenuCommand::Left | MenuCommand::Right => {
                 if let Some(Ok(action)) = rows.get(pause.focus).map(|r| &r.enabled) {
@@ -282,14 +405,24 @@ pub fn pause_input(
                     );
                 }
             }
-            MenuCommand::Back if pause.options => close_options(&mut pause),
-            MenuCommand::Back => session
-                .transition(SessionPhase::Playing)
-                .expect("Paused → Playing is a legal transition"),
-            // No deletable rows, text fields or mouse-produced focus
-            // commands under pause.
-            MenuCommand::Delete
-            | MenuCommand::FocusAt(_)
+            // Only a key slot is deletable; the last key stays.
+            MenuCommand::Delete => {
+                if let Some(Ok(PauseAction::Rebind(action, slot))) =
+                    rows.get(pause.focus).map(|r| &r.enabled)
+                {
+                    clear_key(*action, *slot, &mut graphics, &mut pause);
+                }
+            }
+            MenuCommand::Back => match pause.page {
+                PausePage::Controls => open_page(&mut pause, PausePage::Options, CONTROLS_ROW),
+                PausePage::Options => open_page(&mut pause, PausePage::Pause, OPTIONS_ROW),
+                PausePage::Pause => session
+                    .transition(SessionPhase::Playing)
+                    .expect("Paused → Playing is a legal transition"),
+            },
+            // No text fields or mouse-produced focus commands under
+            // pause, and a capture is handled above.
+            MenuCommand::FocusAt(_)
             | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
             | MenuCommand::Erase
@@ -299,18 +432,30 @@ pub fn pause_input(
     }
 }
 
-/// Leave the graphics page, focus back on the `Options` row.
-fn close_options(pause: &mut PauseMenu) {
-    pause.options = false;
-    pause.focus = OPTIONS_ROW;
+/// Show `page` with focus on `focus` and a clean status line.
+fn open_page(pause: &mut PauseMenu, page: PausePage, focus: usize) {
+    pause.page = page;
+    pause.focus = focus;
     pause.status = None;
+    pause.capture = None;
 }
 
-/// Apply a graphics row's action to the live settings and save them.
-/// A change reaches the lights and cameras through the resource's change
-/// detection (`settings::apply_*`); a save failure is a status line, the
-/// change still stands for the run. Rows of any other kind do nothing.
+/// Apply a settings row's action to the live graphics settings or driving
+/// controls and save them. A change reaches the lights, cameras and
+/// `vehicle_input` through the resources' change detection; a save failure
+/// is a status line, the change still stands for the run. Rows of any
+/// other kind do nothing.
 fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause: &mut PauseMenu) {
+    if let PauseAction::Tune(item) = action {
+        let next = graphics
+            .controls
+            .as_deref()
+            .and_then(|c| c.adjusted(item, forward));
+        if let Some(next) = next {
+            set_controls(next, None, graphics, pause);
+        }
+        return;
+    }
     let Some(settings) = graphics.settings.as_mut() else {
         return;
     };
@@ -325,6 +470,67 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
     }
     **settings = next;
     pause.status = graphics.file.as_deref().and_then(|f| f.save(&next).err());
+}
+
+/// Adopt `next` as the live controls and save it. `message` is the status
+/// line for a success; a failed save replaces it, which matters more.
+fn set_controls(
+    next: ControlSettings,
+    message: Option<String>,
+    graphics: &mut PauseGraphics,
+    pause: &mut PauseMenu,
+) {
+    let Some(controls) = graphics.controls.as_mut() else {
+        return;
+    };
+    if next == **controls {
+        return;
+    }
+    let saved = graphics
+        .controls_save
+        .as_deref()
+        .and_then(|f| f.save(&next).err());
+    **controls = next;
+    pause.status = saved.or(message);
+}
+
+/// Finish a key capture: bind `key`, or keep listening with the refusal
+/// on the status line.
+fn bind_key(
+    action: DriveAction,
+    slot: usize,
+    key: KeyCode,
+    graphics: &mut PauseGraphics,
+    pause: &mut PauseMenu,
+) {
+    let Some(controls) = graphics.controls.as_deref() else {
+        pause.capture = None;
+        return;
+    };
+    match controls.with_key(action, slot, key) {
+        Ok((next, line)) => {
+            pause.capture = None;
+            pause.status = Some(line.clone());
+            set_controls(next, Some(line), graphics, pause);
+        }
+        Err(line) => pause.status = Some(line),
+    }
+}
+
+/// Clear one key slot; the last key of an action stays.
+fn clear_key(
+    action: DriveAction,
+    slot: usize,
+    graphics: &mut PauseGraphics,
+    pause: &mut PauseMenu,
+) {
+    let Some(controls) = graphics.controls.as_deref() else {
+        return;
+    };
+    match controls.without_key(action, slot) {
+        Ok((next, line)) => set_controls(next, Some(line), graphics, pause),
+        Err(line) => pause.status = Some(line),
+    }
 }
 
 /// Keep `Time<Physics>` paused exactly while the session is `Paused`.
@@ -382,16 +588,16 @@ pub fn pause_present(
     mut commands: Commands,
     session: Res<Session>,
     mut pause: ResMut<PauseMenu>,
-    menu_shell: Option<Res<MenuShell>>,
-    hudmap: Option<Res<HudMap>>,
-    settings: Option<Res<GraphicsSettings>>,
+    view: PauseView,
     roots: Query<Entity, (With<PauseUi>, Without<ChildOf>)>,
 ) {
     // F22-A.1/HUD-4: Q's full-screen map *replaces* the pause overlay —
     // while it is up the dimmed rows must not draw over the map. If the
     // map somehow closes with the session still `Paused`, `dirty`
     // redraws the rows it hid.
-    let map_open = hudmap.is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen);
+    let map_open = view
+        .hudmap
+        .is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen);
     if map_open {
         for root in &roots {
             commands.entity(root).despawn();
@@ -406,7 +612,8 @@ pub fn pause_present(
         // The next pause starts at the top row with a clean status.
         pause.focus = 0;
         pause.status = None;
-        pause.options = false;
+        pause.page = PausePage::Pause;
+        pause.capture = None;
         return;
     }
     if !pause.dirty && !roots.is_empty() {
@@ -418,17 +625,18 @@ pub fn pause_present(
     }
 
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
-    let title = if pause.options {
-        "Graphics options"
-    } else {
-        "Paused"
+    let title = match pause.page {
+        PausePage::Pause => "Paused",
+        PausePage::Options => "Graphics options",
+        PausePage::Controls => "Driving controls",
     };
     lines.push((title.to_string(), 34.0, Color::srgb(0.95, 0.9, 0.6)));
     lines.push((String::new(), 8.0, Color::NONE));
     for (i, row) in pause_rows(
-        menu_shell.is_some(),
-        pause.options,
-        settings.as_deref().copied(),
+        view.menu_shell.is_some(),
+        pause.page,
+        view.settings.as_deref().copied(),
+        view.controls.as_deref(),
     )
     .iter()
     .enumerate()
@@ -460,10 +668,13 @@ pub fn pause_present(
         lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
     }
     lines.push((
-        if pause.options {
-            "Up/Down move | Left/Right change | Esc back"
-        } else {
-            "Up/Down move | Enter select | Esc resume"
+        match (pause.page, pause.capture.is_some()) {
+            (PausePage::Controls, true) => "Press the new key | Esc cancels",
+            (PausePage::Controls, false) => {
+                "Up/Down move | Enter rebind | Left/Right change | X clear | Esc back"
+            }
+            (PausePage::Options, _) => "Up/Down move | Left/Right change | Esc back",
+            (PausePage::Pause, _) => "Up/Down move | Enter select | Esc resume",
         }
         .to_string(),
         14.0,

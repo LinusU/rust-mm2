@@ -1,3 +1,59 @@
+# Last iteration — F23-B.2: pause-menu route to the Controls page (new-run iteration 23 of this runner)
+
+Selection: previous review passed with no blockers; its open F23 list led
+with the pause-menu route to Controls (the Controls screen was reachable
+only from the main menu, so a player mid-race could not remap). Took that
+one leg; audio/accessibility options, pad rebinding and AC04 untouched.
+
+Change: the pause overlay's graphics page gained a "Driving controls" row
+opening `PausePage::Controls` (`PauseMenu.options: bool` became
+`page: PausePage`, plus `capture`): one row per key slot (primary and
+"(alt)"), Enter listens for the next key (Esc / pad East / Start cancel,
+nav keys bind instead of moving), X / Delete / pad West clears a slot,
+Left/Right/Enter step the tuning rows, reset disables itself at the
+defaults; Esc backs out one page at a time. Every change replaces the
+live `ControlSettings` and saves `controls.json` through a new
+`ControlsSave` resource (main.rs inserts it with the same evidence-run
+rule as the menu). To avoid a second copy of the screen, the shared pieces
+moved into `controls.rs`: `with_key` / `without_key` (validated rebind +
+status line or refusal), `tuning_rows` / `adjusted` (`ControlItem`,
+`ControlRow`); the main menu's Controls screen now uses them too. Because
+the pause page edits the live resource, `menu_watch` re-syncs the menu's
+copy on reopen (same as graphics) — otherwise the next menu edit would
+have overwritten the pause edit with a stale map. `PauseGraphics`
+SystemParam gained the controls resources; `LiveSettings` / `PauseView`
+SystemParams keep `menu_watch` / `pause_present` under the argument lint.
+
+Tests (+5, 2341 total): `session`: the pause page rebinds / refuses
+reserved + conflicting keys while still listening / Esc cancels / nav keys
+bind / clears a slot, never the last / steps tuning / resets / backs out a
+page at a time, each change checked on the resource and re-loaded from the
+file; the row is disabled without `ControlSettings` and a pending capture
+dies with the pause (restart). `menu`: a pause rebind (pad East cancels a
+listen first) survives into the main menu's Controls screen and a later
+menu edit keeps it. `controls.rs`: +2 unit (`with_key`/`without_key`,
+`tuning_rows`/`adjusted`). Existing pause-options tests updated for the
+`page` field and the extra row (Back moved from 4th to 5th).
+Mutation checks: dropping the `menu_watch` controls re-sync fails the menu
+test; dropping the capture reset on leaving `Paused` fails the pending-
+capture test.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` exit 0;
+`cargo test --locked --workspace` exit 0 (2341 passed, 0 failed; was
+2336). No processes left running.
+
+Not verified / open: synthetic key/pad events only; the new page was not
+rendered (16 rows at 22 px should fit 720 px but no capture was taken —
+there is no `--pause` page flag); no real keyboard session. Still open for
+F23: pad rebinding, mouse/wheel rows, auto-reverse/transmission policy,
+non-driving keys, audio buses/accessibility options, "text entry never
+drives" with a live text field, AC04 display recovery, AC05 audio effect,
+AC06 device records. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F23-C.2: any connected pad answers (new-run iteration 22 of this runner)
 
 Selection: previous review passed with no blockers. Of its open items the

@@ -462,6 +462,138 @@ impl ControlSettings {
     pub fn slot_label(&self, action: DriveAction, slot: usize) -> &'static str {
         self.key_at(action, slot).and_then(key_name).unwrap_or("-")
     }
+
+    /// These controls with `key` bound to `action`'s `slot`, and the
+    /// status line to show. `Err` is the refusal (reserved, taken by
+    /// another action...) worded for a screen that keeps listening.
+    pub fn with_key(
+        &self,
+        action: DriveAction,
+        slot: usize,
+        key: KeyCode,
+    ) -> Result<(Self, String), String> {
+        let mut next = self.clone();
+        match next.rebind(action, slot, key) {
+            Ok(()) => {
+                let line = format!(
+                    "{} is now {}",
+                    action.label(),
+                    next.slot_label(action, slot)
+                );
+                Ok((next, line))
+            }
+            Err(e) => Err(format!(
+                "{}: {e} - press another key (Esc cancels)",
+                key_name(key).unwrap_or("that key")
+            )),
+        }
+    }
+
+    /// These controls with `action`'s `slot` cleared, and the status line
+    /// to show; `Err` is the refusal (the last key stays).
+    pub fn without_key(&self, action: DriveAction, slot: usize) -> Result<(Self, String), String> {
+        let mut next = self.clone();
+        match next.unbind(action, slot) {
+            Ok(()) => Ok((next, format!("{} key {} cleared", action.label(), slot + 1))),
+            Err(e) => Err(format!("{}: {e}", action.label())),
+        }
+    }
+
+    /// The tuning rows every controls page ends with — stick and trigger
+    /// deadzones, steering sensitivity, inversion, then a reset that
+    /// disables itself, with its reason, at the shipped map. The main
+    /// menu's Controls screen and the pause overlay's both list these, so
+    /// the two cannot drift apart.
+    pub fn tuning_rows(&self) -> Vec<ControlRow> {
+        let on_off = |on: bool| if on { "On" } else { "Off" };
+        let row = |text: String, item| ControlRow {
+            text,
+            item,
+            enabled: Ok(()),
+        };
+        vec![
+            row(
+                format!("Stick deadzone: {:.0}%", self.steer_deadzone * 100.0),
+                ControlItem::SteerDeadzone,
+            ),
+            row(
+                format!("Trigger deadzone: {:.0}%", self.trigger_deadzone * 100.0),
+                ControlItem::TriggerDeadzone,
+            ),
+            row(
+                format!("Steering sensitivity: {:.2}x", self.steer_sensitivity),
+                ControlItem::Sensitivity,
+            ),
+            row(
+                format!("Invert stick steering: {}", on_off(self.invert_steering)),
+                ControlItem::InvertSteering,
+            ),
+            ControlRow {
+                text: "Reset to defaults".to_string(),
+                item: ControlItem::Reset,
+                enabled: if *self == Self::default() {
+                    Err("already at the defaults".to_string())
+                } else {
+                    Ok(())
+                },
+            },
+        ]
+    }
+
+    /// These controls with a tuning `item` stepped (`forward` picks the
+    /// direction; a toggle ignores it, reset restores the shipped map).
+    /// `None` for a key row — those rebind by listening, not by stepping.
+    pub fn adjusted(&self, item: ControlItem, forward: bool) -> Option<Self> {
+        Some(match item {
+            ControlItem::SteerDeadzone => self.cycled_steer_deadzone(forward),
+            ControlItem::TriggerDeadzone => self.cycled_trigger_deadzone(forward),
+            ControlItem::Sensitivity => self.cycled_sensitivity(forward),
+            ControlItem::InvertSteering => self.toggled_inversion(),
+            ControlItem::Reset => Self::default(),
+            ControlItem::Key { .. } => return None,
+        })
+    }
+}
+
+/// What a row of a driving-controls page edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlItem {
+    /// One key slot of an action — rebinds by listening for a key.
+    Key {
+        action: DriveAction,
+        slot: usize,
+    },
+    SteerDeadzone,
+    TriggerDeadzone,
+    Sensitivity,
+    InvertSteering,
+    Reset,
+}
+
+/// A tuning row: its label, what it edits, and why it is disabled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlRow {
+    pub text: String,
+    pub item: ControlItem,
+    pub enabled: Result<(), String>,
+}
+
+/// Where the running app saves its driving controls — `None` keeps them
+/// for this run only (an evidence run). A resource so the pause overlay
+/// can save a change the way the main menu does.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ControlsSave(pub Option<PathBuf>);
+
+impl ControlsSave {
+    /// Save `controls`. `Err` is a line for a status bar; the controls
+    /// still apply for the run.
+    pub fn save(&self, controls: &ControlSettings) -> Result<(), String> {
+        let Some(path) = &self.0 else { return Ok(()) };
+        controls.save(path).map_err(|e| {
+            warn!(path = %path.display(), error = %e, "driving controls not saved");
+            format!("controls not saved: {e}")
+        })
+    }
 }
 
 /// The on-disk shape. Every field is optional so a hand-written partial
@@ -870,6 +1002,74 @@ mod tests {
             ControlSettings::default()
                 .toggled_inversion()
                 .invert_steering
+        );
+    }
+
+    #[test]
+    fn with_key_and_without_key_return_the_copy_and_a_status_line() {
+        let c = ControlSettings::default();
+        let (next, line) = c.with_key(DriveAction::Throttle, 0, KeyCode::KeyT).unwrap();
+        assert_eq!(next.key_at(DriveAction::Throttle, 0), Some(KeyCode::KeyT));
+        assert_eq!(line, "Accelerate is now KeyT");
+        assert_eq!(c, ControlSettings::default(), "the receiver is untouched");
+
+        let refused = c
+            .with_key(DriveAction::Throttle, 0, KeyCode::KeyS)
+            .unwrap_err();
+        assert!(refused.contains("Brake / reverse") && refused.contains("Esc cancels"));
+        let reserved = c
+            .with_key(DriveAction::Throttle, 0, KeyCode::KeyR)
+            .unwrap_err();
+        assert!(reserved.contains("in-game control"));
+
+        let (cleared, line) = c.without_key(DriveAction::Throttle, 1).unwrap();
+        assert_eq!(cleared.key_at(DriveAction::Throttle, 1), None);
+        assert_eq!(line, "Accelerate key 2 cleared");
+        assert!(
+            c.without_key(DriveAction::Handbrake, 0).is_err(),
+            "the last key stays"
+        );
+    }
+
+    #[test]
+    fn tuning_rows_follow_the_values_and_adjusted_steps_them() {
+        let c = ControlSettings::default();
+        let rows = c.tuning_rows();
+        let items: Vec<ControlItem> = rows.iter().map(|r| r.item).collect();
+        assert_eq!(
+            items,
+            [
+                ControlItem::SteerDeadzone,
+                ControlItem::TriggerDeadzone,
+                ControlItem::Sensitivity,
+                ControlItem::InvertSteering,
+                ControlItem::Reset,
+            ]
+        );
+        assert_eq!(rows[0].text, "Stick deadzone: 5%");
+        assert!(
+            rows[4].enabled.is_err(),
+            "reset is disabled at the shipped map"
+        );
+
+        let tuned = c.adjusted(ControlItem::InvertSteering, true).unwrap();
+        assert!(tuned.invert_steering);
+        assert!(tuned.tuning_rows()[4].enabled.is_ok());
+        assert_eq!(tuned.adjusted(ControlItem::Reset, true), Some(c.clone()));
+        assert_eq!(
+            c.adjusted(ControlItem::Sensitivity, true),
+            Some(c.cycled_sensitivity(true))
+        );
+        assert_eq!(
+            c.adjusted(
+                ControlItem::Key {
+                    action: DriveAction::Brake,
+                    slot: 0
+                },
+                true
+            ),
+            None,
+            "keys rebind by listening, not by stepping"
         );
     }
 }

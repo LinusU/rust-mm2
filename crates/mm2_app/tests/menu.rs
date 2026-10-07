@@ -3765,3 +3765,89 @@ fn the_pause_menu_answers_any_pad() {
     pad_press(&mut app, held, GamepadButton::Start);
     assert_eq!(phase(&app), SessionPhase::Playing, "Start resumes");
 }
+
+/// A rebind made from the pause overlay is the map the main menu's
+/// Controls screen shows after quitting, and a later menu edit keeps it
+/// (the menu's copy re-syncs from the live resource instead of
+/// overwriting the pause edit). A pad cancels a pending capture without
+/// binding a button's side effect.
+#[test]
+fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = mm2_app::controls::controls_path(dir.path());
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(ControlSettings::default())
+        .insert_resource(mm2_app::controls::ControlsSave(Some(path.clone())))
+        .insert_resource(GraphicsSettings::default())
+        .insert_resource(
+            MenuData::new(None, false, None)
+                .with_controls(ControlSettings::default(), Some(path.clone())),
+        );
+    app.update();
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+
+    // Pause -> Options -> Driving controls, then listen on Accelerate.
+    let pad = spawn_pad(&mut app);
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    for _ in 0..2 {
+        press(&mut app, KeyCode::ArrowDown);
+    }
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::ArrowDown);
+    }
+    press(&mut app, KeyCode::Enter);
+    let pause = |a: &App| {
+        let p = a.world().resource::<PauseMenu>();
+        (p.page, p.capture.is_some())
+    };
+    assert_eq!(pause(&app), (mm2_app::pause::PausePage::Controls, false));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(pause(&app), (mm2_app::pause::PausePage::Controls, true));
+    // The pad's East backs out of the listen and nothing is bound; its
+    // D-pad cannot move the focus while listening.
+    pad_press(&mut app, pad, GamepadButton::DPadDown);
+    assert_eq!(app.world().resource::<PauseMenu>().focus, 0);
+    pad_press(&mut app, pad, GamepadButton::East);
+    assert_eq!(pause(&app), (mm2_app::pause::PausePage::Controls, false));
+    assert_eq!(
+        app.world().resource::<ControlSettings>(),
+        &ControlSettings::default()
+    );
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::KeyP);
+    assert_eq!(
+        app.world()
+            .resource::<ControlSettings>()
+            .key_at(DriveAction::Throttle, 0),
+        Some(KeyCode::KeyP)
+    );
+
+    // Back out two pages and quit to the menu (the pause rows' Quit).
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::Enter);
+    assert!(run_until(&mut app, 30, |a| {
+        phase(a) == SessionPhase::Menu && shell(a).active
+    }));
+
+    // The main menu's Controls screen starts from the pause edit...
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+    focus_row(&mut app, "Driving controls");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).screen, menu::Screen::Controls);
+    assert_eq!(shell(&app).rows[0].text, "Accelerate: KeyP");
+    // ...and a menu edit saves the pause edit along with it.
+    focus_row(&mut app, "Invert stick steering");
+    press(&mut app, KeyCode::Enter);
+    let saved = ControlSettings::load(&path);
+    assert!(saved.invert_steering);
+    assert_eq!(saved.key_at(DriveAction::Throttle, 0), Some(KeyCode::KeyP));
+    assert_eq!(&saved, app.world().resource::<ControlSettings>());
+}

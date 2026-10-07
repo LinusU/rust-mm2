@@ -80,7 +80,7 @@ use mm2_game::{
 };
 use tracing::{info, warn};
 
-use crate::controls::{ControlSettings, DriveAction, SLOTS};
+use crate::controls::{ControlItem, ControlSettings, DriveAction, SLOTS};
 use crate::input::pad_nav;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
@@ -1028,7 +1028,7 @@ impl MenuShell {
                 ));
             }
             Action::ResetControls => {
-                self.set_controls(data, ControlSettings::default(), effects);
+                self.tune_controls(data, ControlItem::Reset, true, effects);
                 self.status = Some("driving controls reset to the defaults".into());
             }
             Action::LaunchCustomize => {
@@ -1190,20 +1190,16 @@ impl MenuShell {
                 self.set_settings(data, data.settings.cycled_antialiasing(forward), effects);
             }
             Action::CycleSteerDeadzone => {
-                self.set_controls(data, data.controls.cycled_steer_deadzone(forward), effects);
+                self.tune_controls(data, ControlItem::SteerDeadzone, forward, effects)
             }
             Action::CycleTriggerDeadzone => {
-                self.set_controls(
-                    data,
-                    data.controls.cycled_trigger_deadzone(forward),
-                    effects,
-                );
+                self.tune_controls(data, ControlItem::TriggerDeadzone, forward, effects);
             }
             Action::CycleSensitivity => {
-                self.set_controls(data, data.controls.cycled_sensitivity(forward), effects);
+                self.tune_controls(data, ControlItem::Sensitivity, forward, effects)
             }
             Action::ToggleInvertSteering => {
-                self.set_controls(data, data.controls.toggled_inversion(), effects);
+                self.tune_controls(data, ControlItem::InvertSteering, forward, effects);
             }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
@@ -1313,6 +1309,19 @@ impl MenuShell {
         effects.push(MenuEffect::Controls(Box::new(controls)));
     }
 
+    /// Step a controls tuning row (or reset) and adopt the result.
+    fn tune_controls(
+        &mut self,
+        data: &mut MenuData,
+        item: ControlItem,
+        forward: bool,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        if let Some(next) = data.controls.adjusted(item, forward) {
+            self.set_controls(data, next, effects);
+        }
+    }
+
     /// Finish a key capture: bind `key`, or keep listening with the
     /// refusal (reserved, taken by another action...) on the status
     /// line so the player can pick another key without re-opening it.
@@ -1324,23 +1333,13 @@ impl MenuShell {
         key: KeyCode,
         effects: &mut Vec<MenuEffect>,
     ) {
-        let mut next = data.controls.clone();
-        match next.rebind(action, slot, key) {
-            Ok(()) => {
+        match data.controls.with_key(action, slot, key) {
+            Ok((next, line)) => {
                 self.capture = None;
-                self.status = Some(format!(
-                    "{} is now {}",
-                    action.label(),
-                    next.slot_label(action, slot)
-                ));
+                self.status = Some(line);
                 self.set_controls_keep_status(data, next, effects);
             }
-            Err(e) => {
-                self.status = Some(format!(
-                    "{}: {e} - press another key (Esc cancels)",
-                    crate::controls::key_name(key).unwrap_or("that key")
-                ));
-            }
+            Err(line) => self.status = Some(line),
         }
     }
 
@@ -1352,13 +1351,12 @@ impl MenuShell {
         slot: usize,
         effects: &mut Vec<MenuEffect>,
     ) {
-        let mut next = data.controls.clone();
-        match next.unbind(action, slot) {
-            Ok(()) => {
-                self.status = Some(format!("{} key {} cleared", action.label(), slot + 1));
+        match data.controls.without_key(action, slot) {
+            Ok((next, line)) => {
+                self.status = Some(line);
                 self.set_controls_keep_status(data, next, effects);
             }
-            Err(e) => self.status = Some(format!("{}: {e}", action.label())),
+            Err(line) => self.status = Some(line),
         }
     }
 
@@ -2317,40 +2315,17 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
             )
         })
         .collect();
-    let on_off = |on: bool| if on { "On" } else { "Off" };
-    let tuning = [
-        (
-            format!("Stick deadzone: {:.0}%", c.steer_deadzone * 100.0),
-            Action::CycleSteerDeadzone,
-        ),
-        (
-            format!("Trigger deadzone: {:.0}%", c.trigger_deadzone * 100.0),
-            Action::CycleTriggerDeadzone,
-        ),
-        (
-            format!("Steering sensitivity: {:.2}x", c.steer_sensitivity),
-            Action::CycleSensitivity,
-        ),
-        (
-            format!("Invert stick steering: {}", on_off(c.invert_steering)),
-            Action::ToggleInvertSteering,
-        ),
-    ];
-    rows.extend(
-        tuning
-            .into_iter()
-            .map(|(text, action)| row(text, Ok(()), action, None)),
-    );
-    rows.push(row(
-        "Reset to defaults".to_string(),
-        if *c == ControlSettings::default() {
-            Err("already at the defaults".to_string())
-        } else {
-            Ok(())
-        },
-        Action::ResetControls,
-        None,
-    ));
+    rows.extend(c.tuning_rows().into_iter().map(|r| {
+        let action = match r.item {
+            ControlItem::SteerDeadzone => Action::CycleSteerDeadzone,
+            ControlItem::TriggerDeadzone => Action::CycleTriggerDeadzone,
+            ControlItem::Sensitivity => Action::CycleSensitivity,
+            ControlItem::InvertSteering => Action::ToggleInvertSteering,
+            ControlItem::Reset => Action::ResetControls,
+            ControlItem::Key { action, slot } => Action::RebindKey { action, slot },
+        };
+        row(r.text, r.enabled, action, None)
+    }));
     rows
 }
 
@@ -2724,6 +2699,14 @@ pub struct MenuSide {
 #[derive(Component)]
 pub struct MenuButton(pub MenuCommand);
 
+/// The live settings resources the pause overlay edits and the menu's
+/// copies re-sync from when it reopens.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LiveSettings<'w> {
+    graphics: Option<Res<'w, GraphicsSettings>>,
+    controls: Option<Res<'w, ControlSettings>>,
+}
+
 /// Keep the shell's `active` flag honest: open exactly while the
 /// session sits at `Menu`, closed everywhere else — this is what makes
 /// a quit from a menu-launched session return to the menu, and it
@@ -2746,7 +2729,7 @@ pub fn menu_watch(
     session: Res<Session>,
     control: Res<SessionControl>,
     active: Option<Res<ActiveProfile>>,
-    settings: Option<Res<GraphicsSettings>>,
+    live: LiveSettings,
     mut note: Option<ResMut<SessionNote>>,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
@@ -2759,8 +2742,14 @@ pub fn menu_watch(
                 // The pause overlay edits the live settings too — the
                 // Options screen must start from them, not from the
                 // copy it last saved.
-                if let Some(settings) = settings {
+                if let Some(settings) = live.graphics {
                     data.settings = *settings;
+                }
+                // Likewise the driving controls the pause overlay's page
+                // rebinds: a stale copy here would overwrite them on the
+                // next menu edit.
+                if let Some(controls) = live.controls {
+                    data.controls = controls.clone();
                 }
                 if let Some(note) = note.as_mut()
                     && let Some(reason) = note.failure.take()
