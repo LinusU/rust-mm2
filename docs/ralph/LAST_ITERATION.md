@@ -1,3 +1,38 @@
+# Last iteration — F26-B.3: late join after a leave (new-run iteration 29 of this runner)
+
+Selection: previous review passed, no blockers. Report 6 follow-up 1's
+two-process leg (breakdown for a remote human's wreck) needs a networked
+Blitz/Checkpoint race on a retail install plus an evidence knob that wrecks
+a car headlessly — too broad for one iteration and unprovable on the
+synthetic dev world, so left open (recorded in PLAN). Took the next named
+F26-B open item instead: reconnect. Without player identity on the wire a
+"reconnect" is a new connection, so the leg pins what must hold: the
+leaver's seat is gone, the newcomer is handed the live generation under a
+fresh wire id and sees only the host.
+
+Change (test + docs only): `net_drive::a_seat_freed_by_a_leaver_is_not_resurrected_for_the_next_joiner`.
+Host starts gen 1 alone, `first` joins/drives/quits (`event=left cause=quit`),
+`second` joins: host logs a second `remote participant spawned` with a
+different wire id; second's record is `mp=gen1 phase=playing`, inputs sent,
+snaps applied, `rem1` exactly. The first run failed on `remote_spin>0`
+(the host's own car has driven to the dev-world end by then and sits still),
+so this leg asserts the other `assert_client_drove` fields inline and says
+why; the spinning copy is covered by the first joiner. Waits are output-driven
+(`until`/`until_within`), no sleeps or fixed frame counts. Docs: `research/net.md`,
+DSN-79, PLAN.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+exit 0; `cargo test --locked --workspace` exit 0 (2378 passed, 0 failed). No test
+processes left running.
+
+Not verified / open: spectator/race participation for late joiners, race ending
+during a late join, same-identity reconnect (designed non-feature), breakdown
+process leg, LAN/Internet. Loopback, one machine, synthetic dev world. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F26-B.2: late-join process leg (new-run iteration 28 of this runner)
 
 Selection: previous review passed with no blockers (its gaps are

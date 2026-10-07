@@ -401,6 +401,77 @@ fn a_client_that_joins_a_running_session_is_handed_the_live_one() {
     quit_and_assert_host_drove(host);
 }
 
+/// F26-AC02's reconnect-shaped leg at process level: a late joiner
+/// plays and leaves, then a *second* process joins the same running
+/// session. Identity is not carried across a reconnect (the wire id is
+/// minted per connection), so the leg pins what must hold instead —
+/// the leaver's seat is gone before the newcomer arrives, the
+/// newcomer is handed the live generation 1 (not a re-minted one),
+/// gets a seat of its own under a fresh wire id, and sees exactly one
+/// other participant: the host. A leaver's remote copy resurrected for
+/// the next joiner would read `rem2`.
+#[test]
+fn a_seat_freed_by_a_leaver_is_not_resurrected_for_the_next_joiner() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let addr = listening_addr(&host);
+
+    host.cmd("start");
+    host.until("event=started generation=1");
+    let first = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "first", 2500));
+    let spawned_first = host.until("remote participant spawned");
+    let rec = first.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove(&rec, 1);
+    assert!(
+        first.wait().success(),
+        "the first joiner did not exit cleanly"
+    );
+    assert!(host.until("event=left").contains("cause=quit"));
+
+    let second = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "second", 4500));
+    let spawned_second = host.until("remote participant spawned");
+    // The log line is colourised, so `player=<n>` is read off its tail.
+    let wire_id = |line: &str| -> u64 {
+        line.rsplit(|c: char| !c.is_ascii_digit())
+            .find(|d| !d.is_empty())
+            .and_then(|d| d.parse().ok())
+            .unwrap_or_else(|| panic!("no wire id in {line}"))
+    };
+    assert_ne!(
+        wire_id(&spawned_first),
+        wire_id(&spawned_second),
+        "the newcomer reused the leaver's wire id: {spawned_first} / {spawned_second}"
+    );
+    let rec = second.until_within("smoke=headless-physics", Duration::from_secs(120));
+    // Not `assert_client_drove`: by now the host's own car has driven
+    // to the end of the dev world and sits still, so the copy's wheels
+    // legitimately read `spin0` (the first joiner, arriving at the
+    // host's start, covers the spinning copy).
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&rec, "phase"), "playing", "{rec}");
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
+    assert!(
+        moved_m(&rec) > 0.0,
+        "the newcomer drove its own seat: {rec}"
+    );
+    let net = net_field(&rec);
+    assert!(net.inputs_sent > 0, "the newcomer streamed inputs: {rec}");
+    assert!(
+        net.snaps_applied > 0,
+        "the newcomer applied authority snapshots: {rec}"
+    );
+    assert_eq!(
+        net.remotes, 1,
+        "only the host is left to copy — the leaver's seat must not return: {rec}"
+    );
+    assert!(
+        second.wait().success(),
+        "the second joiner did not exit cleanly"
+    );
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
 /// The v16 surface tail at process level — the review gap the v16
 /// landing disclosed: every earlier leg either staged the
 /// `SurfaceContact` by hand (in-process) or had nothing to resolve

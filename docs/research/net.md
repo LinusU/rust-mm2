@@ -1352,6 +1352,22 @@ policy is the closed-lobby refusal (`SessionStarted`, MP-5, covered by
 `net_host`); a spectator mode, reconnect-with-same-identity and "race
 ends during late join" are not implemented or covered.
 
+### Late join after a leave, process level (F26-B.3, no wire change)
+
+`net_drive::a_seat_freed_by_a_leaver_is_not_resurrected_for_the_next_joiner`:
+one late joiner plays and quits (its `event=left cause=quit` lands on the
+host), then a *second* `--join --ready` process connects to the same
+still-running generation 1. It is handed `gen1`, the host spawns its seat
+under a wire id different from the leaver's, and its record reads
+`rem1` — only the host's copy, so the leaver's seat did not return. This is
+what "reconnect" means today: a returning player is a new connection with
+a new wire id and no memory of the old seat (no identity or progress is
+carried; that is a designed non-feature, not an original rule). The
+second record is not held to the spinning-wheel assertion: by then the
+host's own car has driven to the end of the dev world and sits still, so
+`spin0` is the honest value there. Passed first run (no defect found),
+3/3 repeats; loopback, one machine, dev world.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
