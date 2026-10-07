@@ -3423,6 +3423,9 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Steer left: KeyA",
             "Steer right: KeyD",
             "Handbrake: Space",
+            "Shift up (manual): KeyG",
+            "Shift down (manual): KeyB",
+            "Transmission: Automatic",
             "Stick deadzone: 5%",
             "Trigger deadzone: 5%",
             "Steering sensitivity: 1.00x",
@@ -3437,8 +3440,9 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
         .collect();
     assert_eq!(alts[0].as_deref(), Some("Alt: ArrowUp"));
     assert_eq!(alts[4].as_deref(), Some("Alt: -"));
-    assert_eq!(alts[5], None);
-    assert!(shell(&app).rows[9].enabled.is_err());
+    assert_eq!(alts[6].as_deref(), Some("Alt: -"), "shift down");
+    assert_eq!(alts[7], None, "tuning rows have no alternate");
+    assert!(shell(&app).rows[12].enabled.is_err());
     // Esc leaves for the graphics screen with the Controls row focused.
     press(&mut app, KeyCode::Escape);
     assert_eq!(shell(&app).screen, menu::Screen::Options);
@@ -3480,7 +3484,7 @@ fn a_captured_key_rebinds_the_action_and_persists() {
     );
     assert_eq!(&ControlSettings::load(&path), live);
     // The reset row woke up; it restores the shipped map everywhere.
-    assert!(shell(&app).rows[9].enabled.is_ok());
+    assert!(shell(&app).rows[12].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(
@@ -3488,6 +3492,45 @@ fn a_captured_key_rebinds_the_action_and_persists() {
         &ControlSettings::default()
     );
     assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+}
+
+/// The Transmission row flips automatic/manual in place, reaches the
+/// live resource and `controls.json`, and the manual shift keys are
+/// rebindable like any other action.
+#[test]
+fn the_transmission_row_switches_policy_and_the_shift_keys_rebind() {
+    use mm2_app::controls::TransmissionPolicy;
+
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+    focus_row(&mut app, "Transmission");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        shell(&app).rows[7].text,
+        "Transmission: Manual",
+        "the row shows the new policy"
+    );
+    let live = app.world().resource::<ControlSettings>().clone();
+    assert_eq!(live.transmission, TransmissionPolicy::Manual);
+    assert_eq!(ControlSettings::load(&path), live);
+
+    focus_row(&mut app, "Shift up");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).capture, Some((DriveAction::ShiftUp, 0)));
+    press(&mut app, KeyCode::KeyU);
+    let live = app.world().resource::<ControlSettings>().clone();
+    assert_eq!(live.key_at(DriveAction::ShiftUp, 0), Some(KeyCode::KeyU));
+    assert_eq!(ControlSettings::load(&path), live);
+
+    // The reset row wakes up and returns the policy to automatic too.
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<ControlSettings>().transmission,
+        TransmissionPolicy::Automatic
+    );
 }
 
 /// The alternate key rebinds through the side entry, independently of
@@ -3503,10 +3546,10 @@ fn the_alternate_slot_rebinds_through_the_side_entry() {
     assert!(shell(&app).side);
     press(&mut app, KeyCode::Enter);
     assert_eq!(shell(&app).capture, Some((DriveAction::Handbrake, 1)));
-    press(&mut app, KeyCode::KeyB);
+    press(&mut app, KeyCode::KeyJ);
     let live = app.world().resource::<ControlSettings>();
     assert_eq!(live.key_at(DriveAction::Handbrake, 0), Some(KeyCode::Space));
-    assert_eq!(live.key_at(DriveAction::Handbrake, 1), Some(KeyCode::KeyB));
+    assert_eq!(live.key_at(DriveAction::Handbrake, 1), Some(KeyCode::KeyJ));
 }
 
 /// While listening, nav keys bind instead of moving focus; a key
@@ -3616,9 +3659,9 @@ fn tuning_rows_apply_and_persist_and_leaving_drops_a_capture() {
     focus_row(&mut app, "Invert");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
-    assert_eq!(rows[5], "Stick deadzone: 10%");
-    assert_eq!(rows[7], "Steering sensitivity: 1.25x");
-    assert_eq!(rows[8], "Invert stick steering: On");
+    assert_eq!(rows[8], "Stick deadzone: 10%");
+    assert_eq!(rows[10], "Steering sensitivity: 1.25x");
+    assert_eq!(rows[11], "Invert stick steering: On");
     let live = app.world().resource::<ControlSettings>().clone();
     assert_eq!(live.steer_deadzone, 0.10);
     assert!(live.invert_steering);

@@ -7,10 +7,11 @@
 
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, RaceState, Session};
-use mm2_vehicle::{ResetVehicle, VehicleInput};
+use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
-use crate::controls::ControlSettings;
+use crate::controls::{ControlSettings, TransmissionPolicy};
+use crate::manual_gear::ManualGear;
 use crate::session::{self, SpawnPoint};
 
 /// The designed in-session pad map (F22-AC06's bindings leg; the
@@ -166,16 +167,31 @@ pub fn parked_drive(mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>)
     }
 }
 
+/// What [`vehicle_input`] reads and writes on the player car. The gearbox
+/// state and config are optional: a harness car without them still drives,
+/// it just cannot run a manual gearbox.
+type DrivenCar = (
+    Entity,
+    &'static mut VehicleInput,
+    Option<&'static VehicleState>,
+    Option<&'static Vehicle>,
+);
+
 /// Fill `VehicleInput` on the player vehicle from keyboard and the
 /// connected gamepad (gamepad axes take precedence when non-neutral),
 /// through the player's [`ControlSettings`] — the bound keys, stick and
-/// trigger deadzones, steering sensitivity and inversion.
+/// trigger deadzones, steering sensitivity and inversion. Under the
+/// manual [`TransmissionPolicy`] it also pins the gearbox through
+/// `forced_gear` — only where this process is the authority: the wire
+/// carries no gear, so a predicted (`Remote`) car pinned locally would
+/// diverge from the host's automatic one.
 // A Bevy system: each input device and context gate is its own parameter.
 #[allow(clippy::too_many_arguments)]
 pub fn vehicle_input(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
-    mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>,
+    mut vehicles: Query<DrivenCar, With<PlayerVehicle>>,
+    mut manual: Local<ManualGear>,
     cam_mode: Res<CameraMode>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
@@ -195,20 +211,44 @@ pub fn vehicle_input(
     let driving =
         !matches!(*cam_mode, CameraMode::Free) && session.is_playing() && focused && !race_locked;
     if !driving {
-        for mut vi in &mut vehicles {
+        // A pause or countdown ends the held gear: the next frame seeds
+        // from whatever the car is in, so a shift key pressed meanwhile
+        // never counts.
+        manual.release();
+        for (_, mut vi, _, _) in &mut vehicles {
             *vi = VehicleInput::default();
         }
         return;
     }
 
     // A harness app that never inserted the settings drives the shipped map.
-    let input = match controls {
-        Some(controls) => controls.drive_input(&keys, gamepads.iter()),
-        None => ControlSettings::default().drive_input(&keys, gamepads.iter()),
+    let fallback;
+    let controls = match controls.as_deref() {
+        Some(controls) => controls,
+        None => {
+            fallback = ControlSettings::default();
+            &fallback
+        }
     };
+    let input = controls.drive_input(&keys, gamepads.iter());
+    let manual_box = controls.transmission == TransmissionPolicy::Manual
+        && session.authority_role().is_authority();
+    if !manual_box {
+        manual.release();
+    }
+    let (shift_up, shift_down) = controls.shift_edges(&keys);
 
-    for mut vi in &mut vehicles {
+    for (car, mut vi, state, vehicle) in &mut vehicles {
         *vi = input;
+        if let (true, Some(state), Some(vehicle)) = (manual_box, state, vehicle) {
+            vi.forced_gear = Some(manual.command(
+                car,
+                state.gear,
+                vehicle.config.transmission.gear_ratios.len(),
+                shift_up,
+                shift_down,
+            ));
+        }
     }
 }
 

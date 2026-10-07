@@ -300,6 +300,8 @@ pub enum Action {
     CycleSensitivity,
     /// Flip the stick steering direction.
     ToggleInvertSteering,
+    /// Flip the transmission policy.
+    ToggleTransmission,
     /// Put every driving control back to the shipped map.
     ResetControls,
     /// Launch the session the Customize screen configures.
@@ -999,6 +1001,7 @@ impl MenuShell {
             | Action::CycleTriggerDeadzone
             | Action::CycleSensitivity
             | Action::ToggleInvertSteering
+            | Action::ToggleTransmission
             | Action::CycleCnrVariant
             | Action::CycleCnrGold
             | Action::CycleCnrLimit) => self.adjust_with(data, &action, true, effects),
@@ -1200,6 +1203,9 @@ impl MenuShell {
             }
             Action::ToggleInvertSteering => {
                 self.tune_controls(data, ControlItem::InvertSteering, forward, effects);
+            }
+            Action::ToggleTransmission => {
+                self.tune_controls(data, ControlItem::Transmission, forward, effects);
             }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
@@ -2321,6 +2327,7 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
             ControlItem::TriggerDeadzone => Action::CycleTriggerDeadzone,
             ControlItem::Sensitivity => Action::CycleSensitivity,
             ControlItem::InvertSteering => Action::ToggleInvertSteering,
+            ControlItem::Transmission => Action::ToggleTransmission,
             ControlItem::Reset => Action::ResetControls,
             ControlItem::Key { action, slot } => Action::RebindKey { action, slot },
         };

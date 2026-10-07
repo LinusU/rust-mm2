@@ -55,16 +55,22 @@ pub enum DriveAction {
     SteerLeft,
     SteerRight,
     Handbrake,
+    /// Next gear up — answers only under [`TransmissionPolicy::Manual`].
+    ShiftUp,
+    /// Next gear down — answers only under [`TransmissionPolicy::Manual`].
+    ShiftDown,
 }
 
 impl DriveAction {
     /// Every action, in the order a rebinding screen lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Throttle,
         Self::Brake,
         Self::SteerLeft,
         Self::SteerRight,
         Self::Handbrake,
+        Self::ShiftUp,
+        Self::ShiftDown,
     ];
 
     /// The row label.
@@ -75,6 +81,8 @@ impl DriveAction {
             Self::SteerLeft => "Steer left",
             Self::SteerRight => "Steer right",
             Self::Handbrake => "Handbrake",
+            Self::ShiftUp => "Shift up (manual)",
+            Self::ShiftDown => "Shift down (manual)",
         }
     }
 
@@ -90,6 +98,10 @@ impl DriveAction {
             Self::SteerLeft => [Some(KeyCode::KeyA), Some(KeyCode::ArrowLeft)],
             Self::SteerRight => [Some(KeyCode::KeyD), Some(KeyCode::ArrowRight)],
             Self::Handbrake => [Some(KeyCode::Space), None],
+            // The documented A / Z (CTL-1) collide with the WASD map and
+            // the nav-arrow keys, so the shifts get free letters.
+            Self::ShiftUp => [Some(KeyCode::KeyG), None],
+            Self::ShiftDown => [Some(KeyCode::KeyB), None],
         }
     }
 }
@@ -210,11 +222,40 @@ pub const SENSITIVITY_RANGE: (f32, f32) = (0.25, 2.0);
 
 const DEFAULT_DEADZONE: f32 = 0.05;
 
+/// Who changes gear. The sim's gearbox is automatic; `Manual` pins it
+/// through [`mm2_vehicle::VehicleInput::forced_gear`] (CTL-1 documents an
+/// automatic/manual choice; the keys that drive it are designed, DSN-77).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransmissionPolicy {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+impl TransmissionPolicy {
+    /// The row value.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Manual => "Manual",
+        }
+    }
+
+    /// The other policy.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Automatic => Self::Manual,
+            Self::Manual => Self::Automatic,
+        }
+    }
+}
+
 /// The user's driving controls. `Default` is the shipped map.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ControlSettings {
     /// Keys per action (indexed by [`DriveAction::ALL`]), primary first.
-    bindings: [[Option<KeyCode>; SLOTS]; 5],
+    bindings: [[Option<KeyCode>; SLOTS]; DriveAction::ALL.len()],
     /// Left-stick |x| at or below this steers nothing.
     pub steer_deadzone: f32,
     /// Trigger value at or below this is released.
@@ -224,6 +265,8 @@ pub struct ControlSettings {
     /// Flip the stick's steering direction. Keys are never inverted —
     /// that would just swap the two bindings.
     pub invert_steering: bool,
+    /// Automatic gearbox, or manual with the shift keys.
+    pub transmission: TransmissionPolicy,
 }
 
 impl Default for ControlSettings {
@@ -234,6 +277,7 @@ impl Default for ControlSettings {
             trigger_deadzone: DEFAULT_DEADZONE,
             steer_sensitivity: 1.0,
             invert_steering: false,
+            transmission: TransmissionPolicy::Automatic,
         }
     }
 }
@@ -328,6 +372,13 @@ impl ControlSettings {
 
     fn pressed(&self, action: DriveAction, keys: &ButtonInput<KeyCode>) -> bool {
         self.keys(action).any(|k| keys.pressed(k))
+    }
+
+    /// The `(up, down)` shift keys pressed this frame — edges, not holds,
+    /// so one press is one gear.
+    pub fn shift_edges(&self, keys: &ButtonInput<KeyCode>) -> (bool, bool) {
+        let edge = |a| self.keys(a).any(|k| keys.just_pressed(k));
+        (edge(DriveAction::ShiftUp), edge(DriveAction::ShiftDown))
     }
 
     /// Normalize raw device state into a [`VehicleInput`]: the bound keys
@@ -450,6 +501,14 @@ impl ControlSettings {
         }
     }
 
+    /// These controls with the transmission policy flipped.
+    pub fn toggled_transmission(&self) -> Self {
+        Self {
+            transmission: self.transmission.toggled(),
+            ..self.clone()
+        }
+    }
+
     /// These controls with the stick inversion flipped.
     pub fn toggled_inversion(&self) -> Self {
         Self {
@@ -513,6 +572,10 @@ impl ControlSettings {
         };
         vec![
             row(
+                format!("Transmission: {}", self.transmission.label()),
+                ControlItem::Transmission,
+            ),
+            row(
                 format!("Stick deadzone: {:.0}%", self.steer_deadzone * 100.0),
                 ControlItem::SteerDeadzone,
             ),
@@ -549,6 +612,7 @@ impl ControlSettings {
             ControlItem::TriggerDeadzone => self.cycled_trigger_deadzone(forward),
             ControlItem::Sensitivity => self.cycled_sensitivity(forward),
             ControlItem::InvertSteering => self.toggled_inversion(),
+            ControlItem::Transmission => self.toggled_transmission(),
             ControlItem::Reset => Self::default(),
             ControlItem::Key { .. } => return None,
         })
@@ -567,6 +631,7 @@ pub enum ControlItem {
     TriggerDeadzone,
     Sensitivity,
     InvertSteering,
+    Transmission,
     Reset,
 }
 
@@ -606,6 +671,7 @@ struct ControlsFile {
     trigger_deadzone: Option<f32>,
     steer_sensitivity: Option<f32>,
     invert_steering: Option<bool>,
+    transmission: Option<String>,
 }
 
 /// Take `value` when it is finite and in `range`, else `default` plus a
@@ -686,6 +752,17 @@ impl ControlSettings {
             &mut issues,
         );
         out.invert_steering = file.invert_steering.unwrap_or(d.invert_steering);
+        out.transmission = match file.transmission.as_deref() {
+            None => d.transmission,
+            Some("automatic") => TransmissionPolicy::Automatic,
+            Some("manual") => TransmissionPolicy::Manual,
+            Some(other) => {
+                issues.push(format!(
+                    "transmission {other:?} is not automatic or manual; using automatic"
+                ));
+                d.transmission
+            }
+        };
         Ok((out, issues))
     }
 
@@ -736,6 +813,13 @@ impl ControlSettings {
             trigger_deadzone: Some(self.trigger_deadzone),
             steer_sensitivity: Some(self.steer_sensitivity),
             invert_steering: Some(self.invert_steering),
+            transmission: Some(
+                match self.transmission {
+                    TransmissionPolicy::Automatic => "automatic",
+                    TransmissionPolicy::Manual => "manual",
+                }
+                .to_string(),
+            ),
         };
         write_json_atomically(path, &file)
     }
@@ -820,7 +904,7 @@ mod tests {
         // Re-binding the key already in the slot is accepted unchanged.
         assert_eq!(c.rebind(DriveAction::Throttle, 0, KeyCode::KeyW), Ok(()));
         // Free the key on the brake first and the bind goes through.
-        c.rebind(DriveAction::Brake, 0, KeyCode::KeyB).unwrap();
+        c.rebind(DriveAction::Brake, 0, KeyCode::KeyJ).unwrap();
         c.rebind(DriveAction::Throttle, 0, KeyCode::KeyS).unwrap();
         assert_eq!(c.owner_of(KeyCode::KeyS), Some(DriveAction::Throttle));
         assert_eq!(c.owner_of(KeyCode::KeyW), None);
@@ -884,6 +968,73 @@ mod tests {
         c.save(&path).unwrap();
         assert_eq!(ControlSettings::load(&path), c);
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn the_transmission_policy_persists_and_a_bad_value_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = controls_path(dir.path());
+        assert_eq!(
+            ControlSettings::default().transmission,
+            TransmissionPolicy::Automatic
+        );
+        let mut c = ControlSettings::default().toggled_transmission();
+        c.rebind(DriveAction::ShiftUp, 0, KeyCode::KeyU).unwrap();
+        c.save(&path).unwrap();
+        let back = ControlSettings::load(&path);
+        assert_eq!(back.transmission, TransmissionPolicy::Manual);
+        assert_eq!(back.key_at(DriveAction::ShiftUp, 0), Some(KeyCode::KeyU));
+
+        let (c, issues) = ControlSettings::from_json(br#"{"transmission":"cvt"}"#).unwrap();
+        assert_eq!(c.transmission, TransmissionPolicy::Automatic);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("cvt"));
+    }
+
+    #[test]
+    fn a_pre_shift_file_keeps_loading_and_a_clash_with_a_new_default_resets_the_keys() {
+        // An older file without the shift actions gets the shipped shifts.
+        let (c, issues) =
+            ControlSettings::from_json(br#"{"bindings":{"throttle":["KeyU"]}}"#).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(c.key_at(DriveAction::ShiftUp, 0), Some(KeyCode::KeyG));
+        // One that already spent a shipped shift key elsewhere is a clash:
+        // reported, and the keys fall back as a set rather than half-apply.
+        let (c, issues) =
+            ControlSettings::from_json(br#"{"bindings":{"handbrake":["KeyB"]}}"#).unwrap();
+        assert_eq!(c, ControlSettings::default());
+        assert!(issues.iter().any(|i| i.contains("KeyB is bound to both")));
+    }
+
+    #[test]
+    fn shift_keys_are_edges_and_follow_their_binding() {
+        let mut c = ControlSettings::default();
+        c.rebind(DriveAction::ShiftUp, 1, KeyCode::KeyU).unwrap();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        assert_eq!(c.shift_edges(&keys), (false, false));
+        keys.press(KeyCode::KeyU);
+        keys.press(KeyCode::KeyB);
+        assert_eq!(c.shift_edges(&keys), (true, true));
+        keys.clear();
+        assert_eq!(c.shift_edges(&keys), (false, false), "held is not an edge");
+    }
+
+    #[test]
+    fn the_transmission_row_toggles_and_enables_the_reset() {
+        let c = ControlSettings::default();
+        let rows = c.tuning_rows();
+        assert_eq!(rows[0].item, ControlItem::Transmission);
+        assert_eq!(rows[0].text, "Transmission: Automatic");
+        let manual = c.adjusted(ControlItem::Transmission, true).unwrap();
+        assert_eq!(manual.tuning_rows()[0].text, "Transmission: Manual");
+        let reset = manual.tuning_rows().pop().unwrap();
+        assert_eq!(reset.item, ControlItem::Reset);
+        assert!(reset.enabled.is_ok(), "manual is a change from the default");
+        assert_eq!(manual.adjusted(ControlItem::Reset, true).unwrap(), c);
+        assert_eq!(
+            manual.adjusted(ControlItem::Transmission, false).unwrap(),
+            c
+        );
     }
 
     #[test]
@@ -1039,6 +1190,7 @@ mod tests {
         assert_eq!(
             items,
             [
+                ControlItem::Transmission,
                 ControlItem::SteerDeadzone,
                 ControlItem::TriggerDeadzone,
                 ControlItem::Sensitivity,
@@ -1046,15 +1198,15 @@ mod tests {
                 ControlItem::Reset,
             ]
         );
-        assert_eq!(rows[0].text, "Stick deadzone: 5%");
+        assert_eq!(rows[1].text, "Stick deadzone: 5%");
         assert!(
-            rows[4].enabled.is_err(),
+            rows[5].enabled.is_err(),
             "reset is disabled at the shipped map"
         );
 
         let tuned = c.adjusted(ControlItem::InvertSteering, true).unwrap();
         assert!(tuned.invert_steering);
-        assert!(tuned.tuning_rows()[4].enabled.is_ok());
+        assert!(tuned.tuning_rows()[5].enabled.is_ok());
         assert_eq!(tuned.adjusted(ControlItem::Reset, true), Some(c.clone()));
         assert_eq!(
             c.adjusted(ControlItem::Sensitivity, true),

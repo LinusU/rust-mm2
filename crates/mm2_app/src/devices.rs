@@ -145,8 +145,8 @@ pub const RECORDS: [CapabilityRecord; 11] = [
     },
     CapabilityRecord {
         capability: Capability::ManualTransmission,
-        status: Status::NotImplemented,
-        note: "the gearbox is automatic and the brake pedal doubles as reverse once stopped",
+        status: Status::SyntheticOnly,
+        note: "a Controls-page policy pins the gearbox through the shift keys (G/B); keyboard only, no pad shift buttons, inert on a predicted multiplayer client; the brake pedal still doubles as reverse once stopped",
     },
     CapabilityRecord {
         capability: Capability::SteeringWheel,

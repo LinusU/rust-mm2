@@ -1,3 +1,52 @@
+# Last iteration — F23-A.2: selectable transmission policy (new-run iteration 25 of this runner)
+
+Selection: previous review passed with no blockers (its gaps: fmt/clippy not
+visible in the log it read, live pad log path not run — neither is a defect to
+repair). Took the F23 req-1 item still absent: "selectable transmission
+policy" (CTL-1 documents `T` auto/manual and `A`/`Z` shifts). The sim already
+had an explicit `VehicleInput::forced_gear` command, so this is a device-side
+slice only; physics untouched.
+
+Change: `ControlSettings.transmission` (`TransmissionPolicy` Automatic default /
+Manual), persisted as `transmission` in `controls.json` (unknown value →
+automatic + issue line). `DriveAction` gained `ShiftUp`/`ShiftDown` (default
+G/B — the documented A/Z collide with steer-left and the nav-arrow key; they
+rebind like the driving keys and appear on both Controls pages). New
+`mm2_app::manual_gear::ManualGear` holds the chosen gear per car: seeded from
+the car's own gear (switching never lurches), one key *press* = one gear,
+clamped to the config's gear count, dropped on every non-driving frame and
+re-seeded for a new car. `vehicle_input` pins `forced_gear` from it. A
+Transmission tuning row (menu Controls screen + pause controls page) flips the
+policy; Reset restores automatic. Policy is inert when
+`authority_role()` is not authority: `forced_gear` never rides the wire, so a
+pinned predicted copy would diverge from the host's automatic car (recorded in
+DSN-77, original-rules.md). Devices record row "manual transmission" is now
+SyntheticOnly (doc + table kept in step).
+
+Tests (+12, 2358 total): `manual_gear` unit (seed/step/clamp/cancel/reseed/
+shorter gearbox); controls unit (policy persists, bad value repaired, old file
+loads with shipped shifts, clash with new default resets as a set, shift keys
+are edges, row toggle + reset); `tests/input.rs` (manual pins/steps/gates
+through the production `vehicle_input`; inert on a `Remote` session); menu
+test for the row + shift-key rebind. Existing menu/session tests re-indexed for
+the extra rows; two tests that used KeyB as a free key now use KeyJ.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+pass; `cargo test --locked --workspace` pass (2358 passed, 0 failed).
+
+Not verified / open: no real keyboard/pad session; the manual box's feel on a
+real car was not driven (the sim's forced-gear path has its own
+`mm2_vehicle` test, `drive.rs::forced_gear_pins_the_gearbox`); original `T`/`A`/`Z`
+behaviour and rev-limit/auto-downshift rules unverified; no pad shift buttons;
+a hand-edited `controls.json` that already used G or B for another action
+resets its key set (reported). Still open for F23: auto-reverse row, pad
+rebinding, mouse driving, non-driving keys, audio/accessibility options, text
+entry vs live field, AC04 display recovery, AC05 audio effect, unrendered
+pause Controls page. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F23-C.3: per-capability input-device record (new-run iteration 24 of this runner)
 
 Selection: previous review passed with no blockers. Its open F23 list is

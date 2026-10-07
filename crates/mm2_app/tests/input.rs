@@ -166,7 +166,7 @@ fn a_persisted_remap_drives_the_player_after_restart() {
         .unwrap();
     chosen.unbind(DriveAction::Throttle, 1).unwrap();
     chosen
-        .rebind(DriveAction::Handbrake, 0, KeyCode::KeyB)
+        .rebind(DriveAction::Handbrake, 0, KeyCode::KeyJ)
         .unwrap();
     chosen.save(&path).unwrap();
 
@@ -182,7 +182,7 @@ fn a_persisted_remap_drives_the_player_after_restart() {
         player_input(app)
     };
     assert_eq!(hold(&mut app, KeyCode::KeyU).throttle, 1.0, "the new key");
-    assert_eq!(hold(&mut app, KeyCode::KeyB).handbrake, 1.0);
+    assert_eq!(hold(&mut app, KeyCode::KeyJ).handbrake, 1.0);
     for old in [KeyCode::KeyW, KeyCode::ArrowUp, KeyCode::Space] {
         let vi = hold(&mut app, old);
         assert_eq!(
@@ -277,4 +277,143 @@ fn pad_deadzone_sensitivity_and_inversion_apply() {
         .press(KeyCode::KeyD);
     app.update();
     assert_eq!(player_input(&mut app).steering, 1.0);
+}
+
+/// A player car with a real config and gearbox state, in `gear`.
+fn spawn_geared_player(app: &mut App, gear: usize) {
+    use mm2_vehicle::{Vehicle, VehicleConfig, VehicleState};
+
+    let config = VehicleConfig::default();
+    let mut state = VehicleState::new(&config);
+    state.gear = gear;
+    let mut q = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>();
+    let car = q.single(app.world()).unwrap();
+    app.world_mut()
+        .entity_mut(car)
+        .insert((Vehicle { config }, state));
+}
+
+fn tap(app: &mut App, key: KeyCode) {
+    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.release_all();
+    keys.clear();
+    keys.press(key);
+    app.update();
+    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.release_all();
+    keys.clear();
+}
+
+/// F23 req 1's transmission policy: automatic leaves the gearbox to the
+/// sim (`forced_gear` stays `None` however the shift keys are hit);
+/// manual pins the gear the car is in, each shift-key *press* moves one
+/// gear (a held key does not run through them), the ends clamp, and a
+/// pause/respawn re-seeds from the car instead of replaying a stale gear.
+#[test]
+fn manual_transmission_pins_and_steps_the_gear() {
+    use mm2_app::controls::{ControlSettings, TransmissionPolicy};
+
+    let mut app = drive_app(CameraMode::Chase);
+    spawn_geared_player(&mut app, 2);
+    app.insert_resource(ControlSettings::default());
+
+    tap(&mut app, KeyCode::KeyG);
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        None,
+        "automatic ignores the shift keys"
+    );
+
+    let manual = ControlSettings::default().toggled_transmission();
+    assert_eq!(manual.transmission, TransmissionPolicy::Manual);
+    app.insert_resource(manual);
+    app.update();
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(2),
+        "seeded from the car"
+    );
+
+    tap(&mut app, KeyCode::KeyG);
+    assert_eq!(player_input(&mut app).forced_gear, Some(3));
+    // Held across frames: one press is one gear.
+    {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(KeyCode::KeyG);
+    }
+    app.update();
+    // `InputPlugin` clears the edges each frame; this minimal app does it by hand.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.update();
+    assert_eq!(player_input(&mut app).forced_gear, Some(4));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release_all();
+    for _ in 0..8 {
+        tap(&mut app, KeyCode::KeyG);
+    }
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(5),
+        "top of six gears"
+    );
+    for _ in 0..9 {
+        tap(&mut app, KeyCode::KeyB);
+    }
+    assert_eq!(player_input(&mut app).forced_gear, Some(0), "first gear");
+
+    // A pause drops the hold: the next playing frame reads the car again.
+    tap(&mut app, KeyCode::KeyG);
+    assert_eq!(player_input(&mut app).forced_gear, Some(1));
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        None,
+        "paused: no command"
+    );
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    app.update();
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(2),
+        "re-seeded from the car's own gear"
+    );
+}
+
+/// A predicted (`Remote`) session never pins the gearbox: the wire carries
+/// no gear, so a locally pinned copy would drift from the host's
+/// automatic one.
+#[test]
+fn manual_transmission_is_inert_on_a_predicted_session() {
+    use mm2_app::controls::ControlSettings;
+    use mm2_game::SessionAuthority;
+
+    let mut session = Session::new();
+    session
+        .begin(SessionConfig {
+            authority: SessionAuthority::Remote,
+            ..SessionConfig::default()
+        })
+        .unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Countdown).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.insert_resource(session);
+    spawn_geared_player(&mut app, 1);
+    app.insert_resource(ControlSettings::default().toggled_transmission());
+    tap(&mut app, KeyCode::KeyG);
+    assert_eq!(player_input(&mut app).forced_gear, None);
 }

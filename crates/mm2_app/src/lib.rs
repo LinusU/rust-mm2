@@ -31,6 +31,7 @@ pub mod hudmap;
 pub mod input;
 pub mod layers;
 pub mod lesson;
+pub mod manual_gear;
 pub mod menu;
 pub mod movers;
 pub mod nav_overlay;

@@ -1983,17 +1983,17 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     assert!(pause_status(&app).unwrap().contains("at least one key"));
 
     // Tuning rows step in place (Right and Enter) and persist.
-    pause_focus_row(&mut app, 10);
+    pause_focus_row(&mut app, 15);
     let dz = live(&app).steer_deadzone;
     press_key(&mut app, KeyCode::ArrowRight);
     assert_ne!(live(&app).steer_deadzone, dz);
-    pause_focus_row(&mut app, 13);
+    pause_focus_row(&mut app, 18);
     press_key(&mut app, KeyCode::Enter);
     assert!(live(&app).invert_steering);
     assert_eq!(ControlSettings::load(&path), live(&app));
 
     // Reset restores the shipped map and then disables itself.
-    pause_focus_row(&mut app, 14);
+    pause_focus_row(&mut app, 19);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(live(&app), ControlSettings::default());
     assert_eq!(ControlSettings::load(&path), ControlSettings::default());
