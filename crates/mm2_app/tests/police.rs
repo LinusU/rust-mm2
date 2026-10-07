@@ -15,7 +15,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_app::opponents::OpponentDriver;
 use mm2_app::police::{PoliceCar, PoliceFleet, PoliceNav, staging_yaw};
-use mm2_app::session::SessionControl;
+use mm2_app::session::{SessionControl, SpawnPoint, spawn_resets};
 use mm2_game::{
     ObjectIdentity, Player, PlayerVehicle, PoliceSpec, RaceProgress, Session, SessionAuthority,
     SessionConfig, SessionEntity, SessionPhase,
@@ -506,6 +506,65 @@ fn a_player_who_is_no_longer_racing_stands_the_cops_down() {
     assert_eq!(phase_of(&app, cop), PursuitPhase::Idle);
     assert_eq!(app.world().get::<VehicleInput>(cop).unwrap().handbrake, 1.0);
     assert!(app.world().get::<EmergencyLights>(cop).is_none());
+}
+
+/// F20 edge case "respawn while chased": the driver's own reset (the
+/// `R` key's `ResetVehicle` bundle) is a teleport, not an escape the
+/// cop can follow. The chase ends within the bound, the cop is never
+/// carried to the respawn, and a later respawn back into sight starts a
+/// fresh chase instead of resuming the old one.
+#[test]
+fn respawning_while_chased_ends_the_chase_and_a_return_starts_a_new_one() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    let player = local_car(&mut app);
+    run_to_racing(&mut app);
+    run(&mut app, 180);
+    let cop = cop_at(&mut app, 0);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+
+    let far = SpawnPoint::new(Vec3::new(60.0, 1.5, -900.0), 0.0);
+    for reset in spawn_resets(&far, Some(player)) {
+        app.world_mut().write_message(reset);
+    }
+    let policy = *app.world().resource::<PursuitPolicy>();
+    run(&mut app, ((policy.lose_after + 2.0) * 60.0) as usize);
+    let landed = pos_of(&app, player);
+    assert!(
+        landed.z < -800.0,
+        "the reset teleported the player: {landed:?}"
+    );
+    assert!(
+        matches!(phase_of(&app, cop), PursuitPhase::Lost(_)),
+        "{:?}",
+        phase_of(&app, cop)
+    );
+    assert!(
+        pos_of(&app, cop).z > -300.0,
+        "the cop was not carried along"
+    );
+    let report = app.world().resource::<PursuitReport>();
+    assert_eq!(
+        (report.committed, report.gave_up, report.pursuing),
+        (1, 1, 0)
+    );
+    assert!(app.world().get::<EmergencyLights>(cop).is_none());
+
+    // Back in sight of the stood-down cop: nothing happens until the
+    // cooldown ends, then a second, separate chase is committed.
+    let near = SpawnPoint::new(pos_of(&app, cop) + Vec3::new(40.0, 0.0, 0.0), 0.0);
+    for reset in spawn_resets(&near, Some(player)) {
+        app.world_mut().write_message(reset);
+    }
+    run(&mut app, 60);
+    assert_eq!(app.world().resource::<PursuitReport>().committed, 1);
+    run(
+        &mut app,
+        ((policy.cooldown + policy.reaction + 2.0) * 60.0) as usize,
+    );
+    let report = app.world().resource::<PursuitReport>();
+    assert_eq!(report.committed, 2, "{report:?}");
+    assert_eq!(report.pursuing, 1);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
 }
 
 #[test]

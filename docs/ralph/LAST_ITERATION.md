@@ -1,3 +1,33 @@
+# Last iteration — F20-C.3: respawn while chased (new-run iteration 40)
+
+Selection: the previous review passed with no blocking findings. F20's
+remaining open items are AC03 outcome semantics (UNK-9) and the density
+option (B.3c), both needing a semantics decision; of the spec's listed
+edge cases, "respawn while chased" had no test (a race finish is covered
+by the stand-down test; "multiple offenses one tick" has no offense
+model). Test-only slice; no production change, no ledger change.
+
+Test (`tests/police.rs::respawning_while_chased_ends_the_chase_and_a_return_starts_a_new_one`):
+a cop pursuing a racing player; the driver's reset is sent through the
+production `session::spawn_resets` → `ResetVehicle` path to a point 1 km
+away. Asserts the player was teleported, the cop is `Lost` within
+`lose_after + 2 s` (not carried to the respawn, `z > -300`), report
+`committed/gave_up/pursuing == 1/1/0`, lights off. A second reset back
+into sight starts nothing during the cooldown, then after
+`cooldown + reaction` a second separate chase (`committed == 2`).
+
+Gates (iteration 40, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0 (2252 passed,
+0 failed; was 2251). No processes left running.
+
+Not verified: synthetic flat ground, no road graph, not a retail chase;
+no mutation check that the test fails without the reset. Open for F20:
+outcome/bust semantics (UNK-9), density option (B.3c), bridge level
+change. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F20-C.2: long-chase bound test (new-run iteration 39)
 
 Selection: the previous review passed with no blocking findings. Of F20's
