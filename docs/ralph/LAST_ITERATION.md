@@ -1,3 +1,53 @@
+# Last iteration — F20-A.2: the event's police stand on the road (new-run iteration 32)
+
+Selection: the previous review passed with no blocking findings (its
+non-blocking gap — `PoliceReport::scan` skipping an unparsable extra
+aimap — does not touch the roster producers and is left open). F20's
+roster existed with no consumer, so I took the next queued leg, A.2:
+field the authored cops. Chase behavior is unverified (COP-4/UNK-9), so
+no pursuit was invented; this slice is the spawn only.
+
+Changes:
+- `mm2_app::police` (new): `spawn_police`, `PoliceCar`, `PoliceFleet`
+  (authored / spawned / unplaceable / load_failed, `smoke_detail`),
+  `staging_yaw`. `EventSetup.police` is built from the same
+  `event_aimap` read as the opponent roster; `load_session_world` fields
+  it beside the opponents and inserts/removes `PoliceFleet` with the
+  session. Cars use `load_opponent` + the shared
+  `opponents::equip_authored_vehicle` (pure extraction from
+  `spawn_opponents` — its tests are unchanged and pass), carry no
+  `Player`/`RaceProgress`, hold the handbrake, and are not fielded when
+  `authority != Local` (MP-4, same as opponents). Bad rows are skipped
+  and counted, never padded.
+- Smoke `pol=<spawned>/<authored>[,uns<N>][,fail<N>]`, absent on cop-less
+  sessions (existing records bit-identical).
+- Measured, not kept: Cruise `roam` headings vs nearest vehicle lane
+  tangent are inconclusive (16/39 rows >12 m from any lane; of 23 near
+  one, 10 within 30° of the lane axis, 13 across) — the yaw convention
+  stays inferred. Ledger COP-8 records this.
+- Tests: `crates/mm2_app/tests/police.rs` (5; reuses the opponents test
+  harness, whose helpers became `pub(crate)`).
+
+Gates (iteration 32, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2182 passed, 0
+failed; was 2177). Retail, local (`MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`):
+headless `--event checkpoint:8` on sf: `pol=4/4`, `--pro` `pol=8/8`;
+london `checkpoint:2` `pol=1/1`; sf `checkpoint:0` no `pol=`; all
+`status=pass`. No processes left running.
+
+Not verified: that a cop is *visible* or correctly oriented (headless; no
+render check, heading unit/axis inferred); that standing cops are right
+at all before pursuit exists (they are an authored placement, not
+behavior); Cruise cops (not fielded: how many of the 19–20 `roam` rows
+are active is unknown, COP-7); cop-density option (no field to read).
+Next in F20: A.3 detect → engage → pursue → lost state machine (enhanced
+policy where the original is unknown, labelled), then siren
+(`Siren::activate` on the opponent program) and lights, Cruise cops.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F20-A.1: the police roster (new-run iteration 31)
 
 Selection: the previous review passed with no blocking findings, and
