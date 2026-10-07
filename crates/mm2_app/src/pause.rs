@@ -77,6 +77,8 @@ enum PauseAction {
     CycleFlashing,
     /// Cycle the window mode.
     CycleDisplay,
+    /// Cycle the camera field of view.
+    CycleFieldOfView,
     /// Toggle vsync.
     CycleVsync,
     /// Step one of the volume levels.
@@ -139,6 +141,10 @@ fn pause_rows(
                 row(settings.flashing_row(), Ok(PauseAction::CycleFlashing)),
                 row(settings.display_row(), Ok(PauseAction::CycleDisplay)),
                 row(settings.vsync_row(), Ok(PauseAction::CycleVsync)),
+                row(
+                    settings.field_of_view_row(),
+                    Ok(PauseAction::CycleFieldOfView),
+                ),
             ];
             rows.extend(AudioLevel::ALL.map(|level| {
                 row(
@@ -415,6 +421,7 @@ pub fn pause_input(
                     | PauseAction::CycleFlashing
                     | PauseAction::CycleDisplay
                     | PauseAction::CycleVsync
+                    | PauseAction::CycleFieldOfView
                     | PauseAction::CycleAudio(_)
                     | PauseAction::ResetGraphics
                     | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
@@ -495,6 +502,7 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
         PauseAction::CycleFlashing => settings.toggled_reduce_flashing(),
         PauseAction::CycleDisplay => settings.cycled_display(forward),
         PauseAction::CycleVsync => settings.toggled_vsync(),
+        PauseAction::CycleFieldOfView => settings.cycled_field_of_view(forward),
         PauseAction::CycleAudio(level) => settings.stepped_audio(level, forward),
         PauseAction::ResetGraphics => GraphicsSettings::default(),
         _ => return,

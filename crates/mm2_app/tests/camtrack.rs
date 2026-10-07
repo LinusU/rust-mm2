@@ -297,6 +297,75 @@ fn authored_lens_drives_boom_and_projection() {
     );
 }
 
+/// The field-of-view setting widens whichever authored lens is active
+/// and returns to the authored value when set back, never compounding.
+#[test]
+fn the_field_of_view_setting_widens_the_active_chase_lens() {
+    use mm2_app::settings::{FieldOfView, GraphicsSettings};
+    let mut app = base_app(CameraMode::Chase);
+    app.init_resource::<GraphicsSettings>();
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: Some(far_lens()),
+            ..default()
+        },
+        true,
+    );
+    let fov = |app: &App| {
+        let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
+            panic!("chase camera keeps a perspective projection");
+        };
+        p.fov.to_degrees()
+    };
+    let set = |app: &mut App, f: FieldOfView| {
+        app.world_mut()
+            .resource_mut::<GraphicsSettings>()
+            .field_of_view = f;
+        for _ in 0..3 {
+            app.update();
+        }
+    };
+
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        (fov(&app) - 70.0).abs() < 0.01,
+        "authored near lens by default"
+    );
+    set(&mut app, FieldOfView::Wide);
+    assert!(
+        (fov(&app) - 80.0).abs() < 0.01,
+        "near lens +10°, got {}",
+        fov(&app)
+    );
+    set(&mut app, FieldOfView::Wider);
+    set(&mut app, FieldOfView::Wider);
+    assert!(
+        (fov(&app) - 90.0).abs() < 0.01,
+        "+20° from authored, not compounded"
+    );
+
+    // The far lens widens from its own authored 65°.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::ChaseFar;
+    set(&mut app, FieldOfView::Wider);
+    assert!(
+        (fov(&app) - 85.0).abs() < 0.01,
+        "far lens +20°, got {}",
+        fov(&app)
+    );
+
+    set(&mut app, FieldOfView::Authored);
+    assert!(
+        (fov(&app) - 65.0).abs() < 0.01,
+        "back to the authored far lens"
+    );
+}
+
 /// `MinSpeed`..`MaxSpeed` extends the boom toward `MaxDist`.
 #[test]
 fn speed_window_extends_boom() {

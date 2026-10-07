@@ -72,6 +72,13 @@ pub struct CockpitCamera {
     pub look_yaw: f32,
 }
 
+/// The vertical field of view (radians) the vehicle's `camPovCS` record
+/// authored for its cockpit camera, kept so the player's field-of-view
+/// setting widens from the authored value rather than compounding on
+/// the last widened one.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct AuthoredFov(pub f32);
+
 /// A vehicle-child subtree that renders only while `CameraMode::Cockpit`
 /// is active — the dash cluster, the roof card and the cockpit camera
 /// itself. `sync_dash_visibility` flips these against every other
@@ -281,6 +288,7 @@ pub fn spawn_dash(
                     is_active: active,
                     ..default()
                 },
+                AuthoredFov(p.camera_fov_deg().unwrap_or(60.0).to_radians()),
                 Projection::Perspective(PerspectiveProjection {
                     // `camera_fov_deg` reads an undrawable `CameraFOV`
                     // as unauthored — the designed 60° stands in.

@@ -904,6 +904,82 @@ fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
     }
 }
 
+/// The field-of-view setting widens the cockpit camera from the
+/// record's authored `CameraFOV` and hands the authored value back when
+/// set to `Authored` (F23 camera option).
+#[test]
+fn the_field_of_view_setting_widens_the_cockpit_from_its_authored_value() {
+    use mm2_app::settings::{FieldOfView, GraphicsSettings, apply_cockpit_field_of_view};
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<GraphicsSettings>()
+        .add_systems(Update, apply_cockpit_field_of_view);
+    let vehicle = app
+        .world_mut()
+        .spawn((PlayerVehicle, Visibility::Visible))
+        .id();
+    let vfs = Vfs::new();
+    let pov = PovCamSpec {
+        camera_fov: Some(55.0),
+        ..PovCamSpec::default()
+    };
+    app.world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "nonexistent_car",
+                            0,
+                            Some(pov.clone()),
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        );
+                    }
+                    queue.apply(world);
+                })
+            })
+        });
+    let fov = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Projection, With<CockpitCamera>>();
+        let Projection::Perspective(p) = q.single(app.world()).unwrap() else {
+            panic!("cockpit camera keeps a perspective projection");
+        };
+        p.fov.to_degrees()
+    };
+    app.update();
+    assert!((fov(&mut app) - 55.0).abs() < 1e-3, "authored by default");
+    for (setting, want) in [
+        (FieldOfView::Wide, 65.0),
+        (FieldOfView::Wider, 75.0),
+        (FieldOfView::Wider, 75.0),
+        (FieldOfView::Authored, 55.0),
+    ] {
+        app.world_mut()
+            .resource_mut::<GraphicsSettings>()
+            .field_of_view = setting;
+        app.update();
+        let got = fov(&mut app);
+        assert!(
+            (got - want).abs() < 1e-3,
+            "{setting:?} → {want}°, got {got}°"
+        );
+    }
+}
+
 fn push_lp(out: &mut Vec<u8>, s: &str) {
     out.push(s.len() as u8 + 1);
     out.extend_from_slice(s.as_bytes());

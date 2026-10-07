@@ -261,7 +261,9 @@ the low-time warning steady instead of alternating or pulsing.
 **Display** (Windowed / Borderless fullscreen) and **VSync** (On/Off) rows
 change the primary window live and persist; borderless never switches the
 display's video mode, so there is no mode to get stuck in. `--no-vsync`
-still forces vsync off for a run.
+still forces vsync off for a run. **Field of view** (Authored / +10° / +20°)
+widens the chase and cockpit cameras from each view's own authored
+`CameraFOV`; the rear-view mirror keeps its authored view.
 
 A settings file that is partly wrong still loads: each invalid field keeps
 its default and logs which one, and a file that is not valid JSON is moved

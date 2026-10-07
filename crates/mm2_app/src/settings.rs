@@ -34,6 +34,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::dash::AuthoredFov;
+
 /// File name inside the settings directory.
 pub const SETTINGS_FILE: &str = "settings.json";
 
@@ -174,6 +176,58 @@ impl TextSize {
             Self::Large => 1.25,
             Self::Larger => 1.5,
         }
+    }
+}
+
+/// How much wider than authored the driving cameras look — the camera
+/// and motion-comfort setting (F23 req 2). The retail `CameraFOV` of
+/// each chase lens and cockpit view stays the baseline and the default;
+/// a wider step adds degrees of vertical field of view to it. Enhanced
+/// policy: retail has no such option, and the mirror keeps its authored
+/// view (a wide mirror would stop matching the road it reflects).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldOfView {
+    /// Each camera's authored field of view.
+    #[default]
+    Authored,
+    /// Ten degrees wider.
+    Wide,
+    /// Twenty degrees wider.
+    Wider,
+}
+
+impl FieldOfView {
+    /// Every value, in menu order.
+    pub const ALL: [Self; 3] = [Self::Authored, Self::Wide, Self::Wider];
+
+    /// The menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Authored => "Authored",
+            Self::Wide => "+10°",
+            Self::Wider => "+20°",
+        }
+    }
+
+    /// Degrees added to an authored vertical field of view.
+    pub fn added_degrees(self) -> f32 {
+        match self {
+            Self::Authored => 0.0,
+            Self::Wide => 10.0,
+            Self::Wider => 20.0,
+        }
+    }
+
+    /// An authored vertical field of view (radians) widened by this
+    /// step, kept short of 120° where the frame's edges smear. A view
+    /// already authored wider than that is left as it is.
+    pub fn widen(self, authored: f32) -> f32 {
+        if self == Self::Authored {
+            return authored;
+        }
+        let cap = 120f32.to_radians();
+        (authored + self.added_degrees().to_radians()).min(cap.max(authored))
     }
 }
 
@@ -374,6 +428,8 @@ pub struct GraphicsSettings {
     /// Wait for the display's refresh when presenting a frame.
     #[serde(default = "vsync_on")]
     pub vsync: bool,
+    /// How much wider than authored the chase and cockpit cameras look.
+    pub field_of_view: FieldOfView,
 }
 
 impl Default for GraphicsSettings {
@@ -386,6 +442,7 @@ impl Default for GraphicsSettings {
             reduce_flashing: false,
             display: DisplayMode::default(),
             vsync: true,
+            field_of_view: FieldOfView::default(),
         }
     }
 }
@@ -436,6 +493,14 @@ impl GraphicsSettings {
         }
     }
 
+    /// These settings with the camera field of view stepped.
+    pub fn cycled_field_of_view(self, forward: bool) -> Self {
+        Self {
+            field_of_view: cycle_wrapping(&FieldOfView::ALL, self.field_of_view, forward),
+            ..self
+        }
+    }
+
     /// These settings with the display mode stepped.
     pub fn cycled_display(self, forward: bool) -> Self {
         Self {
@@ -462,6 +527,11 @@ impl GraphicsSettings {
         } else {
             bevy::window::PresentMode::AutoNoVsync
         }
+    }
+
+    /// The field-of-view row's text.
+    pub fn field_of_view_row(&self) -> String {
+        format!("Field of view: {}", self.field_of_view.label())
     }
 
     /// The display row's text.
@@ -558,6 +628,7 @@ impl GraphicsSettings {
             reduce_flashing: pick(&map, "reduce_flashing", d.reduce_flashing, &mut issues),
             display: pick(&map, "display", d.display, &mut issues),
             vsync: pick(&map, "vsync", d.vsync, &mut issues),
+            field_of_view: pick(&map, "field_of_view", d.field_of_view, &mut issues),
         };
         Ok((out, issues))
     }
@@ -813,6 +884,28 @@ pub fn apply_text_size(settings: Res<GraphicsSettings>, mut scale: ResMut<UiScal
     }
 }
 
+/// Widen the cockpit camera's authored field of view by
+/// [`GraphicsSettings::field_of_view`]. The chase lens is widened in
+/// `camera::chase_follow`, which rewrites that projection every time the
+/// lens changes. Written only when it differs, so a settled frame leaves
+/// the projection's change tick alone.
+pub fn apply_cockpit_field_of_view(
+    settings: Res<GraphicsSettings>,
+    mut cameras: Query<(&AuthoredFov, &mut Projection)>,
+) {
+    for (authored, mut projection) in &mut cameras {
+        let Projection::Perspective(p) = &*projection else {
+            continue;
+        };
+        let want = settings.field_of_view.widen(authored.0);
+        if p.fov != want
+            && let Projection::Perspective(p) = &mut *projection
+        {
+            p.fov = want;
+        }
+    }
+}
+
 /// Push [`GraphicsSettings::display`] and [`GraphicsSettings::vsync`]
 /// onto the primary window when the settings change. Each field is
 /// written only when it differs, so a frame that changes something else
@@ -853,6 +946,7 @@ impl Plugin for GraphicsSettingsPlugin {
                     apply_antialiasing,
                     apply_text_size,
                     apply_display_settings,
+                    apply_cockpit_field_of_view,
                 ),
             );
     }
@@ -971,6 +1065,7 @@ mod tests {
             reduce_flashing: true,
             display: DisplayMode::Fullscreen,
             vsync: false,
+            field_of_view: FieldOfView::Wide,
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -1093,6 +1188,53 @@ mod tests {
         let path = settings_path(dir.path());
         std::fs::write(&path, br#"{"text_size":"huge"}"#).unwrap();
         assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    }
+
+    #[test]
+    fn the_field_of_view_widens_from_the_authored_value_and_stays_capped() {
+        let a = 70f32.to_radians();
+        assert_eq!(FieldOfView::Authored.widen(a), a);
+        assert!((FieldOfView::Wide.widen(a).to_degrees() - 80.0).abs() < 1e-3);
+        assert!((FieldOfView::Wider.widen(a).to_degrees() - 90.0).abs() < 1e-3);
+        // A lens authored near the cap stops at it; one past it is untouched.
+        let near_cap = 115f32.to_radians();
+        assert!((FieldOfView::Wider.widen(near_cap).to_degrees() - 120.0).abs() < 1e-3);
+        let past = 130f32.to_radians();
+        assert_eq!(FieldOfView::Wider.widen(past), past);
+
+        let d = GraphicsSettings::default();
+        assert_eq!(d.field_of_view, FieldOfView::Authored);
+        let up = d.cycled_field_of_view(true);
+        assert_eq!(up.field_of_view, FieldOfView::Wide);
+        assert_eq!(up.cycled_field_of_view(true).cycled_field_of_view(true), d);
+        assert_eq!(
+            d.cycled_field_of_view(false).field_of_view,
+            FieldOfView::Wider
+        );
+        assert_eq!(up.field_of_view_row(), "Field of view: +10°");
+    }
+
+    #[test]
+    fn the_field_of_view_round_trips_and_a_bad_value_is_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let wide = GraphicsSettings {
+            field_of_view: FieldOfView::Wider,
+            ..GraphicsSettings::default()
+        };
+        wide.save(&path).unwrap();
+        assert_eq!(GraphicsSettings::load(&path), wide);
+
+        std::fs::write(&path, br#"{"field_of_view":"fisheye","text_size":"large"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!(loaded.field_of_view, FieldOfView::Authored);
+        assert_eq!(loaded.text_size, TextSize::Large, "the rest survives");
+        // An old file without the key loads authored, silently.
+        std::fs::write(&path, br#"{"shadows":"low"}"#).unwrap();
+        assert_eq!(
+            GraphicsSettings::load(&path).field_of_view,
+            FieldOfView::Authored
+        );
     }
 
     #[test]

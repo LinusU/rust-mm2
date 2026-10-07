@@ -584,6 +584,7 @@ pub fn chase_follow(
     mode: Res<CameraMode>,
     spatial: Option<SpatialQuery>,
     spawn: Option<Res<crate::session::SpawnPoint>>,
+    settings: Option<Res<crate::settings::GraphicsSettings>>,
     mut cams: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
     vehicle: Query<(Entity, &GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
 ) {
@@ -610,7 +611,10 @@ pub fn chase_follow(
         // The lens owns the projection — write-on-diff so toggling
         // near↔far swaps the authored FOV/clips without churning change
         // detection every frame.
-        let want = lens.projection();
+        let mut want = lens.projection();
+        if let Some(settings) = &settings {
+            want.fov = settings.field_of_view.widen(want.fov);
+        }
         let stale = match &*proj {
             Projection::Perspective(p) => {
                 p.fov != want.fov || p.near != want.near || p.far != want.far

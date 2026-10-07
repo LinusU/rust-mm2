@@ -1,3 +1,26 @@
+# Last iteration — F23-B.7: camera field of view (new-run iteration 28 of the 2026-10-07 run)
+
+Selection: the iteration-27 review passed with no blockers (gaps: fmt/clippy not in verify.log — rerun below with exit codes; real-display
+corrupt-file start unshown — still true). F23 req 2 lists camera settings and none existed. Chose the smallest option with an observable
+effect and a comfort/accessibility purpose: a field-of-view widening on top of each camera's authored `CameraFOV`.
+
+Change: `settings::FieldOfView` (Authored default / +10° / +20°, persisted as `field_of_view`, loaded field by field like the rest).
+`camera::chase_follow` widens the lens projection it already rewrites; the cockpit camera gets `dash::AuthoredFov` and
+`settings::apply_cockpit_field_of_view` widens from it (no compounding). Cap 120°; a lens authored wider is untouched; the mirror is
+deliberately not widened. Rows on the Options screen and pause graphics page (after VSync), Reset covers it. Existing menu/pause tests
+that address rows by index were shifted by one. DSN-84, README line, PLAN F23-A note.
+
+Tests (+5): `settings::the_field_of_view_widens_from_the_authored_value_and_stays_capped`, `settings::the_field_of_view_round_trips_and_a_bad_value_is_recovered`,
+`camtrack::the_field_of_view_setting_widens_the_active_chase_lens` (near/far lens, no compounding, back to authored),
+`dash::the_field_of_view_setting_widens_the_cockpit_from_its_authored_value`, `menu::the_field_of_view_row_steps_wraps_persists_and_resets`.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace`
+exit 0, 2514 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no capture of a widened view; HUD/minimap
+fit at +20° unchecked; `session.rs`'s first-frame chase projection is authored until `chase_follow` runs (one frame). F23 req 2 gameplay-assist
+and resolution/scaling options remain open.
+
+---
+
 # Last iteration — F23 AC04: invalid-settings recovery (new-run iteration 27 of the 2026-10-07 run)
 
 Selection: the iteration-26 review passed with no blockers. F23-AC04 (invalid settings rejected/recovered without a corrupt profile)
