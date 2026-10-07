@@ -1,3 +1,40 @@
+# Last iteration — F26-B.4: rematch with a changed session (new-run iteration 30 of this runner)
+
+Selection: previous review passed with no blockers. The breakdown two-process
+leg is still too broad (needs a retail networked race plus a wrecking knob).
+Took F26-AC05's other named open item, "rematch with a changed city/mode".
+Reading the code showed it was not just untested: `HostLink` fixed the config
+it was opened with, so an in-app host could only ever re-run the same session.
+
+Change: `HostCommand::Session(Box<SessionConfig>)` (HostCommand loses `Copy`/`Eq`)
+→ `HostLink::set_session(vfs, config, running)`, drained by `drive_host` (now also
+takes `Res<Mm2Vfs>`; both real schedules and the test app already insert it).
+Gates: refused while `lobby.generation` is live (a peer that cannot run a changed
+ad leaves the lobby — must not happen mid-race), then `validate` + `check_session`
+(the `--host` flag-time gates); a refusal is a lobby notice and the old ad stays.
+Host pick and `mods_active` stay the link's (Start announces the opened pick);
+seed is the caller's; `late_join` follows the new mode. Test
+`net_app::a_rematch_can_change_the_session_without_dropping_the_peer` (fixture
+city, in-process loopback): cruise → Checkpoint event/Professional/new
+conditions+seed; mid-round change refused; unresolvable city refused; peer gets
+the new ad and a `Start` carrying it at generation 2; host seat begins it; a
+newcomer is then refused `SessionStarted`. Verified red with the late-join update
+removed. Docs: `research/net.md`, DSN-79, PLAN.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+exit 0; `cargo test --locked --workspace` exit 0 (2379 passed, 0 failed). No test
+processes left running.
+
+Not verified / open: no operator surface sends the command (stdin words and
+lobby keys cannot build a config; no windowed host menu picks a mode), retail
+city change, two-process leg, client that cannot run the new ad (leaves via
+`refuse`), results→lobby windowed UI, spectator/race late-join, breakdown
+process leg, LAN/Internet. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F26-B.3: late join after a leave (new-run iteration 29 of this runner)
 
 Selection: previous review passed, no blockers. Report 6 follow-up 1's

@@ -1368,6 +1368,31 @@ host's own car has driven to the end of the dev world and sits still, so
 `spin0` is the honest value there. Passed first run (no defect found),
 3/3 repeats; loopback, one machine, dev world.
 
+### Rematch with a changed session (F26-B.4, in-process, no wire change)
+
+Before this slice an in-app host advertised the config it was opened with
+for every round; `HostLink` could not change it. `HostCommand::Session`
+→ `HostLink::set_session` re-advertises the *next* round's session through
+the lobby's existing `Host::set_session` (peers get a `Session` message
+and stay connected; the running round's `Start` is self-contained and
+untouched). Gates: refused while a round runs (a peer that cannot run a
+changed ad leaves the lobby, which must not happen mid-race), then
+`SessionConfig::validate` and `check_session` against the host's own
+install — the `--host` flag-time gates — so a refusal is a lobby notice
+and the old ad stays. The host seat's pick and `mods_active` stay the
+link's (the `Start` announces the pick the lobby opened with); the seed is
+the caller's; the start's late-join policy follows the new mode.
+`net_app::a_rematch_can_change_the_session_without_dropping_the_peer`
+(fixture city, in-process loopback): cruise → Checkpoint event, Professional,
+new conditions/seed; mid-round change refused, unresolvable city refused,
+the peer receives the new ad and `Start` carries it under generation 2,
+the host seat begins it, and a newcomer is now refused `SessionStarted`
+(red when the late-join update is removed). *No operator surface yet*: the
+stdin words and lobby keys do not build a config (no windowed host menu
+picks a mode), so today only code can send the command. Not covered: a
+retail city change, a client that cannot run the new ad (it leaves, by
+`refuse`), results→lobby UI, two-process leg.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

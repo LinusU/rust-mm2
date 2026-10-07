@@ -946,15 +946,44 @@ pub enum HostOpenError {
 /// An operator intent for a hosted lobby — the stdin command surface
 /// (`start`/`cancel`/`quit`, the same words `mm2-host` accepts) and
 /// the windowed lobby keys feed one channel [`drive_host`] drains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HostCommand {
     /// Request the session start — the lobby's own gate decides, the
     /// verdict arrives as `Started`/`StartRefused`.
     Start,
+    /// Re-advertise the session the *next* round runs (a rematch with
+    /// a changed city, mode, difficulty or conditions) — see
+    /// [`HostLink::set_session`] for what is gated and kept.
+    Session(Box<SessionConfig>),
     /// End the running session — everyone returns to the lobby.
     Cancel,
     /// Shut the lobby down and exit the app.
     Quit,
+}
+
+/// Why a hosted lobby refused to re-advertise the next round's session
+/// (F26-AC05) — the flag-time gates `--host` runs, applied again.
+#[derive(Debug, thiserror::Error)]
+pub enum SetSessionError {
+    /// A round is live: its `Start` carried the running config and
+    /// every peer is playing it, so the next round's ad waits for the
+    /// `Cancel` (a peer that cannot run a changed ad leaves the lobby,
+    /// and that must not happen mid-race).
+    #[error("a session is running; change the next round's session after it ends")]
+    SessionRunning,
+    /// The config fails `SessionConfig::validate`.
+    #[error("invalid session configuration: {0}")]
+    Invalid(#[from] ConfigError),
+    /// The host's own install cannot run it (unresolved city, event
+    /// that cannot be built, Cops & Robbers pool too small).
+    #[error("{0}")]
+    Unrunnable(#[from] SessionContentError),
+    /// The config cannot ride the wire.
+    #[error("session cannot be advertised: {0}")]
+    Advertise(#[from] SessionWireError),
+    /// The lobby loop is gone.
+    #[error("{0}")]
+    Net(#[from] NetError),
 }
 
 /// Feed stdin `start`/`cancel`/`quit` lines into a hosted lobby — the
@@ -1137,6 +1166,46 @@ impl HostLink {
             .remote_inputs()
     }
 
+    /// Replace the session the lobby advertises for the *next* round
+    /// (F26-AC05: rematch with a changed city/mode). The gates are the
+    /// ones `--host` runs at flag time — `validate` then
+    /// [`check_session`] against the host's own install — so a peer on
+    /// the same content (the handshake fingerprint) can run what is
+    /// advertised and never leaves over it. Refused while a session is
+    /// live (`running`: the lobby's `generation` mirror).
+    ///
+    /// The host seat's *pick* and the local-only fields stay the link's:
+    /// the lobby's `Start` announces the pick it was opened with, so a
+    /// changed `vehicle` would disagree with what peers spawn. The seed
+    /// is the caller's (the same seed replays the same seed-rolled
+    /// world; mint a fresh one for a new one). The start's late-join
+    /// policy follows the new mode.
+    pub fn set_session(
+        &mut self,
+        vfs: &Vfs,
+        next: &SessionConfig,
+        running: bool,
+    ) -> Result<(), SetSessionError> {
+        if running {
+            return Err(SetSessionError::SessionRunning);
+        }
+        let mut config = next.clone();
+        config.authority = SessionAuthority::Host;
+        config.vehicle = self.config.vehicle.clone();
+        config.mods_active = self.config.mods_active;
+        config.validate()?;
+        check_session(vfs, &config)?;
+        let ad = advertise(&config)?;
+        self.host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_session(ad.clone())?;
+        self.late_join = late_join_policy(&config.mode);
+        self.config = config;
+        self.ad = ad;
+        Ok(())
+    }
+
     /// The advertised session's display summary.
     pub fn summary(&self) -> &str {
         &self.ad.summary
@@ -1234,6 +1303,7 @@ pub fn drive_host(
     mut lobby: ResMut<LobbyState>,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
+    vfs: Res<Mm2Vfs>,
     menu: Option<Res<MenuShell>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -1248,6 +1318,16 @@ pub fn drive_host(
                 // mint a session nobody is left to cancel.
                 if !link.leaving {
                     let _ = link.ctl.start(link.late_join);
+                }
+            }
+            HostCommand::Session(next) => {
+                if link.leaving {
+                    continue;
+                }
+                let running = lobby.generation.is_some();
+                match link.set_session(&vfs.0, &next, running) {
+                    Ok(()) => lobby.advertised = Some(link.ad.clone()),
+                    Err(e) => lobby.notice = Some(format!("next session refused: {e}")),
                 }
             }
             HostCommand::Cancel => {

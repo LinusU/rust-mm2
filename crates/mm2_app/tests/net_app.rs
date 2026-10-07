@@ -1047,6 +1047,199 @@ fn a_hosted_session_end_cancels_the_wire_session() {
     }
 }
 
+/// F26-AC05's city/mode change: between rounds the host re-advertises
+/// a different session (here a cruise → authored Checkpoint event on
+/// the fixture city, harder difficulty, new conditions). The peer is
+/// told on the wire and stays connected; the next `Start` carries the
+/// new session — not the last round's — under a fresh generation, the
+/// host seat begins it, and the event's closed-lobby late-join policy
+/// replaces the cruise's open one. A change while a round runs, or to
+/// a session the host's own install cannot run, is refused with a
+/// notice and leaves the advertisement as it was.
+#[test]
+fn a_rematch_can_change_the_session_without_dropping_the_peer() {
+    let install = support::event_install();
+    let city = |mode| SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/testcity.psdl".to_string(),
+        },
+        mode,
+        ..SessionConfig::default()
+    };
+    let round_one = city(SessionMode::Cruise);
+    let round_two = SessionConfig {
+        difficulty: mm2_game::Difficulty::Professional,
+        conditions: mm2_game::SessionConditions {
+            time_of_day: mm2_game::TimeOfDay::new(2).unwrap(),
+            weather: mm2_game::Weather::new(1).unwrap(),
+        },
+        seed: 0x5eed,
+        ..city(SessionMode::Event(support::event(
+            mm2_game::EventTableKind::Checkpoint,
+            0,
+        )))
+    };
+    let ad_one = net::advertise(&round_one).unwrap();
+    let ad_two = {
+        // What the host stamps: `Host` authority on the same pick.
+        let mut stamped = round_two.clone();
+        stamped.authority = SessionAuthority::Host;
+        net::advertise(&stamped).unwrap()
+    };
+    assert_ne!(ad_one, ad_two);
+
+    let (link, vfs, fp) = host_link(install.path(), &round_one);
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+
+    // Round 1 as advertised at open.
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    match until_wire(&mut peer, |m| matches!(m, Message::Start { .. })) {
+        Message::Start {
+            generation,
+            session,
+            ..
+        } => {
+            assert_eq!(generation, 1);
+            assert_eq!(session.summary, ad_one.summary);
+        }
+        _ => unreachable!(),
+    }
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // A change mid-round is refused: the running session's peers must
+    // not be handed an ad they could refuse by leaving.
+    commands
+        .send(HostCommand::Session(Box::new(round_two.clone())))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().notice.is_some()
+    });
+    {
+        let lobby = app.world().resource::<LobbyState>();
+        assert!(
+            lobby
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("a session is running")),
+            "{:?}",
+            lobby.notice
+        );
+        assert_eq!(lobby.advertised.as_ref(), Some(&ad_one));
+    }
+    assert_eq!(app.world().resource::<HostLink>().summary(), ad_one.summary);
+
+    // The round ends; the lobby re-opens with the peer still in it.
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    spin(&mut app, |a| {
+        session_phase(a) == SessionPhase::Menu
+            && a.world().resource::<LobbyState>().generation.is_none()
+    });
+    until_wire(&mut peer, |m| matches!(m, Message::Cancel { .. }));
+
+    // A world the host's install cannot resolve is refused, the ad
+    // stays round one's.
+    app.world_mut().resource_mut::<LobbyState>().notice = None;
+    commands
+        .send(HostCommand::Session(Box::new(SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/nowhere.psdl".to_string(),
+            },
+            ..round_two.clone()
+        })))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().notice.is_some()
+    });
+    {
+        let lobby = app.world().resource::<LobbyState>();
+        assert!(
+            lobby
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("does not resolve")),
+            "{:?}",
+            lobby.notice
+        );
+        assert_eq!(lobby.advertised.as_ref(), Some(&ad_one));
+    }
+
+    // The valid change: advertised to the peer and mirrored locally.
+    commands
+        .send(HostCommand::Session(Box::new(round_two.clone())))
+        .unwrap();
+    app.update();
+    match until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Session(ad) if *ad == ad_two),
+    ) {
+        Message::Session(ad) => assert_eq!(ad, ad_two),
+        _ => unreachable!(),
+    }
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().advertised.as_ref() == Some(&ad_two)
+    });
+    assert_eq!(app.world().resource::<LobbyState>().roster.len(), 1);
+
+    // Round 2: `Cancel` reset readiness, so the peer re-consents.
+    peer.ctl().unwrap().set_ready(true).unwrap();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Roster { players: r } if r.iter().all(|e| e.ready)),
+    );
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    match until_wire(&mut peer, |m| matches!(m, Message::Start { .. })) {
+        Message::Start {
+            generation,
+            session,
+            ..
+        } => {
+            assert_eq!(generation, 2);
+            assert_eq!(session, ad_two, "Start carries the new session");
+        }
+        _ => unreachable!(),
+    }
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    let session = app.world().resource::<Session>();
+    let config = session.config().expect("round two began");
+    assert_eq!(config.authority, SessionAuthority::Host);
+    assert_eq!(config.difficulty, mm2_game::Difficulty::Professional);
+    assert_eq!(config.seed, 0x5eed);
+    assert!(matches!(config.mode, SessionMode::Event(_)));
+    assert_eq!(session.wire_generation(), 2);
+
+    // The event's late-join policy now governs: a newcomer is refused
+    // (the cruise round would have admitted it).
+    let err = Client::join(
+        addr,
+        &hello("net-app-test".to_string(), "late".to_string(), fp),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            mm2_net::NetError::Rejected {
+                code: mm2_net::RejectCode::SessionStarted,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(app.should_exit().is_none());
+}
+
 /// `quit` while a hosted session runs: the wire session is cancelled
 /// ahead of the sockets dying (both ride the same control channel —
 /// the `Cancel` is processed first), the live session tears down to
