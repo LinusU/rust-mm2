@@ -281,6 +281,24 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Police-roster audit (F20-A.1): run every cataloged event and the
+    /// Cruise (`roam`) record through the production `PoliceRoster`
+    /// builder at both difficulties, cross-check the wired count against
+    /// the table row's `Cops`, and check wired vehicle ids against the
+    /// vehicle catalog. Says nothing about pursuit rules (unverified).
+    Police {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered
+        /// `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on an empty catalog, any build the producer
+        /// refuses, any roster issue, or wired vehicle ids outside the
+        /// vehicle catalog.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Audit the ambient-navigation files (`city/*.bai`): parse every
     /// discovered BAI, validate internal cross-references, and cross-check
     /// room references against the matching PSDL when one resolves.
@@ -640,6 +658,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Cnr { dir, city, strict } => {
             cnr::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Police { dir, city, strict } => {
+            police(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Opponents { dir, city, strict } => {
             opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)
@@ -1622,6 +1643,120 @@ fn opponents(
     }
     if strict && !failures.is_empty() {
         return Err(format!("strict opponents audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+fn describe_police(build: &mm2_content::PoliceBuild) -> String {
+    use mm2_content::PoliceBuild as B;
+    match build {
+        B::Built(s) => {
+            let mut d = format!("{}cop", s.wired);
+            if let Some(table) = s.table_cops
+                && table != s.wired as i64
+            {
+                d.push_str(&format!("/{table}tbl"));
+            }
+            if !s.vehicles.is_empty() {
+                d.push_str(&format!(" [{}]", s.vehicles.join(",")));
+            }
+            if let Some(c) = s.chase_distance {
+                d.push_str(&format!(" chase={c}"));
+            }
+            if s.issues.is_empty() {
+                format!("ok: {d}")
+            } else {
+                format!("ok: {d} — {} issue(s)", s.issues.len())
+            }
+        }
+        B::Unsupported => "unsupported (crash course — F21)".to_string(),
+        B::Failed(mm2_content::RosterBuildError::NotReady(
+            mm2_content::EventStatus::Incomplete { missing },
+        )) => format!("incomplete ({})", missing.join(", ")),
+        B::Failed(e) => format!("failed: {e}"),
+    }
+}
+
+/// Police-roster audit (F20-A.1): every cataloged event's
+/// difficulty-selected `[Police]` lineup, plus the Cruise (`roam`)
+/// record's, runs through the production `PoliceRoster` producer —
+/// wired count vs the table row's authored `Cops`, placeability of each
+/// row, wired vehicle ids vs the vehicle catalog. Other stems that wire
+/// cops are counted as extras, never filtered out.
+fn police(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let cities = race_cities(&vfs, city);
+
+    let mut failures: Vec<String> = Vec::new();
+    for city in &cities {
+        let report = mm2_content::PoliceReport::scan(&vfs, city);
+        println!("== police rosters: {city} ==");
+        if report.entries.is_empty() {
+            println!("  (no authored events cataloged)");
+            failures.push(format!("{city}: event catalog is empty"));
+        }
+        let mut report_build = |label: &str, build: &mm2_content::PoliceBuild| match build {
+            mm2_content::PoliceBuild::Built(s) => {
+                for issue in &s.issues {
+                    println!("       issue: {issue}");
+                    failures.push(format!("{city}: {label} — {issue}"));
+                }
+            }
+            mm2_content::PoliceBuild::Failed(e) => {
+                failures.push(format!("{city}: {label} — roster build failed: {e}"));
+            }
+            mm2_content::PoliceBuild::Unsupported => {}
+        };
+        for entry in &report.entries {
+            println!(
+                "  {:<10} {:>2} {:<12} am: {:<34} pro: {}",
+                format!("{:?}", entry.event_ref.table).to_lowercase(),
+                entry.event_ref.index,
+                entry.stem,
+                describe_police(&entry.amateur),
+                describe_police(&entry.professional),
+            );
+            report_build(&entry.stem, &entry.amateur);
+            report_build(&entry.stem, &entry.professional);
+        }
+        println!(
+            "  {:<10} {:>2} {:<12} am: {:<34} pro: {}",
+            "cruise",
+            "-",
+            "roam",
+            describe_police(&report.cruise[0]),
+            describe_police(&report.cruise[1]),
+        );
+        report_build("roam", &report.cruise[0]);
+        report_build("roam", &report.cruise[1]);
+        for x in &report.extras {
+            println!("  extra: {:<44} {} wired", x.logical, x.wired);
+        }
+        for v in &report.unresolved_vehicles {
+            println!("  unresolved vehicle id: {v}");
+            failures.push(format!(
+                "{city}: wired vehicle {v} is not in the vehicle catalog"
+            ));
+        }
+        println!(
+            "  {city}: {} events + cruise — {} built ({} police wired), {} unsupported, {} failed, {} issue(s), {} extra stem(s)",
+            report.entries.len(),
+            report.built(),
+            report.wired(),
+            report.unsupported(),
+            report.failed(),
+            report.issues(),
+            report.extras.len(),
+        );
+        println!();
+    }
+    if strict && !failures.is_empty() {
+        return Err(format!("strict police audit: {} failures", failures.len()).into());
     }
     Ok(())
 }
