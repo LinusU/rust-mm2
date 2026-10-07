@@ -1,3 +1,40 @@
+# Last iteration — F20-B.3a: police debug overlay and loader coverage (new-run iteration 36)
+
+Selection: the previous review passed with no blocking findings. Its
+gaps named two things I could close: no test asserts that
+`load_session_world` inserts `PoliceNav`, and the F20 spec's debug
+state/route visibility (req 6) was open. I took both (B.3 split: Cruise
+cops and cop density stay B.3b).
+
+Changes:
+- `mm2_game`: `ChaseRoute::remaining()`; `DevOverrides.police_debug`.
+- `mm2_app::police_debug` (new, a real consumer of the chase state): pure
+  `debug_lines` (phase pole; goal cross at `last_seen` and the route or
+  an unrouted straight line, only while pursuing) and `draw_police_debug`
+  through gizmos, gated by `enabled` (session config). `--police-debug`
+  CLI flag, scheduled in the windowed app only (headless draws nothing).
+  Ledger COP-12 (implementation choice).
+- `tests/police.rs`: three tests drive the real loader over a synthetic
+  city (`traffic::synthetic_psdl`/`bai_bytes` made `pub(crate)`): cops get
+  the graph; a copless event does not; a missing BAI leaves it absent.
+  One test runs the overlay system through a live chase.
+
+Retail, local: `--headless --frames 2400 --event checkpoint:8
+--police-debug` `status=pass`, `pur=1/1/1,r1` (unchanged). A windowed
+`--frames 700 --screenshot` ran but no cop was in frame, so the overlay
+has not been seen drawn.
+
+Gates (iteration 36, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2241 passed, 0
+failed; was 2231). No processes left running.
+
+Not verified: how the overlay looks; Cruise cops, cop density, bust
+outcome still open. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F20-B.2: a chasing cop follows the road (new-run iteration 35)
 
 Selection: the previous review passed with no blocking findings; its one

@@ -701,3 +701,107 @@ fn the_road_graph_dies_with_the_session() {
     // a world with no routing graph.
     assert!(app.world().get_resource::<PoliceNav>().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// The loader hands the road graph to the cops (F20-B.2, via the real path)
+// ---------------------------------------------------------------------------
+
+/// `install` plus a synthetic city: the PSDL and the `CAI1` road fixture
+/// `tests/traffic.rs` uses, under the stem `test`. The event stays at
+/// `race/testcity/`; the city world is the PSDL's, so the loader's own
+/// `load_routing_nav_graph` path runs.
+fn city_install(cops: i64, rows: &str, with_bai: bool) -> tempfile::TempDir {
+    let tmp = install(cops, rows);
+    write(
+        tmp.path(),
+        "city/test.psdl",
+        crate::traffic::synthetic_psdl(),
+    );
+    if with_bai {
+        write(tmp.path(), "city/test.bai", crate::traffic::bai_bytes());
+    }
+    tmp
+}
+
+fn city_event_config() -> SessionConfig {
+    SessionConfig {
+        world: mm2_game::WorldMode::City {
+            psdl: "city/test.psdl".into(),
+        },
+        ..event_config()
+    }
+}
+
+fn loaded_city_app(cops: i64, rows: &str, with_bai: bool) -> (tempfile::TempDir, App) {
+    let tmp = city_install(cops, rows, with_bai);
+    let mut app = event_app(city_event_config(), vfs_of(tmp.path()));
+    app.update();
+    (tmp, app)
+}
+
+#[test]
+fn the_loader_gives_fielded_cops_the_citys_road_graph() {
+    let (_tmp, app) = loaded_city_app(1, NEAR, true);
+    assert_eq!(app.world().resource::<PoliceFleet>().spawned, 1);
+    let nav = app
+        .world()
+        .get_resource::<PoliceNav>()
+        .expect("cops in a city with roads get its graph");
+    assert!(
+        nav.0.stats().vehicle_arcs > 0,
+        "the fixture's roads are routable"
+    );
+}
+
+#[test]
+fn a_copless_city_event_keeps_no_second_copy_of_the_roads() {
+    let (_tmp, app) = loaded_city_app(0, "", true);
+    assert_eq!(app.world().resource::<PoliceFleet>().spawned, 0);
+    assert!(app.world().get_resource::<PoliceNav>().is_none());
+}
+
+#[test]
+fn a_city_with_no_road_graph_still_fields_its_cops_without_one() {
+    let (_tmp, app) = loaded_city_app(1, NEAR, false);
+    assert_eq!(app.world().resource::<PoliceFleet>().spawned, 1);
+    assert!(
+        app.world().get_resource::<PoliceNav>().is_none(),
+        "no graph is an honest absence, not an invented one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `--police-debug`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_debug_overlay_runs_only_when_the_session_asked_and_survives_a_live_chase() {
+    use bevy::ecs::system::RunSystemOnce;
+    use mm2_app::police_debug::{draw_police_debug, enabled};
+
+    let tmp = install(1, NEAR);
+    let off = event_app(event_config(), vfs_of(tmp.path()));
+    assert!(
+        !run_enabled(off),
+        "the overlay is off unless --police-debug set it"
+    );
+
+    let mut config = event_config();
+    config.dev.police_debug = true;
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.add_systems(Update, (police_pursuit, draw_police_debug.run_if(enabled)));
+    app.update();
+    run_to_racing(&mut app);
+    app.insert_resource(PoliceNav(bend_graph(0.0)));
+    run(&mut app, 120);
+    assert!(app.world_mut().run_system_once(enabled).unwrap());
+    assert!(
+        app.world().resource::<PursuitReport>().committed > 0,
+        "the drawn cop was really chasing"
+    );
+
+    fn run_enabled(mut app: App) -> bool {
+        app.update();
+        app.world_mut().run_system_once(enabled).unwrap()
+    }
+}

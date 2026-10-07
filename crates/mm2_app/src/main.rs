@@ -23,9 +23,9 @@ use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, damage,
     damage_fx, dash, environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive,
-    oppind, opponents, pause, perf, police, precip, profile, progression, pvs, race, racestat,
-    racetime, recovery, results, scripted, sequence, session, settings, smoke, spark_fx, stuck,
-    texel_fx, traffic, wheel_fx,
+    oppind, opponents, pause, perf, police, police_debug, precip, profile, progression, pvs, race,
+    racestat, racetime, recovery, results, scripted, sequence, session, settings, smoke, spark_fx,
+    stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -368,6 +368,13 @@ struct Cli {
     /// chevrons, intersection markers and aimap-closed roads in red.
     #[arg(long)]
     nav: bool,
+
+    /// Draw each police car's pursuit state, the place it last saw its
+    /// target and the road line it follows (F20 debug overlay): a pole
+    /// over every cop coloured by phase, a line to the chase goal and
+    /// the planned route.
+    #[arg(long)]
+    police_debug: bool,
 
     /// Highlight a route between two BAI road indices `<from>:<to>` on
     /// the nav overlay (implies --nav).
@@ -929,6 +936,7 @@ fn main() {
             cam_cycle_at: cli.cam_cycle_at,
             mirror: cli.mirror,
             no_hud: cli.no_hud,
+            police_debug: cli.police_debug,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -1173,6 +1181,7 @@ fn main() {
         && !cli.mirror
         && !cli.no_hud
         && !cli.nav
+        && !cli.police_debug
         && cli.nav_route.is_none()
         && !cli.bot
         && !cli.parked
@@ -1808,6 +1817,11 @@ fn main() {
     .add_systems(
         Update,
         nav_overlay::draw_nav_overlay.run_if(resource_exists::<nav_overlay::CityNav>),
+    )
+    // F20: the `--police-debug` view draws only when the session asked.
+    .add_systems(
+        Update,
+        police_debug::draw_police_debug.run_if(police_debug::enabled),
     )
     // F18-A.4: the `.sky` dome re-centres on the active camera and
     // advances its authored rotation. F18-A.5's room-PVS culling

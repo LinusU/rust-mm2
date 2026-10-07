@@ -438,6 +438,13 @@ impl ChaseRoute {
         (p, ground_distance(p, pos))
     }
 
+    /// The part of the line the cursor has not yet passed — from the
+    /// start of its current segment to the goal (what a debug view
+    /// draws; at least two points).
+    pub fn remaining(&self) -> &[Vec3] {
+        &self.line[self.seg..]
+    }
+
     /// Ground distance from `pos` to the part of the line still ahead
     /// of the cursor.
     pub fn lateral(&self, pos: Vec3) -> f32 {
@@ -865,6 +872,22 @@ mod tests {
         // Past the end it is the goal.
         let a = r.follow(Vec3::new(40.0, 0.0, -38.0), 20.0);
         assert_eq!(a, r.goal());
+    }
+
+    #[test]
+    fn remaining_is_the_line_from_the_cursor_on() {
+        let mut route = ChaseRoute::new(vec![
+            Vec3::ZERO,
+            Vec3::new(50.0, 0.0, 0.0),
+            Vec3::new(50.0, 0.0, 50.0),
+        ])
+        .unwrap();
+        assert_eq!(route.remaining().len(), 3);
+        route.follow(Vec3::new(50.0, 0.0, 20.0), 5.0);
+        assert_eq!(
+            route.remaining(),
+            &[Vec3::new(50.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)]
+        );
     }
 
     #[test]

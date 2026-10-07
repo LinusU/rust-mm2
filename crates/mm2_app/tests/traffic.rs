@@ -62,7 +62,7 @@ fn push_f32s(d: &mut Vec<u8>, v: &[f32]) {
 /// the junction (road 0's right lane), `r1_start` the backward
 /// approach (road 1's left lane). `bai_bytes` authors `NeverStop` so
 /// the plain fixture keeps its free-flow semantics.
-fn bai_bytes() -> Vec<u8> {
+pub(crate) fn bai_bytes() -> Vec<u8> {
     bai_with_rules(3, 3)
 }
 
@@ -193,7 +193,7 @@ fn bai_with_lane_offsets(
 /// span the fixture's whole play space — the BAI lanes at x ±3.75 and
 /// the player's quarantine spawn at z=200 all need ground under them
 /// (a parked blocker or a bubble centre cannot stand on nothing).
-fn synthetic_psdl() -> Vec<u8> {
+pub(crate) fn synthetic_psdl() -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"PSD0");
     d.extend_from_slice(&2u32.to_le_bytes());

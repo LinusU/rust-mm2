@@ -745,6 +745,12 @@ pub struct DevOverrides {
     /// so like `--pause`/`--mirror` it stays out of
     /// `record_eligibility`.
     pub no_hud: bool,
+    /// `--police-debug`: draw each cop's pursuit state, the place it
+    /// last saw its target and the road line it follows (F20 req 6;
+    /// diagnostics only). Presentation-only — it reads the chase and
+    /// cannot change a run's outcome — so like `--nav` it stays out of
+    /// `record_eligibility`.
+    pub police_debug: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI
