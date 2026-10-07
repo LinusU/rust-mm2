@@ -887,7 +887,7 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
 }
 
 /// One cell of the `cnr=sent<n>,landed<n>,stale<n>,ref<n>,seats<n>,
-/// solo<n>,rob<n>,cop<n>,red<n>,blue<n>,dec<n>` record field — the
+/// solo<n>,rob<n>,cop<n>,red<n>,blue<n>,dec<n>[,win=p<id>|s<side>|tie]` record field — the
 /// host's published Cops & Robbers frames, a client's landed/stale/
 /// refused ones, and (`seats`..`dec`) the match this process sees, its
 /// own or its replica, seated per side (F27-B, v21). The match cells
@@ -961,4 +961,89 @@ fn two_retail_processes_play_a_started_cops_and_robbers_match() {
         cell("landed") <= sent,
         "the client landed frames the host never sent:\nhost   {host_rec}\nclient {rec}"
     );
+}
+
+/// F27's decided-match evidence over real processes: a hosted retail sf
+/// free-for-all to 100 pts whose host seat is driven by the `--bot`
+/// evidence driver (a road-graph route to the gold, then to the
+/// hideout), beside a joined client that sits parked. The host's own
+/// match rules take the pickup and the delivery from measured car
+/// positions, decide the match, and the decided frame crosses the
+/// socket: the client's replica reads `dec1` with the host's winner
+/// seated. Skipped without the operator's install (`MM2_RETAIL=<dir>`).
+///
+/// What it is not: a contested steal, a client that carries or delivers
+/// (the client is parked, so F27-AC01's multi-client cycle and AC02's
+/// simultaneous requests stay open), packet loss, or a rendered match.
+/// The seed is one the `mm2-inspect cnr` reach audit lists (every site
+/// of its opening draw on a routable lane — most retail sf sites are
+/// not, and the bot follows roads) that a local `--bot` run measured to
+/// finish. The bot never re-anchors (no teleport onto the objective):
+/// the delivery is driven. The wall-clock cost is about a minute.
+#[test]
+fn two_retail_processes_decide_a_cops_and_robbers_match() {
+    const SEED: u64 = 1291;
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    let seed = host_args.iter().position(|a| a == "--seed").unwrap();
+    host_args[seed + 1] = SEED.to_string();
+    host_args.extend(
+        [
+            "--city",
+            "sf",
+            "--cnr",
+            "ffa",
+            "--cnr-limit",
+            "100pts",
+            "--bot",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let mut client_args = join_args(&retail, addr, "bob", 25_000);
+    client_args.push("--parked".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+
+    // The host's own log names the delivery and the verdict it decided.
+    let bound = Duration::from_secs(300);
+    let delivered = host.until_within("Delivered {", bound);
+    let ended = host.until_within("Ended(", bound);
+    eprintln!("host   {delivered}\nhost   {ended}");
+    assert!(ended.contains("reason: PointLimit"), "{ended}");
+    assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    host.cmd("quit");
+    let host_rec = host.until_within("smoke=headless-physics", bound);
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let cell =
+        |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+    assert_eq!(cell("ref"), 0, "the client refused the host's match: {rec}");
+    assert_eq!(cell("seats"), 2, "{rec}");
+    assert_eq!(cell("solo"), 2, "a free-for-all seats everyone solo: {rec}");
+    assert_eq!(
+        cell("dec"),
+        1,
+        "the client never saw the decided match: {rec}"
+    );
+    // The host's verdict (player 0, its own seat) is the winner the
+    // client's replica names, and the client's session is on the
+    // match-over screen.
+    assert!(
+        field(&rec, "cnr").split(',').any(|c| c == "win=p0"),
+        "the client's winner differs from the host's: {rec}"
+    );
+    assert_eq!(field(&rec, "phase"), "results", "{rec}");
+    // The parked client never touched the gold: the one delivery is
+    // the host seat's.
+    assert!(cell("landed") > 0, "{rec}");
 }

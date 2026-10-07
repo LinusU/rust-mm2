@@ -1275,9 +1275,23 @@ one round. The client car's carrier mass is predicted too
 the session's own `CnrSettings`, so no mass travels on the wire and the
 predicted car weighs what the authority simulates; the handling scalar
 stays unapplied, UNK-10). Replica lag means the local mass changes when
-the frame lands, not when the host decided. Open: a two-process run that
-*decides* a match (pickup, delivery), and no process-level check of the
-client's mass.
+the frame lands, not when the host decided.
+
+**A decided two-process match (F27-B.4c, evidence).** `network::net_drive::
+two_retail_processes_decide_a_cops_and_robbers_match` (`MM2_RETAIL`-gated,
+~70 s): a hosted retail sf free-for-all to `100pts` on seed 1291 (an opening
+draw with every site on a lane — `mm2-inspect cnr`), the host seat driven by
+the `--bot` evidence driver (nav-planned line to the gold, then the hideout,
+never re-anchored), a joined client parked. Measured (3 runs): the host's
+`cops and robbers event` log shows `Picked` at tick ~760, `Delivered` at tick
+9500–12400, then `Ended(PointLimit, winner Player(0))`; the client's record
+reads `landed>100, ref0, seats2, solo2, dec1, win=p0, phase=results` — the
+decided frame crossed the socket and moved the client's session to the
+match-over state with the host's winner. The record's `cnr=` field gains
+`win=p<id>|s<side>|tie` after `dec1`. Not shown: a client that picks up,
+carries or delivers (the client never moves), a contested pickup, any
+impairment, a rendered screen, or a process-level check of the client's
+carrier mass.
 
 ## Data-plane budget and bounds (F25-B req 6)
 

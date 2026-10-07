@@ -83,6 +83,24 @@ impl Proc {
         }
     }
 
+    /// Lines until one contains `needle`, waiting up to `bound` in all
+    /// rather than [`WAIT`] per line — for a leg whose child is quiet
+    /// for a long stretch (a headless match driving to its objective
+    /// prints nothing between its events). Fails past `bound`.
+    pub fn until_within(&self, needle: &str, bound: Duration) -> String {
+        let deadline = Instant::now() + bound;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = self
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no {needle:?} from child within {bound:?}"));
+            if line.contains(needle) {
+                return line;
+            }
+        }
+    }
+
     /// One operator command on the child's stdin (`start`, `cancel`,
     /// `ready`, `vehicle …`, `quit`).
     pub fn cmd(&mut self, command: &str) {

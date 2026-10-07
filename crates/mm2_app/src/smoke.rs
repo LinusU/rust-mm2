@@ -1217,7 +1217,7 @@ fn run_headless(
     // the client folded in (`stale`/`ref` = dropped or refused), and
     // what this process can see of the match — `seats` participants
     // seated, counted per side, `dec` once the
-    // result is decided. The host reads its own match, a client its
+    // result is decided (then `win=` names who won). The host reads its own match, a client its
     // replica, so two processes in one session must print the same
     // seating. Absent while there is no match and no frame, so every
     // other record stays bit-identical.
@@ -1235,9 +1235,17 @@ fn run_headless(
                 let seen = view
                     .map(|v| {
                         let on = |side| v.standings.iter().filter(|s| s.side == side).count();
-                        use mm2_game::gold::Side;
+                        use mm2_game::gold::{Side, Winner};
+                        // The decided winner, so two processes' records
+                        // can be compared: `p<id>` for a free-for-all
+                        // winner, `s<side>` for a team, `tie`.
+                        let winner = v.outcome.map_or_else(String::new, |o| match o.winner {
+                            Winner::Player(p) => format!(",win=p{}", p.0),
+                            Winner::Side(side) => format!(",win=s{side:?}"),
+                            Winner::Tie => ",win=tie".to_string(),
+                        });
                         format!(
-                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}",
+                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}{winner}",
                             v.standings.len(),
                             on(Side::Solo),
                             on(Side::Robbers),
