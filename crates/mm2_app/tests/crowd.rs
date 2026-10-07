@@ -596,15 +596,28 @@ fn census(app: &mut App) -> Census {
     }
 }
 
+/// Slack above the settled mesh count for the frame a recycled figure's
+/// handles and its replacement's overlap in `Assets<Mesh>`.
+const MESH_TRANSIENT: usize = 8;
+
 /// One minute of driving up and down the road at 20 m/s with a car
 /// running on the sidewalk line 20 m ahead, so the crowd recycles
-/// constantly and the reactions fire. Returns the peak census, the
-/// final one and the end state's fingerprint.
+/// constantly and the reactions fire. Every tick after the crowd has
+/// filled is held to the settled census taken once it did: meshes may
+/// not grow past it by more than the transient overlap, and entities
+/// may only grow by the per-figure entities of the walkers gained.
+/// Returns the peak census, the final one, the end state's fingerprint
+/// and the counters.
 fn soak(dir: &Path, seed: u64) -> (Census, Census, Vec<[i32; 3]>, [u64; 4]) {
+    /// Ticks to let the bubble fill before taking the baseline.
+    const SETTLE: u32 = 60;
     let mut app = app(dir, seed, Some(1.0));
     run(&mut app, 3);
     let car = spawn_car(&mut app, Vec3::new(8.5, 0.0, -70.0), Vec3::ZERO);
     let first = census(&mut app);
+    assert!(first.walkers > 0 && first.meshes > 0, "{first:?}");
+    let mut settled = None;
+    let mut entities_per_figure = 0;
     let mut peak = Census {
         walkers: 0,
         actors: 0,
@@ -626,6 +639,23 @@ fn soak(dir: &Path, seed: u64) -> (Census, Census, Vec<[i32; 3]>, [u64; 4]) {
         let now = census(&mut app);
         assert_eq!(now.walkers, now.actors, "tick {tick}: no orphan actors");
         assert!(now.finite, "tick {tick}: every walker stays finite");
+        if tick + 1 == SETTLE {
+            // A figure is a root plus one child per mesh group, and
+            // each group owns one mesh.
+            entities_per_figure = 1 + now.meshes.div_ceil(now.walkers);
+            settled = Some(Census { ..now });
+        } else if let Some(base) = &settled {
+            assert!(
+                now.meshes <= base.meshes + MESH_TRANSIENT,
+                "tick {tick}: meshes leaked past the settled crowd: {base:?} {now:?}"
+            );
+            let allowed =
+                base.entities + entities_per_figure * now.walkers.saturating_sub(base.walkers);
+            assert!(
+                now.entities <= allowed,
+                "tick {tick}: entities accumulated: {base:?} {now:?} (+{entities_per_figure}/figure)"
+            );
+        }
         peak = Census {
             walkers: peak.walkers.max(now.walkers),
             actors: peak.actors.max(now.actors),
@@ -634,7 +664,6 @@ fn soak(dir: &Path, seed: u64) -> (Census, Census, Vec<[i32; 3]>, [u64; 4]) {
             finite: peak.finite && now.finite,
         };
     }
-    assert!(first.walkers > 0 && first.meshes > 0, "{first:?}");
     let crowd = app.world().resource::<PedCrowd>();
     let counters = [
         crowd.recycled as u64,
@@ -655,17 +684,6 @@ fn a_crowded_minute_of_driving_stays_finite_and_inside_the_actor_and_mesh_budget
     assert!(peak.walkers <= 48, "{peak:?}");
     assert!(peak.walkers <= mm2_app::pedestrian::MAX_PED_ACTORS);
     assert!(last.walkers >= 24, "the bubble is kept populated: {last:?}");
-    // Meshes belong to live figures: the peak is the cap × the
-    // per-figure groups, so dropped handles really free their meshes.
-    let groups = peak.meshes.div_ceil(peak.walkers.max(1));
-    assert!(
-        peak.meshes <= (peak.walkers + 4) * groups.max(1) && last.meshes <= peak.meshes,
-        "meshes follow the live crowd: {peak:?} {last:?}"
-    );
-    assert!(
-        peak.entities - last.entities < 200 && last.entities <= peak.entities,
-        "no entity accumulation: {peak:?} {last:?}"
-    );
     // The soak really recycled and really provoked reactions.
     assert!(recycled > 100 && spawned > recycled, "{recycled} {spawned}");
     assert!(alerts > 0 && dives > 0, "{alerts} {dives}");

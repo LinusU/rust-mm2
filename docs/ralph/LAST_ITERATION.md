@@ -1,4 +1,17 @@
-# Last iteration — F19-B.4: crowd soak and multi-car edge (new-run iteration 42)
+# Last iteration — F19-B.4 repair: make the soak's leak assertions real (iteration 3 of the recovery run)
+
+Blocker (review of the previous candidate, implementation-quality): the soak's mesh and entity checks were tautologies — `peak.meshes <= (walkers+4)*ceil(peak.meshes/walkers)` and
+`last <= peak` hold for any input, so a leak would pass. Root cause: bounds derived from the run's own peak instead of an independent baseline.
+Repair (tests only, `crates/mm2_app/tests/crowd.rs`): `soak` takes a settled census at tick 60 and, every later tick, asserts `meshes <= settled + MESH_TRANSIENT (8)` and
+`entities <= settled.entities + (1 + meshes/walkers) * walkers gained` (a figure = root + one child per mesh group). The redundant peak/last comparisons are gone.
+Mutation checks, each temporary in `crowd.rs::maintain_pedestrians` and reverted: `mem::forget(meshes.add(..))` per recycle fails "meshes leaked past the settled crowd" (tick 307, 118 -> 127);
+`commands.spawn_empty()` per recycle fails "entities accumulated" (tick 251, 211 > 189); dropping the despawn still fails `walkers <= 48`. (A plain dropped `meshes.add` is freed, so is not a leak.)
+Gates (foreground): fmt --check 0; clippy --workspace --all-targets --all-features -D warnings 0; `cargo test --workspace` rc 0, 2631 passed, 0 failed.
+Status: implemented candidate, not independently checked. Still open: retail-geometry soak, real-GPU frame time, audio, crossings (UNK-42), sensing rule (UNK-43), Remote-client crowd.
+
+---
+
+# Previous — F19-B.4: crowd soak and multi-car edge (new-run iteration 42)
 
 Selection: the iteration-41 review passed with no blockers. F19's remaining ACs that need no unknown rule are AC05 (fixed-seed soak within actor/animation
 budgets) and the spec's edge cases (two players approaching, nearby actor culled); crossings (UNK-42) and the original sensing rule (UNK-43) stay blocked.
