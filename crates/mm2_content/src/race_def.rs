@@ -169,7 +169,7 @@ pub fn race_definition(
 /// minutes and frames are absurd at every row. A non-positive,
 /// non-finite or unrepresentable authored value is a build error,
 /// never a clamp.
-fn time_limit_ticks(seconds: f32) -> Result<u32, RaceBuildError> {
+pub(crate) fn time_limit_ticks(seconds: f32) -> Result<u32, RaceBuildError> {
     let bad = || RaceBuildError::BadParam {
         field: "TimeLimit",
         value: seconds.to_string(),
@@ -189,7 +189,7 @@ fn time_limit_ticks(seconds: f32) -> Result<u32, RaceBuildError> {
 /// ranges (0-3, WLD-4), densities against 0..=1 (WLD-1) and actor
 /// counts must be non-negative; an out-of-range value fails the event
 /// build explicitly rather than being clamped (`RaceBuildError::BadParam`).
-fn event_params(p: &RaceParams) -> Result<EventParams, RaceBuildError> {
+pub(crate) fn event_params(p: &RaceParams) -> Result<EventParams, RaceBuildError> {
     let bad = |field: &'static str, value: String| RaceBuildError::BadParam { field, value };
     let selector = |field: &'static str, value: i64| -> Result<u8, RaceBuildError> {
         u8::try_from(value).map_err(|_| bad(field, value.to_string()))
@@ -217,7 +217,7 @@ fn event_params(p: &RaceParams) -> Result<EventParams, RaceBuildError> {
     })
 }
 
-fn checkpoint(w: &mm2_formats::waypoints::Waypoint) -> Checkpoint {
+pub(crate) fn checkpoint(w: &mm2_formats::waypoints::Waypoint) -> Checkpoint {
     Checkpoint {
         center: Vec3::new(w.position[0], w.position[1], w.position[2]),
         radius: w.width,
@@ -267,7 +267,10 @@ fn gates_for(
     }
 }
 
-fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) -> Vec<RaceStart> {
+pub(crate) fn start_slots(
+    event: &CatalogEvent,
+    rows: &[mm2_formats::waypoints::Waypoint],
+) -> Vec<RaceStart> {
     if let Some(slots) = authored_start_slots(event) {
         return slots;
     }

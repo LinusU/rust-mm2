@@ -18,7 +18,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use mm2_assets::Vfs;
-use mm2_content::{CourseCatalog, CrashLesson, LessonTableRole, VehicleCatalog};
+use mm2_content::{
+    CourseCatalog, CrashLesson, EventCatalog, LessonTableRole, VehicleCatalog, lesson_legs,
+};
+use mm2_game::Difficulty;
 
 use crate::build_vfs;
 
@@ -169,14 +172,55 @@ fn print_lesson(lesson: &CrashLesson) {
     }
 }
 
+/// Build one lesson's runnable legs at both difficulties (F21-B.1),
+/// printing each leg's gate/limit summary. Returns one failure per
+/// difficulty that does not build — a lesson with a broken leg is not
+/// playable, so `--strict` counts it.
+fn print_legs(catalog: &EventCatalog, lesson: &CrashLesson) -> Vec<String> {
+    let mut failures = Vec::new();
+    for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+        match lesson_legs(catalog, lesson, difficulty) {
+            Ok(legs) => {
+                println!("    legs ({}): {} built", difficulty.as_str(), legs.len());
+                for leg in &legs {
+                    let d = &leg.definition;
+                    let limit = d
+                        .time_limit_ticks
+                        .map(|t| {
+                            format!("{:.1}s", f64::from(t) / f64::from(mm2_game::RACE_TICK_HZ))
+                        })
+                        .unwrap_or_else(|| "untimed".into());
+                    println!(
+                        "      {:<20} {} gates, {limit}, amb {:.2}, start slot {} (gate run only; {} rule unrecovered)",
+                        leg.filename,
+                        d.checkpoints.len(),
+                        d.params.densities.traffic,
+                        d.start_slots.len(),
+                        leg.objective.label(),
+                    );
+                }
+            }
+            Err(e) => {
+                println!("    legs ({}): FAILED — {e}", difficulty.as_str());
+                failures.push(format!(
+                    "{} {}: legs do not build — {e}",
+                    lesson.stem,
+                    difficulty.as_str()
+                ));
+            }
+        }
+    }
+    failures
+}
+
 /// Scan one city into a [`CourseCatalog`] and collect the wired
 /// vehicle ids for the catalog cross-check.
 fn report_city(
     vfs: &Vfs,
     city: &str,
     vehicle_ids: &BTreeSet<String>,
-) -> (CourseCatalog, Vec<String>) {
-    let catalog = mm2_content::EventCatalog::scan(vfs, city);
+) -> (EventCatalog, CourseCatalog, Vec<String>) {
+    let catalog = EventCatalog::scan(vfs, city);
     let course = CourseCatalog::scan(vfs, &catalog);
     let mut wired: BTreeSet<String> = BTreeSet::new();
     for lesson in &course.lessons {
@@ -189,7 +233,7 @@ fn report_city(
         .into_iter()
         .filter(|id| !vehicle_ids.contains(id))
         .collect();
-    (course, unresolved)
+    (catalog, course, unresolved)
 }
 
 /// `mm2-inspect crashcourse <dir> [--city <stem>] [--strict]` —
@@ -208,10 +252,15 @@ pub fn run(
         .collect();
     let mut failures = Vec::new();
     for city in crate::race_cities(&vfs, city) {
-        let (course, unresolved) = report_city(&vfs, &city, &vehicle_ids);
+        let (catalog, course, unresolved) = report_city(&vfs, &city, &vehicle_ids);
         println!("== crash course: {} ==", course.city);
         for lesson in &course.lessons {
             print_lesson(lesson);
+            failures.extend(
+                print_legs(&catalog, lesson)
+                    .into_iter()
+                    .map(|f| format!("{city}: {f}")),
+            );
         }
         let ready = course
             .lessons
@@ -258,8 +307,7 @@ mod tests {
     }
 
     const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
-    const WAYPOINTS: &str =
-        "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n1,2,3,4,15,0,0,0,\n";
+    const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n1,2,3,4,15,0,0,0,\n5,6,7,8,10,0,0,0,\n";
     const OPP: &str = "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n1,2,3,175,0,0,0,0,0\n";
     const CRASHDATA: &str =
         "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
@@ -307,10 +355,30 @@ mod tests {
         let d = synthetic_install("vpbug");
         let vfs = vfs_of(d.path());
         let ids = crate::event::vehicle_ids(&vfs);
-        let (course, unresolved) = report_city(&vfs, "london", &ids);
+        let (catalog, course, unresolved) = report_city(&vfs, "london", &ids);
         assert_eq!(course.lessons.len(), 1);
         assert!(unresolved.is_empty(), "{unresolved:?}");
         assert!(course.failures().is_empty(), "{:?}", course.failures());
+        let legs = print_legs(&catalog, &course.lessons[0]);
+        assert!(legs.is_empty(), "{legs:?}");
+    }
+
+    #[test]
+    fn a_lesson_whose_leg_cannot_build_is_a_strict_failure_per_difficulty() {
+        let d = synthetic_install("vpbug");
+        // One waypoint row is a start with nowhere to go.
+        write(
+            d.path(),
+            "race/london/follow.csv",
+            "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n1,2,3,4,15,0,0,0,\n",
+        );
+        let vfs = vfs_of(d.path());
+        let ids = crate::event::vehicle_ids(&vfs);
+        let (catalog, course, _) = report_city(&vfs, "london", &ids);
+        let failures = print_legs(&catalog, &course.lessons[0]);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(failures[0].contains("crash0 amateur"), "{failures:?}");
+        assert!(failures[1].contains("crash0 professional"), "{failures:?}");
     }
 
     #[test]
@@ -318,7 +386,7 @@ mod tests {
         let d = synthetic_install("vpghost");
         let vfs = vfs_of(d.path());
         let ids = crate::event::vehicle_ids(&vfs);
-        let (_course, unresolved) = report_city(&vfs, "london", &ids);
+        let (_catalog, _course, unresolved) = report_city(&vfs, "london", &ids);
         assert_eq!(unresolved, vec!["vpghost".to_string()]);
     }
 
@@ -328,7 +396,7 @@ mod tests {
         let vfs = vfs_of(d.path());
         let ids = crate::event::vehicle_ids(&vfs);
         // The install carries no `race/sf/` data at all.
-        let (course, _unresolved) = report_city(&vfs, "sf", &ids);
+        let (_catalog, course, _unresolved) = report_city(&vfs, "sf", &ids);
         assert!(course.lessons.is_empty());
         assert!(
             course

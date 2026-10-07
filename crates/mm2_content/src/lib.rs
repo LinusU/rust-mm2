@@ -22,6 +22,7 @@ pub mod events;
 pub mod expect;
 pub mod fingerprint;
 pub mod garage;
+pub mod lesson_def;
 pub mod model;
 pub mod nav;
 pub mod opponents;
@@ -61,6 +62,7 @@ pub use expect::{
     expected_events,
 };
 pub use garage::{garage_table, scan_garage};
+pub use lesson_def::{LessonBuildError, LessonLeg, lesson_legs};
 pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,

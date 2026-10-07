@@ -138,6 +138,19 @@ wired vehicle ids outside the catalog, rewards bound at `crash3/7/
 11/12` matching CC-6. Extras unclaimed by the `_crash<N>`
 attribution: london 26, sf 23 — counted and printed, not filtered.
 
+## Runnable legs (F21-B.1)
+
+`mm2_content::lesson_legs` builds each sub-event into a gate-run
+`RaceDefinition` (DSN-72, designed). Measured on retail: 26 lessons ×
+2 difficulties build 52/52. Waypoint rows per leg (start + gates):
+london `longjump` 5, `corner` 24, `exam1_1` 19, `final2` 20, `safe` 19,
+`map` 9, `precisionjump` 9, `copchase` 7; the two-row files (`slalom`,
+`stop`, `follow`, `exam1_2`, `exam2_2`, `final1`, `reverse180`) are a
+start pose and one far pose; sf `copchase` 24, `exam1_1`/`final` 18,
+`slalom` 11, `corner0waypoints` 10. The ordering of rows as gates is an
+inference; what each family *requires* beyond reaching the gates is the
+open question below.
+
 ## Open questions
 
 - The `Event` enum's real semantics (UNK-35): does the runtime

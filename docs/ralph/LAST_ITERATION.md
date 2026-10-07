@@ -1,3 +1,41 @@
+# Last iteration — F21-B.1: Crash Course lesson legs (new-run iteration 41)
+
+Selection: the previous review passed with no blocking findings. F20's
+remaining items need semantics decisions (UNK-9, B.3c) or a bridge
+level-change fixture, while F21-B (queued, deps F21-A.1 implemented)
+had nothing at all: every `crash:N` event is refused by
+`race_definition`. Broad F21-B (loader + sequencing + retry + family
+evaluators) does not fit one iteration, and the family rules are
+unrecovered (UNK-35), so I took the data-side first slice.
+
+Change: `mm2_content::lesson_def::lesson_legs(catalog, lesson,
+difficulty)` turns each sub-event of the difficulty's table into a
+`RaceDefinition` (start pose row 0, ordered gates rows 1.., one pass,
+`TimeLimit` → ticks with 0 = untimed, `AmbDensity` → traffic). A lesson
+is a sequence of legs (exams chain 2–3). A leg that cannot run fails the
+whole lesson with a named `LessonBuildError`. `LessonLeg::objective`
+keeps the inferred `Event` family as the dispatch key. Ledger DSN-72
+(designed, labelled gate-run baseline — explicitly *not* the lesson's
+pass criterion), `docs/research/crashcourse.md` gains the measured leg
+sizes. `race_def.rs` helpers (`time_limit_ticks`, `event_params`,
+`checkpoint`, `start_slots`) became `pub(crate)`; no behaviour change.
+`mm2-inspect crash-course` prints each leg; `--strict` fails per
+lesson/difficulty that does not build.
+
+Tests: `crates/mm2_content/tests/lesson_def.rs` +8, inspect +1.
+Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect crash-course <retail>
+--strict` exit 0, 52/52 lesson×difficulty sets build.
+
+Gates (iteration 41, foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0 (after fixing one clone-on-copy); `cargo test --locked --workspace` exit 0 (2261 passed, 0 failed; was 2252). No processes left running.
+
+Not verified / open: no loader, no leg sequencing, no retry/world
+restore, no instruction flow, no family evaluators (UNK-35), no reward
+credit — nothing launches a lesson yet and a gate run is not counted as
+passing one. Row-ordering-as-gates and the `TimeLimit` unit are
+inferences. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F20-C.3: respawn while chased (new-run iteration 40)
 
 Selection: the previous review passed with no blocking findings. F20's
