@@ -1,3 +1,24 @@
+# Last iteration — F23-B.6 review follow-up: CLI overrides stay out of settings.json (new-run iteration 26 of the 2026-10-07 run)
+
+Selection: the iteration-25 review passed with no blockers but flagged a non-blocking persistence side effect: `--no-vsync` (like
+`--shadows`/`--msaa`) mutates the in-memory `GraphicsSettings`, so changing any other option in that run saved `vsync:false` to
+the user's file. Small, concrete and in the area just touched, so I fixed it rather than start a new feature.
+
+Change: `settings::RunOverrides` (disk settings vs. flag-applied effective settings, plus a shared `Arc<AtomicU8>` of fields the person
+has since changed). `persisted(now)` writes a field still holding its flag value as the file had it; once the person changes that field
+(even back to the flag value) it saves as chosen. `SettingsFile` became `{path, overrides}` (`SettingsFile::new(path).with_overrides(..)`);
+`MenuData::with_run_overrides` feeds the menu's own save path; clones share the memory so the menu and pause overlay agree. `main.rs`
+builds it from the loaded vs. flag-applied settings. DSN-82 and PLAN note it.
+
+Tests: `settings::a_flag_override_is_not_saved_until_the_person_changes_that_field`, `settings::the_settings_file_saves_without_the_run_flags`,
+`menu::a_flag_override_stays_out_of_the_saved_file`.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace`
+2507 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no real-display run of the CLI flags; the
+other review gaps (borderless/AutoNoVsync never observed on a GPU) stay open.
+
+---
+
 # Last iteration — F23-B.6: window mode and vsync (new-run iteration 25 of the 2026-10-07 run)
 
 Selection: the iteration-24 review passed with no blockers. F23 req 2 lists graphics/window/resolution/scaling and nothing touched the

@@ -26,6 +26,8 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
 use bevy::prelude::*;
@@ -566,18 +568,100 @@ pub(crate) fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> std
     std::fs::rename(&tmp, path)
 }
 
+/// What a run's command-line flags (`--shadows`, `--msaa`, `--no-vsync`)
+/// changed against the settings file. Those flags are measurement
+/// switches for this run, so a later save from the menu must not write
+/// them into the file: a field still holding its overridden value is
+/// saved as the file had it. Once the person changes a field the flag no
+/// longer applies to it — even if they later step back to the flag's
+/// value, that is now their choice. Clones share that memory, so the
+/// main menu and the pause overlay agree.
+#[derive(Clone, Debug, Default)]
+pub struct RunOverrides {
+    /// The settings as the file had them.
+    disk: GraphicsSettings,
+    /// The settings the run started with, flags applied.
+    effective: GraphicsSettings,
+    /// Fields the person has changed since: one `FIELD_*` bit each.
+    chosen: Arc<AtomicU8>,
+}
+
+const FIELD_SHADOWS: u8 = 1;
+const FIELD_ANTIALIASING: u8 = 2;
+const FIELD_VSYNC: u8 = 4;
+
+impl RunOverrides {
+    /// The overrides that turn `disk` into `effective`.
+    pub fn between(disk: GraphicsSettings, effective: GraphicsSettings) -> Self {
+        Self {
+            disk,
+            effective,
+            chosen: Arc::default(),
+        }
+    }
+
+    /// `now` as it should be written to the settings file.
+    pub fn persisted(&self, now: GraphicsSettings) -> GraphicsSettings {
+        let (disk, effective) = (&self.disk, &self.effective);
+        let mut moved = 0;
+        for (bit, changed) in [
+            (FIELD_SHADOWS, now.shadows != effective.shadows),
+            (
+                FIELD_ANTIALIASING,
+                now.antialiasing != effective.antialiasing,
+            ),
+            (FIELD_VSYNC, now.vsync != effective.vsync),
+        ] {
+            if changed {
+                moved |= bit;
+            }
+        }
+        let chosen = self.chosen.fetch_or(moved, Ordering::Relaxed) | moved;
+        let mut out = now;
+        if chosen & FIELD_SHADOWS == 0 {
+            out.shadows = disk.shadows;
+        }
+        if chosen & FIELD_ANTIALIASING == 0 {
+            out.antialiasing = disk.antialiasing;
+        }
+        if chosen & FIELD_VSYNC == 0 {
+            out.vsync = disk.vsync;
+        }
+        out
+    }
+}
+
 /// Where the running app saves its settings — `None` keeps them for
 /// this run only (an evidence run). A resource so the pause overlay can
 /// save a change the way the main menu does.
 #[derive(Resource, Clone, Debug, Default)]
-pub struct SettingsFile(pub Option<PathBuf>);
+pub struct SettingsFile {
+    path: Option<PathBuf>,
+    overrides: RunOverrides,
+}
 
 impl SettingsFile {
+    /// Save to `path` (`None`: this run only) with no flag overrides.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            overrides: RunOverrides::default(),
+        }
+    }
+
+    /// Keep this run's command-line overrides out of the saved file.
+    pub fn with_overrides(mut self, overrides: RunOverrides) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
     /// Save `settings`. `Err` is a line for a status bar; the settings
     /// still apply for the run.
     pub fn save(&self, settings: &GraphicsSettings) -> Result<(), String> {
-        let Some(path) = &self.0 else { return Ok(()) };
-        settings.save(path).map_err(|e| {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        self.overrides.persisted(*settings).save(path).map_err(|e| {
             warn!(path = %path.display(), error = %e, "graphics settings not saved");
             format!("settings not saved: {e}")
         })
@@ -706,6 +790,73 @@ mod tests {
         assert_eq!(high.bounds, untouched.bounds);
         assert_eq!(high.overlap_proportion, untouched.overlap_proportion);
         assert_eq!(high.minimum_distance, untouched.minimum_distance);
+    }
+
+    #[test]
+    fn a_flag_override_is_not_saved_until_the_person_changes_that_field() {
+        let disk = GraphicsSettings {
+            shadows: ShadowQuality::Low,
+            ..default()
+        };
+        let run = GraphicsSettings {
+            vsync: false,
+            antialiasing: Antialiasing::Off,
+            ..disk
+        };
+        let overrides = RunOverrides::between(disk, run);
+        let shared = overrides.clone();
+
+        // Another setting changes: the flags stay out of the file.
+        let other = GraphicsSettings {
+            text_size: TextSize::Larger,
+            ..run
+        };
+        assert_eq!(
+            overrides.persisted(other),
+            GraphicsSettings {
+                text_size: TextSize::Larger,
+                ..disk
+            }
+        );
+        // The person turns VSync on, then back off: both are their choice,
+        // and the clone (the pause overlay's copy) agrees.
+        let on = GraphicsSettings {
+            vsync: true,
+            ..other
+        };
+        assert!(overrides.persisted(on).vsync);
+        assert!(!shared.persisted(other).vsync);
+        assert_eq!(
+            shared.persisted(other).antialiasing,
+            Antialiasing::X4,
+            "the untouched --msaa flag still stays out"
+        );
+        // No flags at all is the identity.
+        let plain = RunOverrides::between(disk, disk);
+        assert_eq!(plain.persisted(other), other);
+        assert_eq!(RunOverrides::default().persisted(other), other);
+    }
+
+    #[test]
+    fn the_settings_file_saves_without_the_run_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        let disk = GraphicsSettings::default();
+        let run = GraphicsSettings {
+            vsync: false,
+            ..disk
+        };
+        let file =
+            SettingsFile::new(Some(path.clone())).with_overrides(RunOverrides::between(disk, run));
+        let next = GraphicsSettings {
+            reduce_flashing: true,
+            ..run
+        };
+        file.save(&next).unwrap();
+        let saved = GraphicsSettings::load(&path);
+        assert!(saved.reduce_flashing && saved.vsync);
+        // No path: nothing is written and nothing fails.
+        assert!(SettingsFile::new(None).save(&next).is_ok());
     }
 
     #[test]

@@ -27,7 +27,8 @@ use mm2_app::profile::ActiveProfile;
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::settings::{
-    Antialiasing, DisplayMode, GraphicsSettings, ShadowQuality, TextSize, settings_path,
+    Antialiasing, DisplayMode, GraphicsSettings, RunOverrides, ShadowQuality, TextSize,
+    settings_path,
 };
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -3255,6 +3256,47 @@ fn the_text_size_row_steps_wraps_persists_and_resets() {
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
     assert_eq!(shell(&app).rows[2].text, "Text size: 100%");
+}
+
+/// `--no-vsync` (an override for this run) must not reach the settings
+/// file when the person changes another option; changing VSync itself is
+/// their choice and does save.
+#[test]
+fn a_flag_override_stays_out_of_the_saved_file() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let disk = GraphicsSettings::default();
+    disk.save(&path).unwrap();
+    let run = GraphicsSettings {
+        vsync: false,
+        ..disk
+    };
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(run, Some(path.clone()))
+            .with_run_overrides(RunOverrides::between(disk, run)),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    focus_row(&mut app, "Text size");
+    press(&mut app, KeyCode::ArrowRight);
+    assert!(!app.world().resource::<GraphicsSettings>().vsync);
+    let saved = GraphicsSettings::load(&path);
+    assert_eq!(saved.text_size, TextSize::Large);
+    assert!(saved.vsync, "the flag stays out of the file");
+
+    focus_row(&mut app, "VSync");
+    press(&mut app, KeyCode::Enter);
+    assert!(GraphicsSettings::load(&path).vsync);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        !GraphicsSettings::load(&path).vsync,
+        "turning it off by hand is a choice"
+    );
 }
 
 /// The flashing row flips Normal/Reduced from either arrow or Enter,

@@ -1783,7 +1783,7 @@ fn pause_options_change_save_and_back_out() {
     let path = settings_path(dir.path());
     let mut app = dev_app();
     app.insert_resource(GraphicsSettings::default())
-        .insert_resource(SettingsFile(Some(path.clone())));
+        .insert_resource(SettingsFile::new(Some(path.clone())));
     app.update();
     assert!(phase_is(&mut app, SessionPhase::Playing));
 
@@ -2195,7 +2195,7 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
     let path = settings_path(dir.path());
     let mut app = dev_app();
     app.insert_resource(GraphicsSettings::default())
-        .insert_resource(SettingsFile(Some(path.clone())));
+        .insert_resource(SettingsFile::new(Some(path.clone())));
     app.update();
 
     press_key(&mut app, KeyCode::Escape);

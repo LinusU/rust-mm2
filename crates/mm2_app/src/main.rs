@@ -1313,10 +1313,11 @@ fn main() {
         .then(|| profile_root.clone())
         .flatten()
         .map(|root| settings::settings_path(&root));
-    let mut graphics = settings_path
+    let on_disk = settings_path
         .as_deref()
         .map(settings::GraphicsSettings::load)
         .unwrap_or_default();
+    let mut graphics = on_disk;
     if let Some(shadows) = cli.shadows {
         graphics.shadows = shadows;
     }
@@ -1326,6 +1327,9 @@ fn main() {
     if cli.no_vsync {
         graphics.vsync = false;
     }
+    // The flags are for this run: a later save must not write them into
+    // the file.
+    let run_overrides = settings::RunOverrides::between(on_disk, graphics);
 
     // Driving controls persist beside it as `controls.json` under the
     // same evidence-run rule: a capture neither reads nor writes them.
@@ -1392,7 +1396,9 @@ fn main() {
     .insert_resource(graphics)
     .insert_resource(control_settings.clone())
     .insert_resource(controls::ControlsSave(controls_path.clone()))
-    .insert_resource(settings::SettingsFile(settings_path.clone()))
+    .insert_resource(
+        settings::SettingsFile::new(settings_path.clone()).with_overrides(run_overrides.clone()),
+    )
     .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()
     .add_message::<netdrive::RemoteImpact>()
@@ -1963,6 +1969,7 @@ fn main() {
             .insert_resource(
                 menu::MenuData::new(menu_store, has_mods, menu_bound)
                     .with_settings(graphics, settings_path)
+                    .with_run_overrides(run_overrides)
                     .with_controls(control_settings, controls_path),
             )
             .add_systems(

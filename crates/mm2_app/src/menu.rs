@@ -86,7 +86,7 @@ use crate::controls::{ControlItem, ControlSettings, DriveAction, SLOTS};
 use crate::input::pad_nav;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
-use crate::settings::{AudioLevel, GraphicsSettings};
+use crate::settings::{AudioLevel, GraphicsSettings, RunOverrides};
 
 /// One user intent. Keyboard, gamepad, mouse and tests all produce
 /// these — the model never reads devices.
@@ -514,6 +514,8 @@ pub struct MenuData {
     /// Where each change is saved. `None` keeps the settings for this
     /// run only (evidence runs never write the user's settings).
     settings_path: Option<PathBuf>,
+    /// This run's command-line flag overrides, kept out of the saved file.
+    settings_overrides: RunOverrides,
     /// The driving controls the Controls screen shows and edits.
     controls: ControlSettings,
     /// Where each controls change is saved (`None`: this run only).
@@ -540,6 +542,7 @@ impl MenuData {
             cnr_gate: BTreeMap::new(),
             settings: GraphicsSettings::default(),
             settings_path: None,
+            settings_overrides: RunOverrides::default(),
             controls: ControlSettings::default(),
             controls_path: None,
         }
@@ -556,6 +559,13 @@ impl MenuData {
     /// The driving controls the Controls screen currently shows.
     pub fn controls(&self) -> &ControlSettings {
         &self.controls
+    }
+
+    /// Keep `overrides` (this run's `--shadows`/`--msaa`/`--no-vsync`)
+    /// out of the settings file the Options screen saves.
+    pub fn with_run_overrides(mut self, overrides: RunOverrides) -> Self {
+        self.settings_overrides = overrides;
+        self
     }
 
     /// Start the Options screen from `settings`, saving every change
@@ -1319,7 +1329,7 @@ impl MenuShell {
         }
         data.settings = settings;
         if let Some(path) = &data.settings_path
-            && let Err(e) = settings.save(path)
+            && let Err(e) = data.settings_overrides.persisted(settings).save(path)
         {
             warn!(path = %path.display(), error = %e, "graphics settings not saved");
             self.status = Some(format!("settings not saved: {e}"));
