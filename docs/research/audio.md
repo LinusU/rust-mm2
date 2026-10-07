@@ -112,6 +112,10 @@ drops. Stems prefer the `aud/*/sirens/` subtree (the exe's
 silence and an unresolvable stem warns once per activation while the
 program walks on. The `Explosion sample` binding is carried with no
 consumer (F20). `aud=` gains `/<n>w/<n>y` when nonzero (DSN-42).
+F20-B.1 adds the second activation path: a chasing cop (`EmergencyLights`,
+ledger COP-10) starts the shared opponent program through
+`siren_follow_lights` and stops it when the lights go out — the same
+`Siren`/`siren_drive` machine and `MAX_SIRENS` bound as the horn toggle.
 
 F07-B.8 binds the surface-table variant to the session's effective
 weather: the exe carries `%s_surfacedry`/`%s_surfacewet` formats plus

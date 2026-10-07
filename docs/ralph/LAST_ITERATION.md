@@ -1,3 +1,51 @@
+# Last iteration — F20-B.1: a chasing cop runs its siren and light bar (new-run iteration 34)
+
+Selection: the previous review passed with no blocking findings, and
+the handoff named siren + lights as the next F20 leg. I took that slice
+alone (road-aware chase and Cruise cops stay queued as B.2/B.3). Pursuit
+trigger and cadence are unknown in retail (UNK-9/UNK-25), so both are
+designed and disclosed (ledger COP-10).
+
+Findings from the retail model (`mm2-inspect car/pkg vpcop`): `SRN0..3`
+are flat 4-vertex quads at mtx origins along the bar (so far drawn
+permanently lit as ordinary parts); `SIREN0/1` are 24-vertex box pieces
+with no mtx (the housing). Retail audio already authors the siren
+(`SIREN_FLAG` on `vpcop`, shared opponent program) and F07-B.7's `Siren`
+machine already served non-player cars — it just had no activator.
+
+Changes:
+- `mm2_game::police`: `EmergencyLights` component (flash clock,
+  `lit_side`, `advance`) + `LIGHT_BAR_HALF_PERIOD` (0.25 s).
+- `mm2_app::police::police_pursuit`: inserts/advances/removes it exactly
+  while the cop is `Pursuing` (reacting, lost, idle, stood-down: dark).
+- `mm2_app::audio::siren_follow_lights`: lights → opponent siren program
+  on a flagged non-player car, through the existing `Siren`/`siren_drive`/
+  `MAX_SIRENS`; no program → counted failure, no substitute. Chained
+  ahead of `siren_toggle`/`siren_drive` in the windowed and headless apps.
+- `mm2_app::car_visual`: `SRNn` quads become `GlowKind::Siren(n % 2)`
+  flares; `update_glows` lights one half at a time while the car has
+  `EmergencyLights`; the `SIRENn` boxes stay solid.
+- Tests: 2 `mm2_game`, 3 new `tests/light_bar.rs` (synthetic model through
+  `spawn_vehicle_model`), 5 `audio`, 1 new + 4 extended `police`.
+
+Retail, local (`--headless --frames 2400`): sf checkpoint 8 `pol=4/4
+pur=1/0/1 aud=…/12w/1y`; `--pro` `pol=8/8 pur=2/1/2 …/13w/1y` (the cop
+that gave up has no siren); london checkpoint 2 `pur=0/0/0` and sf
+checkpoint 0 carry no `w/y`; all `status=pass`.
+
+Gates (iteration 34, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean (exit 0); `cargo test --locked --workspace` exit 0 (2215
+passed, 0 failed; was 2204). No processes left running.
+
+Not verified: that the flares look right (no capture taken; flare colour
+comes from the authored SRN shader, flash rate/trigger designed); that the
+siren is audible (headless, no output device); road-aware chase; Cruise
+cops; the `Explosion sample` consumer. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F20-A.3: the cops detect, chase and give up (new-run iteration 33)
 
 Selection: the previous review passed with no blocking findings. The
