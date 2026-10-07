@@ -388,6 +388,11 @@ pub struct WaveBank {
     /// Logical path → decoded asset (handles outlive the bank; the
     /// asset store is app-global).
     cache: HashMap<String, Handle<PcmAudio>>,
+    /// [`Vfs::revision`] the stem index was built from. The bank owns its
+    /// index rather than borrowing the VFS, so a lookup against a VFS at
+    /// any other revision is refused instead of answered from a layout
+    /// that no longer exists (F29 req 4).
+    revision: u64,
 }
 
 impl WaveBank {
@@ -429,6 +434,7 @@ impl WaveBank {
         WaveBank {
             stems,
             siren_stems,
+            revision: vfs.revision(),
             ..Default::default()
         }
     }
@@ -441,6 +447,7 @@ impl WaveBank {
         waves: &mut Assets<PcmAudio>,
         name: &str,
     ) -> Result<Handle<PcmAudio>, String> {
+        self.check_revision(vfs)?;
         let stem = name.to_ascii_lowercase();
         let logical = self
             .stems
@@ -461,6 +468,7 @@ impl WaveBank {
         waves: &mut Assets<PcmAudio>,
         name: &str,
     ) -> Result<Handle<PcmAudio>, String> {
+        self.check_revision(vfs)?;
         let stem = name.to_ascii_lowercase();
         let logical = self
             .siren_stems
@@ -469,6 +477,20 @@ impl WaveBank {
             .cloned()
             .ok_or_else(|| format!("no wave matches siren stem {stem:?}"))?;
         self.load_path(vfs, waves, &logical)
+    }
+
+    /// Refuse a lookup against a VFS other than the mount set the index
+    /// was built from.
+    fn check_revision(&self, vfs: &Vfs) -> Result<(), String> {
+        if vfs.revision() == self.revision {
+            Ok(())
+        } else {
+            Err(format!(
+                "wave index is stale: built at mount revision {}, the VFS is at {}",
+                self.revision,
+                vfs.revision()
+            ))
+        }
     }
 
     /// Decode (or fetch from cache) one logical wave path.

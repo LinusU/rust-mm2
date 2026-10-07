@@ -367,6 +367,41 @@ fn the_later_of_two_conflicting_mods_wins() {
     );
 }
 
+/// F29 req 4: the wave bank owns its stem index, so mounting a mod after the
+/// index was built must not leave the old index answering for the new
+/// layout. The stale bank refuses (naming both revisions) and a fresh index
+/// of the same VFS sees the mod's cue — restart-based replacement is a
+/// rebuild, never a silent mix.
+#[test]
+fn a_wave_index_built_before_a_remount_is_refused_not_answered_stale() {
+    let f = fixture();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(&f.base, 0).unwrap();
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves: Assets<PcmAudio> = Assets::default();
+    let base_handle = bank
+        .load(&vfs, &mut waves, "roadskid1")
+        .expect("the index serves the mount set it was built from");
+    let base_frames = waves.get(&base_handle).unwrap().samples.len();
+
+    vfs.mount_mod(&f.audio, 300).unwrap();
+    for result in [
+        bank.load(&vfs, &mut waves, "roadskid1"),
+        bank.load_siren(&vfs, &mut waves, "roadskid1"),
+    ] {
+        let err = result.expect_err("the stale index must not answer, even for a cached cue");
+        assert!(err.contains("stale"), "{err}");
+    }
+
+    let mut fresh = WaveBank::index(&vfs);
+    let handle = fresh.load(&vfs, &mut waves, "roadskid1").unwrap();
+    assert_ne!(
+        waves.get(&handle).unwrap().samples.len(),
+        base_frames,
+        "a rebuilt index sees the mod's cue"
+    );
+}
+
 /// F29-AC03: the explanation of a conflict names the mod the production
 /// consumer actually loaded, in either mount order, and lists the mod it
 /// shadowed and the base file beneath both.

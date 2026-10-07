@@ -54,6 +54,10 @@ pub struct Vfs {
     /// Mounted mods' manifest ids and directories: an id names one mod, so
     /// a second mount of it is refused rather than merged into the first.
     mod_ids: Vec<(String, PathBuf)>,
+    /// Bumped every time the set of mounted sources changes (a mount or a
+    /// rollback) and never reused, so a value read earlier names exactly
+    /// one mount set. See [`Vfs::revision`].
+    revision: u64,
 }
 
 /// Why the winning source of a logical path won.
@@ -237,6 +241,7 @@ impl Vfs {
     fn truncate(&mut self, sources: usize, mods: usize) {
         self.sources.truncate(sources);
         self.mod_ids.truncate(mods);
+        self.revision += 1;
         self.index.clear();
         self.providers.clear();
         for idx in 0..self.sources.len() {
@@ -246,6 +251,7 @@ impl Vfs {
 
     fn push(&mut self, source: Box<dyn Source>, priority: i32) {
         let seq = self.sources.len();
+        self.revision += 1;
         self.sources.push(Mounted {
             source,
             priority,
@@ -409,6 +415,18 @@ impl Vfs {
         let mut v: Vec<String> = self.index.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Identity of the current mount set for anything that derives data from
+    /// it without borrowing the VFS (a stem index, a decoded-asset cache).
+    /// It changes on every mount and every rollback and never repeats, so
+    /// a holder stamps the value it built from and treats any other value
+    /// as stale: replacing content is a remount, and a remount must not
+    /// leave an old index answering for the new layout. It identifies the
+    /// *layout* of sources, not file bytes — [`fingerprint`](crate::fingerprint)
+    /// is the content-level identity.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Manifest ids of the mounted mods, in mount order.
@@ -855,6 +873,42 @@ mod tests {
         assert_eq!(vfs.read(&r).unwrap(), b"a_pack");
         vfs.mount_mod(&mods.join("c_other"), priority::MOD + 1)
             .unwrap();
+    }
+
+    #[test]
+    fn the_revision_names_one_mount_set_and_is_never_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        write(&mods.join("a_good"), "mod.toml", b"[mod]\nid = \"good\"\n");
+        write(&mods.join("b_bad"), "mod.toml", b"[mod]\nid = \"bad\"\n");
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(mods.join("b_bad").join("mod.toml"))
+            .unwrap();
+        f.set_len(crate::manifest::MAX_MANIFEST_SIZE + 1).unwrap();
+        drop(f);
+        let base = tmp.path().join("base");
+        write(&base, "texture/x.tex", b"base");
+
+        let mut vfs = Vfs::new();
+        let empty = vfs.revision();
+        vfs.mount_dir(&base, 0).unwrap();
+        let base_only = vfs.revision();
+        assert_ne!(empty, base_only, "a mount changes the identity");
+        // Reading never moves it.
+        let _ = vfs.list();
+        let _ = vfs.resolve("texture/x.tex");
+        assert_eq!(vfs.revision(), base_only);
+
+        // The scan mounts `a_good` then rolls it back: the layout is the
+        // base-only one again, but the identity must not return to a value
+        // a holder could have stamped before the detour.
+        assert!(vfs.mount_mods_dir(&mods, priority::MOD).is_err());
+        assert_eq!(vfs.source_count(), 1);
+        assert!(
+            vfs.revision() > base_only,
+            "a rollback is a change, not a return"
+        );
     }
 
     #[test]

@@ -146,6 +146,25 @@ and first gameplay path; `--expect-cosmetic` exits non-zero if any mod
 changes gameplay (for a pack advertised as cosmetic). The game logs the same
 verdict per mod at startup.
 
+## Replacement is a remount (cache identity)
+
+Replacing content is restart-based: the game mounts the install and the
+mods once, wraps the `Vfs` in the immutable `Mm2Vfs` resource and never
+remounts it, so every cache (`MaterialCache`, `PropCache`, `BangerDefs`)
+borrows that one VFS and keys by normalized logical path — Rust's borrow
+rules already forbid a mount while they exist. Hot reload is not supported.
+
+The one VFS-derived structure that does *not* borrow is the audio
+`WaveBank` (a Bevy resource holding a stem index and decoded handles).
+`Vfs::revision()` is its identity check: a counter bumped by every mount and
+every rollback (a failed `mount_mods_dir` that undoes its mods still counts
+as a change) and never reused. The bank stamps the revision it was indexed
+from and `load`/`load_siren` refuse any other revision with an error naming
+both, rather than answering from a layout that no longer exists. Any future
+resource that owns an index derived from the VFS must do the same. The
+revision identifies the *layout* of sources only; `fingerprint::gameplay` is
+the byte-level identity of gameplay content.
+
 ## Debugging
 
 - Mount logs print each source, its entry count and priority at startup.
