@@ -1,3 +1,26 @@
+# Last iteration — F29-A.7: a mod id declared twice is refused (new-run iteration 14 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`f3bf7d0`) passed gates and review, no blockers. Its gap list noted duplicate mod ids "share
+one summary row"; the F29 spec names "same ID in two mods" as an edge case and requires duplicate IDs to be documented, yet two
+directories declaring one manifest id were silently both mounted (rows merged, "x over x" shown as a conflict). Chosen over
+the cosmetic inspector label (non-blocking) and the unasserted tracing lines.
+
+Change: `Vfs` remembers each mounted mod's id and directory; `mount_mod` (hence `mount_mods_dir`, `mount_mods`, `mm2`,
+`mm2-host`, `mm2-join`, `mm2-inspect`, `fingerprint`) returns the new `AssetsError::DuplicateModId { id, first, second }`
+naming both directories, before anything of the second is mounted. Policy (enhanced, implementation choice): an id names one
+mod; refusing is deterministic where merging would hide which folder supplied a file. Tests: `vfs::tests::a_mod_id_declared_twice_is_refused_not_merged`
+(directory-scan and one-at-a-time paths, first mount stands, distinct id still accepted), `conflicts.rs`
+`a_duplicate_mod_id_fails_the_inspector_naming_both_directories` (subprocess, non-zero exit, both dirs in stderr).
+`docs/modding.md` states the rule.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2474 passed, 0 failed).
+Status: implemented candidate, not independently checked.
+Not shown: same as F29-A.6 (mount log lines unasserted, inspector prints label only so a mod named `install` over the
+install reads "install over install", no two-process or retail run, AC04/AC06 remainders). Mounting the same directory twice
+now also errors (previously silently doubled).
+
+---
+
 # Last iteration — F29-A.6: provenance summary keys on source kind (new-run iteration 13 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`7bd1e0f`) passed gates and review, no blockers; its minor findings: `override_summary` told

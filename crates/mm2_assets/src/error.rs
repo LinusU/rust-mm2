@@ -58,6 +58,17 @@ pub enum AssetsError {
         reason: String,
     },
 
+    /// Two mounted mods declare the same manifest id.
+    #[error("mod id \"{id}\" is declared by both {first} and {second}; ids must be unique")]
+    DuplicateModId {
+        /// The shared id.
+        id: String,
+        /// Directory of the mod mounted first.
+        first: PathBuf,
+        /// Directory of the refused mod.
+        second: PathBuf,
+    },
+
     /// A mounted directory does not exist.
     #[error("directory not found: {0}")]
     MissingDirectory(PathBuf),

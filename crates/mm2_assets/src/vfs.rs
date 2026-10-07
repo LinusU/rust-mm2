@@ -51,6 +51,9 @@ pub struct Vfs {
     /// shadowed candidates behind each `index` winner, kept so a conflict
     /// can be explained rather than only resolved.
     providers: HashMap<String, Vec<usize>>,
+    /// Mounted mods' manifest ids and directories: an id names one mod, so
+    /// a second mount of it is refused rather than merged into the first.
+    mod_ids: Vec<(String, PathBuf)>,
 }
 
 /// Why the winning source of a logical path won.
@@ -171,6 +174,13 @@ impl Vfs {
     /// (excluding the manifest itself).
     pub fn mount_mod(&mut self, dir: &Path, priority: i32) -> Result<ModManifest, AssetsError> {
         let manifest = ModManifest::load(dir)?;
+        if let Some((_, first)) = self.mod_ids.iter().find(|(id, _)| *id == manifest.id) {
+            return Err(AssetsError::DuplicateModId {
+                id: manifest.id,
+                first: first.clone(),
+                second: dir.to_path_buf(),
+            });
+        }
         let source = DirSource::mount(dir, Some(manifest.id.clone()), &|logical| {
             logical == MANIFEST_FILE
         })?;
@@ -182,6 +192,7 @@ impl Vfs {
             "mounted mod"
         );
         self.push(Box::new(source), priority);
+        self.mod_ids.push((manifest.id.clone(), dir.to_path_buf()));
         Ok(manifest)
     }
 
@@ -755,6 +766,52 @@ mod tests {
                 Err(AssetsError::ModManifest { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_mod_id_declared_twice_is_refused_not_merged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        // Two directories, one manifest id: a renamed or copied mod folder.
+        for dir in ["a_pack", "b_pack_copy"] {
+            write(&mods.join(dir), "mod.toml", b"[mod]\nid = \"pack\"\n");
+            write(&mods.join(dir), "texture/x.tex", dir.as_bytes());
+        }
+        write(
+            &mods.join("c_other"),
+            "mod.toml",
+            b"[mod]\nid = \"other\"\n",
+        );
+
+        let mut vfs = Vfs::new();
+        let err = vfs.mount_mods_dir(&mods, priority::MOD).unwrap_err();
+        match &err {
+            AssetsError::DuplicateModId { id, first, second } => {
+                assert_eq!(id, "pack");
+                assert!(first.ends_with("a_pack") && second.ends_with("b_pack_copy"));
+            }
+            other => panic!("expected DuplicateModId, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("a_pack") && msg.contains("b_pack_copy"),
+            "{msg}"
+        );
+        // The refused copy contributed nothing; the first mount stands.
+        assert_eq!(vfs.source_count(), 1);
+        let r = vfs.resolve("texture/x.tex").unwrap();
+        assert_eq!(vfs.read(&r).unwrap(), b"a_pack");
+
+        // The same holds when mounting one at a time, and a distinct id is
+        // still accepted afterwards.
+        let mut vfs = Vfs::new();
+        vfs.mount_mod(&mods.join("a_pack"), priority::MOD).unwrap();
+        assert!(matches!(
+            vfs.mount_mod(&mods.join("b_pack_copy"), priority::MOD),
+            Err(AssetsError::DuplicateModId { .. })
+        ));
+        vfs.mount_mod(&mods.join("c_other"), priority::MOD + 1)
+            .unwrap();
     }
 
     #[test]

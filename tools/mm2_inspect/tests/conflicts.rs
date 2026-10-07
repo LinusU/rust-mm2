@@ -147,3 +147,26 @@ fn clean_mods_that_only_override_the_install_pass_strict() {
         "{text}"
     );
 }
+
+#[test]
+fn a_duplicate_mod_id_fails_the_inspector_naming_both_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "texture/shared.png", b"install");
+    for dir in ["alpha", "alpha_copy"] {
+        write(&mods.join(dir), "mod.toml", b"[mod]\nid = \"alpha\"\n");
+        write(&mods.join(dir), "texture/shared.png", dir.as_bytes());
+    }
+    let out = inspect(&[
+        "--mods",
+        mods.to_str().unwrap(),
+        "conflicts",
+        install.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("alpha_copy") && err.contains("must be unique"),
+        "{err}"
+    );
+}

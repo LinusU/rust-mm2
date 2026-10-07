@@ -40,6 +40,9 @@ cargo run -- --dev-world --mods examples/mods
 
 Every subdirectory of the mods dir that contains a `mod.toml` is mounted, in
 sorted directory order. Mods listed later win over earlier ones on conflict.
+A mod `id` names exactly one mod: if two directories declare the same id (a
+copied or renamed mod folder), mounting fails with an error naming both
+directories rather than merging them — remove or re-id one.
 Restart-based loading only — hot reload is not implemented.
 
 ## Resolution rules
