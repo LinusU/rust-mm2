@@ -1,3 +1,30 @@
+# Last iteration — F06-C.1: surface override independent of textures (new-run iteration 1 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`f4b87ad`) passed gates and review, no blockers. F25/F26/F30 had
+had most recent attention; F06-C was queued with nothing done, and the spec's req 6 ("mods can
+replace surface configuration independently of cosmetic texture packs") had only the texture-swap
+half tested (AC03). Report 6 follow-up 1's two-process breakdown leg stays open (needs a retail
+networked race plus a wrecking knob; recorded in PLAN earlier).
+
+Change: one test, no production change — `a_surface_override_moves_physics_without_touching_any_texture`
+in `crates/mm2_app/tests/surface.rs` (plus a small `stock_install` helper). A higher-priority
+mod layer holding only `city/materials.mtl`/`.csv` changes the road's `TireSurface` (0.9→0.45,
+`SurfaceMaterial` identity kept) and re-points a texture's material (sidewalk Authored(2)→Authored(1),
+grip and drag follow); the unmapped fan stays `Unspecified` with no component; the stock app built
+in the same test keeps its values.
+
+Findings recorded in PLAN: `SurfaceTables::sound_index`/`ptx_channels` yield `None` for an
+out-of-range `Authored(i)` while `tire_surface` falls back to the neutral reference — reachable
+only by a stale or wire-borne index, not by import (unmapped names import as `Unspecified`); left
+for the AC05/AC04 slice that introduces one contact descriptor.
+
+Gates (foreground, this tree): `cargo fmt --all -- --check` 0; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` 0; `cargo test --workspace` exit 0 (2444 passed,
+0 failed; 2443 before). No processes left running. Status: implemented candidate, not
+independently checked. Synthetic data only; no original-data, graphical or audio evidence.
+
+---
+
 # Last iteration — F30-B.5: build docs, private-path-free release build (new-run iteration 42 of this runner)
 
 Selection: previous review passed, no blockers, no failing gate. F30-A got five slices in a row

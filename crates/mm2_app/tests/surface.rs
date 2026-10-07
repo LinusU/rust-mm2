@@ -467,3 +467,94 @@ fn a_texture_swap_does_not_move_the_physics_surface() {
         );
     }
 }
+
+/// A stock install (`SURF_*` tables, three textures) mounted alone.
+fn stock_install(root: &Path) -> Vfs {
+    write(root, "city/test.psdl", city_psdl());
+    write(root, MTL_PATH, SURF_MTL);
+    write(root, CSV_PATH, SURF_CSV);
+    for name in ["test_road", "test_grass", "mystery"] {
+        write(
+            root,
+            &format!("texture/{name}.png"),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        );
+    }
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+    vfs
+}
+
+#[test]
+fn a_surface_override_moves_physics_without_touching_any_texture() {
+    // F06 req 6 / AC03's converse: a mod that replaces only the
+    // surface tables changes what the colliders are made of while
+    // every texture file stays the stock one. Two overrides, each
+    // visible on its own: the `.mtl` re-authors cobblestone's grip,
+    // the `.csv` re-points the grass texture at cobblestone.
+    let dir = tempfile::tempdir().unwrap();
+    let mut stock = city_app(stock_install(dir.path()));
+
+    let mod_dir = tempfile::tempdir().unwrap();
+    write(
+        mod_dir.path(),
+        MTL_PATH,
+        SURF_MTL.replace("friction: 0.9", "friction: 0.45"),
+    );
+    write(
+        mod_dir.path(),
+        CSV_PATH,
+        "texture,physics\ntest_road,cobblestone\ntest_grass,cobblestone\n",
+    );
+    let mut vfs = stock_install(dir.path());
+    vfs.mount_dir(mod_dir.path(), 100).unwrap();
+    let mut modded = city_app(vfs);
+
+    // The road keeps its material identity; only the grip behind it moved.
+    assert_eq!(
+        surface_at(&mut stock, 0.0, 5.0),
+        surface_at(&mut modded, 0.0, 5.0),
+        "the road is the same material"
+    );
+    assert_eq!(
+        tire_at(&mut stock, 0.0, 5.0),
+        Some(TireSurface {
+            grip: 0.9,
+            drag: 0.0
+        })
+    );
+    assert_eq!(
+        tire_at(&mut modded, 0.0, 5.0),
+        Some(TireSurface {
+            grip: 0.45,
+            drag: 0.0
+        }),
+        "the re-authored friction reaches the road collider"
+    );
+
+    // The sidewalk texture is untouched, but the csv re-pointed it.
+    assert_eq!(
+        surface_at(&mut stock, 4.0, 5.0),
+        Some(SurfaceMaterial::Authored(2))
+    );
+    assert_eq!(
+        surface_at(&mut modded, 4.0, 5.0),
+        Some(SurfaceMaterial::Authored(1)),
+        "the re-mapped texture now names cobblestone"
+    );
+    assert_eq!(
+        tire_at(&mut modded, 4.0, 5.0),
+        Some(TireSurface {
+            grip: 0.45,
+            drag: 0.0
+        }),
+        "and carries cobblestone's grip and drag, not grass's"
+    );
+
+    // Names neither table knows stay on the conservative default.
+    assert_eq!(
+        surface_at(&mut modded, 15.0, 5.0),
+        Some(SurfaceMaterial::Unspecified)
+    );
+    assert_eq!(tire_at(&mut modded, 15.0, 5.0), None);
+}
