@@ -1949,6 +1949,7 @@ fn main() {
             // F19-B.2: the sidewalk crowd — recycle/refill, walk, then
             // animate (the lab and the crowd never run together).
             crowd::maintain_pedestrians,
+            crowd::react_pedestrians,
             crowd::walk_pedestrians,
             pedestrian::animate_pedestrians,
         )

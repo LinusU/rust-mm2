@@ -631,6 +631,97 @@ pub fn print_report(r: &PedsReport) {
     }
 }
 
+/// One dive chain walked through the authored `default next` links.
+#[derive(Debug, PartialEq)]
+pub struct DiveChain {
+    /// State names from the first dive row to where the walk stopped.
+    pub states: Vec<String>,
+    /// Whether the chain reaches `STAND` (the reaction's rejoin edge).
+    pub reaches_stand: bool,
+    /// Lateral travel at the end of the last dive row (csv sign:
+    /// `+` = left), metres.
+    pub lateral: f32,
+    /// Playing time of the whole chain at the designed ped rate, s.
+    pub seconds: f32,
+}
+
+/// Follow `from` through `next` links until `STAND`, a loop or a dead
+/// end (bounded by the state count).
+pub fn dive_chain(animator: &mm2_game::ped::PedAnimator, from: &str) -> Option<DiveChain> {
+    let states = animator.states();
+    let mut at = states.iter().position(|s| s.name == from)?;
+    let mut out = DiveChain {
+        states: Vec::new(),
+        reaches_stand: false,
+        lateral: 0.0,
+        seconds: 0.0,
+    };
+    for _ in 0..=states.len() {
+        let st = &states[at];
+        out.states.push(st.name.clone());
+        if st.x_distance != 0.0 {
+            out.lateral = st.x_offset + st.x_distance;
+        }
+        let frames = st.last_frame.saturating_sub(st.first_frame) + 1;
+        out.seconds += frames as f32 / mm2_game::ped::PED_STATE_FPS;
+        if st.name == "STAND" {
+            out.reaches_stand = true;
+            break;
+        }
+        match st.next {
+            Some(n) if n != at => at = n,
+            _ => break,
+        }
+    }
+    Some(out)
+}
+
+/// The reaction vocabulary of every expected archetype: whether it
+/// authors [`mm2_game::pedreact::REACTION_STATES`] and where each dive
+/// chain ends (F19-B.3 — the chain must reach `STAND` for a diving
+/// walker to rejoin).
+fn print_reactions(vfs: &Vfs) {
+    println!("\nreaction chains (F19-B.3):");
+    for stem in EXPECTED_PEDS.iter().filter(|s| !s.ends_with("wolf")) {
+        let archetype = match mm2_content::PedArchetype::load(vfs, stem) {
+            Ok(a) => a,
+            Err(e) => {
+                println!("  {stem}: not loadable ({e})");
+                continue;
+            }
+        };
+        let Ok(animator) = archetype.animator("WALK") else {
+            println!("  {stem}: no WALK state");
+            continue;
+        };
+        let missing: Vec<&str> = mm2_game::pedreact::REACTION_STATES
+            .iter()
+            .copied()
+            .filter(|n| !animator.states().iter().any(|s| s.name == *n))
+            .collect();
+        if !missing.is_empty() {
+            println!("  {stem}: MISSING reaction states {missing:?}");
+            continue;
+        }
+        for from in ["ANTIC_LDIVE", "ANTIC_RDIVE", "WALK_LDIVE", "WALK_RDIVE"] {
+            match dive_chain(&animator, from) {
+                Some(c) => println!(
+                    "  {stem}: {from} -> {} ({:+.2} m, {:.2} s){}",
+                    c.states.last().map_or("", String::as_str),
+                    c.lateral,
+                    c.seconds,
+                    if c.reaches_stand {
+                        ""
+                    } else {
+                        "  NEVER REACHES STAND"
+                    }
+                ),
+                None => println!("  {stem}: {from} absent"),
+            }
+        }
+    }
+}
+
 /// `mm2-inspect peds <dir> [--strict]`.
 pub fn run(
     dir: &Path,
@@ -643,6 +734,7 @@ pub fn run(
         return Err("pedestrian audit: no anim/ files discovered".into());
     }
     print_report(&report);
+    print_reactions(&vfs);
     if strict
         && !(report.failures.is_empty()
             && report.issues.is_empty()
@@ -1109,5 +1201,38 @@ mtxn 1 1 1
             "{:?}",
             r.issues
         );
+    }
+
+    #[test]
+    fn a_dive_chain_is_followed_to_stand_and_a_broken_one_is_reported() {
+        let parse = |csv: &str| {
+            let states = PedStates::parse(csv).unwrap();
+            mm2_game::ped::PedAnimator::new(&states, "STAND", 30.0).unwrap()
+        };
+        let good = parse(
+            "# h\nSTAND,a,1,4,0,0,0,0,STAND\n\
+             ANTIC_LDIVE,a,1,10,0,0,0,2.2,LDIVE_GROUNDL\n\
+             LDIVE_GROUNDL,a,1,10,0,0,2.2,2.18,GROUND_STANDL\n\
+             GROUND_STANDL,a,1,44,0,0,0,0,STAND\n",
+        );
+        let c = dive_chain(&good, "ANTIC_LDIVE").unwrap();
+        assert_eq!(
+            c.states,
+            ["ANTIC_LDIVE", "LDIVE_GROUNDL", "GROUND_STANDL", "STAND"]
+        );
+        assert!(c.reaches_stand);
+        assert!((c.lateral - 4.38).abs() < 1e-5);
+        assert!((c.seconds - (10.0 + 10.0 + 44.0 + 4.0) / 30.0).abs() < 1e-4);
+        assert!(dive_chain(&good, "NOPE").is_none());
+
+        // A chain that loops on itself never reaches STAND.
+        let stuck = parse(
+            "# h\nSTAND,a,1,4,0,0,0,0,STAND\n\
+             ANTIC_RDIVE,a,1,10,0,0,0,-2.2,GROUND_STANDR\n\
+             GROUND_STANDR,a,1,44,0,0,0,0,GROUND_STANDR\n",
+        );
+        let c = dive_chain(&stuck, "ANTIC_RDIVE").unwrap();
+        assert!(!c.reaches_stand);
+        assert!((c.lateral + 2.2).abs() < 1e-5);
     }
 }

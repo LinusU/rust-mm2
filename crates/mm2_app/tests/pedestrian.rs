@@ -113,7 +113,31 @@ fn shaders() -> Vec<u8> {
     s
 }
 
+/// The states a reacting walker needs, authored the way retail does:
+/// the `ANTIC` loop with its transitions, both dive chains ending in
+/// `STAND` (lateral travel in the `X AXIS` columns) and `STAND_WALK`.
+pub(crate) const REACTIVE_CSV: &str = "# header\n\
+STAND,xstand,1,4,0,0,0,0,STAND\n\
+STAND_WALK,xstand,1,2,0,0.1,0,0,WALK\n\
+WALK,xwalk,1,4,0,1,0,0,WALK\n\
+WALK_ANTIC,xstand,1,2,0,0,0,0,ANTIC\n\
+ANTIC,xstand,1,4,0,0,0,0,ANTIC\n\
+ANTIC_WALK,xstand,1,2,0,0,0,0,WALK\n\
+ANTIC_LDIVE,xstand,1,4,0,0,0,2.2,LDIVE_GROUNDL\n\
+LDIVE_GROUNDL,xstand,1,4,0,0,2.2,2.18,GROUND_STANDL\n\
+GROUND_STANDL,xstand,1,4,0,0,0,0,STAND\n\
+ANTIC_RDIVE,xstand,1,4,0,0,0,-2.2,RDIVE_GROUNDR\n\
+RDIVE_GROUNDR,xstand,1,4,0,0,-2.2,-2.18,GROUND_STANDR\n\
+GROUND_STANDR,xstand,1,4,0,0,0,0,STAND\n\
+WALK_RDIVE,xstand,1,4,0,0,0,-2.188,RDIVE_GROUNDR\n\
+WALK_LDIVE,xstand,1,4,0,0,0,2.224,LDIVE_GROUNDL\n";
+
 pub(crate) fn install() -> tempfile::TempDir {
+    install_with(CSV)
+}
+
+/// An install whose one archetype authors `csv` as its state model.
+pub(crate) fn install_with(csv: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     let put = |name: &str, bytes: &[u8]| {
@@ -122,7 +146,7 @@ pub(crate) fn install() -> tempfile::TempDir {
         std::fs::write(p, bytes).unwrap();
     };
     put("anim/pedmodel_man.skel", SKEL.as_bytes());
-    put("anim/pedmodel_man.csv", CSV.as_bytes());
+    put("anim/pedmodel_man.csv", csv.as_bytes());
     put("anim/pedmodel_man.mod", MOD.as_bytes());
     put("anim/pedmodel_man.shaders", &shaders());
     put("anim/xstand.anim", &clip());

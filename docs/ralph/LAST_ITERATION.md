@@ -1,3 +1,22 @@
+# Last iteration — F19-B.3: pedestrian reactions to cars (new-run iteration 41)
+
+Selection: the iteration-40 review (F19-B.2) passed with no blockers; F19-B's remaining list opened with reactions/avoidance (F19-AC03, req 4)
+and everything it needs (sidewalk crowd, authored `ANTIC`/`*_DIVE` states) already existed. Crossings stay blocked on UNK-42.
+
+Change: `mm2_game::pedreact` (new, pure: threat assessment, `Reaction` phase machine, `dive_lateral`, `rejoin_step`); `mm2_app::crowd::react_pedestrians`
++ `PedReact` (stop and face the car in `ANTIC`, dive the csv's lateral distance away from the car's line, walk back to the curve at `STAND`); `walk_pedestrians`
+skips walkers that are not walking; `PedShape::reacts`; smoke fields `pwary pdive prej prx`; `mm2-inspect peds` reaction-chain leg. Ledger DSN-89 (designed) + UNK-43 (unknown).
+
+Evidence: `mm2-inspect peds` on retail: all 16 dive chains (4 archetypes x ANTIC_/WALK_ x L/R) reach `STAND`, 3.13–3.63 s, ±4.38 m man/manw ±4.99 m woman/womanw.
+Retail `--frames 3000` sf/london: `prx=4/4`, `pwary=0 pdive=0` (nothing drives at a walker, so no reaction was observed on screen — stated plainly in PLAN).
+Tests +20 (15 pure, 4 production-system integration, 1 inspect); mutation check on the dive request failed the integration test.
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` 0; `cargo test --locked --workspace` rc 0, 2628 passed, 0 failed.
+
+Not done / honest gaps: no collider; nothing rendered or viewed of a dive; thresholds designed (UNK-43); dive can land in a wall/road; crossings (UNK-42); audio; `Remote` client
+has no crowd; no measured frame budget. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F19-B.2: the sidewalk crowd at runtime (new-run iteration 40 of the 2026-10-07 run)
 
 Selection: the iteration-39 review passed with no blockers. F19-B.1 named B.2 (runtime spawn/recycle/walk under density, session reset) as the next

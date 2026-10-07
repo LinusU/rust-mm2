@@ -28,6 +28,7 @@ pub mod object_audio;
 pub mod opponent;
 pub mod parked;
 pub mod ped;
+pub mod pedreact;
 pub mod pedwalk;
 pub mod police;
 pub mod profile;

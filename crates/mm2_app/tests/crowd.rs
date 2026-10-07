@@ -7,10 +7,13 @@
 use std::path::Path;
 use std::time::Duration;
 
-use avian3d::prelude::Position;
+use avian3d::prelude::{LinearVelocity, Position};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::crowd::{PedCrowd, PedDensity, PedWalk, maintain_pedestrians, walk_pedestrians};
+use mm2_app::crowd::{
+    PedCrowd, PedDensity, PedReact, PedWalk, maintain_pedestrians, react_pedestrians,
+    walk_pedestrians,
+};
 use mm2_app::pedestrian::{PedActor, animate_pedestrians};
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -18,7 +21,10 @@ use mm2_game::{
     WorldMode, despawn_session_entities,
 };
 
-use crate::pedestrian::install;
+use mm2_game::pedreact::Phase;
+use mm2_vehicle::vehicle::Vehicle;
+
+use crate::pedestrian::{REACTIVE_CSV, install, install_with};
 
 fn push_v3(d: &mut Vec<u8>, v: [f32; 3]) {
     for f in v {
@@ -139,6 +145,7 @@ fn app(dir: &Path, seed: u64, density: Option<f32>) -> App {
                 despawn_session_entities
                     .run_if(|s: Res<Session>| matches!(s.phase(), SessionPhase::Unloading)),
                 maintain_pedestrians,
+                react_pedestrians,
                 walk_pedestrians,
                 animate_pedestrians,
             )
@@ -385,4 +392,185 @@ fn a_stale_crowd_from_another_generation_is_rebuilt_not_reused() {
     let crowd = app.world().resource::<PedCrowd>();
     assert_ne!(crowd.generation(), old);
     assert_eq!(actors(&mut app), 24);
+}
+
+/// A reacting archetype that walks at 3 m/s, so a walk back is quick.
+fn reactive() -> tempfile::TempDir {
+    install_with(&REACTIVE_CSV.replace("WALK,xwalk,1,4,0,1,", "WALK,xwalk,1,4,0,0.4,"))
+}
+
+/// A car (default chassis, 1.85 × 4.4 m) the test steps by hand.
+fn spawn_car(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            Vehicle {
+                config: Default::default(),
+            },
+            Position(at),
+            LinearVelocity(velocity),
+        ))
+        .id()
+}
+
+fn step_car(app: &mut App, car: Entity) {
+    let dt = 1.0 / 60.0;
+    let mut e = app.world_mut().entity_mut(car);
+    let v = e.get::<LinearVelocity>().unwrap().0;
+    e.get_mut::<Position>().unwrap().0 += v * dt;
+}
+
+fn first_walker(app: &mut App) -> Entity {
+    let mut q = app.world_mut().query_filtered::<Entity, With<PedWalk>>();
+    q.iter(app.world()).min().unwrap()
+}
+
+fn phase(app: &App, walker: Entity) -> Phase {
+    app.world()
+        .entity(walker)
+        .get::<PedReact>()
+        .unwrap()
+        .reaction
+        .phase
+}
+
+fn at(app: &App, walker: Entity) -> Transform {
+    *app.world().entity(walker).get::<Transform>().unwrap()
+}
+
+#[test]
+fn a_car_bearing_down_makes_a_walker_look_dive_clear_and_walk_back() {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), 7, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let curve_x = start.x;
+    // 40 m up the walker's sidewalk, driving at it at 15 m/s.
+    let car = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -40.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let mut seen = vec![Phase::Walking];
+    let mut widest = 0.0f32;
+    let mut facing_at_dive = None;
+    for _ in 0..240 {
+        step_car(&mut app, car);
+        app.update();
+        let p = phase(&app, walker);
+        if *seen.last().unwrap() != p {
+            if p == Phase::Diving {
+                let t = at(&app, walker);
+                facing_at_dive = Some((t.rotation * Vec3::NEG_Z).dot(Vec3::NEG_Z));
+            }
+            seen.push(p);
+        }
+        widest = widest.max((at(&app, walker).translation.x - curve_x).abs());
+    }
+    app.world_mut().despawn(car);
+    run(&mut app, 900);
+    assert_eq!(
+        seen,
+        [
+            Phase::Walking,
+            Phase::Wary,
+            Phase::Diving,
+            Phase::Rejoining,
+            Phase::Walking
+        ],
+        "stop and look, dive, walk back, carry on"
+    );
+    assert!(
+        facing_at_dive.unwrap() > 0.9,
+        "it faced the oncoming car: {facing_at_dive:?}"
+    );
+    assert!(
+        (4.2..4.5).contains(&widest),
+        "the authored chain carries it ~4.4 m across the car's line: {widest}"
+    );
+    assert_eq!(phase(&app, walker), Phase::Walking, "back on its curve");
+    let end = at(&app, walker).translation;
+    assert!(
+        (end.x - curve_x).abs() < 0.3,
+        "rejoined its sidewalk: {end:?}"
+    );
+    let crowd = app.world().resource::<PedCrowd>();
+    assert!(crowd.alerts >= 1 && crowd.dives >= 1 && crowd.rejoined >= 1);
+    let found = walkers(&mut app);
+    assert!(found.iter().all(|(t, _)| t.is_finite()));
+    assert_eq!(actors(&mut app), found.len(), "no actor leaked");
+}
+
+#[test]
+fn a_car_passing_in_its_lane_or_standing_still_does_not_disturb_the_crowd() {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), 7, Some(0.5));
+    run(&mut app, 3);
+    // Down the road centre, 8.5 m from either sidewalk.
+    let car = spawn_car(
+        &mut app,
+        Vec3::new(0.0, 0.0, -95.0),
+        Vec3::new(0.0, 0.0, 25.0),
+    );
+    // And a car parked right on a sidewalk.
+    spawn_car(&mut app, Vec3::new(8.5, 0.0, 30.0), Vec3::ZERO);
+    for _ in 0..480 {
+        step_car(&mut app, car);
+        app.update();
+    }
+    let crowd = app.world().resource::<PedCrowd>();
+    assert_eq!((crowd.alerts, crowd.dives), (0, 0));
+}
+
+#[test]
+fn an_archetype_without_the_reaction_states_walks_on_obliviously() {
+    let tmp = install();
+    let mut app = app(tmp.path(), 7, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -40.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    for _ in 0..240 {
+        step_car(&mut app, car);
+        app.update();
+        assert_eq!(phase(&app, walker), Phase::Walking);
+        assert!((at(&app, walker).translation.x - start.x).abs() < 0.01);
+    }
+    let crowd = app.world().resource::<PedCrowd>();
+    assert_eq!((crowd.alerts, crowd.dives), (0, 0));
+}
+
+#[test]
+fn a_pause_freezes_a_walker_mid_dive() {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), 7, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -25.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    while phase(&app, walker) != Phase::Diving {
+        step_car(&mut app, car);
+        app.update();
+        assert!(app.world().resource::<Time>().elapsed_secs() < 10.0);
+    }
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    let frozen = at(&app, walker);
+    for _ in 0..60 {
+        step_car(&mut app, car);
+        app.update();
+    }
+    assert_eq!(at(&app, walker), frozen, "paused mid-dive");
+    assert_eq!(phase(&app, walker), Phase::Diving);
 }

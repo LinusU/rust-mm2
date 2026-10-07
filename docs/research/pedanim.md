@@ -302,3 +302,20 @@ lane at the same level) removes 224 candidate joins at 8 m on London and
 escapes). Pedestrians therefore walk their own street and a few corners,
 and never cross a street — crosswalks are an open question, not a
 feature.
+
+## Reaction chains (F19-B.3, measured)
+
+`mm2-inspect peds` follows each dive row through `default next` on the
+four stock archetypes: `ANTIC_{L,R}DIVE` and `WALK_{L,R}DIVE` all chain
+(`*_GROUND{L,R}` → `GROUND_STAND{L,R}`) into `STAND`. Lateral travel at
+the end of the last dive row is ±4.38 m (man, manw) and ±4.99 m (woman,
+womanw); playing time 3.13 s from `ANTIC_*` and 3.60–3.63 s from
+`WALK_*` at the designed 30 fps (the 44-frame ground recovery is
+1.47 s of it). Left dives are `+` in the csv; in the rig frame the
+clips' root-channel X drift goes negative for left (the figure faces
+−Z, so +X is its right). The first dive clip's own root drift is
+shorter than its csv distance (man `ANTIC_LDIVE`: 0 → −1.23 against
+2.2) while `LDIVE_GROUNDL` starts at −2.22 — the clips do not chain
+continuously, so the runtime applies the csv distances (linear per row,
+DSN-89) and holds them through the ground rows. The sensing rule that
+picks these states is unrecovered (UNK-43).

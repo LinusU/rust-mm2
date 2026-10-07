@@ -32,6 +32,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use mm2_content::PedArchetype;
 use mm2_game::ped::{PED_STATE_FPS, PedAnimator, PedDeform, PedSkin};
+use mm2_game::pedreact::{REACTION_STATES, dive_lateral};
 use mm2_game::{Mm2Vfs, PlayerVehicle, Session, SessionEntity};
 
 use crate::layers::GameLayer;
@@ -161,6 +162,9 @@ pub struct PedShape {
     /// archetype has no `WALK` state that authors forward travel, so no
     /// walker is made from it.
     pub walk_speed: Option<f32>,
+    /// Whether the archetype authors every state a reaction needs
+    /// ([`REACTION_STATES`]). One that does not walks on obliviously.
+    pub reacts: bool,
 }
 
 impl PedShape {
@@ -172,10 +176,16 @@ impl PedShape {
             let frames = archetype.clip(&walk.clip)?.frames;
             walk.locomotion_speed(frames, PED_STATE_FPS)
         });
+        let reacts = archetype.animator("WALK").is_ok_and(|a| {
+            REACTION_STATES
+                .iter()
+                .all(|name| a.states().iter().any(|s| s.name == *name))
+        });
         Self {
             archetype,
             groups,
             walk_speed,
+            reacts,
         }
     }
 }
@@ -207,6 +217,22 @@ impl PedActor {
     /// archetype has no such state.
     pub fn request(&mut self, state: &str) -> bool {
         self.animator.request(state)
+    }
+
+    /// Whether the figure's archetype authors the reaction states.
+    pub fn reacts(&self) -> bool {
+        self.shape.reacts
+    }
+
+    /// Lateral dive travel of the current state's window at the
+    /// animator's cursor and at the window's end (csv sign, `+` = the
+    /// figure's left); `None` in a state that authors none
+    /// ([`dive_lateral`]).
+    pub fn lateral_travel(&self) -> Option<(f32, f32)> {
+        let state = self.animator.current();
+        let frames = self.shape.archetype.clip(&state.clip)?.frames;
+        let now = dive_lateral(state, self.animator.frame(), frames)?;
+        Some((now, state.x_offset + state.x_distance))
     }
 
     /// The deformed skin at the actor's current animation frame.

@@ -31,16 +31,25 @@
 //!   `SessionEntity`-stamped and the [`PedCrowd`] resource is removed on
 //!   unload, so a restart starts clean and accumulates nothing.
 //!
-//! Not done here, deliberately: crossings (UNK-42), reactions and
-//! avoidance (F19-AC03 — figures have no collider, so a car drives
-//! through them and nothing reacts), pedestrian audio, and replication
-//! (a `Remote` client fields no crowd; the host's is not mirrored).
+//! - **Reacting.** [`react_pedestrians`] (F19-B.3) lets a walker sense
+//!   a car heading for it ([`mm2_game::pedreact`]): it stops and faces
+//!   the car in the authored `ANTIC` state, dives clear through the
+//!   authored `*_DIVE` chain when contact is imminent, then walks back
+//!   to its curve. There is still no collider — a car that gives a
+//!   walker too little time drives through it.
+//!
+//! Not done here, deliberately: crossings (UNK-42), the original's
+//! sensing rule (UNK-43), pedestrian audio, and replication (a
+//! `Remote` client fields no crowd; the host's is not mirrored).
 
 use std::sync::Arc;
 
-use avian3d::prelude::Position;
+use avian3d::prelude::{LinearVelocity, Position};
 use bevy::prelude::*;
 use mm2_content::PedArchetype;
+use mm2_game::pedreact::{
+    Approacher, DiveSide, Order, Phase, ReactPolicy, Reaction, most_urgent, rejoin_step,
+};
 use mm2_game::pedwalk::{
     SidewalkNet, WalkPolicy, Walker, candidate_curves, draw_pedestrian, target_population,
 };
@@ -48,6 +57,7 @@ use mm2_game::{
     Mm2Vfs, NavGraph, NavOverrides, NavRng, Player, Session, SessionConfig, SessionEntity,
     WorldMode,
 };
+use mm2_vehicle::vehicle::Vehicle;
 
 use crate::pedestrian::{LAB_ARCHETYPES, MAX_PED_ACTORS, PedActor, PedShape, spawn_pedestrian};
 
@@ -93,6 +103,34 @@ pub struct PedWalk {
     pub speed: f32,
 }
 
+/// A pedestrian's reaction to cars, on the figure's root beside its
+/// [`PedWalk`] (F19-B.3).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PedReact {
+    /// Where the walker is in the reaction.
+    pub reaction: Reaction,
+    /// Where the current dive started.
+    anchor: Vec3,
+    /// The walker's right-hand direction when the dive started.
+    right: Vec3,
+    /// Lateral dive travel reached so far (csv sign: `+` = left).
+    lateral: f32,
+    /// Where the dive row last played ends.
+    row_end: f32,
+}
+
+impl PedReact {
+    fn new() -> Self {
+        Self {
+            reaction: Reaction::new(),
+            anchor: Vec3::ZERO,
+            right: Vec3::X,
+            lateral: 0.0,
+            row_end: 0.0,
+        }
+    }
+}
+
 /// What a built crowd walks on.
 struct CrowdMap {
     graph: NavGraph,
@@ -126,6 +164,17 @@ pub struct PedCrowd {
     pub hops: u64,
     /// Dead-end turn-arounds walkers have made.
     pub turned_around: u64,
+    /// Walkers that stopped to watch an approaching car.
+    pub alerts: u64,
+    /// Dives walkers have made.
+    pub dives: u64,
+    /// Divers that walked back to their curve.
+    pub rejoined: u64,
+    /// The sensing and timing bounds walkers react under.
+    pub react: ReactPolicy,
+    /// Loaded archetypes that author every reaction state, of those
+    /// loaded; set when the map is built.
+    pub reacting: (usize, usize),
     /// Why the crowd is empty, when it is for a structural reason.
     pub issues: Vec<String>,
 }
@@ -138,17 +187,23 @@ impl PedCrowd {
 
     /// The smoke-record field: `peds=<live>/<target> psp=<spawned>
     /// prec=<recycled> pdrop=<dropped> puns=<unspawnable> phop=<hops>
-    /// pturn=<turn-arounds>`, given the live walker count.
+    /// pturn=<turn-arounds> pwary=<alerts> pdive=<dives>
+    /// prej=<rejoined> prx=<reacting>/<archetypes>`, given the live walker count.
     pub fn smoke_detail(&self, live: usize) -> String {
         format!(
-            " peds={live}/{} psp={} prec={} pdrop={} puns={} phop={} pturn={}",
+            " peds={live}/{} psp={} prec={} pdrop={} puns={} phop={} pturn={} pwary={} pdive={} prej={} prx={}/{}",
             self.target,
             self.spawned,
             self.recycled,
             self.dropped,
             self.unspawnable,
             self.hops,
-            self.turned_around
+            self.turned_around,
+            self.alerts,
+            self.dives,
+            self.rejoined,
+            self.reacting.0,
+            self.reacting.1
         )
     }
 
@@ -182,6 +237,11 @@ fn build_crowd(
         unspawnable: 0,
         hops: 0,
         turned_around: 0,
+        alerts: 0,
+        dives: 0,
+        rejoined: 0,
+        react: ReactPolicy::default(),
+        reacting: (0, 0),
         issues: Vec::new(),
     };
     if crowd.target == 0 {
@@ -240,6 +300,13 @@ fn build_crowd(
             .push("no usable pedestrian archetype".to_string());
         return crowd;
     }
+    crowd.reacting = (shapes.iter().filter(|s| s.reacts).count(), shapes.len());
+    for shape in shapes.iter().filter(|s| !s.reacts) {
+        warn!(
+            archetype = shape.archetype.stem,
+            "pedestrians: reaction states missing — it walks on obliviously"
+        );
+    }
     let st = net.stats();
     info!(
         density,
@@ -247,6 +314,7 @@ fn build_crowd(
         walkable = st.walkable,
         joined_ends = st.joined_ends,
         archetypes = shapes.len(),
+        reacting = crowd.reacting.0,
         "pedestrian crowd loaded"
     );
     crowd.map = Some(CrowdMap {
@@ -260,7 +328,13 @@ fn build_crowd(
 /// Heading change that is worth turning for: ignores a vertical curve
 /// whose tangent has no horizontal part.
 fn heading(tangent: [f32; 3]) -> Option<Quat> {
-    let h = Vec3::new(tangent[0], 0.0, tangent[2]);
+    facing(Vec3::from(tangent))
+}
+
+/// The rotation that turns a figure (facing `-Z`) toward the horizontal
+/// part of `dir`; `None` when there is none.
+fn facing(dir: Vec3) -> Option<Quat> {
+    let h = Vec3::new(dir.x, 0.0, dir.z);
     (h.length_squared() > 1e-6).then(|| Quat::from_rotation_arc(Vec3::NEG_Z, h.normalize()))
 }
 
@@ -270,7 +344,7 @@ pub fn walk_pedestrians(
     time: Res<Time>,
     session: Res<Session>,
     crowd: Option<ResMut<PedCrowd>>,
-    mut walkers: Query<(&mut PedWalk, &mut Transform)>,
+    mut walkers: Query<(&mut PedWalk, &mut Transform, Option<&PedReact>)>,
 ) {
     if !session.is_playing() || !session.authority_role().is_authority() {
         return;
@@ -284,7 +358,11 @@ pub fn walk_pedestrians(
     };
     let dt = time.delta_secs();
     let ease = (dt * TURN_RATE).min(1.0);
-    for (mut walk, mut at) in &mut walkers {
+    for (mut walk, mut at, react) in &mut walkers {
+        // A walker watching, diving or walking back is not on its curve.
+        if react.is_some_and(|r| !r.reaction.is_walking()) {
+            continue;
+        }
         let ds = walk.speed * dt;
         let step = map.net.advance(&mut walk.walker, ds, &mut crowd.rng);
         crowd.hops += u64::from(step.hops);
@@ -295,6 +373,125 @@ pub fn walk_pedestrians(
         at.translation = Vec3::from(sample.position);
         if let Some(face) = heading(sample.tangent) {
             at.rotation = at.rotation.slerp(face, ease);
+        }
+    }
+}
+
+/// Let walkers sense approaching cars and react (F19-B.3): stop and
+/// face a car that is heading for them, dive clear when contact is
+/// imminent, then walk back to their curve. Runs only while `Playing`,
+/// on the authority, before [`walk_pedestrians`]; a figure whose
+/// archetype lacks the reaction states is left to walk on.
+#[allow(clippy::type_complexity)] // Bevy query tuple: one system, one query.
+pub fn react_pedestrians(
+    time: Res<Time>,
+    session: Res<Session>,
+    crowd: Option<ResMut<PedCrowd>>,
+    cars: Query<(&Position, &LinearVelocity, &Vehicle)>,
+    mut walkers: Query<(&PedWalk, &mut PedReact, &mut PedActor, &mut Transform)>,
+) {
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let Some(mut crowd) = crowd else {
+        return;
+    };
+    let crowd = &mut *crowd;
+    let Some(map) = &crowd.map else {
+        return;
+    };
+    let dt = time.delta_secs();
+    let ease = (dt * TURN_RATE).min(1.0);
+    let policy = crowd.react;
+    let approachers: Vec<Approacher> = cars
+        .iter()
+        .map(|(pos, vel, vehicle)| Approacher {
+            position: pos.0,
+            velocity: vel.0,
+            half_length: vehicle.config.chassis_size[2] * 0.5,
+            half_width: vehicle.config.chassis_size[0] * 0.5,
+        })
+        .collect();
+    for (walk, mut react, mut actor, mut at) in &mut walkers {
+        if !actor.reacts() {
+            continue;
+        }
+        let react = &mut *react;
+        let right = Vec3::new((at.rotation * Vec3::X).x, 0.0, (at.rotation * Vec3::X).z)
+            .normalize_or_zero();
+        let threat = match react.reaction.phase {
+            Phase::Walking | Phase::Wary => {
+                most_urgent(at.translation, approachers.iter().copied(), &policy)
+            }
+            Phase::Diving | Phase::Rejoining => None,
+        };
+        let side = threat.map_or(DiveSide::Right, |t| DiveSide::toward(right, t.away));
+        match react
+            .reaction
+            .decide(actor.state(), threat.as_ref(), side, dt, &policy)
+        {
+            Order::None => {}
+            Order::Alert => {
+                actor.request("ANTIC");
+                crowd.alerts += 1;
+            }
+            Order::Dive(side) => {
+                let state = if actor.state().contains("ANTIC") {
+                    side.from_antic()
+                } else {
+                    side.from_walk()
+                };
+                actor.request(state);
+                react.anchor = at.translation;
+                react.right = right;
+                react.lateral = 0.0;
+                react.row_end = 0.0;
+                crowd.dives += 1;
+            }
+            Order::Resume => {
+                actor.request("WALK");
+            }
+        }
+        match react.reaction.phase {
+            Phase::Walking => {}
+            Phase::Wary => {
+                if let Some(face) = threat.and_then(|t| facing(t.toward)) {
+                    at.rotation = at.rotation.slerp(face, ease);
+                }
+            }
+            Phase::Diving => {
+                // A row that authors no lateral travel (the ground
+                // recovery) follows the dive row that finished: it
+                // holds that row's full distance, not the last frame
+                // the cursor happened to sample.
+                match actor.lateral_travel() {
+                    Some((now, end)) => {
+                        react.lateral = now;
+                        react.row_end = end;
+                    }
+                    None => react.lateral = react.row_end,
+                }
+                // The csv authors the left dive positive; `right` is the
+                // walker's right-hand side.
+                at.translation = react.anchor + react.right * -react.lateral;
+            }
+            Phase::Rejoining => {
+                let Some(sample) = map.net.sample(&map.graph, &walk.walker) else {
+                    react.reaction.rejoined();
+                    continue;
+                };
+                let home = Vec3::from(sample.position);
+                let (next, arrived) =
+                    rejoin_step(at.translation, home, walk.speed * dt, policy.rejoin_radius);
+                if let Some(face) = facing(next - at.translation) {
+                    at.rotation = at.rotation.slerp(face, ease);
+                }
+                at.translation = next;
+                if arrived {
+                    react.reaction.rejoined();
+                    crowd.rejoined += 1;
+                }
+            }
         }
     }
 }
@@ -399,10 +596,13 @@ pub fn maintain_pedestrians(
             crowd.unspawnable += 1;
             continue;
         };
-        commands.entity(figure).insert(PedWalk {
-            walker: spawn.walker,
-            speed,
-        });
+        commands.entity(figure).insert((
+            PedWalk {
+                walker: spawn.walker,
+                speed,
+            },
+            PedReact::new(),
+        ));
         occupied.push(spawn.sample.position);
         crowd.spawned += 1;
         live += 1;
