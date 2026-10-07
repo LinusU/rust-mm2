@@ -3,11 +3,11 @@
 use bevy::{audio::Volume, prelude::*};
 use mm2_game::{
     CheckpointRule, Mm2Vfs, ParticipantState, Player, PlayerControl, PlayerId, RACE_TICK_HZ,
-    RacePhase, RaceProgress, RaceState, Session, SessionEntity, SessionPhase,
+    RaceDefinition, RacePhase, RaceProgress, RaceState, Session, SessionEntity, SessionPhase,
 };
 
 use crate::{
-    audio::{AudioReport, AudioVoice, PcmAudio, VoiceKind, WaveBank},
+    audio::{AudioReport, AudioVoice, CommentaryAudio, EventCue, PcmAudio, VoiceKind, WaveBank},
     race::LOW_TIME_TICKS,
 };
 
@@ -27,6 +27,7 @@ pub struct RaceAudioWatch {
     started: bool,
     terminal: bool,
     warned: bool,
+    final_gate: bool,
 }
 
 /// Playback lives in Update after session teardown and network snapshots.
@@ -42,6 +43,7 @@ pub fn race_cue_voices(
     bank: Option<ResMut<WaveBank>>,
     mut waves: ResMut<Assets<PcmAudio>>,
     mut report: ResMut<AudioReport>,
+    mut commentary: Option<ResMut<CommentaryAudio>>,
     mut watch: Local<RaceAudioWatch>,
 ) {
     let Some(race) = race.filter(|race| !race.is_stale(session.generation())) else {
@@ -117,6 +119,20 @@ pub fn race_cue_voices(
             }
             _ => {}
         }
+        // The announcer's closing-gate line (F08-A): spoken while one
+        // checkpoint is still to be crossed — before the race can end,
+        // so it lands inside the window commentary plays in. A designed
+        // reading of the `FINALCHECKPOINT` section name.
+        if !watch.terminal
+            && !watch.final_gate
+            && matches!(race.phase, RacePhase::Running)
+            && final_gate_is_next(&race.definition, progress)
+        {
+            watch.final_gate = true;
+            if let Some(commentary) = commentary.as_deref_mut() {
+                commentary.request(EventCue::FinalCheckpoint);
+            }
+        }
         if !watch.terminal
             && !watch.warned
             && matches!(race.phase, RacePhase::Running)
@@ -155,6 +171,19 @@ pub fn race_cue_voices(
                 report.failed += 1;
                 tracing::warn!("audio: race cue {stem}: {error}");
             }
+        }
+    }
+}
+
+/// Whether exactly one checkpoint is left to cross: the final lap's
+/// closing gate under `Ordered`, the last uncleared gate under
+/// `AnyOrder` (a separate finish trigger does not count — it is not a
+/// checkpoint).
+fn final_gate_is_next(definition: &RaceDefinition, progress: &RaceProgress) -> bool {
+    match definition.rule {
+        CheckpointRule::AnyOrder => progress.cleared_count() + 1 == definition.checkpoints.len(),
+        CheckpointRule::Ordered => {
+            progress.lap + 1 >= definition.laps && progress.next + 1 == definition.checkpoints.len()
         }
     }
 }

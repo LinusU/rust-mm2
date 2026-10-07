@@ -1250,10 +1250,16 @@ pub fn load_session_world(
     // scopes to a seeded speaker draw. `commentary_voices` resolves
     // the chain lazily inside the pre-race window; a dev world binds
     // nothing.
+    // F08-A: a race event also binds its kind's announcer table for the
+    // closing-gate line; cruise, Crash Course and C&R bind none.
+    let event_table = match &config.mode {
+        SessionMode::Event(event) => mm2_game::event_speech_table(event.table),
+        _ => None,
+    };
     if let Some(commentary) =
         crate::audio::CommentaryAudio::bind(siren_city, session_conditions, config.seed)
     {
-        commands.insert_resource(commentary);
+        commands.insert_resource(commentary.with_event_table(event_table));
     }
     if world_ok {
         session

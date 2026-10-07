@@ -850,6 +850,28 @@ const COMMENTARY_DOMAIN: u64 = 0x7370_6368_6461_7461;
 const WEATHER_SECTION: &str = "WEATHER";
 /// The `header` section the time-of-day table binds — same block.
 const TOD_SECTION: &str = "TIMEOFDAY";
+/// The `header` section of an event-kind table (`checkpoint.csv` …)
+/// the closing-gate announcement binds — the exe's cue-type string.
+const FINAL_CHECKPOINT_SECTION: &str = "FINALCHECKPOINT";
+
+/// A race-progress announcement the race systems ask the session's
+/// [`CommentaryAudio`] to speak (F08-A). The cue tables name more
+/// sections than are bound; each lands with its own trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventCue {
+    /// The local participant's closing gate became next — the edge
+    /// the `lastwaypoint` effect already marks (`FINALCHECKPOINT`).
+    FinalCheckpoint,
+}
+
+impl EventCue {
+    /// The cue-table section this cue draws its line from.
+    fn section(self) -> &'static str {
+        match self {
+            Self::FinalCheckpoint => FINAL_CHECKPOINT_SECTION,
+        }
+    }
+}
 
 /// Session-scoped environmental commentary (F18-B.5): inserted by
 /// `load_session_world` on every city session — the bound registry
@@ -882,6 +904,18 @@ pub struct CommentaryAudio {
     /// draw ride it, so a replayed session hears the same announcer
     /// and the same lines.
     rng: NavRng,
+    /// The event-kind table (`checkpoint`, `circuit`, `blitz`) the
+    /// session's race announcements read; `None` outside a race
+    /// event, where [`CommentaryAudio::request`] declines.
+    event_table: Option<&'static str>,
+    /// The speaker dir the pre-race resolve drew (`as1`) — every
+    /// later cue of the session is that announcer's.
+    speaker: Option<String>,
+    /// Race announcements asked for and not yet resolved.
+    requests: Vec<EventCue>,
+    /// Cues already asked for this session — an edge replayed by a
+    /// snapshot or a restart of the watcher never speaks twice.
+    asked: Vec<EventCue>,
 }
 
 impl CommentaryAudio {
@@ -902,7 +936,32 @@ impl CommentaryAudio {
             elapsed: 0.0,
             next_at: 0.0,
             rng: NavRng::new(seed.wrapping_add(COMMENTARY_DOMAIN)),
+            event_table: None,
+            speaker: None,
+            requests: Vec::new(),
+            asked: Vec::new(),
         })
+    }
+
+    /// Bind the race announcements to an event's table kind — `None`
+    /// (a cruise, a Crash Course lesson, a Cops & Robbers match)
+    /// leaves them unbound.
+    pub fn with_event_table(mut self, table: Option<&'static str>) -> Self {
+        self.event_table = table;
+        self
+    }
+
+    /// Ask for a race announcement. Each cue is accepted once per
+    /// session and only when an event table is bound; the line is
+    /// resolved by [`commentary_voices`] and queued behind whatever
+    /// is still speaking. Returns whether the request was accepted.
+    pub fn request(&mut self, cue: EventCue) -> bool {
+        if self.event_table.is_none() || self.asked.contains(&cue) {
+            return false;
+        }
+        self.asked.push(cue);
+        self.requests.push(cue);
+        true
     }
 }
 
@@ -2555,6 +2614,9 @@ pub fn commentary_voices(
         commentary.resolved = true;
         resolve_commentary(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
     }
+    for cue in std::mem::take(&mut commentary.requests) {
+        resolve_event_cue(commentary, cue, &vfs.0, &mut bank, &mut waves, &mut report);
+    }
     // Sequencing — the first cue fires immediately; each later one
     // waits out the previous clip's duration plus the gap.
     if commentary.elapsed >= commentary.next_at
@@ -2625,44 +2687,100 @@ fn resolve_commentary(
         return;
     };
     let speaker = format!("{}{d}", index.prefix.to_lowercase());
+    commentary.speaker = Some(speaker.clone());
     for (section_name, stem) in commentary.cues {
         let path = format!("aud/spchdata/{speaker}/{stem}_prerace.csv");
-        let bytes = match vfs.read_logical(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                fail(report, format!("{path}: {e}"));
-                continue;
-            }
-        };
-        let table = match CueTable::parse(&String::from_utf8_lossy(&bytes)) {
-            Ok(t) => t,
-            Err(e) => {
-                fail(report, format!("{path}: {e}"));
-                continue;
-            }
-        };
-        for d in &table.diagnostics {
-            warn!("audio: {path}:{}: {}", d.line, d.message);
+        queue_cue(
+            commentary,
+            vfs,
+            bank,
+            waves,
+            report,
+            (&speaker, &path, section_name),
+        );
+    }
+}
+
+/// Resolve one race announcement against the speaker the pre-race
+/// resolve drew. A session with no speaker (the registry failed, and
+/// was counted then) or no readable table counts this cue's miss
+/// once; nothing substitutes for it.
+fn resolve_event_cue(
+    commentary: &mut CommentaryAudio,
+    cue: EventCue,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+) {
+    let (Some(speaker), Some(table)) = (commentary.speaker.clone(), commentary.event_table) else {
+        report.failed += 1;
+        warn!("audio: {cue:?} has no announcer — the pre-race resolve drew none");
+        return;
+    };
+    let path = format!("aud/spchdata/{speaker}/{table}.csv");
+    queue_cue(
+        commentary,
+        vfs,
+        bank,
+        waves,
+        report,
+        (&speaker, &path, cue.section()),
+    );
+}
+
+/// Read one cue table, take the named section's first row, draw its
+/// wave suffix and queue the decoded clip. `(speaker, path, section)`
+/// names the line. Every miss — unreadable or malformed table, absent
+/// section, undrawable window, missing wave — warns and counts one
+/// `failed`; no substitute cue, no re-draw (F18-AC06).
+fn queue_cue(
+    commentary: &mut CommentaryAudio,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+    (speaker, path, section_name): (&str, &str, &str),
+) {
+    let fail = |report: &mut AudioReport, msg: String| {
+        report.failed += 1;
+        warn!("audio: {msg}");
+    };
+    let bytes = match vfs.read_logical(path) {
+        Ok(b) => b,
+        Err(e) => {
+            fail(report, format!("{path}: {e}"));
+            return;
         }
-        let Some(row) = table.section(section_name).and_then(|s| s.rows.first()) else {
-            fail(report, format!("{path} authors no {section_name} cue"));
-            continue;
-        };
-        let Some(suffix) = draw_cue_suffix(row.end, row.add, &mut commentary.rng) else {
-            fail(
-                report,
-                format!(
-                    "{path} cue {} has an undrawable range (end {} add {})",
-                    row.prefix, row.end, row.add
-                ),
-            );
-            continue;
-        };
-        let wave = cue_wave_stem(&speaker, &row.prefix, suffix);
-        match bank.load(vfs, waves, &wave) {
-            Ok(handle) => commentary.queue.push_back((wave, handle)),
-            Err(e) => fail(report, format!("{path} cue {wave}: {e}")),
+    };
+    let table = match CueTable::parse(&String::from_utf8_lossy(&bytes)) {
+        Ok(t) => t,
+        Err(e) => {
+            fail(report, format!("{path}: {e}"));
+            return;
         }
+    };
+    for d in &table.diagnostics {
+        warn!("audio: {path}:{}: {}", d.line, d.message);
+    }
+    let Some(row) = table.section(section_name).and_then(|s| s.rows.first()) else {
+        fail(report, format!("{path} authors no {section_name} cue"));
+        return;
+    };
+    let Some(suffix) = draw_cue_suffix(row.end, row.add, &mut commentary.rng) else {
+        fail(
+            report,
+            format!(
+                "{path} cue {} has an undrawable range (end {} add {})",
+                row.prefix, row.end, row.add
+            ),
+        );
+        return;
+    };
+    let wave = cue_wave_stem(speaker, &row.prefix, suffix);
+    match bank.load(vfs, waves, &wave) {
+        Ok(handle) => commentary.queue.push_back((wave, handle)),
+        Err(e) => fail(report, format!("{path} cue {wave}: {e}")),
     }
 }
 

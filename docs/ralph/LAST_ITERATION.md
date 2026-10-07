@@ -1,3 +1,25 @@
+# Last iteration — F08-A.1: race announcer final-checkpoint line (new-run iteration 31 of the 2026-10-07 run)
+
+Selection: the iteration-30 review passed with no blockers (gaps: no hardware pad, pad shifts not rebindable and the Controls page has no hint
+that the shoulders stop cycling the arrow under Manual — still open). F23 has had eleven slices in a row, so I moved to F08-A, whose plan row
+listed `spchdata` event/progress/results cues as unbound. The smallest measurable one is `FINALCHECKPOINT` (`RACECHECK`, `as1racecheck01`–`04`).
+
+Change: `mm2_game::event_speech_table` (blitz/checkpoint/circuit → the per-kind table file; Crash Course none). `CommentaryAudio` keeps the
+pre-race speaker, takes `with_event_table` (bound in `load_session_world` from `SessionMode::Event`) and `request(EventCue::FinalCheckpoint)`
+(once per session, only when bound). `race_audio::race_cue_voices` requests it when exactly one checkpoint is left (`final_gate_is_next`);
+`commentary_voices` resolves it through the factored `queue_cue` (shared with the pre-race cues) and queues it behind pre-race speech. I first
+tied it to the `lastwaypoint` edge, but retail headless showed that under AnyOrder with no finish gate that edge is the finish, after commentary
+has stopped (Countdown/Playing only) — so the trigger is "one gate left". DSN-86, `docs/research/audio.md`, PLAN F08-A row.
+
+Tests (+6): `audio::the_last_checkpoint_to_cross_is_announced_once`, `an_unbound_session_announces_no_final_checkpoint`,
+`a_missing_closing_gate_line_counts_once`, `only_the_final_laps_closing_gate_is_announced`,
+`a_final_checkpoint_request_is_accepted_once_and_only_when_bound`, `mm2_game` `each_race_table_kind_names_its_announcer_file`.
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` exit 0, 2527 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no audible output (headless, no sink), trigger/cadence are a designed reading, other cue sections unbound.
+Retail (`--headless --bot --city sf --event checkpoint:0` / `blitz:0`, 6000 frames): `aud=…/3q` (was 2q), no `x` failure marker; circuit:0 did
+not finish within 6000 frames (2q).
+
+---
+
 # Last iteration — F23-A.3: pad shift buttons for the manual gearbox (new-run iteration 30 of the 2026-10-07 run)
 
 Selection: the iteration-29 review passed with no blockers. F23 req 1 asks for a selectable transmission policy, but the Manual box

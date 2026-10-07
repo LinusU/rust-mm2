@@ -16,7 +16,7 @@ use mm2_formats::cardata::{
     SirenProgram, SirenStep, SkidSample, SpeedBand, SurfaceEntry, is_sample_sentinel,
 };
 
-use crate::config::{TimeOfDay, Weather};
+use crate::config::{EventTableKind, TimeOfDay, Weather};
 use crate::nav::NavRng;
 
 /// The authored per-vehicle audio table attached to a spawned vehicle —
@@ -823,6 +823,24 @@ pub fn prerace_tod_stem(tod: TimeOfDay) -> &'static str {
     ["timemorn", "timenoon", "timeeve", "timenight"][tod.get() as usize]
 }
 
+/// The per-event-kind announcer table (`aud/spchdata/<speaker>/
+/// <name>.csv`) an event row's table binds: `checkpoint.csv`,
+/// `circuit.csv` and `blitz.csv` ship under every race speaker with
+/// `PRERACE` / `FINALCHECKPOINT` / `RESULTS*` sections. The file names
+/// are the measured data; that the event table kind selects between
+/// them is a designed binding (the exe string set names the sections
+/// and the `%s_prerace` stems, not this mapping). Crash Course
+/// lessons speak through the separate `ccs`/`ccl` grammar and bind
+/// nothing here.
+pub fn event_speech_table(table: EventTableKind) -> Option<&'static str> {
+    match table {
+        EventTableKind::Blitz => Some("blitz"),
+        EventTableKind::Checkpoint => Some("checkpoint"),
+        EventTableKind::Circuit => Some("circuit"),
+        EventTableKind::CrashCourse => None,
+    }
+}
+
 /// Draw a speaker index inside the authored `Num announcers` domain —
 /// 1-based, matching the `as%d`/`al%d` directory numbering. `None` on
 /// a zero count. Seeded through the session [`NavRng`] like every
@@ -886,6 +904,18 @@ pub fn cue_wave_stem(speaker: &str, prefix: &str, suffix: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_race_table_kind_names_its_announcer_file() {
+        assert_eq!(event_speech_table(EventTableKind::Blitz), Some("blitz"));
+        assert_eq!(
+            event_speech_table(EventTableKind::Checkpoint),
+            Some("checkpoint")
+        );
+        assert_eq!(event_speech_table(EventTableKind::Circuit), Some("circuit"));
+        // Crash Course lessons speak through the separate ccs/ccl grammar.
+        assert_eq!(event_speech_table(EventTableKind::CrashCourse), None);
+    }
+
     use super::*;
 
     /// The retail `aud/cardata/player/vpbug.csv` engine table, verbatim.

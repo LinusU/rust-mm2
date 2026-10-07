@@ -472,9 +472,12 @@ waves — a dead cue family on that one speaker; every
 `weacldy_prerace.csv` authors `WEACLD` (the wave stems match the
 row, not the filename); `ccl/cc_cpoint_indexinfo.csv` is a
 third bare-index grammar (`Crash Course Index`/`Past Index`) the
-parser diagnoses rather than force-fits. The non-prerace sections'
-triggers — `RESULTS`, `UNLOCK`, C&R progress — stay unbound
-(F08 scope).
+parser diagnoses rather than force-fits. The race-kind tables
+(`checkpoint.csv`/`circuit.csv`/`blitz.csv`) author `PRERACE` /
+`FINALCHECKPOINT` / `RESULTS*` sections: only `FINALCHECKPOINT`
+(`RACECHECK`, `end` 3-4) is bound, as a designed trigger (DSN-86).
+The other sections' triggers — `RESULTS`, `UNLOCK`, `finallap.csv`'s
+`RACELAPS` (`end 10, add 8`), damage — stay unbound (F08 scope).
 
 ## Cross-checks (retail)
 

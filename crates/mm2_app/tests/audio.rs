@@ -3284,7 +3284,12 @@ fn commentary_conditions() -> SessionConditions {
 /// is measurable at 1/60 s updates.
 fn commentary_dir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let d = tmp.path();
+    write_commentary_tree(tmp.path());
+    tmp
+}
+
+/// The fixture tree [`commentary_dir`] describes, written under `d`.
+fn write_commentary_tree(d: &Path) {
     write(
         d,
         "aud/spchdata/sf.csv",
@@ -3315,7 +3320,6 @@ fn commentary_dir() -> tempfile::TempDir {
             );
         }
     }
-    tmp
 }
 
 /// The commentary slice of the production app: a session parked at
@@ -3614,6 +3618,193 @@ fn teardown_sweeps_commentary_voices() {
 #[test]
 fn a_dev_world_binds_no_commentary() {
     assert!(CommentaryAudio::bind(None, commentary_conditions(), 7).is_none());
+}
+
+/// The race-effect fixture plus the announcer tree and each speaker's
+/// `checkpoint.csv`/`circuit.csv` closing-gate line (`RACECHECK`, suffix `1..=2`).
+fn final_checkpoint_dir() -> tempfile::TempDir {
+    let tmp = race_effect_fixture();
+    write_commentary_tree(tmp.path());
+    for speaker in ["as1", "as2"] {
+        for table in ["checkpoint", "circuit"] {
+            write(
+                tmp.path(),
+                &format!("aud/spchdata/{speaker}/{table}.csv"),
+                b"Name prefix/type header,end sufix value,sufix add value\nFINALCHECKPOINT header,,\nRACECHECK,2,0\n",
+            );
+        }
+        for n in 1..=2 {
+            write(
+                tmp.path(),
+                &format!("aud/aud22/{speaker}/{speaker}racecheck0{n}.22k.wav"),
+                &pcm_wav(22050, 22050),
+            );
+        }
+    }
+    tmp
+}
+
+/// The race-effect app with the session's commentary bound the way
+/// `load_session_world` binds it for a race event of `table`.
+fn final_checkpoint_app(dir: &Path, table: Option<&'static str>) -> (App, Entity) {
+    let (mut app, player) = race_effect_app(dir);
+    // Speech is sequenced on the clock, so step it like the other
+    // commentary fixtures do.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )));
+    app.add_systems(Update, audio::commentary_voices);
+    let bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
+        .unwrap()
+        .with_event_table(table);
+    app.insert_resource(bound);
+    (app, player)
+}
+
+/// Run the race and clear one of its two gates, so one checkpoint is
+/// left to cross.
+fn clear_all_but_one_checkpoint(app: &mut App, player: Entity) {
+    use mm2_game::{RacePhase, RaceProgress, RaceState};
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    app.update();
+    assert_eq!(
+        app.world().resource::<AudioReport>().commentary,
+        1,
+        "the first pre-race cue only: nothing is announced before the gate"
+    );
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 0, 0, 1, 0);
+}
+
+/// F08-A: the announcer's `FINALCHECKPOINT` line is spoken once one
+/// checkpoint is left — in the speaker the pre-race cues drew, queued
+/// behind the pre-race speech instead of over it, while the session is
+/// still Playing.
+#[test]
+fn the_last_checkpoint_to_cross_is_announced_once() {
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("checkpoint"));
+    clear_all_but_one_checkpoint(&mut app, player);
+    for _ in 0..400 {
+        app.update();
+    }
+    assert!(race_effect_stems(&mut app).contains(&"waypoint"));
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 0);
+    assert_eq!(r.commentary, 3, "weather, time of day, closing gate");
+    let spoken: Vec<String> = commentary_voices(&mut app)
+        .into_iter()
+        .map(|(_, stem, ..)| stem)
+        .collect();
+    let gate: Vec<&String> = spoken.iter().filter(|s| s.contains("racecheck")).collect();
+    assert_eq!(gate.len(), 1, "{spoken:?}");
+    let speaker = &gate[0][..3];
+    assert!(
+        spoken.iter().all(|s| s.starts_with(speaker)),
+        "one announcer per session: {spoken:?}"
+    );
+    assert!(["01", "02"].iter().any(|n| gate[0].ends_with(n)));
+    // A held edge never repeats the line.
+    for _ in 0..200 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 3);
+}
+
+/// Under `Ordered` only the final lap's closing gate is the final
+/// checkpoint — the same gate on an earlier lap is not announced.
+#[test]
+fn only_the_final_laps_closing_gate_is_announced() {
+    use mm2_game::{CheckpointRule, RacePhase, RaceProgress, RaceState};
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("circuit"));
+    {
+        let mut race = app.world_mut().resource_mut::<RaceState>();
+        race.phase = RacePhase::Running;
+        race.definition.rule = CheckpointRule::Ordered;
+        race.definition.laps = 2;
+    }
+    app.update();
+    // Lap 1 of 2, heading for the last gate of the lap: not final.
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 1, 0, 1, 0);
+    for _ in 0..200 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 2);
+    // Lap 2 of 2, same gate: final.
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 1, 1, 3, 0);
+    for _ in 0..200 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed), (3, 0));
+    assert!(
+        commentary_voices(&mut app)
+            .iter()
+            .any(|(_, s, ..)| s.contains("racecheck"))
+    );
+}
+
+/// A session that is not a race event binds no table, so the same edge
+/// asks for nothing and counts nothing.
+#[test]
+fn an_unbound_session_announces_no_final_checkpoint() {
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), None);
+    clear_all_but_one_checkpoint(&mut app, player);
+    for _ in 0..400 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed), (2, 0), "only the pre-race cues");
+    assert!(
+        !commentary_voices(&mut app)
+            .iter()
+            .any(|(_, s, ..)| s.contains("racecheck"))
+    );
+}
+
+/// A table without the section (or a speaker without the table) is one
+/// counted miss, never retried per frame and never replaced by another
+/// line.
+#[test]
+fn a_missing_closing_gate_line_counts_once() {
+    let dir = final_checkpoint_dir();
+    for speaker in ["as1", "as2"] {
+        write(
+            dir.path(),
+            &format!("aud/spchdata/{speaker}/checkpoint.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nPRERACE header,,\nPRE,19,0\n",
+        );
+    }
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("checkpoint"));
+    clear_all_but_one_checkpoint(&mut app, player);
+    for _ in 0..400 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed), (2, 1));
+}
+
+/// `request` accepts each cue once and only with a bound table.
+#[test]
+fn a_final_checkpoint_request_is_accepted_once_and_only_when_bound() {
+    use mm2_app::audio::EventCue;
+    let mut bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
+        .unwrap()
+        .with_event_table(Some("blitz"));
+    assert!(bound.request(EventCue::FinalCheckpoint));
+    assert!(!bound.request(EventCue::FinalCheckpoint));
+    let mut unbound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7).unwrap();
+    assert!(!unbound.request(EventCue::FinalCheckpoint));
 }
 
 fn race_effect_app(dir: &Path) -> (App, Entity) {
