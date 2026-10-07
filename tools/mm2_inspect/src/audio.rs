@@ -9,6 +9,10 @@
 //! pedestrian voices, F08) are probed text-vs-binary, and the
 //! `aud/dmusic` RIFF containers (`DMSG`/`DMST`/`DLS `/`DMBD`) are
 //! classified by form word — DirectMusic playback is not decoded here.
+//! The five `aud/dmusic/csv_files` music cue tables are parsed
+//! (`mm2_formats::music`) and every segment/style/band stem they name
+//! is cross-checked against the shipped containers, with the
+//! containers no table names reported as a finding.
 //!
 //! `--strict` exits nonzero on parse failures and validation issues.
 //! Dead wave references, vehicle-coverage gaps and authored quirks like
@@ -21,6 +25,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_formats::cardata::{self, CardataBody, CardataIssue};
+use mm2_formats::music::{self, MusicTable};
 use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
 /// Everything the audit measures, kept separate from printing so tests
@@ -70,6 +75,17 @@ pub struct AudioReport {
     pub quirks: Vec<String>,
     /// Findings: dead wave references, coverage gaps.
     pub findings: Vec<String>,
+    /// One summary line per parsed `aud/dmusic/csv_files` music table.
+    pub music_tables: Vec<(String, String)>,
+    /// Distinct `(stem, extension)` DirectMusic artifacts the music
+    /// tables name.
+    pub music_refs_total: usize,
+    /// …of which resolve to a shipped `aud/dmusic/<stem>.<ext>`.
+    pub music_refs_resolved: usize,
+    /// Unresolved music references: `stem.ext` → naming tables.
+    pub dead_music_refs: Vec<(String, Vec<String>)>,
+    /// Shipped `.sgt`/`.sty`/`.bnd` files no music table names.
+    pub unreferenced_music: Vec<String>,
     /// Distinct sample names referenced by parsed tables.
     pub refs_total: usize,
     /// …of which resolve to a discovered wave stem.
@@ -174,6 +190,10 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
     let mut refs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut player_ids: BTreeSet<String> = BTreeSet::new();
     let mut opponent_ids: BTreeSet<String> = BTreeSet::new();
+    // DirectMusic artifacts shipped (`stem.ext`, case-folded → logical
+    // path) and the ones the music tables name (→ naming tables).
+    let mut music_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut music_refs: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     let mut logicals: Vec<String> = vfs
         .list()
@@ -230,6 +250,9 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             }
             "sgt" | "sty" | "dls" | "bnd" => match riff_form_type(&bytes) {
                 Some(form) => {
+                    if ext != "dls" {
+                        music_files.insert(name.to_ascii_lowercase(), logical.clone());
+                    }
                     let form_s = String::from_utf8_lossy(&form).into_owned();
                     *r.riff_forms.entry(form_s.clone()).or_default() += 1;
                     if let Some(want) = expected_riff_form(&ext)
@@ -303,8 +326,36 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
                     }
                     Err(e) => r.failures.push((logical.clone(), e.to_string())),
                 },
-                // spchdata/creaturedata/dmusic csv_files: F08 families —
-                // counted, probed text-vs-binary, not parsed here.
+                // The music cue tables (F08-A): parsed, and every named
+                // segment/style/band cross-checked against the shipped
+                // containers below.
+                None if music::is_music_table(logical) => {
+                    match MusicTable::parse(&String::from_utf8_lossy(&bytes)) {
+                        Ok(t) => {
+                            for d in &t.diagnostics {
+                                r.issues
+                                    .push(format!("{logical}: line {}: {}", d.line, d.message));
+                            }
+                            for r_ in t.refs() {
+                                music_refs
+                                    .entry(format!(
+                                        "{}.{}",
+                                        r_.stem.to_ascii_lowercase(),
+                                        r_.artifact.extension()
+                                    ))
+                                    .or_default()
+                                    .push(logical.clone());
+                            }
+                            r.music_tables.push((
+                                logical.clone(),
+                                format!("{} row(s) × {} column(s)", t.rows.len(), t.columns.len()),
+                            ));
+                        }
+                        Err(e) => r.failures.push((logical.clone(), e.to_string())),
+                    }
+                }
+                // spchdata/creaturedata: F08 families — counted, probed
+                // text-vs-binary, not parsed here.
                 None => match std::str::from_utf8(&bytes) {
                     Ok(_) => {
                         r.deferred_text += 1;
@@ -327,6 +378,22 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             r.dead_refs.push((name.clone(), users.clone()));
         }
     }
+    // Music-table stem → shipped DirectMusic container cross-check.
+    r.music_refs_total = music_refs.len();
+    for (stem, users) in &music_refs {
+        if music_files.contains_key(stem) {
+            r.music_refs_resolved += 1;
+        } else {
+            let mut users = users.clone();
+            users.dedup();
+            r.dead_music_refs.push((stem.clone(), users));
+        }
+    }
+    r.unreferenced_music = music_files
+        .iter()
+        .filter(|(name, _)| !music_refs.contains_key(*name))
+        .map(|(_, logical)| logical.clone())
+        .collect();
     for (path, what) in &r.riff_mismatches {
         r.issues
             .push(format!("{path}: RIFF form mismatch ({what})"));
@@ -422,6 +489,27 @@ pub fn print_report(r: &AudioReport) {
     println!("== DirectMusic containers (recognized, not decoded) ==");
     for (form, n) in &r.riff_forms {
         println!("  RIFF form {form:?}: {n} file(s)");
+    }
+    for (path, summary) in &r.music_tables {
+        println!("  {path:<44} {summary}");
+    }
+    println!(
+        "  music references: {}/{} resolved to shipped segment/style/band containers",
+        r.music_refs_resolved, r.music_refs_total
+    );
+    for (stem, users) in &r.dead_music_refs {
+        println!("    dead music ref {stem:?} ← {}", users.join(", "));
+    }
+    if !r.unreferenced_music.is_empty() {
+        println!(
+            "  {} container(s) no music table names (a segment may reach its style/band itself): {}",
+            r.unreferenced_music.len(),
+            r.unreferenced_music
+                .iter()
+                .map(|p| p.strip_prefix("aud/dmusic/").unwrap_or(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     if !r.extras.is_empty() {
         println!(
@@ -591,6 +679,52 @@ mod tests {
         assert_eq!(r.dead_refs.len(), 1);
         assert_eq!(r.dead_refs[0].0, "reverse");
         assert!(r.failures.is_empty());
+    }
+
+    fn riff(form: &[u8; 4]) -> Vec<u8> {
+        let mut out = Vec::from(&b"RIFF"[..]);
+        out.extend_from_slice(&8u32.to_le_bytes());
+        out.extend_from_slice(form);
+        out
+    }
+
+    #[test]
+    fn audit_resolves_music_table_stems_against_the_containers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "aud/dmusic/enemystart.sgt", &riff(b"DMSG"));
+        write(d, "aud/dmusic/groovestyle.sty", &riff(b"DMST"));
+        write(d, "aud/dmusic/bigair.bnd", &riff(b"DMBD"));
+        write(d, "aud/dmusic/spare.sgt", &riff(b"DMSG"));
+        write(d, "aud/dmusic/x.dls", &riff(b"DLS "));
+        // `Missing` names no shipped segment; the style cell resolves as a
+        // `.sty`, not the same-named `.sgt`.
+        write(
+            d,
+            "aud/dmusic/csv_files/singleroam.csv",
+            b"Start Music,Return Music,Big air Motif style,Big Air Motif Band\nEnemyStart,Missing,GrooveStyle,BigAir\n",
+        );
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.music_tables.len(), 1);
+        assert_eq!(r.music_refs_total, 4);
+        assert_eq!(r.music_refs_resolved, 3);
+        assert_eq!(r.dead_music_refs.len(), 1);
+        assert_eq!(r.dead_music_refs[0].0, "missing.sgt");
+        // A table is not deferred text once parsed; the `.dls` bank is
+        // not a segment/style/band so it is never "unreferenced".
+        assert_eq!(r.deferred_text, 0);
+        assert_eq!(r.unreferenced_music, ["aud/dmusic/spare.sgt"]);
+        assert!(r.failures.is_empty());
+    }
+
+    #[test]
+    fn audit_flags_a_ragged_music_row_as_an_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "aud/dmusic/csv_files/ui.csv", b"Music segment\nA,B\n");
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.issues.len(), 1, "{:?}", r.issues);
+        assert!(r.issues[0].contains("2 cells for 1 columns"));
     }
 
     #[test]

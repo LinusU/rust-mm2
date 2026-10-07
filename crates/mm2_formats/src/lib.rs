@@ -24,6 +24,7 @@ pub mod lighting;
 pub mod lmap;
 pub mod materials;
 pub mod mtx;
+pub mod music;
 pub mod opp;
 pub mod pathset;
 pub mod ped;

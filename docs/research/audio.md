@@ -271,9 +271,35 @@ is unverified (the `aud11` tree looks speech-dominated).
 | `.dls` | `DLS ` | 14 | Downloadable sound banks |
 | `.bnd` | `DMBD` | 2 | DirectMusic bands |
 
-Plus 5 text CSVs under `aud/dmusic/csv_files/` (deferred). Playback is
-F08 scope; the audit fails a container whose form word disagrees with
-its extension (none do on retail).
+Plus 5 text CSVs under `aud/dmusic/csv_files/`, the music cue tables
+(below). Playback is F08 scope; the audit fails a container whose form
+word disagrees with its extension (none do on retail).
+
+### Music cue tables (`aud/dmusic/csv_files`, F08-A.3, AUD-13)
+
+Parsed by `mm2_formats::music::MusicTable` (a header line, then rows of
+DirectMusic stems; columns found by header text, never position —
+`singlerace` and `singleroam` order their cop columns differently):
+
+| Table | Rows | Columns (roles) |
+| --- | --- | --- |
+| `singlerace.csv` | 5 (Enemy, Bullet, Duck, London, PimpHand) | start, return, idle, idle-cops, cop-chase, pause, results, big-air style/motif/band |
+| `singleroam.csv` | 4 (SunRoof, TacoLoco, LeTigre, BackOff) | start, return (`…Restart`), idle, cop-chase, idle-cops, pause, big-air style/motif/band |
+| `sfambience.csv`, `londonambience.csv` | 1 each | `SFX segment` |
+| `ui.csv` | 1 | `Music segment` |
+
+`mm2-inspect audio` cross-checks every stem against the shipped
+containers (`Name` → `aud/dmusic/name.sgt`; the big-air style cell →
+`.sty`, the band cell → `.bnd`): **53 distinct stems, 53 resolved, 0
+dead**. 28 shipped `.sgt`/`.sty`/`.bnd` are named by no table (styles,
+the `grooveridle`/`groovercops` segments, `londontrans1`,
+`nightroamstart`, `vanilla1/2`, `undergroundambience`,
+`useforsomething`, and `sunidlecops` — the `SunRoof` row's idle-cops
+cell reads `SunRoofIdle`); a segment may reach its own style/band from
+inside, which this reader cannot see. The tables name a soundtrack's
+*states*; row choice, state triggers and DirectMusic transitions are
+unrecovered (UNK-25) and no segment is decoded, so **no music plays**:
+the unsupported state is stated, not replaced by a loop (F08 req 4).
 
 ## Cardata tables (`aud/cardata/**`, `aud/ambient/**`)
 
@@ -477,8 +503,10 @@ parser diagnoses rather than force-fits. The race-kind tables
 `FINALCHECKPOINT` / `RESULTS*` sections: only `FINALCHECKPOINT`
 (`RACECHECK`, `end` 3-4) and the `RESULTS{POOR,MID,WIN}` tiers
 (`RESULT*`, `end` 9-19; blitz has no `MID`) are bound, as designed triggers
-(DSN-86, DSN-87). The other sections' triggers — `UNLOCK`, `finallap.csv`'s
-`RACELAPS` (`end 10, add 8`), damage — stay unbound (F08 scope).
+(DSN-86, DSN-87). The other sections' triggers — `UNLOCK`, damage — stay
+unbound (F08 scope). `finallap.csv`'s `RACELAPS01,10,8` cannot be bound:
+no `*racelaps*` wave ships for any speaker (measured 2026-10-07), so it
+is a dead authored reference (AUD-13).
 
 ## Cross-checks (retail)
 
@@ -500,8 +528,7 @@ parser diagnoses rather than force-fits. The race-kind tables
 environmental prerace families are runtime-bound, the event/result/
 C&R cue sections stay unbound. Still unparsed: `aud/creaturedata/**`
 (21 — ped/ambient voice tables; verified plain text:
-`Min speed,Max speed,min time in range,…` headers) plus
-`aud/dmusic/csv_files` (5). Three `.bat` work files (`renshit.bat`
+`Min speed,Max speed,min time in range,…` headers). Three `.bat` work files (`renshit.bat`
 etc.) are extras.
 
 ## Open semantics
@@ -541,8 +568,9 @@ etc.) are extras.
   `Explosion sample` consumer and program termination (all retail
   programs cycle; runtime ends defensively on malformed targets)
   stay unverified.
-- DirectMusic segment/style/band playback (F08) and the `csv_files`
-  cue tables.
+- DirectMusic segment/style/band decoding and playback (F08); the
+  `csv_files` tables are parsed (AUD-13) but their selection and
+  transition semantics are not recovered.
 - `spchdata`/`creaturedata` grammars (F08).
 
 ## Race feedback effects (2026-10-03)

@@ -1,3 +1,28 @@
+# Last iteration — F08-A.3: music cue-table inventory (new-run iteration 33 of the 2026-10-07 run)
+
+Selection: the iteration-32 review passed with no blockers. I looked at the next announcer cues first and ruled them out: `finallap.csv`
+authors `RACELAPS01,10,8` but no `*racelaps*` wave ships for any speaker (dead reference, so binding it could only count failures), and the
+`UNLOCK*` lines would need a guessed vehicle/paint→cue mapping. F08 req 4 (determine which music formats the install uses; explicit
+unsupported state) had nothing but form-word counts, and `aud/dmusic/csv_files` (5 text CSVs) sat in the "deferred" bucket.
+
+Change: `mm2_formats::music` (`MusicTable`, `MusicRole::from_header`, `MusicArtifact`, `is_music_table`) — header-identified columns (the
+race and roam tables order their cop columns differently), ragged rows padded/flagged, unknown headers kept and flagged. `mm2-inspect audio`
+parses the five tables (no longer "deferred text"), resolves every named stem to `aud/dmusic/<stem>.sgt/.sty/.bnd` (big-air style → `.sty`,
+band → `.bnd`) and lists shipped containers no table names. Retail: 5 tables, 53/53 stems resolved, 0 dead, 28 containers unnamed
+(informational), `--strict` rc 0. AUD-13 in `docs/original-rules.md`, `docs/research/audio.md` (new music-cue subsection; finallap dead-ref
+note), PLAN F08-A row.
+
+Tests (+10): `mm2_formats::music` 8 (retail-shaped race/roam/ambience/ui, header-not-position, artifact kinds, ragged row, unknown
+header, empty/header-only, path test); `mm2_inspect::audio` 2 (`audit_resolves_music_table_stems_against_the_containers`,
+`audit_flags_a_ragged_music_row_as_an_issue`).
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace`
+exit 0, 2543 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: nothing plays — DirectMusic segments are
+not decoded; which row a session draws, state triggers and transitions are unrecovered (UNK-25); the 28 unnamed containers may be reached
+from inside segments (unverified).
+
+---
+
 # Last iteration — F08-A.2: race-end announcer line (new-run iteration 32 of the 2026-10-07 run)
 
 Selection: the iteration-31 review passed with no blockers. Its minor stale-doc finding (`EventCue::FinalCheckpoint` doc claimed the
