@@ -1,3 +1,22 @@
+# Last iteration — F31-A.1: coverage and gap audit (new-run iteration 7 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`f145ece`) passed gates and review with no blocking findings; its gaps
+(AC06 two-process proof, original-data weather×surface run) need a slice larger than this iteration
+and F06 has had six consecutive synthetic slices, so I took the never-started F31-A (spec: "can
+produce a gap report at any point"). Docs only; no code touched.
+
+Change: `docs/coverage-audit.md` — evidence legend; denominators re-measured on the retail install
+(inventory 21/21 stock cars + 8 rejected extras, 78/80 races + 20 rejected, 42 lessons, 7 audio families
+/3256 files, 45 events per city, strict inventory exits 2 as expected); F00–F30 matrix with gaps; cross-cutting
+gaps; suggested priority (F21 evaluators, F19 runtime, audible mix harness, F29 consumer audit, full-journey
+harness, LAN run). Matrix rows are reconciled from PLAN.md/specs/ledger, not re-executed — the doc says so.
+PLAN.md F31-A row → implemented (candidate).
+
+Gates: only docs changed since `f145ece` (externally passed); `cargo fmt --all -- --check` re-run: pass (exit 0).
+Status: implemented candidate, not independently checked. Open: per-AC matrix, refresh discipline.
+
+---
+
 # Last iteration — F06-C.6: the recorded pin follows the pin that bound (new-run iteration 6 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`3d184c9`) passed gates and review, no blockers. Its one non-blocking
