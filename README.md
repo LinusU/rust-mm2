@@ -254,7 +254,8 @@ anti-aliasing Off/2x/4x), defaulting to High and 4x — the look the game
 shipped with — and saves them to `settings.json` beside the driver
 profiles. `--shadows <off|low|high>` and `--msaa <off|2|4>` override
 them for a single run without saving, which is how to compare settings
-with `--perf-log`.
+with `--perf-log`. The same screen (and the pause overlay) offers a
+**Text size** of 100/125/150%, which scales every menu and HUD element.
 
 Beside the CSV, `frames.csv.report.json` (schema `mm2-perf-report/1`)
 makes the numbers reproducible rather than anecdotal: engine commit and

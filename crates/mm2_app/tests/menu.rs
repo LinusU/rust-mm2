@@ -26,7 +26,7 @@ use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::settings::{Antialiasing, GraphicsSettings, ShadowQuality, settings_path};
+use mm2_app::settings::{Antialiasing, GraphicsSettings, ShadowQuality, TextSize, settings_path};
 use mm2_assets::Vfs;
 use mm2_game::{
     BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
@@ -3081,6 +3081,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         [
             "Shadows: High",
             "Anti-aliasing: 4x MSAA",
+            "Text size: 100%",
             "Master volume: 100%",
             "Sound effects volume: 100%",
             "Commentary volume: 100%",
@@ -3090,7 +3091,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         ]
     );
     assert_eq!(
-        shell(&app).rows[6].enabled,
+        shell(&app).rows[7].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3141,17 +3142,20 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[6].enabled.is_ok());
+    assert!(shell(&app).rows[7].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
-    assert_eq!(rows[..2], ["Shadows: High", "Anti-aliasing: 4x MSAA"]);
+    assert_eq!(
+        rows[..3],
+        ["Shadows: High", "Anti-aliasing: 4x MSAA", "Text size: 100%"]
+    );
     assert_eq!(
         app.world().resource::<GraphicsSettings>(),
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[6].enabled.is_err());
+    assert!(shell(&app).rows[7].enabled.is_err());
 }
 
 /// The volume rows step by ten percent, wrap at both ends, reach the
@@ -3173,15 +3177,15 @@ fn volume_rows_step_wrap_persist_and_reset() {
 
     focus_row(&mut app, "Master volume");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[2].text, "Master volume: 90%");
+    assert_eq!(shell(&app).rows[3].text, "Master volume: 90%");
     assert_eq!(app.world().resource::<GraphicsSettings>().audio.master, 90);
     assert_eq!(GraphicsSettings::load(&path).audio.master, 90);
     // Right from the top wraps to silence, Left from silence to the top.
     press(&mut app, KeyCode::ArrowRight);
     press(&mut app, KeyCode::ArrowRight);
-    assert_eq!(shell(&app).rows[2].text, "Master volume: 0%");
+    assert_eq!(shell(&app).rows[3].text, "Master volume: 0%");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[2].text, "Master volume: 100%");
+    assert_eq!(shell(&app).rows[3].text, "Master volume: 100%");
 
     // Each bus row moves its own level and nothing else.
     focus_row(&mut app, "City sounds");
@@ -3192,12 +3196,60 @@ fn volume_rows_step_wrap_persist_and_reset() {
         (audio.master, audio.effects, audio.commentary, audio.city),
         (100, 100, 100, 80)
     );
-    assert_eq!(shell(&app).rows[5].text, "City sounds volume: 80%");
+    assert_eq!(shell(&app).rows[6].text, "City sounds volume: 80%");
 
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert_eq!(shell(&app).rows[5].text, "City sounds volume: 100%");
+    assert_eq!(shell(&app).rows[6].text, "City sounds volume: 100%");
+}
+
+/// The text-size row steps 100/125/150% and wraps, reaches the live
+/// `GraphicsSettings` and the file at once, moves no other setting, and
+/// the reset row puts it back.
+#[test]
+fn the_text_size_row_steps_wraps_persists_and_resets() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    focus_row(&mut app, "Text size");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[2].text, "Text size: 125%");
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().text_size,
+        TextSize::Large
+    );
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[2].text, "Text size: 150%");
+    assert_eq!(GraphicsSettings::load(&path).text_size, TextSize::Larger);
+    // Right from the largest wraps to the shipped size; Left wraps back.
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[2].text, "Text size: 100%");
+    press(&mut app, KeyCode::ArrowLeft);
+    let saved = GraphicsSettings::load(&path);
+    assert_eq!(saved.text_size, TextSize::Larger);
+    assert_eq!(
+        GraphicsSettings {
+            text_size: TextSize::Normal,
+            ..saved
+        },
+        GraphicsSettings::default(),
+        "only the text size moved"
+    );
+
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    assert_eq!(shell(&app).rows[2].text, "Text size: 100%");
 }
 
 /// A menu with nowhere to save (an evidence run) still applies the
@@ -3891,7 +3943,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..7 {
+    for _ in 0..8 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);

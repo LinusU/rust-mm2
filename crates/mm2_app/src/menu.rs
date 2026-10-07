@@ -286,6 +286,8 @@ pub enum Action {
     CycleShadows,
     /// Cycle the Options screen's anti-aliasing.
     CycleAntialiasing,
+    /// Cycle the Options screen's on-screen text size.
+    CycleTextSize,
     /// Step one of the Options screen's volume levels.
     CycleAudio(AudioLevel),
     /// Put every graphics and audio setting back to its default.
@@ -1002,6 +1004,7 @@ impl MenuShell {
             | Action::CycleOpponents
             | Action::CycleShadows
             | Action::CycleAntialiasing
+            | Action::CycleTextSize
             | Action::CycleAudio(_)
             | Action::CycleSteerDeadzone
             | Action::CycleTriggerDeadzone
@@ -1197,6 +1200,9 @@ impl MenuShell {
             }
             Action::CycleAntialiasing => {
                 self.set_settings(data, data.settings.cycled_antialiasing(forward), effects);
+            }
+            Action::CycleTextSize => {
+                self.set_settings(data, data.settings.cycled_text_size(forward), effects);
             }
             Action::CycleAudio(level) => {
                 self.set_settings(data, data.settings.stepped_audio(*level, forward), effects);
@@ -2280,6 +2286,7 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
     let mut rows = vec![
         row(s.shadows_row(), Ok(()), Action::CycleShadows),
         row(s.antialiasing_row(), Ok(()), Action::CycleAntialiasing),
+        row(s.text_size_row(), Ok(()), Action::CycleTextSize),
     ];
     rows.extend(
         AudioLevel::ALL.map(|level| row(s.audio.row(level), Ok(()), Action::CycleAudio(level))),

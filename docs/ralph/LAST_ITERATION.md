@@ -1,3 +1,25 @@
+# Last iteration — F23-B.4: on-screen text size (new-run iteration 22 of the 2026-10-07 run)
+
+Selection: the iteration-21 review passed with no blockers. F29-A had taken 13 slices and its remaining legs (allocator
+measurement, two-process, xref importer) are not ready, so I moved to the open F23 accessibility leg: req 4's "scalable text" had
+no setting at all (no `UiScale`, no font-size option anywhere).
+
+Change: `settings::TextSize` (100/125/150%, capped because the authored HUD anchors fixed-size elements to the window edge) rides
+`GraphicsSettings.text_size` in `settings.json` (old files load at 100%, an unknown value falls back to the defaults like any broken
+file); `apply_text_size` pushes it onto Bevy's `UiScale` when the setting changes, so every UI node scales and the 3D world does not.
+A "Text size" row sits after Anti-aliasing on the menu Options screen and the pause overlay's graphics page (`CycleTextSize`);
+Reset covers it. `CONTROLS_ROW` and the hard-coded row indices in `tests/menu.rs`/`tests/session.rs` shifted by one. DSN-80 in
+`docs/original-rules.md` (designed, no original counterpart); README line.
+
+Tests: `settings` units (round trip incl. text size, old file keeps Normal, unknown value recovered, step/wrap/cap, setting moves
+`UiScale` and back); `menu::the_text_size_row_steps_wraps_persists_and_resets`; the pause options test steps/saves the row.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` 2496 passed, 0 failed. Status: implemented
+candidate, not independently checked. Not shown: no capture at 125/150% — whether every HUD element still fits a small window is
+unverified; subtitles (no subtitle system exists), reduced motion, pad rebinding, auto-reverse and mouse/wheel rows stay open.
+
+---
+
 # Last iteration — F29-A.13: remaining count-driven reservations bounded by the input (new-run iteration 21 of the 2026-10-07 run)
 
 Selection: the iteration-20 review passed; its stated gap was that `tex.rs`/`dave.rs`/`bai.rs`/`pathset.rs` and other `with_capacity`

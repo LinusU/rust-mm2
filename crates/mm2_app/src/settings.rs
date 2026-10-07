@@ -132,6 +132,47 @@ impl Antialiasing {
     }
 }
 
+/// How large the on-screen text and HUD draw — the accessibility
+/// setting for a player who cannot read the stock layout (F23 req 4).
+/// It is Bevy's [`UiScale`], so every UI node (menus, HUD, results,
+/// pause) grows together; the 3D world is untouched. Capped at 150%:
+/// the authored HUD anchors to the window's edges and a larger step
+/// pushes its fixed-size elements off a 1280x720 window.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    /// The layout the game shipped with.
+    #[default]
+    Normal,
+    /// One quarter larger.
+    Large,
+    /// One half larger.
+    Larger,
+}
+
+impl TextSize {
+    /// Every value, in menu order.
+    pub const ALL: [Self; 3] = [Self::Normal, Self::Large, Self::Larger];
+
+    /// The menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "100%",
+            Self::Large => "125%",
+            Self::Larger => "150%",
+        }
+    }
+
+    /// The factor [`UiScale`] carries.
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::Large => 1.25,
+            Self::Larger => 1.5,
+        }
+    }
+}
+
 /// A volume bus: the group of voices one Options row scales. The
 /// original's Audio Options screen separates Sound FX, Commentary,
 /// Music and City Sounds (CTL-5); there is no music player here yet, so
@@ -285,6 +326,8 @@ pub struct GraphicsSettings {
     pub antialiasing: Antialiasing,
     /// Volume levels.
     pub audio: AudioLevels,
+    /// Size of the on-screen text and HUD.
+    pub text_size: TextSize,
 }
 
 /// Step through every value of a setting, wrapping at both ends —
@@ -314,6 +357,19 @@ impl GraphicsSettings {
             antialiasing: cycle_wrapping(&Antialiasing::ALL, self.antialiasing, forward),
             ..self
         }
+    }
+
+    /// These settings with the text size stepped.
+    pub fn cycled_text_size(self, forward: bool) -> Self {
+        Self {
+            text_size: cycle_wrapping(&TextSize::ALL, self.text_size, forward),
+            ..self
+        }
+    }
+
+    /// The text-size row's text.
+    pub fn text_size_row(&self) -> String {
+        format!("Text size: {}", self.text_size.label())
     }
 
     /// These settings with one audio level stepped.
@@ -451,14 +507,31 @@ pub fn apply_antialiasing(
     }
 }
 
+/// Push [`GraphicsSettings::text_size`] onto Bevy's [`UiScale`] when the
+/// setting changes (the resource starts at 1.0, which is `Normal`).
+pub fn apply_text_size(settings: Res<GraphicsSettings>, mut scale: ResMut<UiScale>) {
+    if !settings.is_changed() {
+        return;
+    }
+    let factor = settings.text_size.factor();
+    if scale.0 != factor {
+        scale.0 = factor;
+    }
+}
+
 /// Registers the settings resource (at its defaults unless the app
 /// inserted one first) and the systems that apply it.
 pub struct GraphicsSettingsPlugin;
 
 impl Plugin for GraphicsSettingsPlugin {
     fn build(&self, app: &mut App) {
+        // `UiPlugin` initialises `UiScale` too; a bare test rig has none.
         app.init_resource::<GraphicsSettings>()
-            .add_systems(Update, (apply_shadow_settings, apply_antialiasing));
+            .init_resource::<UiScale>()
+            .add_systems(
+                Update,
+                (apply_shadow_settings, apply_antialiasing, apply_text_size),
+            );
     }
 }
 
@@ -504,6 +577,7 @@ mod tests {
                 commentary: 0,
                 city: 40,
             },
+            text_size: TextSize::Larger,
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -532,6 +606,48 @@ mod tests {
         let s = GraphicsSettings::load(&path);
         assert_eq!(s.shadows, ShadowQuality::Off);
         assert_eq!(s.antialiasing, Antialiasing::X4);
+        assert_eq!(
+            s.text_size,
+            TextSize::Normal,
+            "a file from before the setting existed"
+        );
+    }
+
+    #[test]
+    fn an_unknown_text_size_is_recovered_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(&path, br#"{"text_size":"huge"}"#).unwrap();
+        assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    }
+
+    #[test]
+    fn text_size_steps_wrap_and_never_exceed_the_cap() {
+        let d = GraphicsSettings::default();
+        assert_eq!(d.text_size.factor(), 1.0);
+        let up = d.cycled_text_size(true);
+        assert_eq!(up.text_size, TextSize::Large);
+        assert_eq!(up.cycled_text_size(true).text_size, TextSize::Larger);
+        assert_eq!(up.cycled_text_size(true).cycled_text_size(true), d);
+        assert_eq!(d.cycled_text_size(false).text_size, TextSize::Larger);
+        for size in TextSize::ALL {
+            assert!((1.0..=1.5).contains(&size.factor()));
+        }
+        assert_eq!(up.text_size_row(), "Text size: 125%");
+    }
+
+    #[test]
+    fn the_text_size_setting_moves_the_ui_scale() {
+        let mut app = App::new();
+        app.add_plugins(GraphicsSettingsPlugin);
+        app.update();
+        assert_eq!(app.world().resource::<UiScale>().0, 1.0);
+        app.world_mut().resource_mut::<GraphicsSettings>().text_size = TextSize::Larger;
+        app.update();
+        assert_eq!(app.world().resource::<UiScale>().0, 1.5);
+        app.world_mut().resource_mut::<GraphicsSettings>().text_size = TextSize::Normal;
+        app.update();
+        assert_eq!(app.world().resource::<UiScale>().0, 1.0);
     }
 
     #[test]
