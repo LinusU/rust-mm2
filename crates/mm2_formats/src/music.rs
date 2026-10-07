@@ -163,6 +163,9 @@ impl MusicTable {
     /// Parse a table. `Err` on input with no header line; everything
     /// else degrades to a diagnostic.
     pub fn parse(input: &str) -> Result<Self, crate::FormatError> {
+        // `str::trim` leaves U+FEFF, which would turn the first header
+        // into an unrecognized column.
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
         let mut lines = input
             .lines()
             .enumerate()
@@ -342,6 +345,13 @@ mod tests {
         assert_eq!(t.columns[1].role, MusicRole::Unknown);
         assert_eq!(t.diagnostics.len(), 1);
         assert_eq!(t.refs().count(), 1);
+    }
+
+    #[test]
+    fn a_utf8_byte_order_mark_does_not_hide_the_first_column() {
+        let t = MusicTable::parse(&format!("\u{feff}{RACE}")).unwrap();
+        assert!(t.diagnostics.is_empty(), "{:?}", t.diagnostics);
+        assert_eq!(t.stem(0, MusicRole::Start), Some("EnemyStart"));
     }
 
     #[test]
