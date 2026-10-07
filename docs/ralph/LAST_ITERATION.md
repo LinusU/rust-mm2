@@ -1,3 +1,24 @@
+# Last iteration — F26-B.6: a client that cannot run the changed ad (new-run iteration 32 of this runner)
+
+Selection: previous review passed, no blockers. Its verification gap "a client
+that cannot run the new advertisement was not exercised" is the smallest ready
+item under F26-AC05 (windowed host menu and retail-city legs are broader).
+`drive_lobby` already gated every `Message::Session` through `gate`/`refuse`,
+but only the *first* ad had a test.
+
+Change: test-only. `net_app::a_client_that_cannot_run_the_changed_session_leaves_cleanly`
+— bridge accepts a dev cruise ad, the raw host re-advertises a city that does
+not resolve on the client's mount; the client gets a "cannot run here" notice,
+leaves with `LeaveCause::Quit`, exits `AppExit::Error(1)`, and `lobby.advertised`
+stays the accepted ad. Verified red by making the `Session` arm accept on gate
+failure (app never exits), then restored. No product defect found.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0 (2386 passed, 0 failed). No test processes left running. Not verified / open: two-process leg of the
+refusal, windowed host menu, retail-city change, LAN/Internet. Loopback,
+in-process, dev world. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F26-B.5: operator surface for the changed rematch (new-run iteration 31 of this runner)
 
 Selection: previous review passed with no blockers; its first verification gap

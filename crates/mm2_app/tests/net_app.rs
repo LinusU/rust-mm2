@@ -746,6 +746,72 @@ fn an_unrunnable_session_is_refused_with_a_clean_leave() {
     host.shutdown();
 }
 
+/// F26-AC05's other side of a changed rematch: a client that already
+/// accepted round one's ad hears the host re-advertise a session its
+/// own mount cannot run. The same gate as the first ad applies — notice,
+/// clean `Quit` leave, nonzero exit — and the accepted ad is not
+/// replaced by the unrunnable one.
+#[test]
+fn a_client_that_cannot_run_the_changed_session_leaves_cleanly() {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, link, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    let mut app = bridge_app(vfs, link);
+    app.update();
+    let accepted = app
+        .world()
+        .resource::<LobbyState>()
+        .advertised
+        .clone()
+        .expect("round one's ad was accepted");
+
+    // The host's own install may resolve a city this client's does not;
+    // the raw host stands in for that mismatch.
+    host.set_session(
+        net::advertise(&SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/nothere.psdl".to_string(),
+            },
+            mode: SessionMode::Cruise,
+            ..SessionConfig::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let exit = until_exit(&mut app);
+
+    assert!(
+        matches!(exit, AppExit::Error(code) if code.get() == 1),
+        "a refused change is a nonzero exit, got {exit:?}"
+    );
+    let lobby = app.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("cannot run here")),
+        "the notice names the refusal: {:?}",
+        lobby.notice
+    );
+    assert_eq!(
+        lobby.advertised.as_ref(),
+        Some(&accepted),
+        "the unrunnable ad never replaces the accepted one"
+    );
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    loop {
+        match host_event(&host) {
+            HostEvent::Left { cause, .. } => {
+                assert_eq!(cause, LeaveCause::Quit);
+                break;
+            }
+            HostEvent::Joined { .. } => continue,
+            other => panic!("unexpected host event: {other:?}"),
+        }
+    }
+    host.shutdown();
+}
+
 // ─── The in-app host (F24-B.8) ─────────────────────────────────────
 //
 // `HostLink` hosts the lobby inside the app: the host seat is the
