@@ -10,6 +10,7 @@ mod bot;
 mod breakaway;
 mod build_docs;
 mod camtrack;
+mod chunked_city;
 mod cnrvoice;
 mod contracts;
 mod damage;

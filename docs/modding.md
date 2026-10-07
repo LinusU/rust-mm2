@@ -145,7 +145,8 @@ pool, allowing maps larger than PSDL's 16-bit vertex indices.
 
 The loader validates every listed file before spawning geometry and reports
 missing or malformed parts as fatal. Paths must be relative, unique, traversal
-free, and must not list the primary file. At most 128 additional parts are
+free, and must not list the primary file; uniqueness is the VFS's, so `City/A.psdl`
+repeats `city/a.psdl` and a capitalised spelling of the primary file lists it. At most 128 additional parts are
 accepted. Nested manifests and CPVS visibility files are rejected: cross-part
 visibility is not yet supported. Room IDs are offset into one unique city
 namespace; per-part `.water` files retain their own water bounds and levels.

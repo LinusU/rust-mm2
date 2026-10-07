@@ -29,7 +29,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use mm2_assets::{Resolved, Vfs};
+use mm2_assets::{Resolved, Vfs, normalize_path};
 use mm2_content::surface::{SurfaceSlot, SurfaceTables};
 use mm2_formats::{
     cpvs::Cpvs,
@@ -3731,7 +3731,11 @@ fn city_chunk_paths(main: &str, text: &str) -> Result<Vec<String>, LoadCityError
         ));
     }
     let mut paths = vec![main.to_owned()];
+    // Identity is the VFS's: ASCII case-insensitive, so `City/A.psdl` is the
+    // same part as `city/a.psdl` (and the primary file under another case).
+    let mut seen = vec![normalize_path(main)];
     for line in lines {
+        let key = normalize_path(line);
         if paths.len() >= 129
             || !line.starts_with("city/")
             || !line.ends_with(".psdl")
@@ -3739,13 +3743,15 @@ fn city_chunk_paths(main: &str, text: &str) -> Result<Vec<String>, LoadCityError
             || line
                 .split('/')
                 .any(|p| p.is_empty() || p == "." || p == "..")
-            || paths.iter().any(|p| p == line)
+            || key.is_none()
+            || seen.contains(&key)
         {
             return Err(LoadCityError::Malformed(format!(
                 "invalid or duplicate city chunk: {line}"
             )));
         }
         paths.push(line.to_owned());
+        seen.push(key);
     }
     if paths.len() == 1 {
         return Err(LoadCityError::Malformed(
@@ -4416,9 +4422,30 @@ mod tests {
             "MM2_CHUNKS 1\n/absolute.psdl",
             "MM2_CHUNKS 1\ncity/a.psdl\ncity/a.psdl",
             "MM2_CHUNKS 1\ncity/a\\b.psdl",
+            // The VFS is case-insensitive, so these are the same part.
+            "MM2_CHUNKS 1\ncity/a.psdl\ncity/A.psdl",
+            "MM2_CHUNKS 1\ncity/TEST.psdl",
         ] {
             assert!(city_chunk_paths(main, bad).is_err(), "{bad}");
         }
+        // A primary file named with capitals is still caught listing itself.
+        assert!(city_chunk_paths("city/Test.psdl", "MM2_CHUNKS 1\ncity/test.psdl").is_err());
+    }
+
+    #[test]
+    fn custom_city_chunk_count_is_bounded_at_128_extra_parts() {
+        let list = |n: usize| {
+            let mut text = String::from("MM2_CHUNKS 1\n");
+            for i in 0..n {
+                text.push_str(&format!("city/t.parts/p{i}.psdl\n"));
+            }
+            text
+        };
+        assert_eq!(
+            city_chunk_paths("city/t.psdl", &list(128)).unwrap().len(),
+            129
+        );
+        assert!(city_chunk_paths("city/t.psdl", &list(129)).is_err());
     }
 
     #[test]

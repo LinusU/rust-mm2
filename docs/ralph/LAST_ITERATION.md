@@ -1,3 +1,22 @@
+# Last iteration — F29-A.9: chunk-manifest identity and refusal coverage (new-run iteration 16 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`73bee25`) passed gates and review, no blockers. F29-AC06 names reference cycles; the only
+reference-bearing format a mod can author is the `.chunks` manifest, whose validation in `load_city` (nested manifest, PVS,
+missing/corrupt part) had no test, and whose duplicate/self check compared raw strings although the VFS is case-insensitive:
+`city/TEST.psdl` or `city/A.psdl` beside `city/a.psdl` passed and loaded a part twice.
+
+Change: `city_chunk_paths` dedupes (and self-checks) on `normalize_path`. Tests: unit `custom_city_chunks_validate_paths_without_silent_fallback`
+(case variants), `custom_city_chunk_count_is_bounded_at_128_extra_parts`; new `tests/chunked_city.rs` through the real `load_city`
+(valid two-part city has both parts' rooms; a part with its own `.chunks` pointing back at the primary, a part or primary `.cpvs`,
+a missing part, a corrupt part, case-variant duplicates all fail with the named error and build no meshes). `docs/modding.md` states it.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2481 passed, 0 failed).
+Status: implemented candidate, not independently checked.
+Not shown: model/PKG reference cycles (no format in the tree follows model-to-model references; `.skel`/tune nesting are
+depth-bounded in their parsers), no two-process or retail run, AC04 other families, F29-B cache identity.
+
+---
+
 # Last iteration — F29-A.8: a failed mods-directory scan mounts none of its mods (new-run iteration 15 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`fa2c4cb`) passed gates and review, no blockers. Its integration note: `mount_mods` failing
