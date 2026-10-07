@@ -150,6 +150,10 @@ repeats `city/a.psdl` and a capitalised spelling of the primary file lists it. A
 accepted. Nested manifests and CPVS visibility files are rejected: cross-part
 visibility is not yet supported. Room IDs are offset into one unique city
 namespace; per-part `.water` files retain their own water bounds and levels.
+Every file a city names beside its PSDL (`.chunks`, `.cpvs`, `.inst`, `.water`,
+`<name>/props.pathset`, ...) is found by the same case-insensitive rule, so a
+city spelled `city/MyCity.PSDL` finds `city/MyCity.chunks`; a part may likewise
+be listed as `city/parts/East.PSDL`.
 Collision surfaces and city diagnostic counts include every part.
 
 This optional companion format is a rust-mm2 extension, not a claim of retail

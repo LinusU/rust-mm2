@@ -1,3 +1,21 @@
+# Last iteration — F29-A.10: city sibling files found case-insensitively (new-run iteration 17 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`5e760d2`) passed gates and review, no blockers. Its verification gap: `load_city` derived the
+manifest/CPVS sibling names with a case-sensitive `str::replace(".psdl", ...)`, so a primary spelled `city/Test.PSDL` (which the
+case-insensitive VFS serves) found none of `.chunks`/`.cpvs`/`.inst`/`.water`/pathset/prop CSVs; with `replace` a non-`.psdl` path
+even aliased itself as its own sibling. Repaired before new feature work.
+
+Change: `city.rs` gains `psdl_stem` (ASCII case-insensitive, char-boundary safe) and `psdl_sibling` (swaps only the trailing
+extension; a path without one gets the tail appended, never aliasing itself); all ten derivation sites use them, and chunk-manifest
+part lines may now end `.PSDL`. Tests: unit `psdl_siblings_ignore_case_and_never_alias_the_path`; `tests/chunked_city.rs`
+`a_primary_file_with_capital_letters_finds_its_manifest_and_parts` (capitalised primary/manifest/part load as two parts; a
+capitalised `.CPVS` is refused). `docs/modding.md` states it.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2483 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: no retail/two-process run (retail city loads use lower-case names, unchanged), model/PKG reference cycles, other AC04 families.
+
+---
+
 # Last iteration — F29-A.9: chunk-manifest identity and refusal coverage (new-run iteration 16 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`73bee25`) passed gates and review, no blockers. F29-AC06 names reference cycles; the only

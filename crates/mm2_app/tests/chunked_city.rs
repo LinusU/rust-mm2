@@ -35,6 +35,10 @@ fn chunked(d: &Path, manifest_body: &str) {
 }
 
 fn load(d: &Path) -> Result<LoadedCity, LoadCityError> {
+    load_primary(d, "city/test.psdl")
+}
+
+fn load_primary(d: &Path, primary: &str) -> Result<LoadedCity, LoadCityError> {
     let mut vfs = Vfs::new();
     vfs.mount_dir(d, 0).unwrap();
     let mut world = World::new();
@@ -47,7 +51,7 @@ fn load(d: &Path) -> Result<LoadedCity, LoadCityError> {
     let loaded = load_city(
         &mut commands,
         &vfs,
-        "city/test.psdl",
+        primary,
         &mut meshes,
         &mut images,
         &mut materials,
@@ -84,6 +88,40 @@ fn a_valid_manifest_loads_every_part_into_one_city() {
         one.report.rooms * 2,
         "both parts' rooms are in the one city"
     );
+}
+
+/// The VFS ignores case, so a city whose files are spelled `Test.PSDL` finds
+/// its `.chunks` and `.cpvs` siblings the same as one spelled `test.psdl`.
+#[test]
+fn a_primary_file_with_capital_letters_finds_its_manifest_and_parts() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "city/Test.PSDL", synthetic_psdl());
+    write(tmp.path(), "city/Test.INST", synthetic_inst());
+    write(tmp.path(), "city/Parts/East.PSDL", synthetic_psdl());
+    write(
+        tmp.path(),
+        "city/Test.CHUNKS",
+        "MM2_CHUNKS 1\ncity/Parts/East.PSDL\n",
+    );
+    let two = load_primary(tmp.path(), "city/Test.PSDL").expect("the capitalised city loads");
+
+    let single = tempfile::tempdir().unwrap();
+    write(single.path(), "city/test.psdl", synthetic_psdl());
+    write(single.path(), "city/test.inst", synthetic_inst());
+    let one = load(single.path()).unwrap();
+    assert_eq!(
+        two.report.rooms,
+        one.report.rooms * 2,
+        "the manifest was found"
+    );
+
+    // Its visibility file is found under the same spelling and refused.
+    write(tmp.path(), "city/Test.CPVS", b"CPVS");
+    let err = match load_primary(tmp.path(), "city/Test.PSDL") {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a chunked city with a primary PVS loaded"),
+    };
+    assert!(err.contains("PVS"), "{err}");
 }
 
 #[test]

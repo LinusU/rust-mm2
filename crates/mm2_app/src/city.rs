@@ -3718,6 +3718,21 @@ fn merge_city_reports(total: &mut CityReport, part: CityReport) {
     }
 }
 
+/// `path` without its `.psdl` extension, matched ASCII case-insensitively
+/// like every other VFS lookup (`city/Test.PSDL` is `city/Test`).
+fn psdl_stem(path: &str) -> Option<&str> {
+    let split = path.len().checked_sub(".psdl".len())?;
+    let (stem, ext) = path.split_at_checked(split)?;
+    ext.eq_ignore_ascii_case(".psdl").then_some(stem)
+}
+
+/// The file a city's PSDL names beside itself (`.inst`, `.chunks`,
+/// `/props.pathset`, ...). A path with no `.psdl` extension gets the tail
+/// appended whole, so a sibling can never alias the path it was derived from.
+fn psdl_sibling(psdl_path: &str, tail: &str) -> String {
+    format!("{}{tail}", psdl_stem(psdl_path).unwrap_or(psdl_path))
+}
+
 /// Parse an optional, flat custom-city chunk list. Paths are logical VFS
 /// paths, never filesystem paths; duplicate/self/nested manifests are rejected.
 fn city_chunk_paths(main: &str, text: &str) -> Result<Vec<String>, LoadCityError> {
@@ -3738,7 +3753,7 @@ fn city_chunk_paths(main: &str, text: &str) -> Result<Vec<String>, LoadCityError
         let key = normalize_path(line);
         if paths.len() >= 129
             || !line.starts_with("city/")
-            || !line.ends_with(".psdl")
+            || psdl_stem(line).is_none()
             || line.contains(['\\', ':'])
             || line
                 .split('/')
@@ -3776,7 +3791,7 @@ pub fn load_city(
     owner: SessionEntity,
     session: &mut Session,
 ) -> Result<LoadedCity, LoadCityError> {
-    let manifest = psdl_path.replace(".psdl", ".chunks");
+    let manifest = psdl_sibling(psdl_path, ".chunks");
     let paths = if vfs.resolve(&manifest).is_some() {
         let (bytes, _) = vfs
             .read_path(&manifest)
@@ -3795,8 +3810,8 @@ pub fn load_city(
                 .read_path(path)
                 .map_err(|e| LoadCityError::Missing(format!("{path}: {e}")))?;
             Psdl::parse(&bytes).map_err(|e| LoadCityError::Malformed(format!("{path}: {e}")))?;
-            if vfs.resolve(&path.replace(".psdl", ".cpvs")).is_some()
-                || (i > 0 && vfs.resolve(&path.replace(".psdl", ".chunks")).is_some())
+            if vfs.resolve(&psdl_sibling(path, ".cpvs")).is_some()
+                || (i > 0 && vfs.resolve(&psdl_sibling(path, ".chunks")).is_some())
             {
                 return Err(LoadCityError::Malformed(format!(
                     "chunked cities do not support PVS or nested manifests: {path}"
@@ -4002,7 +4017,7 @@ fn load_city_part(
     // and never touches PKGs, so it can hold `images`/`materials`
     // directly. The alternate `decals01`/`decals_bad`/`decals_good`
     // files are development extras, never consumed.
-    let decals_path = psdl_path.replace(".psdl", "/decals.pathset");
+    let decals_path = psdl_sibling(psdl_path, "/decals.pathset");
     match vfs.read_path(&decals_path) {
         Ok((decal_bytes, decal_res)) => match pathset::Pathset::parse(&decal_bytes) {
             Ok(pathset) => {
@@ -4040,7 +4055,7 @@ fn load_city_part(
 
     // INST placements → PKG props. Collision is the prop's own triangle
     // mesh, spawned once per placement beside its visual parts.
-    let inst_path = psdl_path.replace(".psdl", ".inst");
+    let inst_path = psdl_sibling(psdl_path, ".inst");
     match vfs.read_path(&inst_path) {
         Ok((inst_bytes, inst_res)) => match inst::parse(&inst_bytes) {
             Ok(comps) => {
@@ -4077,7 +4092,7 @@ fn load_city_part(
     // `audio_pathsets/` carry `PATHnn` sound routes (F07/F08) and
     // `race/<city>/*.pathset` are event-scoped overlays consumed by
     // `load_session_world` (F03-AC04).
-    let pathset_path = psdl_path.replace(".psdl", "/props.pathset");
+    let pathset_path = psdl_sibling(psdl_path, "/props.pathset");
     match vfs.read_path(&pathset_path) {
         Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {
             Ok(pathset) => {
@@ -4130,8 +4145,8 @@ fn load_city_part(
     // walk's geometry is measured on the retail PSDLs; its placement
     // policies (side walk direction, variant pick, lerp direction)
     // are inferred — docs/research/proprules.md, UNK-21.
-    let defs_path = psdl_path.replace(".psdl", "/propdefs.csv");
-    let rules_path = psdl_path.replace(".psdl", "/proprules.csv");
+    let defs_path = psdl_sibling(psdl_path, "/propdefs.csv");
+    let rules_path = psdl_sibling(psdl_path, "/proprules.csv");
     match (vfs.read_path(&defs_path), vfs.read_path(&rules_path)) {
         (Ok((defs_bytes, defs_res)), Ok((rules_bytes, rules_res))) => {
             let defs_text = String::from_utf8_lossy(&defs_bytes);
@@ -4225,8 +4240,8 @@ fn load_city_part(
     // `Open("city", stem, "cpvs")`, no suffix formatting), so the
     // `_NN`/dated extras are bake-sweep artifacts, never runtime
     // variants — none is selected here.
-    let pvs = psdl_path
-        .strip_suffix(".psdl")
+    let pvs = Some(psdl_path)
+        .and_then(psdl_stem)
         .map(|stem| format!("{stem}.cpvs"))
         .and_then(|path| match vfs.read_path(&path) {
             Ok((bytes, res)) => match Cpvs::parse(&bytes) {
@@ -4259,8 +4274,8 @@ fn load_city_part(
     // below-grade roads refute a global below-level kill. Missing or
     // unparseable data yields no resource: the wheel-`drag`
     // classification (F05-B.5) still covers the water materials.
-    let water = psdl_path
-        .strip_suffix(".psdl")
+    let water = Some(psdl_path)
+        .and_then(psdl_stem)
         .map(|stem| format!("{stem}.water"))
         .and_then(|path| match vfs.read_path(&path) {
             Ok((bytes, res)) => match std::str::from_utf8(&bytes) {
@@ -4430,6 +4445,26 @@ mod tests {
         }
         // A primary file named with capitals is still caught listing itself.
         assert!(city_chunk_paths("city/Test.psdl", "MM2_CHUNKS 1\ncity/test.psdl").is_err());
+    }
+
+    #[test]
+    fn psdl_siblings_ignore_case_and_never_alias_the_path() {
+        assert_eq!(psdl_sibling("city/sf.psdl", ".inst"), "city/sf.inst");
+        assert_eq!(psdl_sibling("city/SF.PSDL", ".inst"), "city/SF.inst");
+        assert_eq!(
+            psdl_sibling("city/Sf.Psdl", "/props.pathset"),
+            "city/Sf/props.pathset"
+        );
+        // Only the extension is swapped, not an earlier `.psdl` in the name.
+        assert_eq!(
+            psdl_sibling("city/a.psdl.d/b.psdl", ".chunks"),
+            "city/a.psdl.d/b.chunks"
+        );
+        // No extension, or a multi-byte tail that cuts a character: appended.
+        assert_eq!(psdl_sibling("city/sf", ".inst"), "city/sf.inst");
+        assert_eq!(psdl_sibling("city/é.psd", ".inst"), "city/é.psd.inst");
+        assert_eq!(psdl_stem("psdl"), None);
+        assert_eq!(psdl_stem(".psdl"), Some(""));
     }
 
     #[test]
