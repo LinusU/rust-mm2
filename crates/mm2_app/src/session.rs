@@ -777,8 +777,22 @@ pub fn load_session_world(
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
     let mut event_key = None;
+    // A Crash Course row loads as a lesson (F21-B.6): leg 0 is the
+    // session's race and the driver, installed with it below, swaps in
+    // the later legs.
+    let mut lesson_driver = None;
     if world_ok && let SessionMode::Event(event_ref) = &config.mode {
-        match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
+        let launch = if event_ref.table == mm2_game::EventTableKind::CrashCourse {
+            race::lesson_launch(&vfs.0, event_ref, config.difficulty)
+                .map(|(setup, driver)| {
+                    lesson_driver = Some(driver);
+                    setup
+                })
+                .map_err(|e| e.to_string())
+        } else {
+            race::event_race_setup(&vfs.0, event_ref, config.difficulty).map_err(|e| e.to_string())
+        };
+        match launch {
             Ok(setup) => {
                 event_key = Some(setup.key);
                 event_police = setup.police;
@@ -791,7 +805,9 @@ pub fn load_session_world(
                 // all follow the effective counts. A session whose
                 // picks equal the authored row never sets
                 // `customization` at all (DRV-6).
-                if let Some(picks) = config.customization.and_then(|c| c.race) {
+                if lesson_driver.is_none()
+                    && let Some(picks) = config.customization.and_then(|c| c.race)
+                {
                     let applied = mm2_game::apply_race_picks(&mut def, &mut roster, picks);
                     info!(
                         laps = ?applied.laps,
@@ -1828,6 +1844,9 @@ pub fn load_session_world(
                 availability,
             });
             commands.insert_resource(RaceState::new(def, session.generation()));
+            if let Some(driver) = lesson_driver {
+                commands.insert_resource(driver);
+            }
             session
                 .transition(SessionPhase::Countdown)
                 .expect("Ready → Countdown is a legal transition");

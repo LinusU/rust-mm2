@@ -231,8 +231,8 @@ pub struct LessonSetup {
 /// view of the row → one `RaceDefinition` per sub-event at
 /// `difficulty`. This is the Crash Course counterpart of
 /// [`event_race_setup`], which still refuses these rows; nothing
-/// launches a lesson from it yet (no session driver), and a leg's
-/// clear is the gate-run baseline, not a family evaluator (`UNK-35`).
+/// launches a lesson through [`lesson_launch`], and a leg's clear is
+/// the gate-run baseline, not a family evaluator (`UNK-35`).
 pub fn lesson_race_setup(
     vfs: &Vfs,
     event_ref: &EventRef,
@@ -258,6 +258,39 @@ pub fn lesson_race_setup(
         legs,
         run,
     })
+}
+
+/// Resolve a Crash Course `EventRef` into what the session loader
+/// installs for a lesson (F21-B.6, `DSN-75`): the loader's usual
+/// [`EventSetup`] shape carrying leg 0's definition and the lesson's
+/// stable key, plus the [`LessonDriver`](crate::lesson::LessonDriver)
+/// that swaps in the later legs. A lesson fields no authored
+/// opponents/police, owns no event reward or availability rules (its
+/// pass credit is a separate consumer) and stamps no `.pathset`
+/// overlay yet; the driver is built fresh per call, so a session
+/// restart re-enters on leg 0 with cleared counters.
+pub fn lesson_launch(
+    vfs: &Vfs,
+    event_ref: &EventRef,
+    difficulty: Difficulty,
+) -> Result<(EventSetup, crate::lesson::LessonDriver), LessonSetupError> {
+    let driver = crate::lesson::LessonDriver::new(lesson_race_setup(vfs, event_ref, difficulty)?);
+    let definition = driver
+        .current_leg()
+        .expect("a fresh lesson run is on leg 0")
+        .definition
+        .clone();
+    let setup = EventSetup {
+        definition,
+        key: driver.key().clone(),
+        pathsets: Vec::new(),
+        roster: mm2_game::OpponentRoster::default(),
+        police: mm2_game::PoliceRoster::default(),
+        rewards: mm2_game::RewardTable::default(),
+        availability: mm2_game::AvailabilityTable::default(),
+        aimap: None,
+    };
+    Ok((setup, driver))
 }
 
 /// Marker on a session-owned checkpoint/finish marker entity —

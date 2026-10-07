@@ -1,3 +1,30 @@
+# Last iteration — F21-B.6: lesson session launch (new-run iteration 46)
+
+Selection: the previous review passed; its gap list said the future
+launcher must reinstall the driver for a restarted lesson. The launcher
+is the next F21-B piece and the last thing between the driver and a
+playable (gate-baseline) lesson.
+
+Change: `race::lesson_launch` (crash row → leg 0 `EventSetup` + fresh
+`LessonDriver`); `load_session_world` routes `SessionMode::Event` crash
+rows through it and inserts the driver beside `RaceState`. Restart
+reloads, so the driver is rebuilt on leg 0 (the review's gap). Race picks
+are skipped for lessons. Unbuildable lesson fails the session. Reachable
+only via `--event crash:<row>`; menu rows, `event_race_setup`, net and
+`mm2-host` unchanged (still refuse/disabled). DSN-75 and PLAN updated.
+
+Tests: `tests/lesson_launch.rs` +4 (via `tests/app.rs`).
+
+Gates (iteration 46, foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0 (2296 passed, 0 failed; was 2292). No processes left running.
+
+Not verified / open: menu entry, instruction/pass/fail screens, lesson
+pathset overlay and vehicle restore, per-leg HUD/racestat/nav/countdown
+rebinding, lesson-pass credit, UNK-35 evaluators. No original-data run;
+tests synthetic. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F21-B.5: lesson isolation + driver teardown (new-run iteration 45)
 
 Selection: the previous review passed with no blocking findings, but named

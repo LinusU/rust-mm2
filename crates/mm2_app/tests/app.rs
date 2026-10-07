@@ -21,6 +21,7 @@ mod import_pipeline;
 mod input;
 mod layers;
 mod lesson_drive;
+mod lesson_launch;
 mod lesson_setup;
 mod light_bar;
 mod menu;

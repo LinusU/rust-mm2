@@ -610,8 +610,9 @@ fn main() {
     }
 
     // `--event <table>:<row>` selects an authored event in the chosen
-    // city (default london). Crash Course rows are rejected by the
-    // producer until F21 — an explicit load failure, not a fallback.
+    // city (default london). A `crash:<row>` loads as a Crash Course
+    // lesson (F21-B.6); a row that cannot build fails the session
+    // explicitly, never falls back to a plain race.
     let event_ref = cli.event.as_deref().map(|s| {
         match mm2_game::EventRef::parse(s, cli.city.as_deref().unwrap_or("london")) {
             Some(event_ref) => event_ref,
