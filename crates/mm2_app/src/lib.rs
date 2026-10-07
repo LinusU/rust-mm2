@@ -23,6 +23,7 @@ pub mod damage_fx;
 pub mod dash;
 pub mod decals;
 pub mod dev_world;
+pub mod devices;
 pub mod drawbridge;
 pub mod environment;
 pub mod hud;

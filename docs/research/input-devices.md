@@ -1,0 +1,40 @@
+# Input-device capability record (F23-AC06)
+
+F23 req 5: audit wheel / force-feedback support by actual platform and
+device capability, and report unsupported or untested hardware honestly.
+This is that record, one line per capability. `mm2_app::devices::RECORDS`
+holds the same lines (a unit test fails if the two drift) and the app logs
+them at startup, then names each pad the OS reports as it connects or is
+removed.
+
+Status vocabulary:
+
+- **synthetic only** — implemented, exercised by raw events fed through the
+  production systems (`tests/input.rs`, `tests/device_transitions.rs`,
+  `tests/menu.rs`, `tests/session.rs`). No physical device, real window
+  focus change or live keyboard session has been recorded.
+- **not implemented** — the code does not do this. Nothing is claimed.
+
+No row is hardware-verified. Recording a hardware session means adding a
+status to `devices::Status`, a row here naming the device, OS and date, and
+the command that reproduced it — not editing a note.
+
+## Capabilities
+
+- keyboard driving: synthetic only — bound keys drive the normalized input; no real keyboard session recorded
+- key rebinding: synthetic only — main-menu and pause Controls pages persist controls.json; driven by synthetic key events
+- gamepad driving: synthetic only — stick, triggers and South through the deadzone/sensitivity map; any physical pad is untested
+- gamepad menus: synthetic only — D-pad, stick edges, South/East/West/Start over every connected pad; synthetic events only
+- gamepad hot-plug: synthetic only — connection and disconnection events clear and restore driving; no physical unplug performed
+- focus-loss release: synthetic only — KeyboardFocusLost and unfocused windows release held input; no real window focus change
+- pad rebinding: not implemented — the pad map is fixed (stick/triggers/South plus the designed in-session buttons)
+- mouse driving: not implemented — the original's mouse steering and button throttle (CTL-2) is not built; mouse is menu-only
+- manual transmission: not implemented — the gearbox is automatic and the brake pedal doubles as reverse once stopped
+- steering wheel: not implemented — no wheel-specific mapping; a wheel the OS exposes as a gamepad would be read as a pad, axis layout untested and no wheel hardware available
+- force feedback: not implemented — no rumble or force-feedback requests are sent to any device; untested on hardware
+
+## Platform
+
+Gamepads arrive through Bevy's gilrs backend; the pad's name and USB ids in
+the startup log are whatever the OS reports. The capture/evidence runs
+(`--frames`) read no devices, so none of this is exercised by them.

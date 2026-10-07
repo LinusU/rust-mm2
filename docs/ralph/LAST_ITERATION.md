@@ -1,3 +1,48 @@
+# Last iteration — F23-C.3: per-capability input-device record (new-run iteration 24 of this runner)
+
+Selection: previous review passed with no blockers. Its open F23 list is
+mostly large (pad rebinding, mouse driving, audio/accessibility options)
+or needs hardware/rendering this run lacks. F23-AC06 ("device/platform
+verification recorded per capability, untested wheel/feedback support
+explicitly labeled") had no artifact at all, and is cheap to satisfy
+honestly, so I took it. Pause-page rendering, pad rebinding, transmission
+policy and audio options untouched.
+
+Change: new `mm2_app::devices` — `Capability` (11: keyboard driving, key
+rebinding, gamepad driving/menus/hot-plug, focus-loss release, pad
+rebinding, mouse driving, manual transmission, steering wheel, force
+feedback), `Status` (`NotImplemented` / `SyntheticOnly` — no hardware
+level exists because none was recorded) and `RECORDS` with a note per
+row. `log_input_capabilities` (Startup) writes the record to the log;
+`log_pad_connections` (Update) names each pad the OS reports with its USB
+ids and, on removal, the remembered name (`describe_event`). Both are
+registered in `main.rs`. `docs/research/input-devices.md` carries the same
+table; a unit test fails if a record line is missing from it. Wheel and
+force feedback are `NotImplemented` (no wheel mapping, no rumble/FFB
+requests anywhere in the tree — grep for `Rumble` is empty).
+
+Tests (+5, 2346 total): records cover every capability once in order;
+wheel/FFB never claimed; doc table lists every record line;
+`connected_line` ids; a disconnect is named after its connect and the name
+is forgotten afterwards.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` exit 0 (2346 passed, 0 failed; was
+2341). No processes left running.
+
+Not verified / open: the log systems were not run against a real pad (only
+`describe_event` is unit-tested; the system wiring is three lines); every
+`SyntheticOnly` row still lacks a physical-device session. AC06 is advanced
+(the record exists, wheel/FFB labeled), not closed: a hardware session
+needs a pad/wheel this run cannot reach. Still open for F23: pad
+rebinding, mouse driving, transmission policy, non-driving keys,
+audio/accessibility options, "text entry never drives" with a live text
+field, AC04 display recovery, AC05 audio effect, unrendered pause Controls
+page. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F23-B.2: pause-menu route to the Controls page (new-run iteration 23 of this runner)
 
 Selection: previous review passed with no blockers; its open F23 list led

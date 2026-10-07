@@ -1359,6 +1359,10 @@ fn main() {
     // F27-B.4c: the match readout (clock, points, the gold) — idle
     // until a Cops & Robbers session spawned its panel.
     .add_systems(Update, mm2_app::cnrhud::update_cnr_scoreboard)
+    // F23-AC06: the input-capability record and each pad the OS reports
+    // go to the log, so a run says what it knew about its devices.
+    .add_systems(Startup, mm2_app::devices::log_input_capabilities)
+    .add_systems(Update, mm2_app::devices::log_pad_connections)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
     .init_resource::<mm2_app::worldclock::WorldClock>()
