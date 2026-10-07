@@ -1,3 +1,53 @@
+# Last iteration — F20-A.1: the police roster (new-run iteration 31)
+
+Selection: the previous review passed with no blocking findings, and
+F27's remaining items are process-level evidence or a menu-hosted lobby
+(a startup-time `HostLink` the app cannot yet open from the menu — not a
+small change). F20 (single-player police) was the one original feature
+with no code at all ("no police logic"), so I took its content-selection
+leg: F20-A's own first requirement ("import/discover police content,
+session density and event restrictions"), reusing the opponent-roster
+producer's shape. Pursuit rules are unverified (COP-4 / UNK-9), so no
+behavior was invented.
+
+Changes:
+- `mm2_game::police`: `PoliceSpec` (vehicle, position, heading reduced to
+  (−180, 180], raw tail, source line), `PoliceRoster`, `PoliceIssue`
+  (`MissingVariant`, `CountMismatch`, `Unplaceable`), `normalize_heading`.
+- `mm2_content::police`: `police_roster` (event, shares `event_aimap` with
+  the opponent producer), `cruise_police_roster` (the `roam` record, same
+  Amateur/Professional split + fallback), `PoliceReport::scan` (events at
+  both difficulties + Cruise + extra stems + wired ids vs the vehicle
+  catalog; crash courses counted `unsupported`, never dropped).
+- `mm2-inspect police [--city] [--strict]`.
+- Ledger COP-5/6/7 + `research/aimap.md`. Measured facts: heading column
+  spans −270…535 (my first draft assumed ±180 and the audit's one
+  `Unplaceable` row — `535` on london `roam` — disproved it, so the contract
+  now normalises instead of rejecting); wired count == table `Cops` on all
+  checkpoint builds; Cruise rosters 19/20 (sf) and 20/20 (london); london
+  `crash10/11` `[Police]` rows are non-cop cars (F21's concern).
+
+Gates (iteration 31, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2177 passed, 0
+failed; was 2163). Retail, local with
+`MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`: `cargo test -p
+mm2_content --test police` 11 passed incl. the retail one (not a skip);
+`mm2-inspect police --strict` exit 0 on both cities. No processes left
+running.
+
+Not verified: anything at runtime — nothing spawns a cop; the heading
+unit is inferred (degrees, matches the aimap's own column comment; no
+in-world check); what the other tail columns mean (StartLink/Dist/Mode/
+Lane/Patrol per the file's comment do not fit the column counts); how many
+`roam` rows are active at once and what the Cruise cop-density option
+scales; the `_cop` tuning variants (likely unread, like `_opp` — not
+checked). Next in F20: A.2 spawn the cops (session-owned `vpcop` cars,
+count bounded, siren state), then A.3 detect/pursue/lose. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c commentary: the announcer calls the gold (new-run iteration 30)
 
 Selection: the previous review passed with no blocking findings; the
