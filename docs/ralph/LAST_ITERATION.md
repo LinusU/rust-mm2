@@ -1,3 +1,36 @@
+# Last iteration — F23-A.1: rebindable driving controls (new-run iteration 19 of this runner)
+
+Selection: previous review passed with no blockers. The F21-B remainder
+(instruction flow, pathset restore, UNK-35 evaluators) is research-blocked
+with no new evidence, so I took the first untouched ready feature: F23-A had
+no rebinding or controls persistence (only graphics settings existed).
+Slice: the persistent input schema + normalization, no UI (F23-B).
+
+Change: new `mm2_app::controls` (DSN-76). `ControlSettings` holds two keys
+per driving action, pad deadzones, steering gain, stick inversion;
+`drive_input(keys, pad)` is the single keys+pad → `VehicleInput` mapping and
+`input::vehicle_input` now calls it (absent resource = shipped defaults, for
+harness apps). `rebind`/`unbind` refuse unbindable, reserved (in-session
+function keys), conflicting (names the owner) and last-key cases; `load`
+repairs invalid pieces individually, rejects a doubly-claimed key as a whole
+set, and never fails. `controls.json` sits beside `settings.json`
+(evidence runs skip it, like graphics); `settings::write_json_atomically`
+is now shared by both files.
+
+Tests: 11 unit (`controls.rs`), `tests/input.rs` +3 (persisted remap →
+fresh app → drives, old key dead; remapped key obeys Free/pause gates;
+deadzone/gain/inversion). The existing pad/key tests pass unchanged.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0 (one targeted `too_many_arguments` allow on the Bevy system `vehicle_input`); `cargo test --locked --workspace` exit 0 (2319 passed, 0 failed; was 2305). No processes left running.
+
+Not verified / open: no rebinding screen; default-map-equals-before is
+asserted only by the existing tests; no windowed run, no real pad hot-plug;
+mouse/wheel controllers, auto-reverse and transmission policy rows,
+audio/accessibility options remain. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F21-B.10: required lesson vehicle (new-run iteration 18 of this runner)
 
 Selection: previous review passed with no blockers. Of the F21-B

@@ -11,7 +11,7 @@
 //! errors exit 2.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::*;
@@ -21,7 +21,7 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, damage,
+    audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, controls, damage,
     damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
     netdrive, oppind, opponents, pause, perf, police, police_debug, precip, profile, progression,
     pvs, race, racestat, racetime, recovery, results, scripted, sequence, session, settings, smoke,
@@ -1255,6 +1255,17 @@ fn main() {
         graphics.antialiasing = antialiasing;
     }
 
+    // Driving controls persist beside it as `controls.json` under the
+    // same evidence-run rule: a capture neither reads nor writes them.
+    let controls_path = settings_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(controls::controls_path);
+    let control_settings = controls_path
+        .as_deref()
+        .map(controls::ControlSettings::load)
+        .unwrap_or_default();
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -1306,6 +1317,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
     .insert_resource(graphics)
+    .insert_resource(control_settings)
     .insert_resource(settings::SettingsFile(settings_path.clone()))
     .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()

@@ -10,6 +10,7 @@ use mm2_game::{PlayerVehicle, RaceState, Session};
 use mm2_vehicle::{ResetVehicle, VehicleInput};
 
 use crate::camera::CameraMode;
+use crate::controls::ControlSettings;
 use crate::session::{self, SpawnPoint};
 
 /// The designed in-session pad map (F22-AC06's bindings leg; the
@@ -107,7 +108,11 @@ pub fn parked_drive(mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>)
 }
 
 /// Fill `VehicleInput` on the player vehicle from keyboard and the first
-/// connected gamepad (gamepad axes take precedence when non-neutral).
+/// connected gamepad (gamepad axes take precedence when non-neutral),
+/// through the player's [`ControlSettings`] — the bound keys, stick and
+/// trigger deadzones, steering sensitivity and inversion.
+// A Bevy system: each input device and context gate is its own parameter.
+#[allow(clippy::too_many_arguments)]
 pub fn vehicle_input(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -116,6 +121,7 @@ pub fn vehicle_input(
     session: Res<Session>,
     race: Option<Res<RaceState>>,
     windows: Query<&Window>,
+    controls: Option<Res<ControlSettings>>,
 ) {
     // Driving controls are active in every drive view — the chase
     // lenses and the cockpit (HUD-3's three views are all drive views);
@@ -136,43 +142,11 @@ pub fn vehicle_input(
         return;
     }
 
-    let mut input = VehicleInput::default();
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        input.throttle = 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        input.brake = 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        input.steering -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        input.steering += 1.0;
-    }
-    if keys.pressed(KeyCode::Space) {
-        input.handbrake = 1.0;
-    }
-
-    if let Some(pad) = gamepads.iter().next() {
-        if let Some(x) = pad.get(GamepadAxis::LeftStickX)
-            && x.abs() > 0.05
-        {
-            input.steering = x;
-        }
-        if let Some(rt) = pad.get(GamepadButton::RightTrigger2)
-            && rt > 0.05
-        {
-            input.throttle = rt;
-        }
-        if let Some(lt) = pad.get(GamepadButton::LeftTrigger2)
-            && lt > 0.05
-        {
-            input.brake = lt;
-        }
-        if pad.pressed(GamepadButton::South) {
-            input.handbrake = 1.0;
-        }
-    }
+    // A harness app that never inserted the settings drives the shipped map.
+    let input = match controls {
+        Some(controls) => controls.drive_input(&keys, gamepads.iter().next()),
+        None => ControlSettings::default().drive_input(&keys, gamepads.iter().next()),
+    };
 
     for mut vi in &mut vehicles {
         *vi = input;

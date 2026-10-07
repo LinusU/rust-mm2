@@ -149,3 +149,132 @@ fn non_playing_phase_zeroes_the_pad() {
         "paused clears the held trigger"
     );
 }
+
+/// F23-AC01: a binding remapped in `controls.json` survives a "restart"
+/// (a fresh app that loads the file) and drives the normalized input
+/// through the production `vehicle_input`; the replaced key no longer
+/// does.
+#[test]
+fn a_persisted_remap_drives_the_player_after_restart() {
+    use mm2_app::controls::{ControlSettings, DriveAction, controls_path};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = controls_path(dir.path());
+    let mut chosen = ControlSettings::default();
+    chosen
+        .rebind(DriveAction::Throttle, 0, KeyCode::KeyU)
+        .unwrap();
+    chosen.unbind(DriveAction::Throttle, 1).unwrap();
+    chosen
+        .rebind(DriveAction::Handbrake, 0, KeyCode::KeyB)
+        .unwrap();
+    chosen.save(&path).unwrap();
+
+    // The "next launch": nothing but the file carries the choice over.
+    let mut app = drive_app(CameraMode::Chase);
+    app.insert_resource(ControlSettings::load(&path));
+
+    let hold = |app: &mut App, key: KeyCode| {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release_all();
+        keys.press(key);
+        app.update();
+        player_input(app)
+    };
+    assert_eq!(hold(&mut app, KeyCode::KeyU).throttle, 1.0, "the new key");
+    assert_eq!(hold(&mut app, KeyCode::KeyB).handbrake, 1.0);
+    for old in [KeyCode::KeyW, KeyCode::ArrowUp, KeyCode::Space] {
+        let vi = hold(&mut app, old);
+        assert_eq!(
+            (vi.throttle, vi.handbrake),
+            (0.0, 0.0),
+            "{old:?} was rebound away and must not drive"
+        );
+    }
+    // Untouched actions keep the shipped keys.
+    assert_eq!(hold(&mut app, KeyCode::KeyS).brake, 1.0);
+    assert_eq!(hold(&mut app, KeyCode::ArrowLeft).steering, -1.0);
+}
+
+/// A remapped key is still gated like any other: the free camera, a
+/// non-`Playing` session and the countdown zero it, so a rebind cannot
+/// open a path that drives while a menu or the fly camera owns the keys.
+#[test]
+fn a_remapped_key_is_gated_like_the_default() {
+    use mm2_app::controls::{ControlSettings, DriveAction};
+
+    let mut controls = ControlSettings::default();
+    controls
+        .rebind(DriveAction::Throttle, 0, KeyCode::KeyU)
+        .unwrap();
+    let mut app = drive_app(CameraMode::Free);
+    app.insert_resource(controls);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyU);
+    app.update();
+    assert_eq!(player_input(&mut app).throttle, 0.0, "Free detaches it");
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    assert_eq!(player_input(&mut app).throttle, 1.0);
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    assert_eq!(player_input(&mut app).throttle, 0.0, "a pause clears it");
+}
+
+/// The pad's deadzones, steering gain and inversion are the settings'
+/// own: a stick inside a widened deadzone steers nothing, sensitivity
+/// scales then clamps, inversion flips the stick (not the keys), and a
+/// trigger under its deadzone is released.
+#[test]
+fn pad_deadzone_sensitivity_and_inversion_apply() {
+    use mm2_app::controls::ControlSettings;
+
+    let mut controls = ControlSettings::default();
+    controls.steer_deadzone = 0.3;
+    controls.trigger_deadzone = 0.2;
+    controls.steer_sensitivity = 1.5;
+    controls.invert_steering = true;
+    let mut app = drive_app(CameraMode::Chase);
+    app.insert_resource(controls);
+    app.world_mut().spawn(Gamepad::default());
+
+    set_axis(&mut app, GamepadAxis::LeftStickX, 0.25);
+    set_button_axis(&mut app, GamepadButton::RightTrigger2, 0.15);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(vi.steering, 0.0, "inside the widened stick deadzone");
+    assert_eq!(vi.throttle, 0.0, "inside the trigger deadzone");
+
+    set_axis(&mut app, GamepadAxis::LeftStickX, 0.4);
+    set_button_axis(&mut app, GamepadButton::RightTrigger2, 0.5);
+    app.update();
+    let vi = player_input(&mut app);
+    assert!(
+        (vi.steering + 0.6).abs() < 1e-6,
+        "0.4 * 1.5, inverted: {}",
+        vi.steering
+    );
+    assert_eq!(vi.throttle, 0.5);
+
+    set_axis(&mut app, GamepadAxis::LeftStickX, -0.9);
+    app.update();
+    assert_eq!(
+        player_input(&mut app).steering,
+        1.0,
+        "gain clamps at full lock"
+    );
+
+    // Keys are never inverted: D still steers right with the flag on.
+    set_axis(&mut app, GamepadAxis::LeftStickX, 0.0);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyD);
+    app.update();
+    assert_eq!(player_input(&mut app).steering, 1.0);
+}

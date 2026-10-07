@@ -17,6 +17,7 @@ pub mod cnrhud;
 pub mod cnrnet;
 pub mod cnrvoice;
 pub mod contracts;
+pub mod controls;
 pub mod damage;
 pub mod damage_fx;
 pub mod dash;

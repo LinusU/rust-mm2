@@ -205,16 +205,24 @@ impl GraphicsSettings {
     /// written beside itself and renamed over, so a crash mid-save
     /// leaves the previous settings rather than a truncated file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&serde_json::to_vec_pretty(self)?)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
+        write_json_atomically(path, self)
     }
+}
+
+/// Write `value` as pretty JSON to `path`, creating its directory. The
+/// file is written beside itself and renamed over, so a crash mid-save
+/// leaves the previous file rather than a truncated one. Shared by every
+/// machine-level settings file.
+pub(crate) fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Where the running app saves its settings — `None` keeps them for
