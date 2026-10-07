@@ -854,21 +854,69 @@ const TOD_SECTION: &str = "TIMEOFDAY";
 /// the closing-gate announcement binds — the exe's cue-type string.
 const FINAL_CHECKPOINT_SECTION: &str = "FINALCHECKPOINT";
 
+/// The `header` sections of an event-kind table the race-end line
+/// binds, one per standing tier — the exe's cue-type strings.
+const RESULTS_WIN_SECTION: &str = "RESULTSWIN";
+const RESULTS_MID_SECTION: &str = "RESULTSMID";
+const RESULTS_POOR_SECTION: &str = "RESULTSPOOR";
+
+/// How well the local participant's race ended — which of the
+/// table's `RESULTS*` sections the announcer reads (DSN-87). The
+/// tiers are the authored section names; the standing that picks
+/// each is a designed reading, not a recovered rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultsTier {
+    /// Finished first (`RESULTSWIN`).
+    Win,
+    /// Finished, but neither first nor last of a field (`RESULTSMID`).
+    Mid,
+    /// Finished last of a field, or never finished (`RESULTSPOOR`).
+    Poor,
+}
+
+impl ResultsTier {
+    /// The tier a finish earns: `place` is the 1-based place among the
+    /// recorded finishers (`None` — timed out, or no recorded place —
+    /// is a miss, not a standing) and `field` the number of racers. A
+    /// lone racer who finishes won.
+    pub fn for_standing(place: Option<u32>, field: usize) -> Option<Self> {
+        let place = place?;
+        Some(if place == 1 {
+            Self::Win
+        } else if place as usize >= field {
+            Self::Poor
+        } else {
+            Self::Mid
+        })
+    }
+}
+
 /// A race-progress announcement the race systems ask the session's
 /// [`CommentaryAudio`] to speak (F08-A). The cue tables name more
 /// sections than are bound; each lands with its own trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCue {
-    /// The local participant's closing gate became next — the edge
-    /// the `lastwaypoint` effect already marks (`FINALCHECKPOINT`).
+    /// Exactly one checkpoint is left for the local participant
+    /// (`FINALCHECKPOINT`). A designed trigger (DSN-86): the
+    /// `lastwaypoint` edge is the finish under `AnyOrder`, after
+    /// commentary has stopped.
     FinalCheckpoint,
+    /// The local participant's race ended (`RESULTS*`, DSN-87).
+    Results(ResultsTier),
 }
 
 impl EventCue {
-    /// The cue-table section this cue draws its line from.
-    fn section(self) -> &'static str {
+    /// The cue-table sections this cue draws its line from, most
+    /// specific first: the first one the table authors is read. Only a
+    /// middling finish has a second choice — a table that authors no
+    /// `RESULTSMID` (blitz) has two tiers, and a non-win there is the
+    /// poor one.
+    fn sections(self) -> &'static [&'static str] {
         match self {
-            Self::FinalCheckpoint => FINAL_CHECKPOINT_SECTION,
+            Self::FinalCheckpoint => &[FINAL_CHECKPOINT_SECTION],
+            Self::Results(ResultsTier::Win) => &[RESULTS_WIN_SECTION],
+            Self::Results(ResultsTier::Mid) => &[RESULTS_MID_SECTION, RESULTS_POOR_SECTION],
+            Self::Results(ResultsTier::Poor) => &[RESULTS_POOR_SECTION],
         }
     }
 }
@@ -951,12 +999,14 @@ impl CommentaryAudio {
         self
     }
 
-    /// Ask for a race announcement. Each cue is accepted once per
+    /// Ask for a race announcement. Each kind of cue is accepted once per
     /// session and only when an event table is bound; the line is
     /// resolved by [`commentary_voices`] and queued behind whatever
     /// is still speaking. Returns whether the request was accepted.
     pub fn request(&mut self, cue: EventCue) -> bool {
-        if self.event_table.is_none() || self.asked.contains(&cue) {
+        // A race ends once: whichever tier asks first is the only one.
+        let seen = |asked: &EventCue| std::mem::discriminant(asked) == std::mem::discriminant(&cue);
+        if self.event_table.is_none() || self.asked.iter().any(seen) {
             return false;
         }
         self.asked.push(cue);
@@ -2603,16 +2653,22 @@ pub fn commentary_voices(
         return;
     };
     let commentary = &mut *commentary;
+    // The race-end line is spoken once the session reaches Results,
+    // so the queue drains there too; the pre-race resolve below still
+    // belongs to the live window only.
+    let phase = session.phase();
     if !matches!(
-        session.phase(),
-        SessionPhase::Countdown | SessionPhase::Playing
+        phase,
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
     ) {
         return;
     }
     commentary.elapsed += time.delta_secs();
     if !commentary.resolved {
         commentary.resolved = true;
-        resolve_commentary(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
+        if *phase != SessionPhase::Results {
+            resolve_commentary(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
+        }
     }
     for cue in std::mem::take(&mut commentary.requests) {
         resolve_event_cue(commentary, cue, &vfs.0, &mut bank, &mut waves, &mut report);
@@ -2696,7 +2752,7 @@ fn resolve_commentary(
             bank,
             waves,
             report,
-            (&speaker, &path, section_name),
+            (&speaker, &path, &[section_name]),
         );
     }
 }
@@ -2725,22 +2781,23 @@ fn resolve_event_cue(
         bank,
         waves,
         report,
-        (&speaker, &path, cue.section()),
+        (&speaker, &path, cue.sections()),
     );
 }
 
-/// Read one cue table, take the named section's first row, draw its
-/// wave suffix and queue the decoded clip. `(speaker, path, section)`
-/// names the line. Every miss — unreadable or malformed table, absent
-/// section, undrawable window, missing wave — warns and counts one
-/// `failed`; no substitute cue, no re-draw (F18-AC06).
+/// Read one cue table, take the first named section it authors, draw
+/// its first row's wave suffix and queue the decoded clip.
+/// `(speaker, path, sections)` names the line, the sections in
+/// preference order. Every miss — unreadable or malformed table,
+/// no listed section, undrawable window, missing wave — warns and
+/// counts one `failed`; no substitute cue, no re-draw (F18-AC06).
 fn queue_cue(
     commentary: &mut CommentaryAudio,
     vfs: &Vfs,
     bank: &mut WaveBank,
     waves: &mut Assets<PcmAudio>,
     report: &mut AudioReport,
-    (speaker, path, section_name): (&str, &str, &str),
+    (speaker, path, sections): (&str, &str, &[&str]),
 ) {
     let fail = |report: &mut AudioReport, msg: String| {
         report.failed += 1;
@@ -2763,8 +2820,12 @@ fn queue_cue(
     for d in &table.diagnostics {
         warn!("audio: {path}:{}: {}", d.line, d.message);
     }
-    let Some(row) = table.section(section_name).and_then(|s| s.rows.first()) else {
-        fail(report, format!("{path} authors no {section_name} cue"));
+    let Some(row) = sections
+        .iter()
+        .find_map(|name| table.section(name))
+        .and_then(|s| s.rows.first())
+    else {
+        fail(report, format!("{path} authors no {} cue", sections[0]));
         return;
     };
     let Some(suffix) = draw_cue_suffix(row.end, row.add, &mut commentary.rng) else {

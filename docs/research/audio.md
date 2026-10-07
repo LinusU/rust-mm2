@@ -475,8 +475,9 @@ third bare-index grammar (`Crash Course Index`/`Past Index`) the
 parser diagnoses rather than force-fits. The race-kind tables
 (`checkpoint.csv`/`circuit.csv`/`blitz.csv`) author `PRERACE` /
 `FINALCHECKPOINT` / `RESULTS*` sections: only `FINALCHECKPOINT`
-(`RACECHECK`, `end` 3-4) is bound, as a designed trigger (DSN-86).
-The other sections' triggers — `RESULTS`, `UNLOCK`, `finallap.csv`'s
+(`RACECHECK`, `end` 3-4) and the `RESULTS{POOR,MID,WIN}` tiers
+(`RESULT*`, `end` 9-19; blitz has no `MID`) are bound, as designed triggers
+(DSN-86, DSN-87). The other sections' triggers — `UNLOCK`, `finallap.csv`'s
 `RACELAPS` (`end 10, add 8`), damage — stay unbound (F08 scope).
 
 ## Cross-checks (retail)

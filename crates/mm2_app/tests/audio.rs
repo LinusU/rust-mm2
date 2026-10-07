@@ -3621,7 +3621,8 @@ fn a_dev_world_binds_no_commentary() {
 }
 
 /// The race-effect fixture plus the announcer tree and each speaker's
-/// `checkpoint.csv`/`circuit.csv` closing-gate line (`RACECHECK`, suffix `1..=2`).
+/// `checkpoint.csv`/`circuit.csv` closing-gate line (`RACECHECK`, suffix `1..=2`)
+/// and `RESULTS*` tiers (`blitz.csv` has no middle tier).
 fn final_checkpoint_dir() -> tempfile::TempDir {
     let tmp = race_effect_fixture();
     write_commentary_tree(tmp.path());
@@ -3630,13 +3631,26 @@ fn final_checkpoint_dir() -> tempfile::TempDir {
             write(
                 tmp.path(),
                 &format!("aud/spchdata/{speaker}/{table}.csv"),
-                b"Name prefix/type header,end sufix value,sufix add value\nFINALCHECKPOINT header,,\nRACECHECK,2,0\n",
+                b"Name prefix/type header,end sufix value,sufix add value\nFINALCHECKPOINT header,,\nRACECHECK,2,0\nRESULTSPOOR header,,\nRESULTPOOR,1,0\nRESULTSMID header,,\nRESULTMID,1,0\nRESULTSWIN header,,\nRESULTWIN,1,0\n",
             );
         }
+        // Blitz authors two tiers only, like the retail table.
+        write(
+            tmp.path(),
+            &format!("aud/spchdata/{speaker}/blitz.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nRESULTSPOOR header,,\nRESULTPOOR,1,0\nRESULTSWIN header,,\nRESULTWIN,1,0\n",
+        );
         for n in 1..=2 {
             write(
                 tmp.path(),
                 &format!("aud/aud22/{speaker}/{speaker}racecheck0{n}.22k.wav"),
+                &pcm_wav(22050, 22050),
+            );
+        }
+        for tier in ["poor", "mid", "win"] {
+            write(
+                tmp.path(),
+                &format!("aud/aud22/{speaker}/{speaker}result{tier}01.22k.wav"),
                 &pcm_wav(22050, 22050),
             );
         }
@@ -3792,6 +3806,220 @@ fn a_missing_closing_gate_line_counts_once() {
     }
     let r = app.world().resource::<AudioReport>();
     assert_eq!((r.commentary, r.failed), (2, 1));
+}
+
+/// Finish the local participant of a `field`-car race with `ahead` rivals
+/// in front (`outcome` is `finished`, `timed-out`, or anything else for
+/// a finish the ledger never ranked), recording the ledger standings the production finish writes,
+/// and move the session to Results the way the finish does.
+fn end_race(app: &mut App, player: Entity, field: usize, outcome: &str, ahead: u32) {
+    use mm2_game::{ParticipantState, RaceProgress, ResultLedger, SessionOutcome, SessionResult};
+    app.init_resource::<ResultLedger>();
+    let local = app.world().get::<Player>(player).unwrap().id;
+    let progress = app.world().get::<RaceProgress>(player).unwrap().clone();
+    for n in 1..field {
+        let id = app.world_mut().resource_mut::<Session>().mint_player_id();
+        app.world_mut().spawn((
+            Player {
+                id,
+                control: PlayerControl::Remote,
+            },
+            progress.clone(),
+        ));
+        if (n as u32) <= ahead {
+            let result = app.world_mut().resource_mut::<Session>().mint_result_id(id);
+            let generation = app.world().resource::<Session>().generation();
+            assert_eq!(result.generation, generation);
+            app.world_mut()
+                .resource_mut::<ResultLedger>()
+                .record(SessionResult {
+                    id: result,
+                    tick: 1,
+                    outcome: SessionOutcome::Finished { race_ticks: 500 },
+                })
+                .unwrap();
+        }
+    }
+    let result = app
+        .world_mut()
+        .resource_mut::<Session>()
+        .mint_result_id(local);
+    let (state, recorded) = match outcome {
+        "finished" => (
+            ParticipantState::Finished {
+                race_ticks: 900,
+                result: result.clone(),
+            },
+            Some(SessionOutcome::Finished { race_ticks: 900 }),
+        ),
+        "timed-out" => (
+            ParticipantState::TimedOut {
+                race_ticks: 900,
+                result: result.clone(),
+            },
+            Some(SessionOutcome::TimedOut { race_ticks: 900 }),
+        ),
+        // A finish the ledger never ranked.
+        _ => (
+            ParticipantState::Finished {
+                race_ticks: 900,
+                result: result.clone(),
+            },
+            None,
+        ),
+    };
+    if let Some(outcome) = recorded {
+        app.world_mut()
+            .resource_mut::<ResultLedger>()
+            .record(SessionResult {
+                id: result,
+                tick: 2,
+                outcome,
+            })
+            .unwrap();
+    }
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .state = state;
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Results)
+        .unwrap();
+}
+
+/// The race-end line read back: the stems the announcer spoke that are
+/// results lines.
+fn spoken_results(app: &mut App) -> Vec<String> {
+    commentary_voices(app)
+        .into_iter()
+        .map(|(_, stem, ..)| stem)
+        .filter(|s| s.contains("result"))
+        .collect()
+}
+
+/// F08-A: the announcer reads a tier of the table's `RESULTS*` sections
+/// when the race ends, from the speaker the pre-race cues drew, once —
+/// first place wins, last of a field is poor, between is middling, and
+/// a time-out is poor.
+#[test]
+fn the_announcer_reads_the_results_tier_the_standing_earns() {
+    for (field, outcome, ahead, tier) in [
+        (3, "finished", 0, "win"),
+        (3, "finished", 1, "mid"),
+        (3, "finished", 2, "poor"),
+        (3, "timed-out", 0, "poor"),
+        // A lone racer who finishes won.
+        (1, "finished", 0, "win"),
+    ] {
+        let dir = final_checkpoint_dir();
+        let (mut app, player) = final_checkpoint_app(dir.path(), Some("checkpoint"));
+        app.update();
+        end_race(&mut app, player, field, outcome, ahead);
+        for _ in 0..400 {
+            app.update();
+        }
+        let spoken = spoken_results(&mut app);
+        assert_eq!(spoken.len(), 1, "{field} {outcome} {ahead}: {spoken:?}");
+        assert!(
+            spoken[0].ends_with(&format!("result{tier}01")),
+            "{spoken:?}"
+        );
+        let r = app.world().resource::<AudioReport>();
+        assert_eq!(r.failed, 0, "{field} {outcome} {ahead}");
+        let all: Vec<String> = commentary_voices(&mut app)
+            .into_iter()
+            .map(|(_, stem, ..)| stem)
+            .collect();
+        assert!(
+            all.iter().all(|s| s.starts_with(&spoken[0][..3])),
+            "one announcer per session: {all:?}"
+        );
+    }
+}
+
+/// A table with no `RESULTSMID` (blitz) has two tiers: a middling
+/// finish reads the poor one, a win still reads the win line.
+#[test]
+fn a_table_without_a_middle_tier_reads_poor_for_a_middling_finish() {
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("blitz"));
+    app.update();
+    end_race(&mut app, player, 3, "finished", 1);
+    for _ in 0..400 {
+        app.update();
+    }
+    let spoken = spoken_results(&mut app);
+    assert_eq!(spoken.len(), 1, "{spoken:?}");
+    assert!(spoken[0].ends_with("resultpoor01"), "{spoken:?}");
+    assert_eq!(app.world().resource::<AudioReport>().failed, 0);
+}
+
+/// A finish the ledger never ranked has no standing to announce, a
+/// Crash Course/cruise session (no table) speaks nothing at all, and a
+/// held Results phase never repeats the line.
+#[test]
+fn an_unranked_or_unbound_finish_announces_no_results() {
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("checkpoint"));
+    app.update();
+    end_race(&mut app, player, 2, "unranked", 0);
+    for _ in 0..200 {
+        app.update();
+    }
+    assert!(spoken_results(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().failed, 0);
+
+    let (mut app, player) = final_checkpoint_app(dir.path(), None);
+    app.update();
+    end_race(&mut app, player, 2, "finished", 0);
+    for _ in 0..200 {
+        app.update();
+    }
+    assert!(spoken_results(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().failed, 0);
+}
+
+/// A session that reaches Results without ever running the pre-race
+/// window drew no announcer: the verdict is one counted miss, and the
+/// pre-race resolve is not run late.
+#[test]
+fn a_session_with_no_announcer_counts_one_results_miss() {
+    let dir = final_checkpoint_dir();
+    let (mut app, player) = final_checkpoint_app(dir.path(), Some("checkpoint"));
+    end_race(&mut app, player, 2, "finished", 0);
+    for _ in 0..200 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed), (0, 1));
+}
+
+/// The tier a standing earns, edges included.
+#[test]
+fn a_standing_maps_to_its_results_tier() {
+    use mm2_app::audio::ResultsTier;
+    use mm2_app::audio::ResultsTier::{Mid, Poor, Win};
+    let tier = ResultsTier::for_standing;
+    assert_eq!(tier(None, 4), None);
+    assert_eq!(tier(Some(1), 4), Some(Win));
+    assert_eq!(tier(Some(2), 4), Some(Mid));
+    assert_eq!(tier(Some(3), 4), Some(Mid));
+    assert_eq!(tier(Some(4), 4), Some(Poor));
+    assert_eq!(tier(Some(1), 1), Some(Win));
+    assert_eq!(tier(Some(2), 2), Some(Poor));
+}
+
+/// Each race-end cue is asked for once: a second tier is refused.
+#[test]
+fn a_results_request_is_accepted_once_whatever_the_tier() {
+    use mm2_app::audio::{EventCue, ResultsTier};
+    let mut bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
+        .unwrap()
+        .with_event_table(Some("checkpoint"));
+    assert!(bound.request(EventCue::Results(ResultsTier::Mid)));
+    assert!(!bound.request(EventCue::Results(ResultsTier::Win)));
+    assert!(bound.request(EventCue::FinalCheckpoint));
 }
 
 /// `request` accepts each cue once and only with a bound table.

@@ -1,3 +1,29 @@
+# Last iteration — F08-A.2: race-end announcer line (new-run iteration 32 of the 2026-10-07 run)
+
+Selection: the iteration-31 review passed with no blockers. Its minor stale-doc finding (`EventCue::FinalCheckpoint` doc claimed the
+`lastwaypoint` edge) is fixed. Next smallest unbound cue in the tables F08-A.1 already reads: `RESULTSWIN`/`RESULTSMID`/`RESULTSPOOR`.
+
+Change: `audio::ResultsTier` + `EventCue::Results(tier)`; `EventCue::sections()` returns preference-ordered sections and `queue_cue` takes
+the first one the table authors (so `Mid` falls to `POOR` on blitz, which authors no `RESULTSMID`). `race_audio::race_cue_voices` asks at
+the local terminal edge: `Finished` → `ResultsTier::for_standing(ledger place, field size)` (1st = win, last of ≥2 = poor, else mid; no
+ranked place = silent), `TimedOut` → poor. `commentary_voices` now also drains in `Results` (the finish moves the session there at once);
+the pre-race resolve is not run late, so a session that reaches Results unannounced counts one `failed`. `request` dedups per cue kind
+(one race-end line whatever the tier). DSN-87 in `docs/original-rules.md` (designed; the standing→tier rule is not recovered),
+`docs/research/audio.md`, PLAN F08-A row.
+
+Tests (+6, `tests/audio.rs`): `the_announcer_reads_the_results_tier_the_standing_earns` (win/mid/poor/time-out/lone racer, one line, same
+speaker, failed 0), `a_table_without_a_middle_tier_reads_poor_for_a_middling_finish`, `an_unranked_or_unbound_finish_announces_no_results`,
+`a_session_with_no_announcer_counts_one_results_miss`, `a_standing_maps_to_its_results_tier`, `a_results_request_is_accepted_once_whatever_the_tier`.
+Retail (`--headless --bot --city sf --event checkpoint:0` / `blitz:0`, 6000 frames, outcome finished): `aud=…/4q` (was 3q), no `x` failure marker.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings clean (Finished, no diagnostics);
+`cargo test --locked --workspace` exit 0, 2533 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no audible
+output (headless, no sink); the standing→tier rule and the Results-phase timing are designed readings; `UNLOCK*`/`PRERACE`/`finallap`/damage
+cue sections and music remain open; circuit:0 retail not run to the end; the placement among recorded finishers ranks a first finisher first
+even if the field is still racing.
+
+---
+
 # Last iteration — F08-A.1: race announcer final-checkpoint line (new-run iteration 31 of the 2026-10-07 run)
 
 Selection: the iteration-30 review passed with no blockers (gaps: no hardware pad, pad shifts not rebindable and the Controls page has no hint

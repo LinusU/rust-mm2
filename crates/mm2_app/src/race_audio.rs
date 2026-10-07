@@ -3,11 +3,15 @@
 use bevy::{audio::Volume, prelude::*};
 use mm2_game::{
     CheckpointRule, Mm2Vfs, ParticipantState, Player, PlayerControl, PlayerId, RACE_TICK_HZ,
-    RaceDefinition, RacePhase, RaceProgress, RaceState, Session, SessionEntity, SessionPhase,
+    RaceDefinition, RacePhase, RaceProgress, RaceState, ResultLedger, Session, SessionEntity,
+    SessionPhase,
 };
 
 use crate::{
-    audio::{AudioReport, AudioVoice, CommentaryAudio, EventCue, PcmAudio, VoiceKind, WaveBank},
+    audio::{
+        AudioReport, AudioVoice, CommentaryAudio, EventCue, PcmAudio, ResultsTier, VoiceKind,
+        WaveBank,
+    },
     race::LOW_TIME_TICKS,
 };
 
@@ -39,6 +43,7 @@ pub fn race_cue_voices(
     session: Res<Session>,
     race: Option<Res<RaceState>>,
     participants: Query<(&Player, &RaceProgress)>,
+    ledger: Option<Res<ResultLedger>>,
     vfs: Option<Res<Mm2Vfs>>,
     bank: Option<ResMut<WaveBank>>,
     mut waves: ResMut<Assets<PcmAudio>>,
@@ -100,10 +105,19 @@ pub fn race_cue_voices(
             ParticipantState::Finished { .. } => {
                 cues.push("endofracetag");
                 watch.terminal = true;
+                // The announcer's verdict (DSN-87): the standing the
+                // ledger ranks. A finish with no ranked place says nothing.
+                let place = ledger
+                    .as_deref()
+                    .and_then(|l| l.place_of_in(session.generation(), player.id));
+                if let Some(tier) = ResultsTier::for_standing(place, participants.iter().count()) {
+                    request_results(commentary.as_deref_mut(), tier);
+                }
             }
             ParticipantState::TimedOut { .. } => {
                 cues.push("youlose");
                 watch.terminal = true;
+                request_results(commentary.as_deref_mut(), ResultsTier::Poor);
             }
             _ if total > watch.progress => {
                 let last = match race.definition.rule {
@@ -172,6 +186,13 @@ pub fn race_cue_voices(
                 tracing::warn!("audio: race cue {stem}: {error}");
             }
         }
+    }
+}
+
+/// Ask the announcer for the race-end line of `tier`.
+fn request_results(commentary: Option<&mut CommentaryAudio>, tier: ResultsTier) {
+    if let Some(commentary) = commentary {
+        commentary.request(EventCue::Results(tier));
     }
 }
 
