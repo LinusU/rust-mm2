@@ -1,3 +1,50 @@
+# Last iteration — F27-B.4c commentary: the announcer calls the gold (new-run iteration 30)
+
+Selection: the previous review passed with no blocking findings; the
+remaining closable F27 item named in the handoffs was commentary (the
+cue vocabulary was audited in iteration 9, nothing voiced it). Reading the
+retail `cnrsf.csv`/`cnrlondon.csv` rows against the wave inventory showed
+the suffix draw was wrong for them, so that was repaired first.
+
+Changes (three commits):
+- `mm2_game::audio::draw_cue_suffix` now draws `add + 1 ..= end`
+  (`mm2_formats::spchdata` validate flags `add >= end`). Evidence: the 14
+  C&R families of a table partition one wave pool per speaker
+  (`as1cops01`–`11`, `as1robrob01`–`10`; london `al1cops01`–`12`) through
+  `<end>,<add>` — e.g. `ROBDROPLOOT 6,5` is `as1cops06` — while the old
+  `add + 1 + rng % end` named waves up to `as1robrob19`. Weather/time rows
+  have `add` 0, so the pre-race draw and its seeded stream are unchanged.
+  AUD-12 / `research/audio.md` corrected.
+- `GoldEvent::call` / `GoldView::call_since` (`mm2_game::gold`, pure) and
+  `mm2_content::cnr::commentary_cue` (side × get/drop/stash/recover → family;
+  every authored family is reachable, test-enforced).
+- `mm2_app::cnrvoice::cnr_commentary_voices` + `CnrCommentary` (bound in
+  `cnr::start_match`, removed at teardown, registered in the app and the
+  smoke schedules). Authority voices `CnrEvent`s, a client the replica
+  change; lines queue ≤ 3, stale (> 6 s) dropped counted, a missing
+  wave/row counts `failed` and says nothing. Smoke `cnr=` gains `,say<N>`.
+  Ledger CNR-13, `research/cnr.md`.
+
+Gates (iteration 30, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2163 passed, 0
+failed; was 2145). Retail, local with `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`:
+`cnrvoice::retail_every_family_window_names_only_shipped_waves` passes (not
+a skip); `network two_retail_processes_decide_a_cops_and_robbers_match`
+passes (73 s) and now asserts the client's `say>=2` — measured `say2`. No
+processes left running.
+
+Not verified: that anything is *audible* (headless, no output device —
+voice entities and stems are the evidence); the host's process-level count
+(its record is read after `quit`, match gone — covered only by the 10
+`mm2_app` unit-level tests); when the original actually fires each family
+(CNR-13: designed), including the FFA → `ROB*` choice; client lines for
+frames lost on the wire; contested pickups / multi-client cycle /
+impairment at process level / rendering. Open: menu-hosted lobby offer,
+F27-AC01..06. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c review gaps: the re-plan wait is tested, and the first frame keeps it (new-run iteration 29)
 
 Selection: the previous review passed with no blocking findings; its
