@@ -1,3 +1,55 @@
+# Last iteration — F27-B.4c (decided two-process match): the `--bot` driver plays Cops & Robbers (new-run iteration 27)
+
+Selection: the previous review passed (no blocking findings); its gaps
+were process-level evidence. The largest explicit open item on F27 was
+"a two-process match that is *decided* (pickup, delivery)": nothing had
+ever driven a car to the gold in a real process pair, so the decided
+frame, the client's Results state and the winner agreement were only
+unit/socket evidence.
+
+Changes (one coherent slice, committed as separate commits):
+- `NavGraph::drive_line` (mm2_game): the routed lane arcs sampled and
+  bracketed by the query points; the router's error, never a guessed
+  straight line. One synthetic test through a junction + the
+  unreachable reverse trip.
+- `scripted::cnr_target` + a nav-planned `ScriptedRoute` (`goal` set):
+  with no race, `--bot` chases the gold, then its side's delivery marker
+  from `CnrHost`/`CnrReplica`. **No re-anchor for these guides**: the
+  first attempt "delivered" at tick 947 via the bounded re-anchor
+  teleporting onto the route end — a faked delivery, removed before any
+  evidence was recorded. 3 unit tests (`cnr_target`).
+- `cnr_host_step` logs each `CnrEvent` (`cops and robbers event …`).
+- `mm2-inspect cnr` site-reach audit + `GoldMatch::opening_sites`
+  (1 test): **sf 12/44, london 14/46** sites lie on a routable vehicle
+  lane (15 m horizontal, 5 m vertical); sf has 78 seeds in 0..4096 whose
+  opening draw is all on lanes (london 99). Most retail sites are off the
+  road, so a road-following driver finishes only some rounds — recorded
+  in `docs/research/cnr.md` + ledger CNR-12 as measured data, no rule claim.
+- Smoke `cnr=` gains `win=p<id>|s<side>|tie` after `dec1`.
+- `MM2_RETAIL`-gated `net_drive::two_retail_processes_decide_a_cops_and_robbers_match`
+  (+ `Proc::until_within`): host `--bot` seat + parked joined client on
+  seed 1291, `100pts` FFA. 3/3 runs (~73 s each): host `Picked` (tick
+  ~760) → `Delivered` (tick 9.5k–12.4k) → `Ended(PointLimit, Player(0))`;
+  client `seats2,solo2,dec1,win=p0,phase=results`.
+
+Gates (iteration 27, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo test --locked --workspace` exit 0 (2145 passed, 0 failed;
+was 2139). A first full run caught `--seed` without `--host` being a
+deliberate usage error (`mm2_host_flag_gates_are_named_exits`); I had
+relaxed it for local exploration and reverted that, keeping the gate.
+No processes left running.
+
+Not verified: a client that picks up/carries/delivers (AC01 multi-client
+cycle), contested pickups (AC02), impairment/late-join at process level
+(AC05), rendered output, the client's carrier mass at process level. The
+winner agreement reads the host's *log line* against the client's record
+(the host's own record after `quit` has no match cells). Open: commentary,
+menu-hosted lobby offer, F27-AC01..06. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F27-B.4c (client-load leg): a client's predicted car carries the gold's mass (new-run iteration 26)
 
 Selection: the previous review passed with no blocking findings; its
