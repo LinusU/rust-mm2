@@ -334,6 +334,7 @@ fn city_app(vfs: Vfs) -> App {
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
                 (wheel_fx::emit_wheel_fx, wheel_fx::advance_wheel_fx).chain(),
+                mm2_app::audio::surface_voices,
                 wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
                 (
                     despawn_session_entities.run_if(session::unloading),
@@ -894,4 +895,173 @@ fn the_surface_table_resolves_the_authored_channels() {
     );
     let default = tables.ptx_channels(SurfaceMaterial::Unspecified).unwrap();
     assert_eq!(default.index, [4, -1]);
+}
+
+/// F06-AC05 end to end: one real city collider, one real car through
+/// the Avian wheel path, and the three consumers — the tire force, the
+/// skid voice and the wheel puffs — all read the same contact. A car
+/// slid sideways across the authored `testgrass` road (re-authored
+/// here to friction 0.6 so its grip is distinguishable from the
+/// neutral 1.0) must (a) apply the `TireSurface` grip that surface
+/// normalizes to, (b) resolve the `sound` class the table assigns the
+/// same material and sound its authored skid band, and (c) emit the
+/// dust/grass channels the same material authors — every consumer
+/// naming the one `SurfaceMaterial` under the wheel.
+#[test]
+fn one_collider_drives_the_tire_the_voice_and_the_puff() {
+    use mm2_app::audio::{SurfaceContact, SurfaceRole, SurfaceVoice};
+    use mm2_game::PlayerVehicle;
+    use mm2_vehicle::TireConditions;
+
+    let tmp = city_install();
+    write_wheel_fx(tmp.path());
+    crate::support::surface_audio(tmp.path());
+    write(
+        tmp.path(),
+        "city/materials.mtl",
+        MATERIALS_MTL.replace(
+            "friction: 1.0\neffect: none\nsound: 1",
+            "friction: 0.6\neffect: none\nsound: 1",
+        ),
+    );
+    let mut app = city_app(vfs_of(tmp.path()));
+    app.insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.0, 10.0), 0.0));
+    app.update();
+    assert!(playing(&mut app));
+
+    let grass = SurfaceMaterial::Authored(material_index(&mut app, "testgrass"));
+    let tables = app.world().resource::<mm2_content::SurfaceTables>();
+    let tire = tables
+        .tire_surface_for(grass)
+        .expect("authored tire surface");
+    let sound = tables.sound_index(grass).expect("authored sound class");
+    let ptx = tables.ptx_channels(grass).expect("authored ptx channels");
+    assert!(tire.grip < 0.99, "the road is not the neutral surface");
+    assert_eq!(sound, 1, "testgrass authors sound: 1 — the grass row");
+    assert_eq!(ptx.index, [1, 2]);
+    let traction = app
+        .world()
+        .get_resource::<TireConditions>()
+        .map_or(1.0, |c| c.traction);
+
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .single(app.world())
+        .expect("one local car");
+    // Settle onto the road, then slide the car sideways across the
+    // strip — every wheel slips hard on the authored surface.
+    run(&mut app, 60);
+    let at = Vec3::new(-2.6, 0.7, 10.0);
+    app.world_mut().entity_mut(car).insert((
+        Position(at),
+        Transform::from_translation(at),
+        LinearVelocity(Vec3::new(6.0, 0.0, 0.0)),
+    ));
+
+    let (mut gripped, mut skidded, mut puffed, mut voiced) = (0, 0, 0, 0);
+    let mut channels = std::collections::BTreeSet::new();
+    for _ in 0..90 {
+        app.update();
+        let state = app.world().get::<VehicleState>(car).unwrap();
+        for w in state.wheels.iter().filter(|w| w.grounded) {
+            let on = w
+                .contact_entity
+                .and_then(|e| app.world().get::<SurfaceMaterial>(e))
+                .copied();
+            if on != Some(grass) {
+                continue;
+            }
+            // (a) The tire path applied exactly the classified grip.
+            assert!(
+                (w.surface_grip - tire.grip * traction).abs() < 1e-5,
+                "wheel grip {} vs {}",
+                w.surface_grip,
+                tire.grip * traction
+            );
+            gripped += 1;
+        }
+        // (b) The published contact names the sound class of a
+        // material some grounded wheel actually rests on (the
+        // sidewalk's unmarked collider reads the `_default` row).
+        if let Some(skid) = app.world().get::<SurfaceContact>(car).and_then(|c| c.skid) {
+            let tables = app.world().resource::<mm2_content::SurfaceTables>();
+            let underfoot: Vec<u16> = state
+                .wheels
+                .iter()
+                .filter(|w| w.grounded)
+                .map(|w| {
+                    let m = w
+                        .contact_entity
+                        .and_then(|e| app.world().get::<SurfaceMaterial>(e))
+                        .copied()
+                        .unwrap_or_default();
+                    tables
+                        .sound_index(m)
+                        .expect("every material resolves a class")
+                })
+                .collect();
+            assert!(
+                underfoot.contains(&skid.surface),
+                "{skid:?} vs {underfoot:?}"
+            );
+            if skid.surface == sound {
+                skidded += 1;
+            }
+        }
+        // The grass row's lone band (`grassskid`, 11025 Hz) is the
+        // voice the class resolves — not the road rows' bands.
+        let world = app.world_mut();
+        let mut q = world.query::<(&SurfaceVoice, &AudioPlayer<mm2_app::audio::PcmAudio>)>();
+        for (v, player) in q.iter(world) {
+            let rate = world
+                .resource::<Assets<mm2_app::audio::PcmAudio>>()
+                .get(&player.0)
+                .unwrap()
+                .sample_rate
+                .get();
+            if v.role == SurfaceRole::Skid(0) {
+                assert_eq!(rate, 11025);
+                voiced += 1;
+            }
+        }
+        // (c) Every puff's tile range (rule index × 8 in this
+        // fixture) is a channel of a material some grounded wheel has
+        // rested on — a puff outlives its contact, so the set only
+        // grows — and the road's own dust/grass ranges must appear.
+        let tables = app.world().resource::<mm2_content::SurfaceTables>();
+        for w in app
+            .world()
+            .get::<VehicleState>(car)
+            .unwrap()
+            .wheels
+            .iter()
+            .filter(|w| w.grounded)
+        {
+            let m = w
+                .contact_entity
+                .and_then(|e| app.world().get::<SurfaceMaterial>(e))
+                .copied()
+                .unwrap_or_default();
+            channels.extend(
+                tables
+                    .ptx_channels(m)
+                    .unwrap()
+                    .index
+                    .into_iter()
+                    .filter(|i| *i >= 0)
+                    .map(|i| i * 8),
+            );
+        }
+        for (_, frame_start, _) in car_puffs(&mut app, car) {
+            assert!(channels.contains(&frame_start), "stray puff {frame_start}");
+            if matches!(frame_start, 8 | 16) {
+                puffed += 1;
+            }
+        }
+    }
+    assert!(gripped > 0, "a wheel never read the road collider");
+    assert!(skidded > 0, "no skid contact resolved");
+    assert!(voiced > 0, "no skid voice sounded");
+    assert!(puffed > 0, "no puff emitted");
 }

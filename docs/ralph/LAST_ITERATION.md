@@ -1,3 +1,27 @@
+# Last iteration — F06-C.3: one collider drives tire, voice and puff end to end (new-run iteration 3 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`7b02a7d`) passed gates and review, no blockers. Its verification gaps
+named AC05's end-to-end leg as open; that is the next ready F06-C slice and needs no new data.
+
+Change (test only, no production code): `tests/wheel_fx.rs::one_collider_drives_the_tire_the_voice_and_the_puff`.
+The `city_app` harness gained `audio::surface_voices` (a no-op without `SurfaceAudio`, so the other
+legs are unaffected) and this test mounts `support::surface_audio`. The real `load_session_world` car
+settles on the synthetic city through Avian, is teleported onto the road strip and slid sideways, and
+every frame asserts: (a) a grounded wheel on the authored `testgrass` collider (re-authored to
+friction 0.6) applied `surface_grip == TireSurface.grip × TireConditions.traction`; (b) the published
+`SurfaceContact.skid.surface` is the `sound_index` of a material some grounded wheel rests on, and the
+grass row's `grassskid` voice (11025 Hz) sounds; (c) every puff's tile range belongs to a channel of
+a material a wheel has rested on, and the road's own dust/grass ranges appear. Mutation check: scaling
+`surface_grip` by 0.9 in `mm2_vehicle` made the test fail (`wheel grip 0.54 vs 0.6`); reverted.
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` 0 (first run caught a `useless_conversion`, fixed); `cargo test --locked
+--workspace` exit 0 (2447 passed, 0 failed). Status: implemented candidate, not independently checked.
+Synthetic only; no original-data, rendered or audio-output evidence. AC06 and the weather→traction
+two-surface test remain open.
+
+---
+
 # Last iteration — F06-C.2: one surface classification for tire, audio and wheel-fx (new-run iteration 2 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`e9a27b6`) passed gates and review with no blockers. Its verification
