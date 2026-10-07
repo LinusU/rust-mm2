@@ -19,6 +19,11 @@
 //! the contact count, so the CSV says *which part* of physics is slow
 //! and whether it scales with what is on screen.
 //!
+//! Each row also carries the live-entity count (sampled every
+//! [`ENTITY_SAMPLE_EVERY`] frames), and the summary and report give its
+//! first, last and peak value past warm-up — a soak that leaks entities
+//! shows `last` well above `first` (F30-AC02's growth signal).
+//!
 //! The recorder writes one CSV row per frame when the app drops and
 //! prints a percentile summary, so a person can play the event and hand
 //! over the file. It is a developer aid: nothing reads it back, and it
@@ -42,6 +47,7 @@ use std::{
 
 use avian3d::collision::CollisionDiagnostics;
 use avian3d::dynamics::solver::SolverDiagnostics;
+use bevy::ecs::entity::Entities;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
 use mm2_game::Mm2Vfs;
@@ -94,6 +100,11 @@ const HITCH_FACTOR: f64 = 1.5;
 /// say nothing about how the game *plays*.
 const WARMUP_FRAMES: usize = 120;
 
+/// The live-entity count is an O(n) walk of the entity table, so it is
+/// sampled every this-many frames and carried forward between samples
+/// rather than adding a per-frame cost to the thing being measured.
+const ENTITY_SAMPLE_EVERY: u64 = 30;
+
 /// One finished frame.
 #[derive(Clone, Copy, Debug)]
 struct Row {
@@ -110,6 +121,8 @@ struct Row {
     solver: Duration,
     /// The most contacts any one of the frame's steps held.
     contacts: u32,
+    /// Live entities at the most recent sample ([`ENTITY_SAMPLE_EVERY`]).
+    entities: u32,
 }
 
 /// Aggregates over the post-warm-up frames, in milliseconds.
@@ -135,6 +148,12 @@ struct Stats {
     solver_per_step: f64,
     steps_per_frame: f64,
     max_contacts: u32,
+    /// Live entities at the first measured frame, the largest sample, and
+    /// the last frame: a soak that leaks shows `last` well above `first`
+    /// and still climbing.
+    entities_first: u32,
+    entities_max: u32,
+    entities_last: u32,
 }
 
 /// The recorder's state — present only when `--perf-log` was given.
@@ -154,6 +173,7 @@ struct PerfLog {
     narrow: Duration,
     solver: Duration,
     contacts: u32,
+    entities: u32,
     context: RunContext,
     content: Option<ContentFingerprint>,
     /// Filled by [`capture_adapter`] once the renderer exists; stays
@@ -179,6 +199,7 @@ impl PerfLog {
             narrow: Duration::ZERO,
             solver: Duration::ZERO,
             contacts: 0,
+            entities: 0,
         }
     }
 
@@ -198,6 +219,7 @@ impl PerfLog {
                 narrow: self.narrow,
                 solver: self.solver,
                 contacts: self.contacts,
+                entities: self.entities,
             });
         }
         self.frame += 1;
@@ -256,6 +278,9 @@ impl PerfLog {
             solver_per_step: per_step(|r| r.solver),
             steps_per_frame: steps as f64 / rows.len() as f64,
             max_contacts: rows.iter().map(|r| r.contacts).max().unwrap_or(0),
+            entities_first: rows[0].entities,
+            entities_max: rows.iter().map(|r| r.entities).max().unwrap_or(0),
+            entities_last: rows[rows.len() - 1].entities,
         })
     }
 
@@ -278,7 +303,8 @@ impl PerfLog {
              {wfx:.2} + update {wup:.2} + render {wrn:.2} ({ws} steps)\n\
              perf: mean ms per frame: fixed {mfx:.2} update {mup:.2} render {mrn:.2} \
              | avian ms per fixed step: broad {sb:.2} narrow {sn:.2} solver {ss:.2} \
-             | fixed steps per frame {spf:.2} | max contacts {mc}",
+             | fixed steps per frame {spf:.2} | max contacts {mc} \
+             | live entities first {ef} last {el} max {em}",
             n = st.frames,
             median = st.median,
             p95 = st.p95,
@@ -304,6 +330,9 @@ impl PerfLog {
             ss = st.solver_per_step,
             spf = st.steps_per_frame,
             mc = st.max_contacts,
+            ef = st.entities_first,
+            el = st.entities_last,
+            em = st.entities_max,
         )
     }
 
@@ -363,6 +392,12 @@ impl PerfLog {
                 },
                 "fixed_steps_per_frame": st.steps_per_frame,
                 "max_contacts": st.max_contacts,
+                "live_entities": {
+                    "sample_every_frames": ENTITY_SAMPLE_EVERY,
+                    "first": st.entities_first,
+                    "last": st.entities_last,
+                    "max": st.entities_max,
+                },
                 "worst_frame": {
                     "frame": st.worst.frame,
                     "total_ms": ms(st.worst.total),
@@ -425,13 +460,13 @@ impl PerfLog {
         let mut out = BufWriter::new(File::create(&self.path)?);
         writeln!(
             out,
-            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts"
+            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities"
         )?;
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         for r in &self.rows {
             writeln!(
                 out,
-                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{}",
+                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{}",
                 r.frame,
                 ms(r.total),
                 ms(r.fixed),
@@ -441,7 +476,8 @@ impl PerfLog {
                 ms(r.broad),
                 ms(r.narrow),
                 ms(r.solver),
-                r.contacts
+                r.contacts,
+                r.entities
             )?;
         }
         out.flush()
@@ -505,6 +541,13 @@ fn fixed_step_physics(
             + s.finalize
             + s.store_impulses
             + s.swept_ccd;
+    }
+}
+
+/// Count live entities every [`ENTITY_SAMPLE_EVERY`] frames.
+fn sample_entities(entities: &Entities, mut log: ResMut<PerfLog>) {
+    if log.frame.is_multiple_of(ENTITY_SAMPLE_EVERY) {
+        log.entities = entities.count_spawned();
     }
 }
 
@@ -583,7 +626,7 @@ pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
         .add_systems(RunFixedMainLoop, fixed_loop_end.in_set(AfterFixedMainLoop))
         .add_systems(FixedFirst, fixed_step)
         .add_systems(FixedLast, fixed_step_physics)
-        .add_systems(Update, capture_adapter)
+        .add_systems(Update, (capture_adapter, sample_entities))
         .add_systems(Last, frame_main_end);
 }
 
@@ -603,6 +646,7 @@ mod tests {
             narrow: Duration::ZERO,
             solver: Duration::ZERO,
             contacts: 0,
+            entities: 0,
         }
     }
 
@@ -781,5 +825,73 @@ mod tests {
                 .starts_with("frame,total_ms"),
             "the CSV survives its report"
         );
+    }
+
+    #[test]
+    fn entity_growth_is_reported_first_last_and_peak() {
+        let mut log = long_log(RunContext::default());
+        for (i, r) in log.rows.iter_mut().enumerate() {
+            r.entities = match i {
+                // Warm-up churn must not set the baseline or the peak.
+                0..=119 => 9_000,
+                120..=159 => 1_000,
+                160..=179 => 1_500,
+                _ => 1_200,
+            };
+        }
+        let live = &log.report()["timings"]["live_entities"];
+        assert_eq!(live["first"], 1_000);
+        assert_eq!(live["max"], 1_500);
+        assert_eq!(live["last"], 1_200);
+        assert_eq!(live["sample_every_frames"], ENTITY_SAMPLE_EVERY);
+        let s = log.summary();
+        assert!(
+            s.contains("live entities first 1000 last 1200 max 1500"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn the_csv_has_an_entities_column_matching_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PerfLog::new(dir.path().join("e.csv"), RunContext::default());
+        let mut r = row(0, 16, 1);
+        r.entities = 321;
+        log.rows.push(r);
+        log.write_csv().unwrap();
+        let text = std::fs::read_to_string(&log.path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<_> = lines.next().unwrap().split(',').collect();
+        let cells: Vec<_> = lines.next().unwrap().split(',').collect();
+        assert_eq!(header.len(), cells.len());
+        assert_eq!(header.last(), Some(&"entities"));
+        assert_eq!(cells.last(), Some(&"321"));
+    }
+
+    #[test]
+    fn the_sampler_counts_what_is_spawned_and_not_what_was_despawned() {
+        let mut app = App::new();
+        app.insert_resource(PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_entities_test.csv"),
+            RunContext::default(),
+        ))
+        .add_systems(Update, sample_entities);
+        let baseline = app.world().entities().count_spawned();
+        let spawned: Vec<Entity> = (0..50)
+            .map(|_| app.world_mut().spawn_empty().id())
+            .collect();
+        // Off the sampling cadence: nothing is counted.
+        app.world_mut().resource_mut::<PerfLog>().frame = 1;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().entities, 0);
+        app.world_mut().resource_mut::<PerfLog>().frame = ENTITY_SAMPLE_EVERY;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().entities, baseline + 50);
+        for e in spawned.into_iter().take(20) {
+            app.world_mut().despawn(e);
+        }
+        app.world_mut().resource_mut::<PerfLog>().frame = 2 * ENTITY_SAMPLE_EVERY;
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().entities, baseline + 30);
     }
 }

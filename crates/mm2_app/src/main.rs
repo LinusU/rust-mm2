@@ -2363,8 +2363,6 @@ fn smoke_test(
     exit.write(AppExit::Success);
 }
 
-/// Directory (relative to the working directory, gitignored) that
-/// Cmd/Ctrl+P screenshots are saved to.
 /// The primary window's size in logical pixels; the perf report's
 /// `settings.window` row is formatted from this same value.
 const WINDOW_SIZE: (u32, u32) = (1280, 720);
@@ -2378,6 +2376,8 @@ fn window_label((w, h): (u32, u32)) -> String {
     format!("{w}x{h}")
 }
 
+/// Directory (relative to the working directory, gitignored) that
+/// Cmd/Ctrl+P screenshots are saved to.
 const SCREENSHOT_DIR: &str = "screenshots";
 
 /// Where Cmd/Ctrl+P screenshots go: [`SCREENSHOT_DIR`] unless that is inside

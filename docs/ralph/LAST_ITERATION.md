@@ -1,3 +1,25 @@
+# Last iteration — F30-A.3: live-entity growth in the perf log (new-run iteration 39 of this runner)
+
+Selection: previous review passed with one cosmetic nit (WINDOW_SIZE/FIXED_HZ were wedged
+between `SCREENSHOT_DIR`'s doc comment and its const) — fixed first. Then the smallest ready
+F30-A slice toward AC02's "no unbounded entity growth": the perf log had no actor/entity count.
+
+Change: `perf.rs` samples `Entities::count_spawned()` every 30 frames (it is an O(n) walk, so
+not per frame), carries it in every CSV row (`entities` column), and the summary and the
+report's `timings.live_entities` give first/last/max past warm-up. 3 tests: first/last/max with
+warm-up churn excluded, CSV header/cell alignment, sampler cadence against real spawn/despawn.
+
+Gates (foreground, exit statuses checked): fmt --check 0; clippy --locked -D warnings 0 (after
+fixing `manual_is_multiple_of`); test --locked --workspace 0 (2427 passed, 0 failed). No
+processes left running.
+
+Not verified / open: no soak was run (no populated session driven for minutes); voices,
+draw calls, GPU memory, bandwidth columns; release baseline; windowed proof. AC01 advanced,
+AC02 only gains an instrument, not a result. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F30-A.2: perf report settings follow the app's own constants (new-run iteration 38 of this runner)
 
 Selection: previous review passed, no blockers. Its verification gaps named one concrete
