@@ -83,8 +83,14 @@ You never need to know which archive or physical file shipped the original.
   `dave::MAX_ENTRY_SIZE`) is listed but refuses to read with a typed
   `TooLarge` error; a `mod.toml` over 1 MiB, or one that is not a regular
   file, fails the mount. Mods have no dependency declarations, so there is
-  no mod-to-mod reference cycle to check; model/prop reference cycles stay
-  with the format parsers.
+  no mod-to-mod reference cycle to check. A PKG's `xref` chunk names other
+  models, but the importer only keeps those names (`VehicleModel::xrefs`)
+  and never opens them, so a PKG that references itself or a pair that
+  reference each other loads once and cannot recurse
+  (`mm2_app/tests/reference_cycles.rs`); an importer that starts following
+  xrefs must bring its own cycle check. Nested text formats (`.skel`, tune
+  blocks) have fixed depth bounds, and a `.chunks` manifest part may not be
+  a manifest.
 - Top-level folders mirror the game's layout: `texture/`, `geometry/`,
   `city/`, `audio/`, etc. The inspector lists everything currently mounted:
 

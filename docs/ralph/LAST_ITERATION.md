@@ -1,3 +1,20 @@
+# Last iteration — F29-A.11: model reference cycles pinned through the prop path (new-run iteration 19 of the 2026-10-07 run)
+
+Selection: the iteration-18 review passed with no blockers; the open F29-A items were AC04 for other families, AC06 reference
+cycles, and the two-process leg. AC06's "recursive model references" edge case was the one that needed no new format work: the only
+model-to-model reference is the PKG `xref` chunk, and `docs/modding.md` said cycles "stay with the format parsers" without a test.
+
+Finding: `build_model` keeps xref names in `VehicleModel::xrefs` and nothing in `crates/` resolves them, so a cycle cannot expand today.
+Change: `mm2_app/tests/reference_cycles.rs` (synthetic PKG + `xref` chunk) — a self-referencing prop and a mutually-referencing pair
+load through `load_city` with `props_spawned == 1`, `props_failed == 0`; a reference to a missing model is kept verbatim and neither
+fails the prop nor is searched for. `docs/modding.md` states the rule (any importer that starts following xrefs owes its own cycle
+check). No production code changed: this is a regression guard, not a behaviour fix.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2487 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: no retail run; the xref-following importer (breakable parts by name) does not exist, so the cycle check for it is future work.
+
+---
+
 # Last iteration — F29-A.10 repair: environment siblings and stems share the case-insensitive helper (new-run iteration 18 of the 2026-10-07 run)
 
 Selection: iteration 17's review rejected `02974a0`: `environment.rs` derived `.ltNN`/`_fog.csv`/`.sky` with a case-sensitive
