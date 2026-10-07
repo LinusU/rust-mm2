@@ -523,6 +523,61 @@ fn an_opponent_disabled_resets_in_place_without_restarting_the_race() {
     assert_eq!(report(&app).recovered, 1);
 }
 
+/// A fielded cop's identity as the loader stamps it — no `Player`: a
+/// cop is not a race participant.
+fn cop_marker() -> mm2_app::police::PoliceCar {
+    mm2_app::police::PoliceCar {
+        index: 0,
+        spec: mm2_game::PoliceSpec {
+            vehicle: "vpcop".into(),
+            position: Vec3::ZERO,
+            heading_deg: Some(0.0),
+            params: vec![0.0],
+            line: 1,
+        },
+    }
+}
+
+#[test]
+fn a_wrecked_cop_is_reset_and_repaired_in_place_without_touching_the_session() {
+    // F20-C: a cop has no `Player`; the outcome once skipped it as an
+    // unidentified object, leaving a wreck down for the whole session.
+    let (mut app, _car, _object) = damage_app(
+        event_config(EventTableKind::Blitz),
+        Vec3::new(0.0, 1.2, 0.0),
+    );
+    let cop_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let cop_pos = Vec3::new(10.0, 1.2, 5.0);
+    let cop = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(cop_object),
+            cop_marker(),
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleDamage::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(cop_pos),
+            Transform::from_translation(cop_pos),
+        ))
+        .id();
+    app.update();
+    drain_damage(&mut app);
+
+    write_impact(&mut app, 7, cop_object, ObjectId::WORLD, 300.0);
+    app.update();
+
+    assert_eq!(app.world().get::<VehicleDamage>(cop).unwrap().total(), 0.0);
+    let pos = app.world().get::<Position>(cop).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(cop_pos.x, pos.y, cop_pos.z)) < 1.0,
+        "the wreck resets in place, got {pos}"
+    );
+    assert!(!app.world().resource::<SessionControl>().restart);
+    assert_eq!(report(&app).recovered, 1);
+}
+
 #[test]
 fn two_disabling_impacts_in_one_tick_resolve_once() {
     let (mut app, car, object) = damage_app(

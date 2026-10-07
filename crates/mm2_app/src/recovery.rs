@@ -48,6 +48,7 @@ use mm2_vehicle::{
 };
 
 use crate::city::WorldFloor;
+use crate::police::{PoliceCar, recovery_driver};
 use crate::session::SpawnPoint;
 
 /// Per-session evidence counters for the recovery pipeline — the
@@ -388,12 +389,13 @@ pub fn resolve_recovery(
     session: Res<Session>,
     spawn: Option<Res<SpawnPoint>>,
     support: SupportProbe,
-    identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&Player>, Has<PoliceCar>)>,
     mut vehicles: Query<(
         &mut VehicleRecovery,
         Option<&mut VehicleStuck>,
         Option<&Vehicle>,
     )>,
+    cops: Query<(), With<PoliceCar>>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<RecoveryReport>,
 ) {
@@ -413,7 +415,7 @@ pub fn resolve_recovery(
     let generation = session.generation();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
-        .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
+        .map(|(entity, id, player, cop)| (id.0, (entity, recovery_driver(player, cop))))
         .collect();
 
     for event in reader.read() {
@@ -424,8 +426,9 @@ pub fn resolve_recovery(
             continue;
         };
         // Every identified participant resolves — a remote driver is
-        // this authority's simulated car (F25-A.4); an unidentified
-        // object has no driver to recover for.
+        // this authority's simulated car (F25-A.4), a cop an AI-driven
+        // one (`recovery_driver`); an unidentified object has no driver
+        // to recover for.
         if control.is_none() {
             continue;
         }
@@ -446,7 +449,14 @@ pub fn resolve_recovery(
         // No ground under the landing: the spawn is the landing of last
         // resort, as for a car that never stood anywhere — and only
         // without one does the bare anchor stand.
-        let spawn_pose = spawn.as_ref().map(|s| (s.position, s.yaw));
+        // A cop never falls back to the session spawn — that is the
+        // player's start, and a cop set down there would be teleported
+        // onto its target; it keeps the bare anchor (its own post).
+        let spawn_pose = if cops.contains(entity) {
+            None
+        } else {
+            spawn.as_ref().map(|s| (s.position, s.yaw))
+        };
         let Some((position, yaw)) = seated.or(spawn_pose).or(anchor) else {
             continue;
         };

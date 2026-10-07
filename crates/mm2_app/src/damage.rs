@@ -39,6 +39,7 @@
 
 use std::collections::HashMap;
 
+use crate::police::{PoliceCar, recovery_driver};
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
@@ -223,7 +224,7 @@ pub fn resolve_disabled(
     mut control: ResMut<SessionControl>,
     spawn: Option<Res<SpawnPoint>>,
     mut race: Option<ResMut<RaceState>>,
-    identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&Player>, Has<PoliceCar>)>,
     landing: UprightLanding,
     mut damaged: Query<(&mut VehicleDamage, Has<VehicleBreakdown>)>,
     mut stuck: Query<&mut VehicleStuck>,
@@ -248,7 +249,7 @@ pub fn resolve_disabled(
     let generation = session.generation();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
-        .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
+        .map(|(entity, id, player, cop)| (id.0, (entity, recovery_driver(player, cop))))
         .collect();
 
     for event in reader.read() {
@@ -406,7 +407,8 @@ pub fn resolve_disabled(
                 texel.reset(entity);
                 report.recovered += 1;
             }
-            // An unidentified object has no driver to resolve for.
+            // An unidentified object has no driver to resolve for (a
+            // cop resolves as AI — `recovery_driver`).
             None => {}
         }
     }

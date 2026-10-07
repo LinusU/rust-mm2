@@ -105,6 +105,19 @@ impl PoliceFleet {
     }
 }
 
+/// Who a self-recovery system resolves an identified vehicle for. A
+/// racing car answers with its [`Player`] control; a cop carries no
+/// `Player` (it is no participant) but is a simulated AI-driven car all
+/// the same, so a wrecked, wedged or fallen cop recovers in place like
+/// an opponent does — without it every recovery resolver skips the cop
+/// as "unidentified" and a wreck stays down for the rest of the
+/// session. Anything else has no driver (`None`).
+pub fn recovery_driver(player: Option<&Player>, police: bool) -> Option<PlayerControl> {
+    player
+        .map(|p| p.control)
+        .or(police.then_some(PlayerControl::Ai))
+}
+
 /// The yaw a cop is staged with: the authored heading in degrees as a
 /// vehicle yaw (forward `(−sin h, −cos h)`); a row with no heading
 /// faces the world's default (0).

@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 
+use crate::police::{PoliceCar, recovery_driver};
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
@@ -170,7 +171,7 @@ pub fn track_stuck(
 pub fn resolve_stuck(
     mut reader: MessageReader<StuckEvent>,
     session: Res<Session>,
-    identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&Player>, Has<PoliceCar>)>,
     landing: UprightLanding,
     mut commands: Commands,
     mut resets: MessageWriter<ResetVehicle>,
@@ -188,7 +189,7 @@ pub fn resolve_stuck(
     let generation = session.generation();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
-        .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
+        .map(|(entity, id, player, cop)| (id.0, (entity, recovery_driver(player, cop))))
         .collect();
 
     for event in reader.read() {

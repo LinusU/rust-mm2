@@ -354,6 +354,66 @@ fn an_opponent_stuck_recovers_without_touching_the_session() {
     assert!(!app.world().resource::<SessionControl>().restart);
 }
 
+/// A fielded cop's identity as the loader stamps it — no `Player`: a
+/// cop is not a race participant.
+fn cop_marker() -> mm2_app::police::PoliceCar {
+    mm2_app::police::PoliceCar {
+        index: 0,
+        spec: mm2_game::PoliceSpec {
+            vehicle: "vpcop".into(),
+            position: Vec3::ZERO,
+            heading_deg: Some(0.0),
+            params: vec![0.0],
+            line: 1,
+        },
+    }
+}
+
+#[test]
+fn a_stuck_cop_is_recovered_in_place_like_an_opponent() {
+    // F20-C: a cop carries no `Player`, so the resolver once skipped it
+    // as unidentified and a wedged cop stayed wedged for the session.
+    let (mut app, _car, _object) = stuck_app(Vec3::new(0.0, 1.2, 0.0), SPEC);
+    let cop_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let cop_pos = Vec3::new(10.0, 1.2, 5.0);
+    let cop = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(cop_object),
+            cop_marker(),
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleStuck::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(cop_pos),
+            Transform::from_translation(cop_pos),
+        ))
+        .id();
+    app.update();
+    drain_stuck(&mut app);
+    app.world_mut().resource_mut::<StuckReport>().reset();
+
+    // Rolled onto its side by the impact, it must be righted in place.
+    let side = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    {
+        let world = app.world_mut();
+        world.get_mut::<Rotation>(cop).unwrap().0 = side;
+        world.get_mut::<Transform>(cop).unwrap().rotation = side;
+    }
+    write_impact(&mut app, 7, cop_object, ObjectId::WORLD, 30.0);
+    run(&mut app, 75);
+
+    assert_eq!(report(&app).recovered, 1);
+    let pos = app.world().get::<Position>(cop).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(cop_pos.x, pos.y, cop_pos.z)) < 1.0,
+        "the cop is righted where it lay, got {pos}"
+    );
+    let up = (app.world().get::<Rotation>(cop).unwrap().0 * Vec3::Y).y;
+    assert!(up > 0.9, "upright again, up={up}");
+}
+
 #[test]
 fn a_remote_driver_is_armed_and_recovered_by_the_authority() {
     // F25-A.4: under a hosted session a remote car is this authority's

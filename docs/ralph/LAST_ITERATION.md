@@ -1,3 +1,47 @@
+# Last iteration — F20-C.1: cops recover like opponents (new-run iteration 38)
+
+Selection: the previous review passed with no blocking findings; its
+gaps (retail numbers unverified by the reviewer, density/activation
+unknown) stay disclosed. B.3c needs a semantics decision, so I took the
+F20 edge case "overturned pursuer" / AC04 (bounded stuck recovery) and
+searched for what actually happens to a wrecked cop. Finding: the three
+recovery resolvers (`damage::resolve_disabled`, `stuck::resolve_stuck`,
+`recovery::resolve_recovery`) skip any identified vehicle with no `Player`
+("unidentified object"), and cops are deliberately not `Player`s (COP-8).
+Retail `vpcop` ships `vehcardamage`/`vehstuck`, so `equip_authored_vehicle`
+armed detectors nothing answered: a wrecked or wedged cop stayed down
+for the session.
+
+Changes:
+- `mm2_app::police::recovery_driver(player, is_cop)`: a cop resolves as
+  `PlayerControl::Ai`; the three resolvers use it (query gains
+  `Has<PoliceCar>`). Cops stay non-participants.
+- `resolve_recovery`: a cop never falls back to the session `SpawnPoint`
+  (the player's start — it would teleport the cop onto its target); it
+  keeps its own landing/anchor.
+- Ledger COP-14 (implementation choice, mirrors the opponent policy,
+  UNK-13).
+- Tests (3, in `tests/{damage,stuck,recovery}.rs`): a wrecked cop resets
+  in place and repairs without restarting the session; a rolled, stuck cop
+  is righted in place; a cop recovers to its own landing and not the
+  spawn. Checked causal: all three FAIL with `recovery_driver` returning
+  `None` for cops.
+
+Retail, local: sf `--spawn=59,1.5,95,0 --headless --frames 1800`
+`status=pass pol=19/19 pur=1/1/1,r1,nr2`.
+
+Gates (iteration 38, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2250 passed, 0
+failed; was 2247). No processes left running.
+
+Not verified: no retail scenario that wrecks a cop; nothing seen or
+heard. Open for F20: outcome/bust semantics (UNK-9), long-chase bound
+test, density option (B.3c). Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F20-B.3b: Cruise roam cops (new-run iteration 37)
 
 Selection: the previous review passed with no blocking findings; its

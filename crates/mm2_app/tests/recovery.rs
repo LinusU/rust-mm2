@@ -964,6 +964,64 @@ fn a_landing_with_no_ground_under_it_falls_back_to_the_spawn() {
     );
 }
 
+/// A fielded cop's identity as the loader stamps it — no `Player`: a
+/// cop is not a race participant.
+fn cop_marker() -> mm2_app::police::PoliceCar {
+    mm2_app::police::PoliceCar {
+        index: 0,
+        spec: mm2_game::PoliceSpec {
+            vehicle: "vpcop".into(),
+            position: Vec3::ZERO,
+            heading_deg: Some(0.0),
+            params: vec![0.0],
+            line: 1,
+        },
+    }
+}
+
+/// A cop that falls out of the world recovers to its own anchor — and
+/// never to the session spawn, which is the player's start: a groundless
+/// landing would otherwise teleport it onto its target (F20-C).
+#[test]
+fn a_cop_is_recovered_to_its_own_landing_never_the_players_spawn() {
+    let (mut app, _car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let cop_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let cop_pos = Vec3::new(40.0, 1.2, 40.0);
+    let cop = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(cop_object),
+            cop_marker(),
+            role,
+            mm2_game::DamageSignals::default(),
+            mm2_game::VehicleRecovery::with_anchor(POLICY, cop_pos, 0.0),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(cop_pos),
+            Transform::from_translation(cop_pos),
+        ))
+        .id();
+    app.update();
+    drain_recovery(&mut app);
+    let before = report(&app).recovered;
+
+    // Over the ground it lands where its landing says...
+    recover_to(&mut app, cop_object, (Vec3::new(-40.0, 1.2, 40.0), 0.0));
+    assert_eq!(report(&app).recovered, before + 1);
+    let pos = position(&app, cop);
+    assert!(
+        pos.distance(Vec3::new(-40.0, pos.y, 40.0)) < 0.5,
+        "a cop recovers to its landing, got {pos}"
+    );
+    // ...and with nothing under it, it is not sent to the spawn.
+    recover_to(&mut app, cop_object, (Vec3::new(500.0, 5.0, 500.0), 0.0));
+    let pos = position(&app, cop);
+    assert!(
+        pos.distance(Vec3::new(SPAWN.x, pos.y, SPAWN.z)) > 100.0,
+        "a cop must never be set down at the player's spawn, got {pos}"
+    );
+}
+
 /// Only ground that anchored the car seats its landing: another car
 /// parked alongside must not lift it onto its roof.
 #[test]
