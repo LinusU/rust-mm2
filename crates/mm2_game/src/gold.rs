@@ -483,6 +483,66 @@ pub enum GoldEvent {
     Ended(Outcome),
 }
 
+/// What the announcer calls out — the four situations the original's
+/// commentary tables distinguish per role (`GETLOOT`, `DROPLOOT`,
+/// `STASHLOOT`, `RECOVERLOOT`; `mm2_content::cnr::COMMENTARY_CUES`).
+/// *Which* in-game moment triggers each is unrecovered (ledger CNR-13);
+/// this is the designed mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// A car took the gold off its site.
+    Get,
+    /// The carrier lost it.
+    Drop,
+    /// A carrier delivered it.
+    Stash,
+    /// A car took gold that had been dropped.
+    Recover,
+}
+
+/// One announcement: what happened, and to which side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Call {
+    /// What happened.
+    pub kind: CallKind,
+    /// The side it happened to — the carrier's.
+    pub side: Side,
+}
+
+impl GoldEvent {
+    /// The announcement this event earns, if any. `side_of` names a
+    /// participant's side for the events that carry only a player
+    /// (a drop). Round changes, a re-placed gold, roster changes and
+    /// the match end are not announced.
+    pub fn call(&self, side_of: impl Fn(PlayerId) -> Option<Side>) -> Option<Call> {
+        match *self {
+            GoldEvent::Picked {
+                side, recovered, ..
+            } => Some(Call {
+                kind: if recovered {
+                    CallKind::Recover
+                } else {
+                    CallKind::Get
+                },
+                side,
+            }),
+            GoldEvent::Dropped { player, .. } => Some(Call {
+                kind: CallKind::Drop,
+                side: side_of(player)?,
+            }),
+            GoldEvent::Delivered { side, .. } => Some(Call {
+                kind: CallKind::Stash,
+                side,
+            }),
+            GoldEvent::SitesDrawn { .. }
+            | GoldEvent::Lost { .. }
+            | GoldEvent::Joined { .. }
+            | GoldEvent::Left { .. }
+            | GoldEvent::Ended(_) => None,
+        }
+    }
+}
+
 /// A copy of a match's observable state: the host builds one from its
 /// [`GoldMatch`] and a client rebuilds one from the wire. State, not an
 /// event — a replica holds the newest by `(revision, elapsed)` and a
@@ -522,6 +582,59 @@ impl GoldView {
     pub fn carrier(&self) -> Option<PlayerId> {
         match self.state {
             GoldState::Carried { by } => Some(by),
+            _ => None,
+        }
+    }
+
+    /// A participant's side, from the standings.
+    pub fn side_of(&self, player: PlayerId) -> Option<Side> {
+        self.standings
+            .iter()
+            .find(|s| s.player == player)
+            .map(|s| s.side)
+    }
+
+    /// The announcement the change from `prev` to `self` earns — what a
+    /// client, which receives state rather than events, derives so it
+    /// can voice the same commentary the authority's events earn. Only
+    /// what the two views show: a gold taken (recovered when it lay
+    /// dropped, which a hand-over inside one frame also reads as), a
+    /// carrier's drop, or a stash (the round advanced with the carrier
+    /// gone). `None` across a generation change, a round that went
+    /// backwards, a repeated or older frame, and when nothing visible
+    /// changed — so a first frame after a late join, or a lost frame,
+    /// is silent rather than a stale line.
+    pub fn call_since(&self, prev: &GoldView) -> Option<Call> {
+        if self.generation != prev.generation
+            || self.round < prev.round
+            || self.freshness() <= prev.freshness()
+        {
+            return None;
+        }
+        match (prev.state, self.state) {
+            (GoldState::Carried { by }, GoldState::Carried { by: now }) if by == now => None,
+            (GoldState::Carried { .. }, GoldState::Carried { by: now }) => Some(Call {
+                kind: CallKind::Recover,
+                side: self.side_of(now)?,
+            }),
+            (before, GoldState::Carried { by }) => Some(Call {
+                kind: if matches!(before, GoldState::Dropped { .. }) {
+                    CallKind::Recover
+                } else {
+                    CallKind::Get
+                },
+                side: self.side_of(by)?,
+            }),
+            (GoldState::Carried { by }, GoldState::Dropped { .. }) => Some(Call {
+                kind: CallKind::Drop,
+                side: self.side_of(by).or_else(|| prev.side_of(by))?,
+            }),
+            (GoldState::Carried { by }, GoldState::Resting { .. }) if self.round > prev.round => {
+                Some(Call {
+                    kind: CallKind::Stash,
+                    side: self.side_of(by).or_else(|| prev.side_of(by))?,
+                })
+            }
             _ => None,
         }
     }
@@ -2099,5 +2212,179 @@ mod tests {
         for v in CnrVariant::ALL {
             assert_eq!(v.sides().len() > 1, v.team_scored());
         }
+    }
+
+    fn cops_and_robbers() -> GoldMatch {
+        GoldMatch::new(
+            4,
+            ObjectId {
+                generation: 4,
+                slot: 9,
+            },
+            rules(CnrVariant::CopsVsRobbers, EndRule::None),
+            pool(8),
+            77,
+            &[(A, Side::Robbers), (B, Side::Cops)],
+        )
+        .unwrap()
+    }
+
+    fn calls(m: &mut GoldMatch) -> Vec<Call> {
+        let sides: Vec<Standing> = m.standings();
+        m.drain_events()
+            .iter()
+            .filter_map(|e| e.call(|p| sides.iter().find(|s| s.player == p).map(|s| s.side)))
+            .collect()
+    }
+
+    #[test]
+    fn events_earn_the_call_for_the_carriers_side() {
+        let mut m = cops_and_robbers();
+        m.drain_events();
+        take(&mut m, A);
+        assert_eq!(
+            calls(&mut m),
+            [Call {
+                kind: CallKind::Get,
+                side: Side::Robbers
+            }]
+        );
+        let at = m.gold_position().unwrap_or(Vec3::ZERO);
+        m.dislodge(A, at, DropCause::Destroyed).unwrap();
+        assert_eq!(
+            calls(&mut m),
+            [Call {
+                kind: CallKind::Drop,
+                side: Side::Robbers
+            }]
+        );
+        // B recovers what A lost (A is locked out of it).
+        take(&mut m, B);
+        assert_eq!(
+            calls(&mut m),
+            [Call {
+                kind: CallKind::Recover,
+                side: Side::Cops
+            }]
+        );
+        // The cops deliver to the bank; the stash is announced once and
+        // the round redraw, which follows it, is not.
+        let bank = m.sites().bank;
+        m.deliver(B, 0, bank);
+        assert_eq!(
+            calls(&mut m),
+            [Call {
+                kind: CallKind::Stash,
+                side: Side::Cops
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unknown_dropper_earns_no_call() {
+        let drop = GoldEvent::Dropped {
+            player: C,
+            at: Vec3::ZERO,
+            cause: DropCause::Disconnected,
+            round: 0,
+        };
+        assert_eq!(drop.call(|_| None), None);
+        for quiet in [
+            GoldEvent::Left { player: A },
+            GoldEvent::Joined {
+                player: A,
+                side: Side::Solo,
+            },
+        ] {
+            assert_eq!(quiet.call(|_| Some(Side::Solo)), None);
+        }
+    }
+
+    #[test]
+    fn a_replicas_change_earns_the_call_the_events_did() {
+        let mut m = cops_and_robbers();
+        let start = m.view();
+        take(&mut m, A);
+        let carried = m.view();
+        let got = |next: &GoldView, prev: &GoldView| next.call_since(prev);
+        assert_eq!(
+            got(&carried, &start),
+            Some(Call {
+                kind: CallKind::Get,
+                side: Side::Robbers
+            })
+        );
+        // A repeat of the same frame, or an older one, is silent.
+        assert_eq!(got(&carried, &carried), None);
+        assert_eq!(got(&start, &carried), None);
+        let at = m.gold_position().unwrap_or(Vec3::ZERO);
+        m.dislodge(A, at, DropCause::Knocked { by: Some(B) })
+            .unwrap();
+        let dropped = m.view();
+        assert_eq!(
+            got(&dropped, &carried),
+            Some(Call {
+                kind: CallKind::Drop,
+                side: Side::Robbers
+            })
+        );
+        take(&mut m, B);
+        let recovered = m.view();
+        assert_eq!(
+            got(&recovered, &dropped),
+            Some(Call {
+                kind: CallKind::Recover,
+                side: Side::Cops
+            })
+        );
+        let bank = m.sites().bank;
+        m.deliver(B, 0, bank);
+        let stashed = m.view();
+        assert_eq!(
+            got(&stashed, &recovered),
+            Some(Call {
+                kind: CallKind::Stash,
+                side: Side::Cops
+            })
+        );
+        // Frames that skip a step still read from what they show: the
+        // carrier is gone and the round moved on.
+        assert_eq!(
+            got(&stashed, &carried),
+            Some(Call {
+                kind: CallKind::Stash,
+                side: Side::Robbers
+            })
+        );
+    }
+
+    #[test]
+    fn a_replica_stays_silent_across_a_new_match_or_a_backwards_round() {
+        let mut m = cops_and_robbers();
+        take(&mut m, A);
+        let carried = m.view();
+        let mut other = carried.clone();
+        other.generation += 1;
+        other.state = GoldState::Resting { at: Vec3::ZERO };
+        other.revision += 5;
+        assert_eq!(other.call_since(&carried), None, "a new generation");
+        let mut earlier = carried.clone();
+        earlier.round = carried.round + 1;
+        let mut later = carried.clone();
+        later.revision += 1;
+        later.state = GoldState::Dropped {
+            at: Vec3::ZERO,
+            by: Some(A),
+            free_at: 0,
+        };
+        assert_eq!(later.call_since(&earlier), None, "a round that went back");
+        // A carrier missing from the standings (never seated) cannot be
+        // placed on a side, so there is no line to voice.
+        let mut ghost = carried.clone();
+        ghost.revision += 1;
+        ghost.state = GoldState::Carried { by: C };
+        let mut resting = carried.clone();
+        resting.state = GoldState::Resting { at: Vec3::ZERO };
+        assert_eq!(ghost.call_since(&resting), None);
     }
 }

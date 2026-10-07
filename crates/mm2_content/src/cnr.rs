@@ -62,11 +62,44 @@ pub const COMMENTARY_CUES: &[&str] = &[
     "COPRECOVERLOOT",
 ];
 
+/// The commentary cue family an announcement voices, or `None` for a
+/// family the original does not author.
+///
+/// Cops and robbers each have the four role families (`ROBGETLOOT`,
+/// `COPRECOVERLOOT`, …). The two robber teams of Robbers vs. Robbers
+/// have three (`REDTEAMHASGOLD`, `…DROPPEDGOLD`, `…STASHEDGOLD`): the
+/// authored vocabulary has no team *recover*, so a recovery reads as
+/// the team having the gold again. Free-for-all authors no family of
+/// its own; its players are robbers delivering to a hideout, so it
+/// voices the `ROB` ones. The pairing of situation to family is the
+/// vocabulary's own; *when* each fires, and the free-for-all choice,
+/// are designed (ledger CNR-13).
+pub fn commentary_cue(call: Call) -> Option<&'static str> {
+    use CallKind::{Drop, Get, Recover, Stash};
+    Some(match (call.side, call.kind) {
+        (Side::Robbers | Side::Solo, Get) => "ROBGETLOOT",
+        (Side::Robbers | Side::Solo, Drop) => "ROBDROPLOOT",
+        (Side::Robbers | Side::Solo, Stash) => "ROBSTASHLOOT",
+        (Side::Robbers | Side::Solo, Recover) => "ROBRECOVERLOOT",
+        (Side::Cops, Get) => "COPGETLOOT",
+        (Side::Cops, Drop) => "COPDROPLOOT",
+        (Side::Cops, Stash) => "COPSTASHLOOT",
+        (Side::Cops, Recover) => "COPRECOVERLOOT",
+        (Side::Red, Get | Recover) => "REDTEAMHASGOLD",
+        (Side::Red, Drop) => "REDTEAMDROPPEDGOLD",
+        (Side::Red, Stash) => "REDTEAMSTASHEDGOLD",
+        (Side::Blue, Get | Recover) => "BLUETEAMHASGOLD",
+        (Side::Blue, Drop) => "BLUETEAMDROPPEDGOLD",
+        (Side::Blue, Stash) => "BLUETEAMSTASHEDGOLD",
+    })
+}
+
 pub use mm2_game::cnr_options::{
     CnrSettings, DELIVERY_POINTS, DELIVERY_RADIUS_M, DROP_LOCKOUT_SECONDS, GoldMass, MatchLimit,
     PICKUP_POINTS, PICKUP_RADIUS_M, POINT_LIMITS, TIME_LIMIT_MINUTES,
 };
 pub use mm2_game::gold::CnrVariant;
+use mm2_game::gold::{Call, CallKind, Side};
 
 /// One file the mode depends on and whether the VFS resolved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +319,40 @@ mod tests {
     use mm2_game::gold::{CarrierLoad, EndRule};
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn every_announcement_names_an_authored_family_and_every_family_is_reachable() {
+        let kinds = [
+            CallKind::Get,
+            CallKind::Drop,
+            CallKind::Stash,
+            CallKind::Recover,
+        ];
+        let sides = [Side::Solo, Side::Robbers, Side::Cops, Side::Red, Side::Blue];
+        let mut reached = std::collections::BTreeSet::new();
+        for side in sides {
+            for kind in kinds {
+                let cue = commentary_cue(Call { kind, side }).unwrap();
+                assert!(COMMENTARY_CUES.contains(&cue), "{cue} is not authored");
+                reached.insert(cue);
+            }
+        }
+        for cue in COMMENTARY_CUES {
+            assert!(reached.contains(cue), "{cue} is voiced by nothing");
+        }
+    }
+
+    #[test]
+    fn the_variants_voice_the_families_their_sides_own() {
+        let call = |side, kind| commentary_cue(Call { kind, side }).unwrap();
+        assert_eq!(call(Side::Cops, CallKind::Recover), "COPRECOVERLOOT");
+        assert_eq!(call(Side::Robbers, CallKind::Stash), "ROBSTASHLOOT");
+        // Free-for-all has no family of its own: robbers'.
+        assert_eq!(call(Side::Solo, CallKind::Drop), "ROBDROPLOOT");
+        // Teams author no recover: the team has the gold again.
+        assert_eq!(call(Side::Blue, CallKind::Recover), "BLUETEAMHASGOLD");
+        assert_eq!(call(Side::Red, CallKind::Stash), "REDTEAMSTASHEDGOLD");
+    }
 
     const HEADER: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";
 
