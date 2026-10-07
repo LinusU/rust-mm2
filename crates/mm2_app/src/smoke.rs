@@ -2073,7 +2073,7 @@ fn run_headless(
     // `1.0` unmodified runs stay bit-identical.
     let traction_detail = world_ecs
         .get_resource::<mm2_vehicle::TireConditions>()
-        .filter(|t| t.traction != 1.0 || rec_config.dev.traction.is_some())
+        .filter(|t| t.traction != 1.0 || crate::session::traction_pin(&rec_config).is_some())
         .map(|t| format!(" traction={}", t.traction))
         .unwrap_or_default();
     // A bound driver profile is recorded so a run under persisted

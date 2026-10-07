@@ -1,3 +1,21 @@
+# Last iteration — F06-C.6: the recorded pin follows the pin that bound (new-run iteration 6 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`3d184c9`) passed gates and review, no blockers. Its one non-blocking
+note: `smoke.rs` `traction_detail` still flagged a run as pinned whenever `dev.traction` was set, so a
+`Remote` client with an ignored pin recorded as pinned (value printed was right, trigger imprecise).
+Repaired before anything else; a two-process proof is a larger slice and stays open.
+
+Change: `session::traction_pin(config)` (new, pub) is the one place that decides whether the pin binds
+(`is_authoritative`); `session_traction` and the smoke record both read it. Test
+`environment::only_an_authoritative_session_reports_a_pin` (Local/Host → `Some`, Remote/no pin → `None`).
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` 0; `cargo test --locked --workspace` exit 0 (2451 passed, 0 failed).
+Status: implemented candidate, not independently checked. Synthetic only; AC06's two-process proof and
+original-data weather×surface run remain open.
+
+---
+
 # Last iteration — F06-C.5: a networked client's surface state is the host's (new-run iteration 5 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`6c7cebb`) passed gates and review, no blockers. Its open list named

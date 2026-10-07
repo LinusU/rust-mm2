@@ -606,18 +606,25 @@ pub fn dev_reset_at(
 /// weather (the host never advertises a pin, so there is no other
 /// value for the two to agree on) and says so rather than diverging.
 pub fn session_traction(config: &mm2_game::SessionConfig, weather: mm2_game::Weather) -> f32 {
-    let pin = match config.dev.traction {
-        Some(pin) if config.authority.is_authoritative() => Some(pin),
-        Some(pin) => {
-            warn!(
-                pin,
-                "--traction ignored: the host owns a networked session's surface state"
-            );
-            None
-        }
-        None => None,
-    };
-    pin.unwrap_or_else(|| weather.traction_factor()).max(0.0)
+    if config.dev.traction.is_some() && traction_pin(config).is_none() {
+        warn!(
+            pin = config.dev.traction,
+            "--traction ignored: the host owns a networked session's surface state"
+        );
+    }
+    traction_pin(config)
+        .unwrap_or_else(|| weather.traction_factor())
+        .max(0.0)
+}
+
+/// The `--traction` pin that actually binds this session: `None` on a
+/// `Remote` client, where the stamped local pin is ignored. Recording
+/// reads this too, so a run only says `pinned` when the pin took.
+pub fn traction_pin(config: &mm2_game::SessionConfig) -> Option<f32> {
+    config
+        .dev
+        .traction
+        .filter(|_| config.authority.is_authoritative())
 }
 
 /// The asset collections world spawning writes into.

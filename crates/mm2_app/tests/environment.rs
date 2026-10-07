@@ -626,6 +626,35 @@ fn a_networked_client_takes_the_hosts_wetness_not_its_local_pin() {
     );
 }
 
+/// The recorded "pinned" flag reads the same decision the physics
+/// used: a `Remote` client's stamped pin did not bind, so it is not a
+/// pinned run.
+#[test]
+fn only_an_authoritative_session_reports_a_pin() {
+    let pinned = |authority| SessionConfig {
+        authority,
+        dev: DevOverrides {
+            traction: Some(0.4),
+            ..DevOverrides::default()
+        },
+        ..city_config(mm2_game::SessionConditions::default())
+    };
+    for authority in [
+        mm2_game::SessionAuthority::Local,
+        mm2_game::SessionAuthority::Host,
+    ] {
+        assert_eq!(session::traction_pin(&pinned(authority)), Some(0.4));
+    }
+    assert_eq!(
+        session::traction_pin(&pinned(mm2_game::SessionAuthority::Remote)),
+        None
+    );
+    assert_eq!(
+        session::traction_pin(&city_config(mm2_game::SessionConditions::default())),
+        None
+    );
+}
+
 /// F06-AC06: surface state survives session configuration changes —
 /// quitting to the menu and beginning a session with different weather
 /// re-stamps the modifier from the new config (never the previous
