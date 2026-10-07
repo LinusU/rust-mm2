@@ -1,3 +1,16 @@
+# Last iteration — F08-A.4 review nits (new-run iteration 36 of the 2026-10-07 run)
+
+Selection: the iteration-35 review passed with no blockers; I took its two non-blocking nits as a small repair rather than start a new slice.
+(a) Doc wording: AUD-14 / `docs/research/audio.md` said every segment carries a command track; the census says 61 of 62. `mm2-inspect audio`
+now lists segments lacking any of band/command/style/tempo (`AudioReport::dm_segments_without`); retail run shows exactly one,
+`bigair.sgt` (no command track, but chord/seqt/tims), and the docs say so. (b) `PoolCueOutOfRange` check used `Vec::contains` per cue
+(quadratic on a hostile bank); the wave offsets are now a `HashSet`.
+
+Tests: `audit_follows_dmrf_references...` extended (segments-without census); existing 16 `dmus` tests cover the cue path unchanged.
+Gates (foreground): fmt --check 0; clippy -D warnings 0; `cargo test --locked --workspace` 2565 passed, 0 failed; retail `mm2-inspect audio --strict` rc 0. Status: implemented candidate, not independently checked. F08-A stays active; nothing plays.
+
+---
+
 # Last iteration — F08-A.4: DirectMusic container reader (new-run iteration 35 of the 2026-10-07 run)
 
 Selection: the iteration-34 review passed with no blockers. F08 req 4/6 (determine the music formats; unsupported state explicit) still

@@ -94,9 +94,12 @@ pub struct AudioReport {
     pub dm_parsed: usize,
     /// Segment track kinds across every parsed segment → track count.
     pub dm_tracks: BTreeMap<String, usize>,
-    /// Segments with no tracks, and bands/styles with no instruments,
-    /// are informational; this counts band instruments across every
-    /// container.
+    /// Segments missing one of the usual track kinds (`DM_USUAL_TRACKS`):
+    /// track kind → segment paths. Informational, since a segment may
+    /// legitimately omit one; it exists so a "every segment carries X"
+    /// claim can be checked against the census.
+    pub dm_segments_without: BTreeMap<&'static str, Vec<String>>,
+    /// Band instruments across every container.
     pub dm_instruments: usize,
     /// `DMRF` references authored across all containers.
     pub dm_refs_total: usize,
@@ -128,6 +131,9 @@ pub struct AudioReport {
     pub dead_refs: Vec<(String, Vec<String>)>,
 }
 
+/// Track kinds (`Track::kind_name`) nearly every retail segment carries.
+const DM_USUAL_TRACKS: [&str; 4] = ["band", "command", "style", "tempo"];
+
 impl AudioReport {
     /// Fold one parsed DirectMusic container into the census; returns the
     /// case-folded file names it references.
@@ -135,6 +141,16 @@ impl AudioReport {
         self.dm_parsed += 1;
         for t in &c.content.tracks {
             *self.dm_tracks.entry(t.kind_name()).or_default() += 1;
+        }
+        if c.kind == DmKind::Segment {
+            for kind in DM_USUAL_TRACKS {
+                if !c.content.tracks.iter().any(|t| t.kind_name() == kind) {
+                    self.dm_segments_without
+                        .entry(kind)
+                        .or_default()
+                        .push(logical.to_string());
+                }
+            }
         }
         self.dm_instruments += c.content.instruments.len();
         for i in &c.issues {
@@ -637,6 +653,16 @@ pub fn print_report(r: &AudioReport) {
             .join(", "),
         r.dm_instruments
     );
+    for (kind, segs) in &r.dm_segments_without {
+        println!(
+            "  {} segment(s) with no {kind} track: {}",
+            segs.len(),
+            segs.iter()
+                .map(|p| p.strip_prefix("aud/dmusic/").unwrap_or(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!(
         "  DLS: {} bank(s), {} instrument(s), {} wave(s) ({} not PCM16), {:.1}s PCM16",
         r.dls_banks, r.dls_instruments, r.dls_waves, r.dls_unsupported_waves, r.dls_seconds
@@ -975,6 +1001,15 @@ mod tests {
         assert!(r.issues.is_empty(), "{:?}", r.issues);
         assert_eq!(r.dm_parsed, 3);
         assert_eq!(r.dm_tracks["command"], 4);
+        // The stub segments carry command tracks only: every one lacks
+        // band/style/tempo, none lacks a command track.
+        assert!(!r.dm_segments_without.contains_key("command"));
+        assert_eq!(r.dm_segments_without["tempo"].len(), 2);
+        assert!(
+            r.dm_segments_without["tempo"]
+                .iter()
+                .all(|p| p.ends_with(".sgt"))
+        );
         assert_eq!(r.dm_refs_total, 2);
         assert_eq!(r.dm_refs_resolved, 1);
         assert_eq!(

@@ -17,6 +17,7 @@
 
 use crate::wav::{WaveFormat, parse_fmt};
 use crate::{FormatError, Reader};
+use std::collections::HashSet;
 use std::ops::Range;
 
 /// RIFF nesting bound. Retail's deepest container (a segment holding a
@@ -703,7 +704,7 @@ impl DmContainer {
     ) -> Result<(), FormatError> {
         let mut dls = DlsContent::default();
         let mut pool_start = None;
-        let mut offsets_of_waves: Vec<usize> = Vec::new();
+        let mut offsets_of_waves: HashSet<usize> = HashSet::new();
         for c in children(data, range, nodes)? {
             let body = &data[c.body.clone()];
             if is_container(&c.id) {
@@ -732,7 +733,7 @@ impl DmContainer {
                         pool_start = Some(inner.start);
                         for w in children(data, inner, nodes)? {
                             if is_container(&w.id) && form_of(data, &w).as_ref() == Some(b"wave") {
-                                offsets_of_waves.push(w.body.start - 8);
+                                offsets_of_waves.insert(w.body.start - 8);
                                 let wave = self.parse_dls_wave(
                                     data,
                                     w.body.start + 4..w.body.end,

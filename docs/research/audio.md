@@ -272,7 +272,7 @@ parse, 0 findings.
 
 | Form | Reader extracts | Retail |
 | --- | --- | --- |
-| `DMSG` | `segh` (repeats, length, play/loop points, resolution), `guid`/`vers`/`UNAM`, `trkh` per track (kind from `ckid`/`fccType`), `DMRF` references | tracks: band 62, command 61, style 62, tempo 62, chord/sequence/time-sig 1 each (`bigair.sgt`) |
+| `DMSG` | `segh` (repeats, length, play/loop points, resolution), `guid`/`vers`/`UNAM`, `trkh` per track (kind from `ckid`/`fccType`), `DMRF` references | tracks: band 62, command 61, style 62, tempo 62, chord/sequence/time-sig 1 each (`bigair.sgt`, which is also the one segment with no command track — `mm2-inspect audio` lists segments missing a usual track) |
 | `DMST` | `styh` (time signature, tempo), `part`/`pttn` counts, embedded `DMBD` | — |
 | `DMBD` | `lbin`/`bins` instruments (MSB/LSB/program, PChannel, flags), `DMRF` to a DLS bank | 2 073 band instruments across all containers |
 | `DLS ` | `colh`/`insh`/`rgnh`/`wlnk`, `ptbl` cues, `wvpl` waves (`fmt `/`data`) | 14 banks, 204 instruments, 368 waves |
