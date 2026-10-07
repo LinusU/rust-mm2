@@ -211,6 +211,34 @@ fn guide_stale(guide: Option<&ScriptedRoute>, objective: Vec3) -> bool {
     guide.is_none_or(|rs| rs.goal.is_some_and(|g| g.distance(objective) > 2.0))
 }
 
+/// What one frame of Cops & Robbers re-planning did.
+enum NavReplan {
+    /// A previous failure's wait is still running; the router was not asked.
+    Waiting,
+    /// The planner found a road line; bind it as the car's guide.
+    Planned(ScriptedRoute),
+    /// No road line; the wait is armed again.
+    Failed,
+}
+
+/// One frame of re-planning for a car whose guide is stale: the planner
+/// runs only once `wait` has run out, and a failure re-arms the wait to
+/// [`NAV_REPLAN_FRAMES`] so a missing connection costs one router query
+/// per window, not one per frame.
+fn nav_replan(wait: &mut u32, plan: impl FnOnce() -> Option<ScriptedRoute>) -> NavReplan {
+    if *wait > 0 {
+        *wait -= 1;
+        return NavReplan::Waiting;
+    }
+    match plan() {
+        Some(route) => NavReplan::Planned(route),
+        None => {
+            *wait = NAV_REPLAN_FRAMES;
+            NavReplan::Failed
+        }
+    }
+}
+
 /// A driving line over the city's shared road graph from `from` to
 /// `to` — the F09 route query sampled into the same [`OpponentRoute`]
 /// shape the authored guides use, so the bounded re-anchor and the
@@ -896,6 +924,7 @@ pub fn scripted_drive(
         let fwd = rot.0 * Vec3::NEG_Z;
         let yaw = (-fwd.x).atan2(-fwd.z);
         let mut fresh = ScriptedBot::default();
+        let new_bot = bot.is_none();
         let bot = match bot {
             Some(b) => b.into_inner(),
             None => {
@@ -907,22 +936,34 @@ pub fn scripted_drive(
         // and bound as the car's guide; the plan holds until the
         // objective moves (a delivery, a drop, a new round).
         if race.is_none() && cnr_view.is_some() && guide_stale(bot_route.as_deref(), gate) {
-            if bot.plan_wait > 0 {
-                bot.plan_wait -= 1;
-            } else if let Some(route) = routing_graph(&mut nav, vfs.as_deref(), &session)
-                .and_then(|graph| plan_nav_route(graph, pos.0, gate))
-            {
+            let replan = nav_replan(&mut bot.plan_wait, || {
+                let graph = routing_graph(&mut nav, vfs.as_deref(), &session)?;
+                let route = plan_nav_route(graph, pos.0, gate)?;
                 let mut guide = ScriptedRoute::new(route, pos.0, yaw);
                 guide.goal = Some(gate);
-                commands.entity(entity).insert(guide);
-            } else {
-                // No road line: retry later, and stop chasing a guide
-                // built for an objective that is no longer the target
-                // (the car aims straight, as the cruise bot does).
-                bot.plan_wait = NAV_REPLAN_FRAMES;
-                if bot_route.is_some() {
-                    commands.entity(entity).remove::<ScriptedRoute>();
-                    bot_route = None;
+                Some(guide)
+            });
+            match replan {
+                NavReplan::Waiting => {}
+                NavReplan::Planned(guide) => {
+                    commands.entity(entity).insert(guide);
+                }
+                NavReplan::Failed => {
+                    // No road line: retry later, and stop chasing a guide
+                    // built for an objective that is no longer the target
+                    // (the car aims straight, as the cruise bot does).
+                    if new_bot {
+                        // The component is not on the car yet; the throwaway
+                        // value the wait was armed on would be lost.
+                        commands.entity(entity).insert(ScriptedBot {
+                            plan_wait: bot.plan_wait,
+                            ..default()
+                        });
+                    }
+                    if bot_route.is_some() {
+                        commands.entity(entity).remove::<ScriptedRoute>();
+                        bot_route = None;
+                    }
                 }
             }
         }
@@ -1316,5 +1357,29 @@ mod cnr_target_tests {
             objective
         ));
         assert!(!guide_stale(Some(&guide(None)), objective));
+    }
+
+    /// A failed plan costs one router query per window: the planner is not
+    /// asked again until [`NAV_REPLAN_FRAMES`] frames have passed.
+    #[test]
+    fn a_failed_plan_waits_a_window_before_the_router_is_asked_again() {
+        let mut wait = 0;
+        let mut asked = 0;
+        let mut frame = |wait: &mut u32, ok: bool| {
+            nav_replan(wait, || {
+                asked += 1;
+                ok.then(|| ScriptedRoute::new(OpponentRoute::default(), Vec3::ZERO, 0.0))
+            })
+        };
+        assert!(matches!(frame(&mut wait, false), NavReplan::Failed));
+        assert_eq!(wait, NAV_REPLAN_FRAMES);
+        for _ in 0..NAV_REPLAN_FRAMES {
+            assert!(matches!(frame(&mut wait, true), NavReplan::Waiting));
+        }
+        assert_eq!(wait, 0);
+        // Only the failing frame has asked so far; the next one asks again.
+        assert!(matches!(frame(&mut wait, true), NavReplan::Planned(_)));
+        assert_eq!(wait, 0);
+        assert_eq!(asked, 2);
     }
 }
