@@ -232,3 +232,103 @@ fn deps_shows_which_source_served_the_files_a_failed_load_read() {
     );
     assert!(text.contains("load failed after"), "{text}");
 }
+
+/// A synthetic London circuit table with three rows; only row 0 has its
+/// authored records.
+fn write_event_install(install: &Path) {
+    let header = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, \
+        NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, \
+        Peds, NumLaps, TimeLimit, Difficulty";
+    let row = "none, 0, 0, 0, 0, 0, 0.5, 0.5, 3, 50.0, 1, 0, 0, 0, 0, 0, 0.5, 0.5, 3, 60.0, 2";
+    let table = format!("{header}\r\n{row}\r\n{row}\r\n{row}\r\n");
+    write(install, "race/london/mmcircuitdata.csv", table.as_bytes());
+    write(
+        install,
+        "race/london/circuit0waypoints.csv",
+        WAYPOINTS.as_bytes(),
+    );
+    write(
+        install,
+        "race/london/circuit0_strtpnts",
+        b"0,0,0,90,0,0,0,0,0,\r\n5,0,0,90,0,0,0,0,0,\r\n",
+    );
+}
+
+const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\r\n\
+    0,0,0,0,10,0,0,0,\r\n50,0,0,0,10,0,0,0,\r\n100,0,0,0,10,0,0,0,\r\n150,0,0,0,10,0,0,0,\r\n";
+
+#[test]
+fn deps_traces_an_event_and_credits_only_the_mod_that_replaced_its_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write_event_install(&install);
+    // A real (different) route: the mod moves the second gate.
+    let moved = WAYPOINTS.replace("50,0,0,0,10", "60,0,0,0,10");
+    write(
+        &mods.join("reroute"),
+        "mod.toml",
+        b"[mod]\nid = \"reroute\"\n",
+    );
+    write(
+        &mods.join("reroute"),
+        "race/london/circuit0waypoints.csv",
+        moved.as_bytes(),
+    );
+    // A mod for another city: its files are never part of London's scan.
+    write(
+        &mods.join("elsewhere"),
+        "mod.toml",
+        b"[mod]\nid = \"elsewhere\"\n",
+    );
+    write(
+        &mods.join("elsewhere"),
+        "race/sf/circuit0waypoints.csv",
+        WAYPOINTS.as_bytes(),
+    );
+    let (install, mods) = (install.to_str().unwrap(), mods.to_str().unwrap());
+    let trace = |row: &str, extra: &[&str]| {
+        let mut args = vec!["--mods", mods, "deps", install, "--city", "london"];
+        args.extend(["--event", row]);
+        args.extend(extra);
+        inspect(&args)
+    };
+
+    let out = trace("circuit:0", &["--expect-mod", "reroute"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("mod `reroute`: 1 file(s)\n  race/london/circuit0waypoints.csv"),
+        "{text}"
+    );
+    // The catalog table itself is still the original's.
+    assert!(text.contains("race/london/mmcircuitdata.csv"), "{text}");
+    assert!(text.contains("london Circuit:0 (circuit0)"), "{text}");
+
+    // The other city's mod is never read, so expecting it fails.
+    let bystander = trace("circuit:0", &["--expect-mod", "elsewhere"]);
+    assert_eq!(bystander.status.code(), Some(2), "{bystander:?}");
+    assert!(String::from_utf8_lossy(&bystander.stderr).contains("no file was read from mod"));
+
+    // A row with no authored line is a failed lookup, not a silent empty trace.
+    let unknown = trace("circuit:9", &[]);
+    assert_eq!(unknown.status.code(), Some(2), "{unknown:?}");
+    assert!(
+        String::from_utf8(unknown.stdout)
+            .unwrap()
+            .contains("load failed after")
+    );
+
+    // A car id and an event are alternatives, not a pair.
+    let both = inspect(&[
+        "deps",
+        install,
+        "vpt",
+        "--city",
+        "london",
+        "--event",
+        "circuit:0",
+    ]);
+    assert!(!both.status.success());
+    let neither = inspect(&["deps", install]);
+    assert!(!neither.status.success());
+}

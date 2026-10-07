@@ -200,6 +200,14 @@ the byte-level identity of gameplay content.
   were asked for by name; an optional file the loader only `resolve`s and
   finds absent leaves no entry. Tracing is per call and nests; nothing is
   recorded outside one.
+  `mm2-inspect deps <install> --city <stem> --event <table>:<row>` traces an
+  authored event instead (the same `<table>:<row>` vocabulary as `event`),
+  through the inspector's event audit: the production catalog scan, the row's
+  records, and the race-definition and roster builds. The scan reads the whole
+  city's event tables and records, so a mod that replaces any of that city's
+  race files is credited, not just the named row's; another city's mod is not.
+  Race-family files only — a city's geometry and audio have no `deps` target
+  yet.
 
 ## Portable cities with multiple PSDL parts
 

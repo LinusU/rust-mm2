@@ -159,19 +159,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Trace which files loading a vehicle reads and which source serves
-    /// each (the mod that replaced it, or the original), plus the optional
-    /// files no source provides.
+    /// Trace which files loading a vehicle (or resolving one authored
+    /// event) reads and which source serves each (the mod that replaced
+    /// it, or the original), plus the optional files no source provides.
     Deps {
         /// Path to the MM2 installation directory.
         dir: PathBuf,
         /// Vehicle id (e.g. `vpbug`) or unique display-name alias.
-        id: String,
+        /// Omit it to trace an event with `--city` and `--event`.
+        #[arg(required_unless_present = "event", conflicts_with = "event")]
+        id: Option<String>,
         /// Paint-job index to load (zero-based).
         #[arg(long, default_value_t = 0)]
         paint: usize,
+        /// Trace one authored event instead of a car: `<table>:<row>`,
+        /// the same vocabulary as `event --event`. The scan reads the
+        /// city's whole event catalog, then the row's records.
+        #[arg(long, requires = "city")]
+        event: Option<String>,
+        /// City stem the traced event lives in (`london`, `sf`).
+        #[arg(long, requires = "event")]
+        city: Option<String>,
         /// Exit non-zero unless the load read at least one file from this
-        /// mod (repeatable) — proof the mod is live for this car.
+        /// mod (repeatable) — proof the mod is live for this target.
         #[arg(long = "expect-mod")]
         expect_mod: Vec<String>,
     },
@@ -672,8 +682,16 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             id,
             paint,
+            event,
+            city,
             expect_mod,
-        } => deps(dir, cli.mods.as_deref(), id, *paint, expect_mod),
+        } => deps(
+            dir,
+            cli.mods.as_deref(),
+            DepsTarget::from_args(id.as_deref(), event.as_deref(), city.as_deref())?,
+            *paint,
+            expect_mod,
+        ),
         Command::Handling { dir, id, strict } => {
             handling(dir, cli.mods.as_deref(), id.as_deref(), *strict)
         }
@@ -4852,24 +4870,65 @@ fn paint_coverage(def: &mm2_content::VehicleDef) -> Vec<String> {
     problems
 }
 
-/// Load one vehicle through the production loader with the VFS tracing its
+/// What `deps` loads under the read trace.
+enum DepsTarget<'a> {
+    /// A vehicle, by id or alias.
+    Car(&'a str),
+    /// One authored event row of a city.
+    Event {
+        city: &'a str,
+        table: mm2_game::EventTableKind,
+        index: usize,
+    },
+}
+
+impl<'a> DepsTarget<'a> {
+    fn from_args(
+        id: Option<&'a str>,
+        event: Option<&'a str>,
+        city: Option<&'a str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        match (id, event, city) {
+            (Some(id), None, _) => Ok(Self::Car(id)),
+            (None, Some(spec), Some(city)) => {
+                let (table, index) = event::parse_event_spec(spec)?;
+                Ok(Self::Event { city, table, index })
+            }
+            // clap enforces the shapes; this is the defensive leg.
+            _ => Err("give a vehicle id, or --event <table>:<row> with --city <stem>".into()),
+        }
+    }
+}
+
+/// Load one target through its production loader with the VFS tracing its
 /// reads, and report the files it depended on grouped by serving source.
 fn deps(
     dir: &Path,
     mods: Option<&Path>,
-    id: &str,
+    target: DepsTarget,
     paint: usize,
     expect_mod: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
-    let (loaded, trace) = vfs.trace_reads(|| mm2_content::load_by_id(&vfs, id, paint));
     // A load that fails still shows what it read before it did.
+    let (loaded, trace): (Result<String, Box<dyn std::error::Error>>, _) = match target {
+        DepsTarget::Car(id) => vfs.trace_reads(|| {
+            mm2_content::load_by_id(&vfs, id, paint)
+                .map(|def| def.id)
+                .map_err(Into::into)
+        }),
+        DepsTarget::Event { city, table, index } => vfs.trace_reads(|| {
+            event::inspect(&vfs, city, table, index)
+                .map(|r| format!("{city} {table:?}:{index} ({})", r.stem))
+                .map_err(Into::into)
+        }),
+    };
     print!("{}", trace.render());
-    let def = match loaded {
-        Ok(def) => def,
+    let label = match loaded {
+        Ok(label) => label,
         Err(e) => {
             println!("load failed after {} read(s)", trace.accesses.len());
-            return Err(e.into());
+            return Err(e);
         }
     };
     let missing = trace.missing();
@@ -4878,8 +4937,7 @@ fn deps(
     }
     let origins = trace.by_origin();
     println!(
-        "{}: {} file(s) from {} source(s), {} not provided",
-        def.id,
+        "{label}: {} file(s) from {} source(s), {} not provided",
         origins.values().map(Vec::len).sum::<usize>() - missing.len(),
         origins.keys().filter(|k| *k != "(not found)").count(),
         missing.len()

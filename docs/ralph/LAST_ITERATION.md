@@ -1,3 +1,14 @@
+# Last iteration — F29-B.4: `deps` traces an authored event (iteration 8 of the recovery run)
+
+Selection: the F29-B.3 review passed with no blockers. Its named gap was that `deps` had only a car target. A city target needs `mm2_app::load_city` (Bevy), which `mm2_inspect` deliberately does not link, so the race family — the other consumer the inspector already drives through production code (`event::inspect`: catalog scan, record parse, `race_definition`, roster builds) — is the smallest honest second target.
+Change: `mm2-inspect deps <install> --city <stem> --event <table>:<row> [--expect-mod <id>]` (id and `--event` are exclusive; clap enforces the shapes, `DepsTarget::from_args` is the defensive leg). The shared report path is unchanged: a failed lookup still prints the reads made; `--expect-mod` exits 2 unless that mod served a file. `docs/modding.md` says the scan covers the whole city's catalog, so a mod replacing any of the city's race files is credited, not only the named row's. No ledger row (tooling).
+Test (+1, `tools/mm2_inspect/tests/conflicts.rs`): a synthetic London circuit table; a mod replacing `circuit0waypoints.csv` is listed under `mod reroute` and `--expect-mod reroute` passes; the table stays original; a mod that only touches `race/sf/` fails `--expect-mod`; an unknown row exits 2 with `load failed after`; id+event and neither are rejected. First draft asserted a row-1 bystander and was wrong: the catalog scan reads every row's records, so row 1 also read the row-0 file — the test now uses another city as the bystander, and the doc says so.
+Retail (read-only): `deps <retail> --city sf --event circuit:0` → 495 files from 1 source, 0 not provided (the scan also reads every roster `tune/*.info`, as with cars).
+Gates (foreground): see end of file.
+Status: implemented candidate, not independently checked. Open on F29: city-geometry and audio `deps` targets, `resolve`-only misses untraced, AC06 oversize/cycle coverage for other families, declared per-mod classification in examples, AC03 on a real two-process run.
+
+---
+
 # Last iteration — F29-B.3: dependency diagnostics for mods (iteration 7 of the recovery run)
 
 Selection: the F29-B.2 review passed with no blockers. F29 req 4 still lacked "which files did a resource pull in, per source" (named open by the review and PLAN). A mod author could see which source wins a path (`resolve`/`lookup`) but not whether a replacement is actually *read* by a given car, so the slice is the read trace plus one inspector consumer.
@@ -3936,3 +3947,7 @@ candidate, not independently checked.
 --workspace` exit 0 (1962 passed, 0 failed; includes the 2 new
 `worldprops` ledger tests). No retail/graphical run this iteration. No
 test processes left running.
+
+## Gate results (iteration 8)
+
+`cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0 (2650 passed, 0 failed). No test processes left running.
