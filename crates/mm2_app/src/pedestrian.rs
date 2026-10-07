@@ -31,7 +31,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use mm2_content::PedArchetype;
-use mm2_game::ped::{PedAnimator, PedDeform, PedSkin};
+use mm2_game::ped::{PED_STATE_FPS, PedAnimator, PedDeform, PedSkin};
 use mm2_game::{Mm2Vfs, PlayerVehicle, Session, SessionEntity};
 
 use crate::layers::GameLayer;
@@ -156,13 +156,27 @@ pub struct PedShape {
     pub archetype: Arc<PedArchetype>,
     /// The mesh split, computed once per archetype.
     pub groups: Vec<GroupPlan>,
+    /// Ground speed (m/s) at which the authored `WALK` clip keeps the
+    /// feet planted (`PedAnimState::locomotion_speed`); `None` when the
+    /// archetype has no `WALK` state that authors forward travel, so no
+    /// walker is made from it.
+    pub walk_speed: Option<f32>,
 }
 
 impl PedShape {
     /// Plan the mesh split for `archetype`.
     pub fn new(archetype: Arc<PedArchetype>) -> Self {
         let groups = plan_groups(&archetype.skin);
-        Self { archetype, groups }
+        let walk_speed = archetype.animator("WALK").ok().and_then(|a| {
+            let walk = a.states().iter().find(|s| s.name == "WALK")?;
+            let frames = archetype.clip(&walk.clip)?.frames;
+            walk.locomotion_speed(frames, PED_STATE_FPS)
+        });
+        Self {
+            archetype,
+            groups,
+            walk_speed,
+        }
     }
 }
 

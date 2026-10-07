@@ -13,6 +13,7 @@ mod camtrack;
 mod chunked_city;
 mod cnrvoice;
 mod contracts;
+mod crowd;
 mod damage;
 mod damage_fx;
 mod dash;

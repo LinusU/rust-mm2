@@ -523,6 +523,78 @@ pub fn within_bubble(position: [f32; 3], interest: &[[f32; 3]], policy: &WalkPol
     interest.iter().any(|p| dist2(position, *p) <= max2)
 }
 
+/// Indices of the walkable sidewalk curves within `recycle_distance` of
+/// some interest point, in index order (so a draw over them is
+/// deterministic). Pass the result to [`draw_pedestrian`].
+pub fn candidate_curves(
+    net: &SidewalkNet,
+    graph: &NavGraph,
+    interest: &[[f32; 3]],
+    policy: &WalkPolicy,
+) -> Vec<usize> {
+    let mut candidates: BTreeSet<usize> = BTreeSet::new();
+    for p in interest {
+        let query = LaneQuery::of_kind(LaneKind::Sidewalk, policy.recycle_distance);
+        for hit in graph.lane_hits(*p, &query) {
+            if let Some(&i) = net.index.get(&hit.lane.key()) {
+                candidates.insert(i);
+            }
+        }
+    }
+    candidates.into_iter().collect()
+}
+
+/// One placement directive: up to `policy.placement_attempts` random
+/// points on `candidates` curves, the first of which lands inside the
+/// spawn annulus ([`in_walk_band`]) and `policy.spacing` clear of every
+/// `occupied` position wins. `None` when none does — the draw is
+/// dropped, never forced. Shared by the initial plan and the runtime
+/// refill, so both obey the same bounds.
+pub fn draw_pedestrian(
+    net: &SidewalkNet,
+    graph: &NavGraph,
+    candidates: &[usize],
+    rng: &mut NavRng,
+    interest: &[[f32; 3]],
+    occupied: &[[f32; 3]],
+    policy: &WalkPolicy,
+) -> Option<PedSpawn> {
+    let spacing2 = policy.spacing * policy.spacing;
+    for _ in 0..policy.placement_attempts {
+        let &i = rng.pick(candidates)?;
+        let lane = &net.lanes[i];
+        let s = rng.next_f32() * lane.length;
+        let dir = if rng.next_u64() & 1 == 0 {
+            WalkDir::Forward
+        } else {
+            WalkDir::Backward
+        };
+        let variant = rng.next_u64();
+        let walker = Walker {
+            lane: lane.id,
+            s,
+            dir,
+            from: None,
+        };
+        let Some(sample) = net.sample(graph, &walker) else {
+            continue;
+        };
+        if !in_walk_band(sample.position, interest, policy)
+            || occupied
+                .iter()
+                .any(|o| dist2(*o, sample.position) < spacing2)
+        {
+            continue;
+        }
+        return Some(PedSpawn {
+            walker,
+            sample,
+            variant,
+        });
+    }
+    None
+}
+
 /// Draw the initial pedestrian population around `interest` (each
 /// player's position). Candidate curves are the walkable sidewalks
 /// within `recycle_distance` of an interest point; each directive
@@ -552,59 +624,26 @@ pub fn plan_pedestrians(
         issues.push(WalkIssue::NoInterest);
     }
 
-    let mut candidates: BTreeSet<usize> = BTreeSet::new();
-    for p in interest {
-        let query = LaneQuery::of_kind(LaneKind::Sidewalk, policy.recycle_distance);
-        for hit in graph.lane_hits(*p, &query) {
-            if let Some(&i) = net.index.get(&hit.lane.key()) {
-                candidates.insert(i);
-            }
-        }
-    }
-    let candidates: Vec<usize> = candidates.into_iter().collect();
+    let candidates = candidate_curves(net, graph, interest, policy);
 
     let mut rng = NavRng::new(seed);
     let mut spawns: Vec<PedSpawn> = Vec::new();
     let mut dropped = 0usize;
-    let spacing2 = policy.spacing * policy.spacing;
     if !candidates.is_empty() && !interest.is_empty() {
-        'draws: for _ in 0..target {
-            for _ in 0..policy.placement_attempts {
-                let Some(&i) = rng.pick(&candidates) else {
-                    break 'draws;
-                };
-                let lane = &net.lanes[i];
-                let s = rng.next_f32() * lane.length;
-                let dir = if rng.next_u64() & 1 == 0 {
-                    WalkDir::Forward
-                } else {
-                    WalkDir::Backward
-                };
-                let variant = rng.next_u64();
-                let walker = Walker {
-                    lane: lane.id,
-                    s,
-                    dir,
-                    from: None,
-                };
-                let Some(sample) = net.sample(graph, &walker) else {
-                    continue;
-                };
-                if !in_walk_band(sample.position, interest, policy)
-                    || spawns
-                        .iter()
-                        .any(|o| dist2(o.sample.position, sample.position) < spacing2)
-                {
-                    continue;
-                }
-                spawns.push(PedSpawn {
-                    walker,
-                    sample,
-                    variant,
-                });
-                continue 'draws;
+        for _ in 0..target {
+            let occupied: Vec<[f32; 3]> = spawns.iter().map(|s| s.sample.position).collect();
+            match draw_pedestrian(
+                net,
+                graph,
+                &candidates,
+                &mut rng,
+                interest,
+                &occupied,
+                policy,
+            ) {
+                Some(spawn) => spawns.push(spawn),
+                None => dropped += 1,
             }
-            dropped += 1;
         }
     }
 

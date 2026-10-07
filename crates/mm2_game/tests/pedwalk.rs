@@ -11,7 +11,8 @@ use mm2_formats::bai::{
 };
 use mm2_game::pedwalk::{
     MAX_ADVANCE, MIN_WALK_LANE, PedPlan, SidewalkNet, WalkDir, WalkIssue, WalkPolicy, Walker,
-    in_walk_band, plan_pedestrians, target_population, within_bubble,
+    candidate_curves, draw_pedestrian, in_walk_band, plan_pedestrians, target_population,
+    within_bubble,
 };
 use mm2_game::*;
 
@@ -574,4 +575,52 @@ fn the_bubble_tests_follow_every_interest_point() {
     assert!(within_bubble([520.0, 0.0, 0.0], &[a, b], &p), "near b only");
     assert!(!within_bubble([250.0, 0.0, 0.0], &[a, b], &p));
     assert!(!within_bubble([0.0, 0.0, 0.0], &[], &p));
+}
+
+// ---------- the refill draw ----------
+
+#[test]
+fn a_refill_draw_lands_in_the_band_clear_of_everyone_and_is_seeded() {
+    let g = corner_graph();
+    let net = net_of(&g);
+    let p = policy();
+    let here = [[20.0, 0.0, 20.0]];
+    let curves = candidate_curves(&net, &g, &here, &p);
+    assert_eq!(curves.len(), 2, "the far curve is not a candidate");
+
+    let draw = |seed, occupied: &[[f32; 3]]| {
+        draw_pedestrian(
+            &net,
+            &g,
+            &curves,
+            &mut NavRng::new(seed),
+            &here,
+            occupied,
+            &p,
+        )
+    };
+    let a = draw(5, &[]).expect("a free sidewalk offers a spot");
+    assert!(in_walk_band(a.sample.position, &here, &p));
+    assert_eq!(draw(5, &[]), Some(a.clone()), "same stream, same draw");
+
+    // Everything the draw can reach is occupied: nothing is forced.
+    let blanket: Vec<[f32; 3]> = (0..=40)
+        .flat_map(|i| {
+            let t = i as f32;
+            [[8.0, 0.0, t], [8.0 + t, 0.0, 41.0]]
+        })
+        .collect();
+    assert_eq!(draw(5, &blanket), None);
+}
+
+#[test]
+fn a_refill_draw_without_candidates_or_interest_is_none() {
+    let g = corner_graph();
+    let net = net_of(&g);
+    let p = policy();
+    let mut rng = NavRng::new(1);
+    assert!(draw_pedestrian(&net, &g, &[], &mut rng, &[[20.0, 0.0, 20.0]], &[], &p).is_none());
+    let curves = candidate_curves(&net, &g, &[[20.0, 0.0, 20.0]], &p);
+    assert!(draw_pedestrian(&net, &g, &curves, &mut rng, &[], &[], &p).is_none());
+    assert!(candidate_curves(&net, &g, &[], &p).is_empty());
 }

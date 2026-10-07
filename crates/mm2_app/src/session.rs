@@ -306,6 +306,10 @@ pub fn drive_session(
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<crate::worldtraffic::TrafficReplica>();
+            // F19-B.2: the sidewalk crowd (its figures are
+            // `SessionEntity`-stamped and chain-despawn) and its density.
+            commands.remove_resource::<crate::crowd::PedCrowd>();
+            commands.remove_resource::<crate::crowd::PedDensity>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
@@ -1669,6 +1673,16 @@ pub fn load_session_world(
         if let Some(r) = crate::worldtraffic::load_traffic_replica(&vfs.0, &config) {
             commands.insert_resource(r);
         }
+        // F19-B.2: the pedestrian density this session runs under
+        // (pick, else the event's authored `Peds`, else the default);
+        // `maintain_pedestrians` builds the crowd from it on the first
+        // `Playing` frame.
+        commands.insert_resource(crate::crowd::resolve_density(
+            &config,
+            event_race
+                .as_ref()
+                .map(|(def, ..)| def.params.densities.pedestrians),
+        ));
     }
 
     // World built and the player exists — release control. Event

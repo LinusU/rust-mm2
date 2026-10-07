@@ -20,11 +20,11 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, controls, damage,
-    damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
-    netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip, profile,
-    progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence, session,
-    settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, controls, crowd,
+    damage, damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow,
+    net, netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip,
+    profile, progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence,
+    session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1946,6 +1946,10 @@ fn main() {
         (
             pedestrian::spawn_ped_lab.run_if(pedestrian::lab_enabled),
             pedestrian::advance_ped_lab.run_if(pedestrian::lab_enabled),
+            // F19-B.2: the sidewalk crowd — recycle/refill, walk, then
+            // animate (the lab and the crowd never run together).
+            crowd::maintain_pedestrians,
+            crowd::walk_pedestrians,
             pedestrian::animate_pedestrians,
         )
             .chain(),
@@ -2298,9 +2302,17 @@ fn smoke_test(
     mut st: ResMut<SmokeTest>,
     session: Res<Session>,
     aud: Option<Res<audio::AudioReport>>,
+    crowd: Option<Res<crowd::PedCrowd>>,
+    walkers: Query<(), With<crowd::PedWalk>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let world = st.world.clone();
+    // F19-B.2: the sidewalk crowd's live/target population and
+    // placement counters, when the session fielded one.
+    let ped_detail = crowd
+        .filter(|c| c.is_active())
+        .map(|c| c.smoke_detail(walkers.iter().count()))
+        .unwrap_or_default();
     // F07-A.2/B.1: the capture reports its voice path — `s` counting
     // the sinks the output device attached (0 means the mixer never
     // saw the voice, an honest no-device report), `l` the engine loops
@@ -2367,7 +2379,7 @@ fn smoke_test(
                 record(
                     smoke::SmokeStatus::Pass,
                     format!(
-                        "frames=done screenshot={} bytes={bytes}{aud_detail}",
+                        "frames=done screenshot={} bytes={bytes}{aud_detail}{ped_detail}",
                         path.display()
                     ),
                 )
@@ -2392,7 +2404,11 @@ fn smoke_test(
     }
     println!(
         "{}",
-        record(smoke::SmokeStatus::Pass, format!("frames=done{aud_detail}"),).line()
+        record(
+            smoke::SmokeStatus::Pass,
+            format!("frames=done{aud_detail}{ped_detail}"),
+        )
+        .line()
     );
     exit.write(AppExit::Success);
 }

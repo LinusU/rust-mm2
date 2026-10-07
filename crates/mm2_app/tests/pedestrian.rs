@@ -113,7 +113,7 @@ fn shaders() -> Vec<u8> {
     s
 }
 
-fn install() -> tempfile::TempDir {
+pub(crate) fn install() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     let put = |name: &str, bytes: &[u8]| {

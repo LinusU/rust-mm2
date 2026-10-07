@@ -1,3 +1,22 @@
+# Last iteration — F19-B.2: the sidewalk crowd at runtime (new-run iteration 40 of the 2026-10-07 run)
+
+Selection: the iteration-39 review passed with no blockers. F19-B.1 named B.2 (runtime spawn/recycle/walk under density, session reset) as the next
+leg and nothing on screen consumed `densities.pedestrians` or the sidewalk net yet; I took it whole because the pure parts already existed.
+
+Change: `mm2_app::crowd` (new): `PedDensity` + `resolve_density` (pick → event `Peds` → default; inserted in `session.rs` load, removed on unload with
+`PedCrowd`), `PedCrowd` (lazy build on first `Playing` frame), `maintain_pedestrians` (recycle outside bubbles, refill via the planner's draw),
+`walk_pedestrians`. `mm2_game::pedwalk`: `candidate_curves` + `draw_pedestrian` extracted from `plan_pedestrians` (same RNG consumption). `PedShape.walk_speed`.
+Visual smoke record gains `peds=…` fields. Wired in `main.rs` before `animate_pedestrians`.
+
+Evidence: retail sf/london `--frames 3000` → `peds=24/24 … pdrop=0 puns=0` (sf psp=66 prec=42; london psp=57 prec=33 pturn=13); sf capture viewed (walkers on
+the sidewalks). Local only. Tests +13 (see PLAN F19-B.2); mutation check on recycle failed the right tests.
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` rc 0, 2608 passed, 0 failed.
+
+Not done / honest gaps: no collider or reaction (car drives through walkers, F19-AC03), no crossings (UNK-42), no audio, `Remote` client has no crowd,
+height is the BAI curve's, headless runs don't field it, no measured frame-time budget. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — recovery of F19-B.1 review rejection (new-run iteration 39)
 
 Root cause: the iteration-38 review rejected the candidate because the pedestrian ledger row was labelled `DSN-80`, an ID already used by the
