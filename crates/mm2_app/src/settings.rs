@@ -330,6 +330,9 @@ pub struct GraphicsSettings {
     pub audio: AudioLevels,
     /// Size of the on-screen text and HUD.
     pub text_size: TextSize,
+    /// Photosensitivity option: lights that alternate or pulse hold
+    /// steady instead (the cop light bar, the low-time warning).
+    pub reduce_flashing: bool,
 }
 
 /// Step through every value of a setting, wrapping at both ends —
@@ -367,6 +370,25 @@ impl GraphicsSettings {
             text_size: cycle_wrapping(&TextSize::ALL, self.text_size, forward),
             ..self
         }
+    }
+
+    /// These settings with reduced flashing flipped. Both step
+    /// directions flip it — a two-valued row has no ends to wrap past.
+    pub fn toggled_reduce_flashing(self) -> Self {
+        Self {
+            reduce_flashing: !self.reduce_flashing,
+            ..self
+        }
+    }
+
+    /// The flashing row's text.
+    pub fn flashing_row(&self) -> String {
+        let value = if self.reduce_flashing {
+            "Reduced"
+        } else {
+            "Normal"
+        };
+        format!("Flashing: {value}")
     }
 
     /// The text-size row's text.
@@ -580,6 +602,7 @@ mod tests {
                 city: 40,
             },
             text_size: TextSize::Larger,
+            reduce_flashing: true,
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -613,6 +636,35 @@ mod tests {
             TextSize::Normal,
             "a file from before the setting existed"
         );
+    }
+
+    #[test]
+    fn reduced_flashing_toggles_both_ways_and_an_old_file_keeps_it_off() {
+        let d = GraphicsSettings::default();
+        assert!(!d.reduce_flashing, "the shipped look flashes");
+        assert_eq!(d.flashing_row(), "Flashing: Normal");
+        let on = d.toggled_reduce_flashing();
+        assert!(on.reduce_flashing);
+        assert_eq!(on.flashing_row(), "Flashing: Reduced");
+        assert_eq!(on.toggled_reduce_flashing(), d);
+        // Only the flag moved.
+        assert_eq!(
+            GraphicsSettings {
+                reduce_flashing: false,
+                ..on
+            },
+            d
+        );
+        // A file from before the option existed loads with it off.
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(&path, br#"{"text_size":"large"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert!(!loaded.reduce_flashing);
+        assert_eq!(loaded.text_size, TextSize::Large);
+        // A value that is not a bool resets the file like any bad field.
+        std::fs::write(&path, br#"{"reduce_flashing":"yes"}"#).unwrap();
+        assert_eq!(GraphicsSettings::load(&path), d);
     }
 
     #[test]

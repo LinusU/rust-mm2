@@ -288,6 +288,8 @@ pub enum Action {
     CycleAntialiasing,
     /// Cycle the Options screen's on-screen text size.
     CycleTextSize,
+    /// Toggle the Options screen's reduced-flashing accessibility option.
+    CycleFlashing,
     /// Step one of the Options screen's volume levels.
     CycleAudio(AudioLevel),
     /// Put every graphics and audio setting back to its default.
@@ -1005,6 +1007,7 @@ impl MenuShell {
             | Action::CycleShadows
             | Action::CycleAntialiasing
             | Action::CycleTextSize
+            | Action::CycleFlashing
             | Action::CycleAudio(_)
             | Action::CycleSteerDeadzone
             | Action::CycleTriggerDeadzone
@@ -1203,6 +1206,9 @@ impl MenuShell {
             }
             Action::CycleTextSize => {
                 self.set_settings(data, data.settings.cycled_text_size(forward), effects);
+            }
+            Action::CycleFlashing => {
+                self.set_settings(data, data.settings.toggled_reduce_flashing(), effects);
             }
             Action::CycleAudio(level) => {
                 self.set_settings(data, data.settings.stepped_audio(*level, forward), effects);
@@ -2287,6 +2293,7 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         row(s.shadows_row(), Ok(()), Action::CycleShadows),
         row(s.antialiasing_row(), Ok(()), Action::CycleAntialiasing),
         row(s.text_size_row(), Ok(()), Action::CycleTextSize),
+        row(s.flashing_row(), Ok(()), Action::CycleFlashing),
     ];
     rows.extend(
         AudioLevel::ALL.map(|level| row(s.audio.row(level), Ok(()), Action::CycleAudio(level))),

@@ -571,12 +571,15 @@ pub fn toggle_headlights(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<Headlig
 /// Glow-quad visibility from the owning vehicle's state: brake lights on
 /// pedal, reverse lights while reversing, head/tail lights on `L`, a
 /// cop's light-bar flares alternating halves while its
-/// [`EmergencyLights`] are on.
+/// [`EmergencyLights`] are on — or both halves held lit under the
+/// reduced-flashing option, which has nothing alternate.
 pub fn update_glows(
     lights: Res<HeadlightsOn>,
+    settings: Option<Res<crate::settings::GraphicsSettings>>,
     vehicles: Query<(&VehicleState, &VehicleInput, Option<&EmergencyLights>)>,
     mut glows: Query<(&GlowPart, &mut Visibility, &ChildOf)>,
 ) {
+    let steady = settings.is_some_and(|s| s.reduce_flashing);
     for (glow, mut vis, parent) in &mut glows {
         let Ok((state, input, emergency)) = vehicles.get(parent.parent()) else {
             continue;
@@ -586,7 +589,7 @@ pub fn update_glows(
             GlowKind::Headlight | GlowKind::Taillight => lights.0,
             GlowKind::Brake => braking && state.direction == DriveDirection::Forward,
             GlowKind::Reverse => braking && state.direction == DriveDirection::Reverse,
-            GlowKind::Siren(side) => emergency.is_some_and(|e| e.lit_side() == side),
+            GlowKind::Siren(side) => emergency.is_some_and(|e| steady || e.lit_side() == side),
         };
         let want = if show {
             Visibility::Visible

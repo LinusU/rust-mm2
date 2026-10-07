@@ -2152,6 +2152,30 @@ fn low_time_warning_pulses_on_the_race_clock() {
     assert_eq!(warning(&mut app).0, Visibility::Hidden);
 }
 
+/// Reduced flashing keeps the same arming and hiding but never takes
+/// the dim phase: the banner is bright through the whole window.
+#[test]
+fn reduced_flashing_holds_the_low_time_warning_bright() {
+    let def = timed_def(0, LOW_TIME_TICKS + 40);
+    let mut app = race_app(event_config(), def.clone());
+    app.insert_resource(mm2_app::settings::GraphicsSettings {
+        reduce_flashing: true,
+        ..Default::default()
+    });
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 22);
+    assert_eq!(warning(&mut app), (Visibility::Visible, LOW_TIME_BRIGHT));
+    // The default run turns dim 61 ticks in and bright again at 121.
+    for _ in 0..4 {
+        run(&mut app, 30);
+        assert_eq!(
+            warning(&mut app),
+            (Visibility::Visible, LOW_TIME_BRIGHT),
+            "never the dim half"
+        );
+    }
+}
+
 /// The cue waits for `Running`: a race whose whole limit sits under
 /// the threshold still shows nothing while the countdown holds the
 /// clock at zero.

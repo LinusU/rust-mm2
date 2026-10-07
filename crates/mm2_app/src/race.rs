@@ -780,11 +780,13 @@ pub fn spawn_race_warning(commands: &mut Commands, owner: SessionEntity) {
 /// no timed race is live — stale or `Complete` races, countdowns,
 /// untimed definitions, or an already-resolved local participant.
 /// While the `H` HUD gate is off the pulse keeps computing but stays
-/// hidden (F22-A.3).
+/// hidden (F22-A.3). Under the reduced-flashing option the banner stays
+/// on [`LOW_TIME_BRIGHT`] for the whole window instead of pulsing.
 pub fn update_race_warning(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
     hud: Res<crate::hud::HudVisible>,
+    settings: Option<Res<crate::settings::GraphicsSettings>>,
     participants: Query<(&Player, &RaceProgress)>,
     mut warning: Query<(&mut Visibility, &mut TextColor), With<LowTimeWarning>>,
 ) {
@@ -802,12 +804,13 @@ pub fn update_race_warning(
         (Some(race), true) => race.time_remaining(),
         _ => None,
     };
+    let steady = settings.is_some_and(|s| s.reduce_flashing);
     for (mut vis, mut color) in &mut warning {
         match remaining {
             Some(t) if t <= LOW_TIME_TICKS && hud.0 => {
                 *vis = Visibility::Visible;
                 let phase = ((LOW_TIME_TICKS - t) / LOW_TIME_FLASH_TICKS) % 2;
-                color.0 = if phase == 0 {
+                color.0 = if phase == 0 || steady {
                     LOW_TIME_BRIGHT
                 } else {
                     LOW_TIME_DIM

@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 use mm2_app::car_visual::{self, GlowKind, GlowPart, HeadlightsOn, update_glows};
+use mm2_app::settings::GraphicsSettings;
 use mm2_assets::Vfs;
 use mm2_content::model::{Lod, MeshGroup, ModelPart, PartRole, VehicleModel};
 use mm2_game::{EmergencyLights, LIGHT_BAR_HALF_PERIOD};
@@ -179,4 +180,41 @@ fn the_flash_clock_lights_one_half_then_the_other_then_none_when_removed() {
     app.world_mut().entity_mut(car).remove::<EmergencyLights>();
     app.update();
     assert!(lit(&mut app).is_empty(), "signals off, bar dark");
+}
+
+/// The reduced-flashing option holds the whole bar lit — nothing
+/// alternates — for as long as the signals are on, and the bar still
+/// goes dark when they stop. Switching it back restores the flash.
+#[test]
+fn reduced_flashing_holds_every_flare_lit_while_the_signals_are_on() {
+    let (mut app, car) = app_with_car();
+    app.insert_resource(GraphicsSettings {
+        reduce_flashing: true,
+        ..GraphicsSettings::default()
+    });
+    app.world_mut()
+        .entity_mut(car)
+        .insert(EmergencyLights::default());
+    let all = vec![-0.56, -0.19, 0.19, 0.58];
+    for _ in 0..4 {
+        app.update();
+        assert_eq!(lit(&mut app), all, "both halves lit, whatever the phase");
+        app.world_mut()
+            .get_mut::<EmergencyLights>(car)
+            .unwrap()
+            .advance(LIGHT_BAR_HALF_PERIOD + 0.01);
+    }
+
+    app.world_mut().entity_mut(car).remove::<EmergencyLights>();
+    app.update();
+    assert!(lit(&mut app).is_empty(), "steady is not stuck on");
+
+    app.world_mut()
+        .resource_mut::<GraphicsSettings>()
+        .reduce_flashing = false;
+    app.world_mut()
+        .entity_mut(car)
+        .insert(EmergencyLights::default());
+    app.update();
+    assert_eq!(lit(&mut app), vec![-0.56, -0.19], "the flash is back");
 }

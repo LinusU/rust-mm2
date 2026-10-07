@@ -73,6 +73,8 @@ enum PauseAction {
     CycleAntialiasing,
     /// Cycle the on-screen text size.
     CycleTextSize,
+    /// Toggle reduced flashing.
+    CycleFlashing,
     /// Step one of the volume levels.
     CycleAudio(AudioLevel),
     /// Put the graphics and audio settings back to their defaults.
@@ -130,6 +132,7 @@ fn pause_rows(
                     Ok(PauseAction::CycleAntialiasing),
                 ),
                 row(settings.text_size_row(), Ok(PauseAction::CycleTextSize)),
+                row(settings.flashing_row(), Ok(PauseAction::CycleFlashing)),
             ];
             rows.extend(AudioLevel::ALL.map(|level| {
                 row(
@@ -205,7 +208,7 @@ fn pause_rows(
 const OPTIONS_ROW: usize = 2;
 /// Index of the `Driving controls` row on the graphics page — where focus
 /// returns when the controls page closes.
-const CONTROLS_ROW: usize = 3 + AudioLevel::ALL.len() + 1;
+const CONTROLS_ROW: usize = 4 + AudioLevel::ALL.len() + 1;
 
 /// The pause overlay's presentation state — focus, a status line and a
 /// redraw latch. Session flow itself stays in `Session`/`SessionControl`;
@@ -403,6 +406,7 @@ pub fn pause_input(
                     PauseAction::CycleShadows
                     | PauseAction::CycleAntialiasing
                     | PauseAction::CycleTextSize
+                    | PauseAction::CycleFlashing
                     | PauseAction::CycleAudio(_)
                     | PauseAction::ResetGraphics
                     | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
@@ -480,6 +484,7 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
         PauseAction::CycleShadows => settings.cycled_shadows(forward),
         PauseAction::CycleAntialiasing => settings.cycled_antialiasing(forward),
         PauseAction::CycleTextSize => settings.cycled_text_size(forward),
+        PauseAction::CycleFlashing => settings.toggled_reduce_flashing(),
         PauseAction::CycleAudio(level) => settings.stepped_audio(level, forward),
         PauseAction::ResetGraphics => GraphicsSettings::default(),
         _ => return,

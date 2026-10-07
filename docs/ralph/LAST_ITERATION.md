@@ -1,3 +1,24 @@
+# Last iteration — F23-B.5: reduced-flashing option (new-run iteration 24 of the 2026-10-07 run)
+
+Selection: the iteration-23 review passed with no blockers. F23 req 4 still listed "reduced motion" open. Audit: the game has no camera
+shake, bob or FOV kick, so the only self-driven alternating light is the cop light bar (side swap every 0.25 s) and the pulsing
+`LOW TIME` banner (bright/dim every 0.5 s). A photosensitivity option over exactly those two is the honest reading; subtitles have no
+text source (no transcripts exist) so they stay open.
+
+Change: `GraphicsSettings.reduce_flashing` (persisted, default off, old files load off); Flashing row after Text size on the menu
+Options screen and the pause graphics page (`CycleFlashing`, either arrow/Enter toggles; Reset covers it). `update_glows` holds both bar
+halves lit and `update_race_warning` holds the banner bright when it is set (both read `Option<Res<GraphicsSettings>>`). Row indices in
+`tests/menu.rs`/`tests/session.rs` and `pause::CONTROLS_ROW` shifted by one. DSN-81, README, PLAN updated.
+
+Tests: `settings::reduced_flashing_toggles_both_ways_and_an_old_file_keeps_it_off` (+ round trip), `light_bar::reduced_flashing_holds_every_flare_lit_while_the_signals_are_on`,
+`race::reduced_flashing_holds_the_low_time_warning_bright`, `menu::the_flashing_row_toggles_persists_and_resets`, the pause options test.
+
+Not shown: no capture of the steady bar; siren audio, the `GO!` flash and any flashing in original textures are not covered.
+
+Gates (foreground): fmt 0; clippy --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` 2501 passed, 0 failed. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F23-B.4 review fix: minimap bezel under UiScale (new-run iteration 23 of the 2026-10-07 run)
 
 Root cause (implementation): iteration 22's review rejected the text-size setting because `HudMapFrame` positions its bezel with
