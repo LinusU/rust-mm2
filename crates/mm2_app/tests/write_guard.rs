@@ -86,3 +86,63 @@ fn a_profile_dir_beside_the_install_is_accepted() {
     assert!(saves.is_dir(), "the profile store was not created");
     let _ = out;
 }
+
+/// Run with every OS user-data base pointed at `home`, so the *default*
+/// profile root resolves there on any platform.
+fn run_with_home(install: &Path, home: &Path, extra: &[&std::ffi::OsStr]) -> (Output, String) {
+    let out = Command::new(MM2_EXE)
+        .arg("--mm2-path")
+        .arg(install)
+        .args(["--headless", "--dev-world", "--frames", "5"])
+        .args(extra)
+        .env_remove("RUST_LOG")
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home)
+        .env("APPDATA", home)
+        .env("USERPROFILE", home)
+        .output()
+        .expect("spawn mm2");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out, log)
+}
+
+#[test]
+fn a_default_profile_root_inside_the_install_is_refused_and_nothing_is_written() {
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("MM2");
+    std::fs::create_dir(&install).unwrap();
+    let home = install.join("home");
+    let (out, log) = run_with_home(&install, &home, &["--new-profile".as_ref(), "Ada".as_ref()]);
+    assert_eq!(out.status.code(), Some(2), "not refused:\n{log}");
+    assert!(
+        log.contains("original installation"),
+        "no reason given:\n{log}"
+    );
+    assert!(
+        !home.exists(),
+        "the default store was created in the install"
+    );
+}
+
+#[test]
+fn a_default_profile_root_outside_the_install_still_binds() {
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("MM2");
+    std::fs::create_dir(&install).unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let (_, log) = run_with_home(&install, &home, &["--new-profile".as_ref(), "Ada".as_ref()]);
+    assert!(
+        !log.contains("write destination refused")
+            && !log.contains("default profile store refused"),
+        "a user location was refused:\n{log}"
+    );
+    assert!(
+        log.contains("driver profile bound"),
+        "no profile bound:\n{log}"
+    );
+}

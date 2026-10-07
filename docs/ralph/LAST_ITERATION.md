@@ -1,3 +1,29 @@
+# Last iteration — F30-B.4: the default profile root against the protected dirs (new-run iteration 36 of this runner)
+
+Selection: previous review passed, no blockers. Its open items for F30-AC05 included
+"default profile root vs. protected dirs"; that is the smallest ready one (`--mods` is a
+read-only mount, so it is not a write and is not guarded).
+
+Change: `profile::guarded_store_root` (+ private `guard_root`) checks the default OS
+user-data root with `write_guard::check`. `main.rs` resolves `profile_root` once, after the
+explicit-destination guards, and the three former `store_root` call sites (profile bind,
+menu store, `settings.json`) use it. A refused default root logs the reason and means no
+store; an explicit profile request then exits 2 through the existing path. Docs:
+`architecture.md` "Where the app writes", PLAN F30-B.4.
+
+Tests: 3 unit (`profile::guard_tests`), 2 process in `tests/write_guard.rs` (all OS
+data-dir env vars pointed into the install → exit 2, nothing created; pointed outside →
+profile binds). Red check: with the `check` call removed the install-refusal process test
+fails; restored.
+
+Gates (foreground, exit statuses checked): fmt --check exit 0; clippy --locked -D warnings clean; test --locked --workspace exit 0 (2418 passed, 0 failed). No test processes left running.
+
+Not verified / open: no real macOS/Windows/Linux install layouts; no packaging step;
+case-insensitive filesystems; dangling symlink components. AC05 advanced, not complete.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F30-B.3: the screenshot hotkey and `link/..` gaps of B.2 (new-run iteration 35 of this runner)
 
 Selection: previous review passed with no blockers; its first two verification gaps

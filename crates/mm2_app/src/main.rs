@@ -643,6 +643,20 @@ fn main() {
             warn!("no writable screenshot directory outside the install; Cmd/Ctrl+P is disabled")
         }
     }
+    // The default user-data root is checked too: an odd HOME/XDG_DATA_HOME
+    // can put it inside the install. A refused root means no store at all
+    // (an explicit `--profile-dir` was already refused above).
+    let profile_root = match profile::guarded_store_root(
+        cli.profile_dir.clone(),
+        &write_guards,
+        cwd.as_deref(),
+    ) {
+        Ok(root) => root,
+        Err(refusal) => {
+            error!(error = %refusal, "default profile store refused; running without persistence");
+            None
+        }
+    };
     let mut has_mods = false;
     if let Some(mods) = &cli.mods {
         match mount_mods(&mut vfs, mods) {
@@ -763,7 +777,7 @@ fn main() {
     let active_profile = if cli.no_profile || (smoke_requested && !profile_explicit) {
         None
     } else {
-        match profile::store_root(cli.profile_dir.clone()) {
+        match profile_root.clone() {
             Some(root) => match mm2_game::ProfileStore::open(&root) {
                 Ok(store) => {
                     let request = profile_request.unwrap_or(profile::ProfileRequest::Active);
@@ -1271,7 +1285,7 @@ fn main() {
             .as_ref()
             .map(|s| s.store.clone())
             .or_else(|| {
-                profile::store_root(cli.profile_dir.clone()).and_then(|root| {
+                profile_root.clone().and_then(|root| {
                     match mm2_game::ProfileStore::open(&root) {
                         Ok(store) => Some(store),
                         Err(e) => {
@@ -1290,7 +1304,7 @@ fn main() {
     // names one — a capture must not depend on, or change, how the
     // person who ran it plays. `--shadows`/`--msaa` override for the run.
     let settings_path = (!smoke_requested || cli.profile_dir.is_some())
-        .then(|| profile::store_root(cli.profile_dir.clone()))
+        .then(|| profile_root.clone())
         .flatten()
         .map(|root| settings::settings_path(&root));
     let mut graphics = settings_path

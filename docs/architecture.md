@@ -150,8 +150,14 @@ Cmd/Ctrl+P screenshot directory (`screenshots/` under the working directory)
 goes through the same guard: when the working directory is protected it falls
 back to `<user-data>/rust-mm2/screenshots`, and with neither allowed the hotkey
 logs a refusal and writes nothing.
-Not covered: the default root is not re-checked against those directories, and
-`--vehicle-config`/`--bot-route` are inputs, not writes.
+The default user-data root is checked against the same directories
+(`profile::guarded_store_root`, one resolution in `main.rs` feeding the profile
+bind, the menu store and `settings.json`): if an unusual `HOME`/`XDG_DATA_HOME`/
+`APPDATA` puts it inside the install, the refusal is logged and the run goes on
+without any store — and exits 2 when a profile was explicitly requested.
+Not covered: `--mods` (a read-only mount; nothing is written to it) and
+`--vehicle-config`/`--bot-route` are inputs, not writes; real
+macOS/Windows/Linux install layouts are untested.
 
 ## Vehicle simulation
 

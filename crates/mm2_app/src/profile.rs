@@ -326,3 +326,68 @@ pub fn note_session_start(
 pub fn store_root(dir: Option<PathBuf>) -> Option<PathBuf> {
     dir.or_else(ProfileStore::default_root)
 }
+
+/// [`store_root`] after the write guard (F30-AC05): a root inside a
+/// protected directory — an explicit `--profile-dir`, or a default
+/// user-data directory that an unusual `HOME`/`XDG_DATA_HOME`/`APPDATA`
+/// places inside the install — is a refusal, never a store.
+pub fn guarded_store_root(
+    dir: Option<PathBuf>,
+    protected: &[crate::write_guard::Protected],
+    cwd: Option<&std::path::Path>,
+) -> Result<Option<PathBuf>, crate::write_guard::Refused> {
+    guard_root(store_root(dir), protected, cwd)
+}
+
+fn guard_root(
+    root: Option<PathBuf>,
+    protected: &[crate::write_guard::Protected],
+    cwd: Option<&std::path::Path>,
+) -> Result<Option<PathBuf>, crate::write_guard::Refused> {
+    if let Some(root) = &root {
+        crate::write_guard::check("the profile store", root, protected, cwd)?;
+    }
+    Ok(root)
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::write_guard::protected_dirs;
+
+    #[test]
+    fn a_default_root_inside_the_install_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("MM2");
+        std::fs::create_dir(&install).unwrap();
+        let guards = protected_dirs(Some(&install), None, None);
+        let inside = install.join("home/profiles");
+        let err = guard_root(Some(inside), &guards, None).unwrap_err();
+        assert_eq!(err.what, "the profile store");
+        assert_eq!(err.inside.label, "original installation");
+    }
+
+    #[test]
+    fn a_root_elsewhere_and_no_root_pass_through() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("MM2");
+        std::fs::create_dir(&install).unwrap();
+        let guards = protected_dirs(Some(&install), None, None);
+        let beside = root.path().join("saves");
+        assert_eq!(
+            guard_root(Some(beside.clone()), &guards, None).unwrap(),
+            Some(beside)
+        );
+        assert_eq!(guard_root(None, &guards, None).unwrap(), None);
+    }
+
+    #[test]
+    fn an_explicit_dir_replaces_the_default_before_the_check() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("MM2");
+        std::fs::create_dir(&install).unwrap();
+        let guards = protected_dirs(Some(&install), None, None);
+        let err = guarded_store_root(Some(install.join("saves")), &guards, None).unwrap_err();
+        assert_eq!(err.inside.label, "original installation");
+    }
+}
