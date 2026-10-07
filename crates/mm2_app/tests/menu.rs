@@ -3089,6 +3089,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
             "Display: Windowed",
             "VSync: On",
             "Field of view: Authored",
+            "Flip recovery: Automatic",
             "Master volume: 100%",
             "Sound effects volume: 100%",
             "Commentary volume: 100%",
@@ -3098,7 +3099,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         ]
     );
     assert_eq!(
-        shell(&app).rows[11].enabled,
+        shell(&app).rows[12].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3149,7 +3150,7 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[11].enabled.is_ok());
+    assert!(shell(&app).rows[12].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
@@ -3162,7 +3163,7 @@ fn option_changes_apply_persist_and_reset() {
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[11].enabled.is_err());
+    assert!(shell(&app).rows[12].enabled.is_err());
 }
 
 /// The volume rows step by ten percent, wrap at both ends, reach the
@@ -3184,15 +3185,15 @@ fn volume_rows_step_wrap_persist_and_reset() {
 
     focus_row(&mut app, "Master volume");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[7].text, "Master volume: 90%");
+    assert_eq!(shell(&app).rows[8].text, "Master volume: 90%");
     assert_eq!(app.world().resource::<GraphicsSettings>().audio.master, 90);
     assert_eq!(GraphicsSettings::load(&path).audio.master, 90);
     // Right from the top wraps to silence, Left from silence to the top.
     press(&mut app, KeyCode::ArrowRight);
     press(&mut app, KeyCode::ArrowRight);
-    assert_eq!(shell(&app).rows[7].text, "Master volume: 0%");
+    assert_eq!(shell(&app).rows[8].text, "Master volume: 0%");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[7].text, "Master volume: 100%");
+    assert_eq!(shell(&app).rows[8].text, "Master volume: 100%");
 
     // Each bus row moves its own level and nothing else.
     focus_row(&mut app, "City sounds");
@@ -3203,17 +3204,17 @@ fn volume_rows_step_wrap_persist_and_reset() {
         (audio.master, audio.effects, audio.commentary, audio.city),
         (100, 100, 100, 80)
     );
-    assert_eq!(shell(&app).rows[10].text, "City sounds volume: 80%");
+    assert_eq!(shell(&app).rows[11].text, "City sounds volume: 80%");
 
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert_eq!(shell(&app).rows[10].text, "City sounds volume: 100%");
+    assert_eq!(shell(&app).rows[11].text, "City sounds volume: 100%");
 }
 
-/// The text-size row steps 100/125/150% and wraps, reaches the live
-/// `GraphicsSettings` and the file at once, moves no other setting, and
-/// the reset row puts it back.
+/// The field-of-view row steps Authored/+10°/+20° and wraps, reaches the
+/// live `GraphicsSettings` and the file at once, moves no other setting,
+/// and the reset row puts it back.
 #[test]
 fn the_field_of_view_row_steps_wraps_persists_and_resets() {
     let tmp = install();
@@ -3270,6 +3271,56 @@ fn the_field_of_view_row_steps_wraps_persists_and_resets() {
     assert_eq!(row(&app), "Field of view: Authored");
 }
 
+/// The flip-recovery row toggles between Automatic and Manual, reaches
+/// the live `GraphicsSettings` and the file at once, moves no other
+/// setting, and the reset row puts the assist back on.
+#[test]
+fn the_flip_recovery_row_toggles_persists_and_resets() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    focus_row(&mut app, "Flip recovery");
+    let row = |app: &App| {
+        shell(app)
+            .rows
+            .iter()
+            .find(|r| r.text.starts_with("Flip recovery"))
+            .map(|r| r.text.clone())
+            .expect("the Options screen lists a flip-recovery row")
+    };
+    assert_eq!(row(&app), "Flip recovery: Automatic");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(row(&app), "Flip recovery: Manual");
+    assert!(!app.world().resource::<GraphicsSettings>().auto_right);
+    let saved = GraphicsSettings::load(&path);
+    assert!(!saved.auto_right);
+    assert_eq!(
+        GraphicsSettings {
+            auto_right: true,
+            ..saved
+        },
+        GraphicsSettings::default(),
+        "only the assist moved"
+    );
+
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    assert_eq!(row(&app), "Flip recovery: Automatic");
+}
+
+/// The text-size row steps 100/125/150% and wraps, reaches the live
+/// `GraphicsSettings` and the file at once, moves no other setting, and
+/// the reset row puts it back.
 #[test]
 fn the_text_size_row_steps_wraps_persists_and_resets() {
     let tmp = install();
@@ -4142,7 +4193,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..12 {
+    for _ in 0..13 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);

@@ -8,7 +8,7 @@ use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
     DriveDirection, EngineImpairment, GyroSpin, PreStepVelocity, ResetAuthority, ResetPending,
-    ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    ResetVehicle, SelfRightOptOut, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -815,6 +815,7 @@ type SelfRightQuery<'w, 's> = Query<
         &'static Position,
         &'static Rotation,
         &'static LinearVelocity,
+        Has<SelfRightOptOut>,
     ),
 >;
 
@@ -1014,7 +1015,8 @@ impl UprightLanding<'_, '_> {
 /// would fight the next `Snap` for its pose. There the host's own
 /// detectors resolve the flip and the epoch carries it back, so this
 /// system stays inert rather than accumulating `upended_for` toward a
-/// teleport it must not make.
+/// teleport it must not make. A car carrying [`SelfRightOptOut`] is left
+/// alone the same way.
 pub fn vehicle_self_right(
     time: Res<Time>,
     authority: Res<ResetAuthority>,
@@ -1026,9 +1028,9 @@ pub fn vehicle_self_right(
     if dt <= 0.0 || !authority.0 {
         return;
     }
-    for (entity, vehicle, mut state, pos, rot, lv) in &mut vehicles {
+    for (entity, vehicle, mut state, pos, rot, lv, opted_out) in &mut vehicles {
         let delay = vehicle.config.assists.self_right_delay;
-        if delay <= 0.0 {
+        if delay <= 0.0 || opted_out {
             state.upended_for = 0.0;
             continue;
         }

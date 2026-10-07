@@ -296,6 +296,8 @@ pub enum Action {
     CycleVsync,
     /// Cycle the Options screen's camera field of view.
     CycleFieldOfView,
+    /// Toggle the Options screen's automatic flip recovery.
+    ToggleAutoRight,
     /// Step one of the Options screen's volume levels.
     CycleAudio(AudioLevel),
     /// Put every graphics and audio setting back to its default.
@@ -1027,6 +1029,7 @@ impl MenuShell {
             | Action::CycleDisplay
             | Action::CycleVsync
             | Action::CycleFieldOfView
+            | Action::ToggleAutoRight
             | Action::CycleAudio(_)
             | Action::CycleSteerDeadzone
             | Action::CycleTriggerDeadzone
@@ -1231,6 +1234,9 @@ impl MenuShell {
             }
             Action::CycleFieldOfView => {
                 self.set_settings(data, data.settings.cycled_field_of_view(forward), effects);
+            }
+            Action::ToggleAutoRight => {
+                self.set_settings(data, data.settings.toggled_auto_right(), effects);
             }
             Action::CycleDisplay => {
                 self.set_settings(data, data.settings.cycled_display(forward), effects);
@@ -2325,6 +2331,7 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         row(s.display_row(), Ok(()), Action::CycleDisplay),
         row(s.vsync_row(), Ok(()), Action::CycleVsync),
         row(s.field_of_view_row(), Ok(()), Action::CycleFieldOfView),
+        row(s.auto_right_row(), Ok(()), Action::ToggleAutoRight),
     ];
     rows.extend(
         AudioLevel::ALL.map(|level| row(s.audio.row(level), Ok(()), Action::CycleAudio(level))),

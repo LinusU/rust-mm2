@@ -35,6 +35,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::dash::AuthoredFov;
+use mm2_game::PlayerVehicle;
+use mm2_vehicle::SelfRightOptOut;
 
 /// File name inside the settings directory.
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -430,6 +432,10 @@ pub struct GraphicsSettings {
     pub vsync: bool,
     /// How much wider than authored the chase and cockpit cameras look.
     pub field_of_view: FieldOfView,
+    /// Right an upended car on its own once it has rested (the modern
+    /// self-righting assist); off leaves the manual reset key and the
+    /// authored stuck recovery.
+    pub auto_right: bool,
 }
 
 impl Default for GraphicsSettings {
@@ -443,6 +449,7 @@ impl Default for GraphicsSettings {
             display: DisplayMode::default(),
             vsync: true,
             field_of_view: FieldOfView::default(),
+            auto_right: true,
         }
     }
 }
@@ -501,6 +508,15 @@ impl GraphicsSettings {
         }
     }
 
+    /// These settings with the self-righting assist flipped (either step
+    /// direction flips it).
+    pub fn toggled_auto_right(self) -> Self {
+        Self {
+            auto_right: !self.auto_right,
+            ..self
+        }
+    }
+
     /// These settings with the display mode stepped.
     pub fn cycled_display(self, forward: bool) -> Self {
         Self {
@@ -532,6 +548,18 @@ impl GraphicsSettings {
     /// The field-of-view row's text.
     pub fn field_of_view_row(&self) -> String {
         format!("Field of view: {}", self.field_of_view.label())
+    }
+
+    /// The flip-recovery row's text.
+    pub fn auto_right_row(&self) -> String {
+        format!(
+            "Flip recovery: {}",
+            if self.auto_right {
+                "Automatic"
+            } else {
+                "Manual"
+            }
+        )
     }
 
     /// The display row's text.
@@ -629,6 +657,7 @@ impl GraphicsSettings {
             display: pick(&map, "display", d.display, &mut issues),
             vsync: pick(&map, "vsync", d.vsync, &mut issues),
             field_of_view: pick(&map, "field_of_view", d.field_of_view, &mut issues),
+            auto_right: pick(&map, "auto_right", d.auto_right, &mut issues),
         };
         Ok((out, issues))
     }
@@ -906,6 +935,29 @@ pub fn apply_cockpit_field_of_view(
     }
 }
 
+/// Keep the player car's [`SelfRightOptOut`] in step with
+/// [`GraphicsSettings::auto_right`]. Runs every frame rather than on a
+/// settings change so a car spawned later (a new event, a respawned
+/// session) picks the choice up too; the marker is inserted or removed
+/// only when it disagrees, so a settled frame writes nothing.
+pub fn apply_auto_right(
+    settings: Res<GraphicsSettings>,
+    players: Query<(Entity, Has<SelfRightOptOut>), With<PlayerVehicle>>,
+    mut commands: Commands,
+) {
+    for (car, opted_out) in &players {
+        match (settings.auto_right, opted_out) {
+            (false, false) => {
+                commands.entity(car).insert(SelfRightOptOut);
+            }
+            (true, true) => {
+                commands.entity(car).remove::<SelfRightOptOut>();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Push [`GraphicsSettings::display`] and [`GraphicsSettings::vsync`]
 /// onto the primary window when the settings change. Each field is
 /// written only when it differs, so a frame that changes something else
@@ -947,6 +999,7 @@ impl Plugin for GraphicsSettingsPlugin {
                     apply_text_size,
                     apply_display_settings,
                     apply_cockpit_field_of_view,
+                    apply_auto_right,
                 ),
             );
     }
@@ -1066,6 +1119,7 @@ mod tests {
             display: DisplayMode::Fullscreen,
             vsync: false,
             field_of_view: FieldOfView::Wide,
+            auto_right: false,
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -1404,6 +1458,56 @@ mod tests {
             std::fs::write(&path, bad).unwrap();
             assert_eq!(GraphicsSettings::load(&path), d);
         }
+    }
+
+    #[test]
+    fn flip_recovery_toggles_round_trips_and_recovers_a_bad_value() {
+        let d = GraphicsSettings::default();
+        assert!(d.auto_right, "the shipped assist is on");
+        assert_eq!(d.auto_right_row(), "Flip recovery: Automatic");
+        let manual = d.toggled_auto_right();
+        assert!(!manual.auto_right);
+        assert_eq!(manual.auto_right_row(), "Flip recovery: Manual");
+        assert_eq!(manual.toggled_auto_right(), d);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        manual.save(&path).unwrap();
+        assert_eq!(GraphicsSettings::load(&path), manual);
+
+        std::fs::write(&path, br#"{"auto_right":"sometimes","text_size":"large"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert!(loaded.auto_right, "a bad value recovers to the default");
+        assert_eq!(loaded.text_size, TextSize::Large, "the rest survives");
+        // A file from before the option existed keeps the assist on.
+        std::fs::write(&path, br#"{"shadows":"low"}"#).unwrap();
+        assert!(GraphicsSettings::load(&path).auto_right);
+    }
+
+    #[test]
+    fn the_player_car_follows_the_flip_recovery_setting_including_later_spawns() {
+        let mut app = App::new();
+        app.add_plugins(GraphicsSettingsPlugin);
+        let player = app.world_mut().spawn(PlayerVehicle).id();
+        let other = app.world_mut().spawn_empty().id();
+        app.update();
+        let opted = |app: &App, e| app.world().get::<SelfRightOptOut>(e).is_some();
+        assert!(!opted(&app, player), "the assist is on by default");
+
+        *app.world_mut().resource_mut::<GraphicsSettings>() =
+            GraphicsSettings::default().toggled_auto_right();
+        let next = app.world_mut().spawn(PlayerVehicle).id();
+        app.update();
+        assert!(opted(&app, player));
+        assert!(
+            opted(&app, next),
+            "a car spawned after the choice follows it"
+        );
+        assert!(!opted(&app, other), "only the player's car is affected");
+
+        *app.world_mut().resource_mut::<GraphicsSettings>() = GraphicsSettings::default();
+        app.update();
+        assert!(!opted(&app, player) && !opted(&app, next));
     }
 
     #[test]

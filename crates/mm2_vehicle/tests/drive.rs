@@ -14,7 +14,8 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_vehicle::vehicle::{DriveDirection, VehicleInput, VehicleState};
 use mm2_vehicle::{
-    ResetAuthority, ResetVehicle, Teleported, VehicleConfig, VehiclePlugin, vehicle_bundle,
+    ResetAuthority, ResetVehicle, SelfRightOptOut, Teleported, VehicleConfig, VehiclePlugin,
+    vehicle_bundle,
 };
 
 const FRAMES_PER_SECOND: usize = 60;
@@ -578,6 +579,38 @@ fn an_upended_car_stays_down_without_reset_authority() {
         app.world().get::<Teleported>(car).is_none(),
         "no teleport happened under a remote authority"
     );
+    assert_finite(&app, car);
+}
+
+/// A car carrying `SelfRightOptOut` (the player's "flip recovery:
+/// manual" choice) stays on its roof past the delay and arms nothing;
+/// lifting the opt-out lets the very same assist flop it.
+#[test]
+fn an_upended_car_stays_down_while_it_opts_out_of_the_assist() {
+    let (mut app, car) = test_app();
+    app.world_mut().entity_mut(car).insert(SelfRightOptOut);
+    let delay = VehicleConfig::default().assists.self_right_delay;
+    let frames = (FRAMES_PER_SECOND as f32 * (delay + 1.5)) as usize;
+
+    {
+        let flipped = Quat::from_rotation_z(std::f32::consts::PI);
+        let world = app.world_mut();
+        world.get_mut::<Rotation>(car).unwrap().0 = flipped;
+        world.get_mut::<Transform>(car).unwrap().rotation = flipped;
+    }
+    drive(&mut app, car, frames, VehicleInput::default());
+    let up = |app: &App| (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y;
+    assert!(up(&app) < 0.0, "an opted-out car is never flopped");
+    assert_eq!(
+        app.world().get::<VehicleState>(car).unwrap().upended_for,
+        0.0,
+        "the opted-out detector never armed"
+    );
+    assert!(app.world().get::<Teleported>(car).is_none());
+
+    app.world_mut().entity_mut(car).remove::<SelfRightOptOut>();
+    drive(&mut app, car, frames, VehicleInput::default());
+    assert!(up(&app) > 0.9, "the assist answers once the opt-out ends");
     assert_finite(&app, car);
 }
 

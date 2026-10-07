@@ -1,3 +1,27 @@
+# Last iteration — F23-B.8: flip recovery assist option (new-run iteration 29 of the 2026-10-07 run)
+
+Selection: the iteration-28 review passed with no blockers. Its one nit (the new menu test sat between the text-size test's doc comment
+and that test) is fixed. F23 req 2 still listed "gameplay assistance" with nothing behind it; the one real modern assist in the sim is
+the self-righting flop (`vehicle_self_right`, not an original behaviour), so it is the honest first toggle.
+
+Change: `GraphicsSettings.auto_right` (default true, persisted, bad value recovers to on). `mm2_vehicle::SelfRightOptOut` marker;
+`vehicle_self_right` skips (and zeroes `upended_for` for) a car carrying it. `settings::apply_auto_right` keeps the marker on the
+`PlayerVehicle` only, every frame, insert/remove only on disagreement so a later-spawned car follows. AI cars are never opted out. "Flip
+recovery: Automatic/Manual" row after Field of view on the Options screen and pause graphics page; Reset covers it; menu/pause tests that
+address rows by index shifted by one. DSN-85, README line, PLAN F23-A note. Manual leaves `R` and the authored `vehstuck` recovery
+(impact-armed) untouched, so an impact-free rollover is then the player's `R`.
+
+Tests (+5): `drive::an_upended_car_stays_down_while_it_opts_out_of_the_assist` (flops again once the marker is removed),
+`settings::flip_recovery_toggles_round_trips_and_recovers_a_bad_value`, `settings::the_player_car_follows_the_flip_recovery_setting_including_later_spawns`,
+`menu::the_flip_recovery_row_toggles_persists_and_resets`, pause options test extended.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings clean (Finished, no diagnostics);
+`cargo test --locked --workspace` exit 0, 2518 passed, 0 failed. Status: implemented candidate, not independently checked. Not shown: no
+playtest/real-display observation of the manual setting; other assists (steering/brake assist, auto-reverse policy) and resolution/scaling
+remain open under F23 req 2.
+
+---
+
 # Last iteration — F23-B.7: camera field of view (new-run iteration 28 of the 2026-10-07 run)
 
 Selection: the iteration-27 review passed with no blockers (gaps: fmt/clippy not in verify.log — rerun below with exit codes; real-display

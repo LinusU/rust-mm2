@@ -230,6 +230,14 @@ impl VehicleState {
     }
 }
 
+/// Marks a vehicle the self-righting assist ([`systems::vehicle_self_right`])
+/// leaves alone — the player's "automatic flip recovery: off" choice. The
+/// assist is a modern addition (retail recovers a wreck through the
+/// authored `vehstuck` detector and the manual reset key, both of which
+/// stay available), so opting out strands nothing the original did not.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SelfRightOptOut;
+
 /// Whether this process may originate a [`ResetVehicle`] itself. A
 /// standalone world and any authoritative session (`Local`, or the host
 /// of a networked session) resolve their own teleports; a predicted

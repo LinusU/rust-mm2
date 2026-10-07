@@ -79,6 +79,8 @@ enum PauseAction {
     CycleDisplay,
     /// Cycle the camera field of view.
     CycleFieldOfView,
+    /// Toggle automatic flip recovery.
+    ToggleAutoRight,
     /// Toggle vsync.
     CycleVsync,
     /// Step one of the volume levels.
@@ -145,6 +147,7 @@ fn pause_rows(
                     settings.field_of_view_row(),
                     Ok(PauseAction::CycleFieldOfView),
                 ),
+                row(settings.auto_right_row(), Ok(PauseAction::ToggleAutoRight)),
             ];
             rows.extend(AudioLevel::ALL.map(|level| {
                 row(
@@ -422,6 +425,7 @@ pub fn pause_input(
                     | PauseAction::CycleDisplay
                     | PauseAction::CycleVsync
                     | PauseAction::CycleFieldOfView
+                    | PauseAction::ToggleAutoRight
                     | PauseAction::CycleAudio(_)
                     | PauseAction::ResetGraphics
                     | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
@@ -503,6 +507,7 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
         PauseAction::CycleDisplay => settings.cycled_display(forward),
         PauseAction::CycleVsync => settings.toggled_vsync(),
         PauseAction::CycleFieldOfView => settings.cycled_field_of_view(forward),
+        PauseAction::ToggleAutoRight => settings.toggled_auto_right(),
         PauseAction::CycleAudio(level) => settings.stepped_audio(level, forward),
         PauseAction::ResetGraphics => GraphicsSettings::default(),
         _ => return,

@@ -28,7 +28,8 @@ pub use surface::{TireConditions, TireSurface};
 pub use systems::{UprightLanding, seat_level, seated_upright_pose, upright_recovery_pose};
 pub use vehicle::{
     DriveDirection, EngineImpairment, PreStepVelocity, RemoteReplica, ResetAuthority, ResetPending,
-    ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    ResetVehicle, SelfRightOptOut, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState,
+    WheelState,
 };
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
