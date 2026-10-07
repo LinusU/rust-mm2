@@ -21,6 +21,7 @@ pub mod gold;
 pub mod hudmap;
 pub mod ids;
 pub mod impact;
+pub mod lesson;
 pub mod movers;
 pub mod nav;
 pub mod object_audio;
@@ -72,6 +73,10 @@ pub use effects::{
 pub use hudmap::{HudMap, MapOrientation, MapView};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
+pub use lesson::{
+    LegFailure, LegReport, LegResult, LessonPass, LessonPhase, LessonRun, NoLegs, ReportEffect,
+    RetryError, StaleReason,
+};
 pub use nav::{
     ArcEnd, ArcExit, ArcId, CrossingPath, EndSignal, LaneHit, LaneId, LaneKind, LaneQuery,
     LaneSample, NavArc, NavBuild, NavGraph, NavIntersection, NavIssue, NavLane, NavOverrides,

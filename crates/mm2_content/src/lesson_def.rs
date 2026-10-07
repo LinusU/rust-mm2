@@ -15,7 +15,7 @@
 //! - **Gate sequence** (designed, `DSN-56`): row 0 is the start pose and
 //!   rows `1..` are the gates in authored order, the last being the
 //!   finish; one pass under [`CheckpointRule::Ordered`]. The retail files
-//!   are course paths (`corner.csv` 24 rows, `exam1_1.csv` 19) and the
+//!   are course paths (`corner.csv` 24 rows, `london/exam1_1.csv` 15) and the
 //!   two-row ones (`slalom`, `stop`, `follow`) reduce to "reach the far
 //!   pose". That the runtime *orders* the rows is an inference — nothing
 //!   recovered says so (UNK-35).

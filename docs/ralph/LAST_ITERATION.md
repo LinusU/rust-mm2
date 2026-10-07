@@ -1,3 +1,43 @@
+# Last iteration — F21-B.2: lesson leg sequencer (new-run iteration 42)
+
+Selection: the previous review passed with no blocking findings; its one
+non-blocking item (london `exam1_1` is 15 rows, not 19, in
+`docs/research/crashcourse.md` and the `lesson_def.rs` docs) is corrected.
+F21-B's remaining pieces are the session loader, family evaluators
+(UNK-35, unrecoverable from data), world restore and rewards. The loader
+needs a defined sequencing/retry/credit contract first, so I took that as
+the next small, testable slice rather than launching `crash:N` as a bare
+gate run (which would risk counting a gate run as a lesson pass).
+
+Change: `mm2_game::lesson::LessonRun` (DSN-73, designed) — pure state
+machine over a lesson's legs: strict authored order; reports for another
+leg / a superseded attempt / a non-running lesson are `Stale` (counted,
+never applied); a failure ends the attempt; `retry` restarts the whole
+lesson from leg 0 with cleared counters (the DMG-2 `RestartEvent`
+reading; resume-at-failed-leg is unrecovered); `abandon`; `take_pass`
+yields the pass exactly once (failed/quit/duplicate never). No new
+dependency (manual `Display`/`Error`).
+
+Tests: `crates/mm2_game/tests/lesson.rs` +12 (order, duplicate/out-of-
+order, failure-then-late-clear, retry clears counters and stales the old
+attempt, mid-lesson restart, pass-once, passed is terminal, quit yields
+nothing, stale counting across attempts, zero-leg refusal).
+
+Gates (iteration 42, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0 (2273 passed,
+0 failed; was 2261). No processes left running.
+
+Not verified / open: **no consumer** — nothing drives `LessonRun` from a
+session or the race runtime, so no in-game behavior changed; nothing
+launches `crash:N`. Retry-whole-lesson and order-as-gate-sequence are
+designed readings, not recovered rules. Still open for F21-B: session
+loader, world restore on retry, instruction flow, family evaluators
+(UNK-35), lesson-only reward credit. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F21-B.1: Crash Course lesson legs (new-run iteration 41)
 
 Selection: the previous review passed with no blocking findings. F20's
