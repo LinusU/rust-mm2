@@ -1043,6 +1043,13 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
         "the client's winner differs from the host's: {rec}"
     );
     assert_eq!(field(&rec, "phase"), "results", "{rec}");
+    // The client's announcer voiced what the replica's changes showed —
+    // the host's pickup and its delivery (the host's own record is read
+    // after `quit` tore its match down, so it carries no `say`).
+    assert!(
+        cell("say") >= 2,
+        "the client did not announce the pickup and the stash: {rec}"
+    );
     // The parked client never touched the gold: the one delivery is
     // the host seat's.
     assert!(cell("landed") > 0, "{rec}");

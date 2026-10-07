@@ -137,6 +137,15 @@ Both cue tables author: `BLUETEAMHASGOLD`, `REDTEAMHASGOLD`,
 team variant. `RECOVER` implies picking up *dropped* gold is a distinct
 event, but nothing here says who may recover or what it scores.
 
+The families partition one wave pool per speaker through `<end>,<add>`
+(`add + 1 ..= end`, not `add + 1 + rng % end`): sf `ROBGETLOOT 3,0` is
+`as1cops01`–`03`, `COPSTASHLOOT 4,3` is `as1cops04`, `ROBDROPLOOT 6,5`
+is `as1cops06`, `COPRECOVERLOOT 11,10` is `as1cops11`; the pool ships
+`as1cops01`–`11` and `as1robrob01`–`10` (london `al1cops01`–`12`).
+Every row's prefix is speaker-qualified, so the mode has no announcer
+draw. `mm2_app::cnrvoice` plays them — triggers designed, see ledger
+CNR-13.
+
 ## 5. Still unknown (stays open against F27-A / UNK-10)
 
 * What knocks gold out of a carrier — impact threshold, which collisions,

@@ -836,7 +836,7 @@ const COMMENTARY_GAP: f32 = 0.25;
 /// Commentary one-shot gain — authored level, same policy as the
 /// authored horn/impact plays (designed; the original's speech mix
 /// is unrecovered, UNK-25).
-const COMMENTARY_VOLUME: f32 = 1.0;
+pub(crate) const COMMENTARY_VOLUME: f32 = 1.0;
 /// Domain separation for the commentary `NavRng` — the thunder
 /// schedule, precip jitter and wheel-effect streams each hold their
 /// own mix of the session seed, so this draw can never alias another

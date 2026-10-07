@@ -15,6 +15,7 @@ pub mod city;
 pub mod cnr;
 pub mod cnrhud;
 pub mod cnrnet;
+pub mod cnrvoice;
 pub mod contracts;
 pub mod damage;
 pub mod damage_fx;

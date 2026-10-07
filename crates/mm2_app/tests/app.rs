@@ -8,6 +8,7 @@ mod banger;
 mod bot;
 mod breakaway;
 mod camtrack;
+mod cnrvoice;
 mod contracts;
 mod damage;
 mod damage_fx;

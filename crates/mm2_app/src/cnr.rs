@@ -182,6 +182,16 @@ pub fn start_match(
     .map_err(|e| format!("Cops & Robbers cannot start in {city:?}: {e:?}"))?;
     let report = spawn_cnr_markers(commands, vfs, &host, meshes, images, materials, owner);
     crate::cnrhud::spawn_cnr_scoreboard(commands, owner);
+    // The announcer: every process voices its own calls (the authority
+    // from its events, a client from the replica's changes), so each
+    // binds the city's table; a city without one plays silent.
+    match crate::cnrvoice::CnrCommentary::load(vfs, city, seed) {
+        Some(voice) => {
+            info!("cops and robbers commentary bound for {city}");
+            commands.insert_resource(voice);
+        }
+        None => warn!("cops and robbers commentary: no usable table for {city}"),
+    }
     // Only the authority plays the match. A client built the same draw
     // (same seed, same pool) to place its markers where the round
     // starts, and then follows the host's replica

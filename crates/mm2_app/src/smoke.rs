@@ -671,7 +671,11 @@ fn run_headless(
                     crate::audio::weather_voices.after(session::drive_session),
                     // F18-B.5: the environmental commentary queue —
                     // the record's `aud=` q field reads its count.
-                    crate::audio::commentary_voices.after(session::drive_session),
+                    (
+                        crate::audio::commentary_voices,
+                        crate::cnrvoice::cnr_commentary_voices,
+                    )
+                        .after(session::drive_session),
                     // Object sounds — the record's `aud=` o field
                     // counts the voices spawned.
                     crate::object_sound::object_sound_voices
@@ -1256,7 +1260,12 @@ fn run_headless(
                         )
                     })
                     .unwrap_or_default();
-                format!(" cnr=sent{sent},landed{landed},stale{stale},ref{refused}{seen}")
+                // `say` = lines the announcer queued (`cnrvoice`), once
+                // it is bound.
+                let say = world_ecs
+                    .get_resource::<crate::cnrvoice::CnrCommentary>()
+                    .map_or_else(String::new, |c| format!(",say{}", c.said()));
+                format!(" cnr=sent{sent},landed{landed},stale{stale},ref{refused}{seen}{say}")
             }
         }
     };
