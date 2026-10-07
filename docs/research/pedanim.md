@@ -268,3 +268,37 @@ nine authored states in place (root horizontal drift removed). Retail
 `pedmodel_*.shaders` author colour only, so the figures are flat-coloured
 clothing, not textured. A rendered capture of the line-up on retail
 `sf` was inspected locally (not committed: original content).
+
+## Sidewalk movement (F19-B.1)
+
+`mm2_game::pedwalk` is the domain half of pedestrian movement: a
+`SidewalkNet` over the BAI sidewalk curves, a seeded `plan_pedestrians`,
+and `SidewalkNet::advance`. Nothing spawns from it yet (the runtime leg
+is the next slice); `--ped-lab` is still the only on-screen spawner.
+
+Walk speed comes from the animation, not a constant:
+`PedAnimState::locomotion_speed` = the state's `Y AXIS DISTANCE` over the
+time one pass of its window takes at the 30 fps playback policy. Retail
+man `WALK`: 1.409 m over its 20-frame window ≈ 2.1 m/s; woman `WALK`:
+1.087 m ≈ 1.6 m/s. A walker moved at this speed does not skate.
+
+`mm2-inspect nav` now prints a sidewalk census per city. Measured on
+retail (fingerprint `e91e6cd4b2ae30d9`):
+
+| join radius | London joined ends (of 2160) / regions | SF joined ends (of 1516) / regions |
+| --- | --- | --- |
+| 1 m | 176 / 994 | 20 / 750 |
+| 3 m | 589 / 792 | 260 / 632 |
+| 5 m | 1171 / 505 | 1093 / 278 |
+| 8 m (default) | 1551 / 325 | 1222 / 224 |
+| 12 m | 1791 / 212 | 1284 / 210 |
+
+Corner gaps are spread over the whole range rather than clustered, so
+no radius recovers the original's rule (UNK-42); even at 12 m London's
+largest connected region is 99 of 1080 curves. The vehicle-lane guard
+(a join is refused when the line between the two ends crosses a vehicle
+lane at the same level) removes 224 candidate joins at 8 m on London and
+30 on SF. A 2 km soak of one walker per curve stays on the net (0
+escapes). Pedestrians therefore walk their own street and a few corners,
+and never cross a street — crosswalks are an open question, not a
+feature.

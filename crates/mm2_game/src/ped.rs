@@ -320,6 +320,28 @@ pub struct PedAnimState {
     pub next: Option<usize>,
 }
 
+impl PedAnimState {
+    /// Ground speed (m/s) a looping locomotion state implies: its
+    /// authored `Y AXIS DISTANCE` over the time one pass of its window
+    /// takes at `fps`, the window clamped against the clip exactly as
+    /// [`PedAnimator::tick`] clamps it. A walker moved at this speed
+    /// keeps its feet planted to the ground. `None` for a state that
+    /// authors no forward travel, an empty window, or a non-finite or
+    /// non-positive `fps`. The magnitude is returned: a backing-up
+    /// state authors a negative distance and the caller owns direction.
+    pub fn locomotion_speed(&self, clip_frames: u32, fps: f32) -> Option<f32> {
+        if clip_frames == 0 || !fps.is_finite() || fps <= 0.0 || !self.y_distance.is_finite() {
+            return None;
+        }
+        let end = self.last_frame.min(clip_frames - 1) as u64 + 1;
+        let frames = end
+            .checked_sub(self.first_frame as u64)
+            .filter(|f| *f > 0)?;
+        let speed = self.y_distance.abs() / (frames as f32 / fps);
+        (speed.is_finite() && speed > 0.0).then_some(speed)
+    }
+}
+
 /// Why a state model cannot become a [`PedAnimator`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum PedAnimError {
@@ -1246,6 +1268,27 @@ bone root {
             ..clip(&[[0.0; 12]; 1])
         };
         assert!(r.sample(&wide, 0.0).is_ok());
+    }
+
+    #[test]
+    fn locomotion_speed_is_window_travel_over_window_time() {
+        let states = csv("STAND,stand,1,30,0,0,0,0,STAND\n\
+             WALK,walk,1,20,0,1.5,0,0,WALK\n\
+             BACKUP,back,1,10,0,-1.0,0,0,BACKUP\n");
+        let a = PedAnimator::new(&states, "STAND", 30.0).unwrap();
+        let by = |n: &str| a.states().iter().find(|s| s.name == n).unwrap();
+        // 1.5 m over 20 frames at 30 fps (2/3 s).
+        let walk = by("WALK").locomotion_speed(20, 30.0).unwrap();
+        assert!((walk - 2.25).abs() < 1e-5, "{walk}");
+        // Overshoot windows clamp against the clip: only 10 frames exist.
+        let short = by("WALK").locomotion_speed(10, 30.0).unwrap();
+        assert!((short - 4.5).abs() < 1e-5, "{short}");
+        // Magnitude only; no travel, bad inputs: nothing.
+        assert!((by("BACKUP").locomotion_speed(10, 30.0).unwrap() - 3.0).abs() < 1e-5);
+        assert_eq!(by("STAND").locomotion_speed(30, 30.0), None);
+        assert_eq!(by("WALK").locomotion_speed(0, 30.0), None);
+        assert_eq!(by("WALK").locomotion_speed(20, 0.0), None);
+        assert_eq!(by("WALK").locomotion_speed(20, f32::NAN), None);
     }
 
     #[test]

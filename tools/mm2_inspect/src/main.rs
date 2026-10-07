@@ -2322,6 +2322,143 @@ struct NavOptions<'a> {
     strict: bool,
 }
 
+/// Connected walkable regions of a sidewalk net under its corner joins,
+/// as component sizes, largest first.
+fn sidewalk_regions(net: &mm2_game::pedwalk::SidewalkNet) -> Vec<usize> {
+    // Sidewalk curves are identified by (road, side, index) — the kind
+    // is always `Sidewalk` here.
+    let slot = |l: &mm2_game::LaneId| {
+        (
+            l.road,
+            l.index,
+            matches!(l.side, mm2_formats::bai::Side::Left),
+        )
+    };
+    let ids: Vec<mm2_game::LaneId> = net.lane_ids().collect();
+    let pos: std::collections::HashMap<(u16, u16, bool), usize> =
+        ids.iter().enumerate().map(|(i, l)| (slot(l), i)).collect();
+    let mut parent: Vec<usize> = (0..ids.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    for (i, l) in ids.iter().enumerate() {
+        for finish in [false, true] {
+            for other in net.corner(*l, finish) {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, pos[&slot(&other)]));
+                parent[a] = b;
+            }
+        }
+    }
+    let mut sizes: std::collections::BTreeMap<usize, usize> = Default::default();
+    for i in 0..ids.len() {
+        let r = find(&mut parent, i);
+        *sizes.entry(r).or_default() += 1;
+    }
+    let mut by_size: Vec<usize> = sizes.values().copied().collect();
+    by_size.sort_unstable_by(|a, b| b.cmp(a));
+    by_size
+}
+
+/// Sidewalk-network census for one city (F19-B.1): how many authored
+/// sidewalk curves a pedestrian may walk, how the kerb-corner join
+/// radius changes the join count and the connected walkable regions
+/// (the radius is a designed policy — UNK-42 — so its sensitivity is
+/// printed, not assumed), and a seeded soak walking one pedestrian per
+/// curve. Returns strict-failure lines: a city with no walkable
+/// sidewalk, or a soak that leaves the net.
+fn sidewalk_census(
+    graph: &mm2_game::NavGraph,
+    overrides: &mm2_game::NavOverrides,
+    city: &str,
+) -> Vec<String> {
+    use mm2_game::pedwalk::{SidewalkNet, WalkDir, WalkPolicy, Walker};
+    let mut failures = Vec::new();
+    let policy = WalkPolicy::default();
+    let net = SidewalkNet::build(graph, overrides, &policy);
+    let st = net.stats();
+    println!(
+        "    sidewalks: {} curves, {} walkable ({} excluded), {}/{} curve ends share a kerb corner at {:.1} m ({} candidate joins severed by a vehicle lane)",
+        st.curves,
+        st.walkable,
+        st.excluded,
+        st.joined_ends,
+        st.ends,
+        policy.join_radius,
+        st.severed,
+    );
+    if st.walkable == 0 {
+        failures.push(format!("city/{city}.bai: no walkable sidewalk curve"));
+        return failures;
+    }
+    for r in [1.0f32, 2.0, 3.0, 5.0, 8.0, 12.0] {
+        let n = SidewalkNet::build(
+            graph,
+            overrides,
+            &WalkPolicy {
+                join_radius: r,
+                ..policy.clone()
+            },
+        );
+        let regions = sidewalk_regions(&n);
+        println!(
+            "      join radius {r:>4.1} m: {:>4} joined ends ({} severed), {:>3} regions (largest {}, {} single-curve)",
+            n.stats().joined_ends,
+            n.stats().severed,
+            regions.len(),
+            regions[0],
+            regions.iter().filter(|n| **n == 1).count(),
+        );
+    }
+
+    // Soak: one walker per curve, 10 m steps for 2 km of walking each.
+    let ids: Vec<mm2_game::LaneId> = net.lane_ids().collect();
+    let mut rng = mm2_game::NavRng::new(0x5EED);
+    let (mut hops, mut turns, mut off) = (0u64, 0u64, 0u64);
+    for (i, l) in ids.iter().enumerate() {
+        let len = net.length(*l).unwrap_or(0.0);
+        let mut w = Walker {
+            lane: *l,
+            s: len * 0.5,
+            dir: if i % 2 == 0 {
+                WalkDir::Forward
+            } else {
+                WalkDir::Backward
+            },
+            from: None,
+        };
+        for _ in 0..200 {
+            let step = net.advance(&mut w, 10.0, &mut rng);
+            hops += step.hops as u64;
+            turns += step.turned_around as u64;
+            let ok = net
+                .length(w.lane)
+                .is_some_and(|len| (0.0..=len).contains(&w.s))
+                && net
+                    .sample(graph, &w)
+                    .is_some_and(|p| p.position.iter().all(|c| c.is_finite()));
+            if !ok {
+                off += 1;
+                break;
+            }
+        }
+    }
+    println!(
+        "    walk soak at {:.1} m: {} walkers x 2000 m — {hops} corner hops, {turns} dead-end turn-arounds, {off} left the net",
+        policy.join_radius,
+        ids.len(),
+    );
+    if off > 0 {
+        failures.push(format!(
+            "city/{city}.bai: {off} soak walkers left the sidewalk net"
+        ));
+    }
+    failures
+}
+
 /// Navigation-graph audit (F09-B): each stock city's `city/<name>.bai`
 /// is loaded through the production `mm2_content::load_nav_graph` path
 /// and its `NavGraph` build reported — arc/lane counts, one-way roads,
@@ -2433,6 +2570,9 @@ fn nav(
                 o.default_speed_limit
             );
         }
+
+        let walk_overrides = overrides.clone().unwrap_or_default();
+        failures.extend(sidewalk_census(g, &walk_overrides, c));
 
         if let Some((from, to)) = probe {
             let opts = overrides

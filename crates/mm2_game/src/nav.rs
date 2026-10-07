@@ -85,7 +85,7 @@ pub struct LaneId {
 }
 
 impl LaneId {
-    fn key(&self) -> u64 {
+    pub(crate) fn key(&self) -> u64 {
         let side = match self.side {
             Side::Right => 0u64,
             Side::Left => 1,

@@ -1,3 +1,26 @@
+# Last iteration — F19-B.1: pedestrian sidewalk net, planner and walker (new-run iteration 38 of the 2026-10-07 run)
+
+Selection: the iteration-37 review passed with no blockers (its gaps were retail visual evidence only). F19 req 3 (sidewalk movement, density/seed,
+bounded spawning) was the next ready leg: F09-B's `NavGraph` already carries every authored sidewalk curve (1080 London / 758 SF) with nothing
+consuming them, and `SessionConfig.densities.pedestrians` has no consumer. I took the pure-domain half first (net + planner + stepper + retail census)
+so the runtime spawner (B.2) lands on tested, measured ground; no crowd appears on screen this iteration.
+
+Change: `mm2_game::pedwalk` (new): `SidewalkNet` (walkable curves, kerb-corner joins, vehicle-lane severing), `plan_pedestrians` (seeded density
+placement in a spawn annulus), `SidewalkNet::advance` (corner hop / dead-end turn-around, step clamp), `in_walk_band`/`within_bubble`.
+`PedAnimState::locomotion_speed` (walk speed from the authored `Y AXIS DISTANCE`). `LaneId::key` made `pub(crate)`. `mm2-inspect nav`: sidewalk census,
+join-radius sweep, 2 km soak. Docs: DSN-80 (designed policy), UNK-42 (navigation semantics unknown), `docs/research/pedanim.md` sidewalk section, PLAN rows.
+
+Measured (retail, local): corner gaps are not clustered — joined ends rise steadily with radius (London 176 @1 m → 1791 @12 m of 2160). My first
+default (3 m) left 792 regions of mostly single curves (walkers just paced), so the default is 8 m plus a structural guard: a join is refused when the line
+between the two ends crosses a vehicle lane (224 London / 30 SF candidates at 8 m). Regions remain small (London largest 56 curves) and there are no
+crossings; both are recorded as open (UNK-42), not hidden.
+
+Tests (+15): `mm2_game/tests/pedwalk.rs` 14, `ped` unit 1 (`locomotion_speed`). Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked
+--workspace` exit 0, 2593 passed, 0 failed. Retail `mm2-inspect nav` rc 0 (its `--strict` already fails on the 176 pre-existing road-side issues, unchanged).
+Status: implemented candidate, not independently checked. No rendered/audio/playtest evidence; nothing spawns from this module yet. F19-B stays active.
+
+---
+
 # Last iteration — F19-A.5: pedestrian skins on screen (new-run iteration 37 of the 2026-10-07 run)
 
 Selection: the iteration-36 review passed with no blockers. Five audio-audit slices in a row had moved only inventory; `docs/coverage-audit.md`
