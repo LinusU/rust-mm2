@@ -294,7 +294,10 @@ pub fn vehicle_gate_note(
 /// cannot lose them.
 ///
 /// `vehicle` is only written when a catalog vehicle actually drives
-/// (a dev-car run does not erase the remembered car); `last_event` is
+/// (a dev-car run does not erase the remembered car) and the session
+/// did not pick it for the player — a Crash Course lesson's required
+/// car (`remember_vehicle` false) never replaces the remembered one;
+/// `last_event` is
 /// only written by an event session (a cruise does not erase the last
 /// played event). Save failures are logged, never fatal — profile I/O
 /// must never sink a session.
@@ -302,8 +305,9 @@ pub fn note_session_start(
     slot: &mut ActiveProfile,
     selected: &SelectedCar,
     event_key: Option<&EventKey>,
+    remember_vehicle: bool,
 ) {
-    if let Some(def) = &selected.def {
+    if let Some(def) = selected.def.as_ref().filter(|_| remember_vehicle) {
         slot.profile.selections.vehicle = Some(VehicleChoice {
             id: def.id.clone(),
             paint: selected.paint.min(u32::MAX as usize) as u32,

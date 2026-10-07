@@ -781,6 +781,7 @@ pub fn load_session_world(
     // session's race and the driver, installed with it below, swaps in
     // the later legs.
     let mut lesson_driver = None;
+    let mut lesson_installed = false;
     if world_ok && let SessionMode::Event(event_ref) = &config.mode {
         let launch = if event_ref.table == mm2_game::EventTableKind::CrashCourse {
             race::lesson_launch(&vfs.0, event_ref, config.difficulty)
@@ -1845,6 +1846,7 @@ pub fn load_session_world(
             });
             commands.insert_resource(RaceState::new(def, session.generation()));
             if let Some(driver) = lesson_driver {
+                lesson_installed = true;
                 commands.insert_resource(driver);
             }
             session
@@ -1902,6 +1904,13 @@ pub fn load_session_world(
     // lose the selections. A failed load never reaches here, so nothing
     // records an event the player never entered.
     if let Some(profile) = &mut active_profile {
-        crate::profile::note_session_start(profile, &selected, event_key.as_ref());
+        // A lesson's car is the school's requirement (CC-4), not the
+        // player's choice — it never becomes the remembered vehicle.
+        crate::profile::note_session_start(
+            profile,
+            &selected,
+            event_key.as_ref(),
+            !lesson_installed,
+        );
     }
 }

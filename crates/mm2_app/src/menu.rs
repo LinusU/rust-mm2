@@ -1224,19 +1224,20 @@ impl MenuShell {
         customization: Option<SessionCustomization>,
         effects: &mut Vec<MenuEffect>,
     ) {
+        let vehicle = self.launch_vehicle(data, &mode, &city);
         let config = SessionConfig {
             world: WorldMode::City {
                 psdl: format!("city/{city}.psdl"),
             },
             mode,
             difficulty: self.difficulty,
-            vehicle: self.vehicle.clone(),
+            vehicle: vehicle.clone(),
             customization,
             mods_active: data.has_mods,
             ..SessionConfig::default()
         };
-        let car = match &self.vehicle.id {
-            Some(id) => match mm2_content::load_by_id(vfs, id, self.vehicle.paint) {
+        let car = match &vehicle.id {
+            Some(id) => match mm2_content::load_by_id(vfs, id, vehicle.paint) {
                 Ok(def) => Some(Box::new(def)),
                 Err(e) => {
                     self.status = Some(format!("vehicle {id}: {e}"));
@@ -1248,8 +1249,67 @@ impl MenuShell {
         effects.push(MenuEffect::Launch {
             config: Box::new(config),
             car,
-            paint: self.vehicle.paint,
+            paint: vehicle.paint,
         });
+    }
+
+    /// The vehicle a launch drives. Normally the pending selection; an
+    /// unpassed Crash Course lesson requires its school's car instead
+    /// (CC-4: the Mustang Fastback in SF, the Cab in London), and a
+    /// passed lesson replays in any vehicle. The pending selection is
+    /// left alone — a lesson's car is required, not chosen — and the
+    /// player's own paint survives when they already picked the
+    /// required car. A required car this install does not ship keeps
+    /// the player's pick with a warning rather than blocking the course.
+    fn launch_vehicle(&self, data: &MenuData, mode: &SessionMode, city: &str) -> VehicleSelection {
+        let SessionMode::Event(event_ref) = mode else {
+            return self.vehicle.clone();
+        };
+        if event_ref.table != EventTableKind::CrashCourse {
+            return self.vehicle.clone();
+        }
+        let Some(required) = mm2_content::required_vehicle(city) else {
+            return self.vehicle.clone();
+        };
+        let passed = data.bound.as_ref().is_some_and(|p| {
+            data.events
+                .get(city)
+                .and_then(|c| c.events.iter().find(|e| e.event_ref == *event_ref))
+                .is_some_and(|e| {
+                    p.event(&mm2_game::EventKey {
+                        city: city.to_string(),
+                        table: event_ref.table,
+                        stem: e.stem.clone(),
+                    })
+                    .is_some_and(|r| r.is_beaten())
+                })
+        });
+        if passed {
+            return self.vehicle.clone();
+        }
+        if data
+            .catalog
+            .as_ref()
+            .is_some_and(|c| c.find(required).is_err())
+        {
+            warn!(
+                city,
+                required,
+                "required Crash Course vehicle is not in this install; using the selected car"
+            );
+            return self.vehicle.clone();
+        }
+        if self.vehicle.id.as_deref() == Some(required) {
+            return self.vehicle.clone();
+        }
+        info!(
+            city,
+            required, "Crash Course lesson requires its school's vehicle"
+        );
+        VehicleSelection {
+            id: Some(required.to_string()),
+            paint: 0,
+        }
     }
 }
 

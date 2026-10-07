@@ -293,3 +293,13 @@ fn a_missing_course_table_yields_no_lessons() {
             .any(|f| f.contains("no crash-course lessons"))
     );
 }
+
+/// CC-4: the two schools name their required car; any other city (a mod's
+/// course) names none rather than inheriting a guess.
+#[test]
+fn each_school_names_its_required_vehicle() {
+    assert_eq!(mm2_content::required_vehicle("sf"), Some("vpbullet"));
+    assert_eq!(mm2_content::required_vehicle("london"), Some("vpcab"));
+    assert_eq!(mm2_content::required_vehicle("testcity"), None);
+    assert_eq!(mm2_content::required_vehicle(""), None);
+}

@@ -306,6 +306,24 @@ pub struct CourseCatalog {
     pub remaining_extras: Vec<crate::events::ExtraRecord>,
 }
 
+/// The vehicle a school's lessons require (CC-4, help: "Crash Course"):
+/// the Ford Mustang Fastback (`vpbullet`) at the San Francisco stunt
+/// school, the London Cab (`vpcab`) at the London cabbie school.
+/// `None` for any other city — a mod's course names no required car.
+///
+/// The help text names the cars; the ids are measured: the Fastback is
+/// the `vpbullet` catalog row and the Cab `vpcab`, the same two ids the
+/// midterm-3 / midterm-2 paint rewards bind (CC-6). The *per-lesson*
+/// binding is not data-driven anywhere recovered — the same car serves
+/// every lesson of a school here (designed reading; UNK-35).
+pub fn required_vehicle(city: &str) -> Option<&'static str> {
+    match city {
+        "sf" => Some("vpbullet"),
+        "london" => Some("vpcab"),
+        _ => None,
+    }
+}
+
 /// Build the lesson view of one cataloged Crash Course event.
 pub fn crash_lesson(vfs: &Vfs, catalog: &EventCatalog, event: &CatalogEvent) -> CrashLesson {
     debug_assert_eq!(event.event_ref.table, EventTableKind::CrashCourse);

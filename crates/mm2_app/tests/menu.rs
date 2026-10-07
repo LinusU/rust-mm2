@@ -1025,6 +1025,133 @@ fn crash_course_rows_launch_as_lessons() {
     );
 }
 
+/// A London install with a Crash Course and two cars: `vpt` (the pending
+/// selection) and `vpcab` (the school's required vehicle, CC-4).
+fn london_cab_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for car in ["vpt", "vpcab"] {
+        write(
+            d,
+            &format!("tune/{car}.info"),
+            "Description=Test Car\nColors=Red|Blue\n",
+        );
+        write(d, &format!("tune/vehicle/{car}.vehcarsim"), vehcarsim());
+        write(d, &format!("geometry/{car}.pkg"), car_pkg());
+        write(d, &format!("bound/{car}_bound.bnd"), car_bnd());
+        write(d, &format!("geometry/{car}_whl0.mtx"), wheel_mtx());
+    }
+    write(d, "city/london.psdl", city_psdl());
+    let row = "0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n";
+    write(
+        d,
+        "race/london/mmcrashdata.csv",
+        format!("{MM_HEADER}\nlesson1,{row}"),
+    );
+    let crashdata =
+        "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
+    write(d, "race/london/crash0.aimap", "[Opponent]\n0\n");
+    for suffix in ["data", "data_p"] {
+        write(
+            d,
+            &format!("race/london/crash0{suffix}.csv"),
+            format!("{crashdata}slalom,7,1,12,0.05,0,0,0,0,0,0\n"),
+        );
+    }
+    write(d, "race/london/slalom.csv", waypoints_csv());
+    tmp
+}
+
+/// Launch London's Lesson 1 from the menu and report the session's
+/// vehicle, the shell's pending selection and the drive-through result.
+fn launch_london_lesson(app: &mut App) -> (Option<String>, Option<String>) {
+    activate_row(app, "Events");
+    activate_row(app, "london");
+    activate_row(app, "Crash Course");
+    activate_row(app, "Lesson 1");
+    assert!(
+        run_until(app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the lesson never launched: {:?}",
+        phase(app)
+    );
+    let cfg = app.world().resource::<Session>().config().cloned().unwrap();
+    (cfg.vehicle.id, shell(app).vehicle.id.clone())
+}
+
+/// CC-4: an unpassed lesson drives its school's required car whatever the
+/// menu has selected — and the pending selection is left alone, so the
+/// next cruise still drives the player's pick.
+#[test]
+fn an_unpassed_lesson_requires_the_schools_vehicle() {
+    let tmp = london_cab_install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    let (session_car, pending) = launch_london_lesson(&mut app);
+    assert_eq!(session_car.as_deref(), Some("vpcab"));
+    assert_eq!(pending.as_deref(), Some("vpt"), "the pick is not rewritten");
+    let selected = app.world().resource::<SelectedCar>();
+    assert_eq!(selected.def.as_ref().map(|d| d.id.as_str()), Some("vpcab"));
+}
+
+/// CC-4's second half: a passed lesson replays in any vehicle, and a
+/// lesson's required car never replaces the profile's remembered one.
+#[test]
+fn a_passed_lesson_replays_in_the_selected_vehicle_and_a_forced_car_is_not_remembered() {
+    let tmp = london_cab_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let id = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap()
+        .id;
+    let mut loaded = store.load(&id).unwrap().profile;
+    loaded.selections.vehicle = Some(mm2_game::VehicleChoice {
+        id: "vpt".into(),
+        paint: 1,
+    });
+    store.save(&mut loaded).unwrap();
+    let reopen = ProfileStore::open(store_dir.path()).unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    let (session_car, _) = launch_london_lesson(&mut app);
+    assert_eq!(session_car.as_deref(), Some("vpcab"));
+    let after = reopen.load(&id).unwrap().profile;
+    let remembered = after.selections.vehicle.expect("the remembered car stays");
+    assert_eq!((remembered.id.as_str(), remembered.paint), ("vpt", 1));
+    assert!(
+        after.selections.last_event.is_some(),
+        "the lesson itself is still remembered"
+    );
+
+    // Pass the lesson, back to the menu: the pending car now drives.
+    let mut passed = reopen.load(&id).unwrap().profile;
+    passed
+        .event_mut(EventKey {
+            city: "london".into(),
+            table: EventTableKind::CrashCourse,
+            stem: "crash0".into(),
+        })
+        .record_finish(900, Some(1), Difficulty::Amateur);
+    reopen.save(&mut passed).unwrap();
+    let mut app = menu_app(
+        tmp.path(),
+        Some(ProfileStore::open(store_dir.path()).unwrap()),
+    );
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    let (session_car, _) = launch_london_lesson(&mut app);
+    assert_eq!(session_car.as_deref(), Some("vpt"));
+}
+
 /// CC-3 end to end on the menu: a profile whose lesson pass was credited
 /// (the same `EventRecord` `record_session_results` writes for a passed
 /// lesson) finds the midterm open, while a fresh profile's stays gated.

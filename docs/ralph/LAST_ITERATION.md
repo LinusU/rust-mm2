@@ -1,3 +1,34 @@
+# Last iteration — F21-B.10: required lesson vehicle (new-run iteration 18 of this runner)
+
+Selection: previous review passed with no blockers. Of the F21-B
+remainder (instruction flow, pathset/vehicle restore, UNK-35 evaluators)
+only the vehicle leg has documented evidence (CC-4, help text) and fits a
+small slice; evaluators and instruction content stay research-blocked.
+Nothing made the Crash Course use its school's car — a lesson drove
+whatever the menu had selected.
+
+Change: `mm2_content::required_vehicle` (sf→`vpbullet` Ford Mustang
+Fastback, london→`vpcab` London Cab, others none; ids confirmed through
+the retail `--list-cars`); `menu.rs::launch_vehicle` substitutes it for an
+unpassed lesson row (passed lesson = replay in the pending car, CC-4's
+second sentence; car absent from the install = keep the pick + warn);
+the shell's pending selection is untouched; `profile::note_session_start`
+takes `remember_vehicle` (false for a lesson session) so the forced car
+never becomes the remembered vehicle. Ledger CC-4 and PLAN updated.
+
+Tests: `tests/menu.rs` +2, `mm2_content/tests/crashcourse.rs` +1. Mutation
+checks: disabling the substitution fails both menu tests; passing
+`remember_vehicle=true` fails the second.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0 (2305 passed, 0 failed; was 2302). No processes left running.
+
+Not verified / open: no retail menu launch or windowed lesson; per-lesson
+vs per-school car unknown; CLI `--event crash:N` keeps `--car`;
+instruction flow, pathset restore, UNK-35 evaluators. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.9 follow-up: end-to-end pass-credit test (new-run iteration 17 of this runner)
 
 Selection: previous review passed with no blockers; its first verification
