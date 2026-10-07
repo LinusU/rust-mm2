@@ -1,3 +1,27 @@
+# Last iteration — F29-A.5: explainable conflict provenance (new-run iteration 12 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`172df44`) passed gates and review, no blockers; its open list names F29-AC03 (conflicts have
+deterministic explainable provenance across app/inspector/server). `docs/modding.md` said "conflicts are silent by design" and
+`resolve` showed only the winner, so a mod-vs-mod conflict could not be explained. Deliberately not fixed: the TOCTOU note on
+`File::open` after `symlink_metadata` (low severity, user-owned mod dir; unchanged).
+
+Change: `mm2_assets` — `Vfs` keeps every provider per logical path; `Vfs::explain(path)` returns an `Explanation` (candidates in
+resolution rank, winner first, with `WinReason` OnlySource/Priority/MountOrder; `render()` is the one text form) and
+`Vfs::conflicts()` lists multiply-provided paths. `mount::override_summary` groups them by (winner, shadowed) pair;
+`mount_mods` (shared by `mm2`, `mm2-host`, `mm2-join`, `mm2-inspect`) logs `warn` for mod-vs-mod and `info` for mod-over-install.
+`mm2-inspect resolve` appends the explanation; new `mm2-inspect conflicts [--prefix] [--strict]` (strict fails on mod-vs-mod).
+Tests: mm2_assets (rank/reason across 3 providers, mount-order tie both ways, stable render, summary grouping, no-mods),
+`tools/mm2_inspect/tests/conflicts.rs` (subprocess on a synthetic install + two mods), `mod_override.rs` (the explanation's
+winner is the mod `load_vehicle` actually loaded, in both mount orders). `docs/modding.md` documents it.
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` 0;
+`cargo test --locked --workspace` exit 0 (2470 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: a real two-process app/server run reporting the same provenance (they share `mount_mods` and `Explanation`, but no
+process-level observation of the log lines), retail-install run, AC03 for resolve_preferred cross-extension losers (explain is per
+logical path; a mod's `foo.png` beating the base `foo.tex` is two paths — `lookup` still covers that), AC04/AC06 remainders.
+
+---
+
 # Last iteration — F29-A.4: bounded loose-file and manifest reads (new-run iteration 11 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`507a0fa`) passed gates and review, no blockers; its gap list names F29-AC06. Audit of the

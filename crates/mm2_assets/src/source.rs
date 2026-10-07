@@ -32,6 +32,26 @@ pub struct ResolvedSource {
     pub label: Option<String>,
 }
 
+impl ResolvedSource {
+    /// Whether the source is a mod (only mods carry a label).
+    pub fn is_mod(&self) -> bool {
+        self.label.is_some()
+    }
+
+    /// One-line description every tool uses for a source: the mod id, or the
+    /// kind of store, then its physical location.
+    pub fn describe(&self) -> String {
+        match (&self.label, self.kind, self.archive_offset) {
+            (Some(id), _, _) => format!("mod `{id}` ({})", self.path.display()),
+            (None, SourceKind::Archive, Some(off)) => {
+                format!("archive {} @ {off:#x}", self.path.display())
+            }
+            (None, SourceKind::Archive, None) => format!("archive {}", self.path.display()),
+            (None, SourceKind::Directory, _) => format!("directory {}", self.path.display()),
+        }
+    }
+}
+
 /// A mounted source of assets.
 pub(crate) trait Source: Send + Sync {
     /// List every logical path this source provides (normalized).

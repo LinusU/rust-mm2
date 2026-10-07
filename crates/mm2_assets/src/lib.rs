@@ -22,9 +22,12 @@ mod vfs;
 
 pub use error::AssetsError;
 pub use manifest::ModManifest;
-pub use mount::{InstallMount, MountReport, mount_install, mount_mods};
+pub use mount::{
+    INSTALL_LABEL, InstallMount, MountReport, OverrideSummary, mount_install, mount_mods,
+    override_summary,
+};
 pub use source::{ResolvedSource, SourceKind};
-pub use vfs::{Resolved, Vfs};
+pub use vfs::{Candidate, Explanation, Resolved, Vfs, WinReason};
 
 /// Well-known source priority tiers. The exact ordering of original archives
 /// is deliberately *not* encoded here — archives are mounted in a configured

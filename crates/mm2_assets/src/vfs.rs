@@ -47,6 +47,92 @@ struct Mounted {
 pub struct Vfs {
     sources: Vec<Mounted>,
     index: HashMap<String, usize>,
+    /// Every source that provides a logical path, in mount order — the
+    /// shadowed candidates behind each `index` winner, kept so a conflict
+    /// can be explained rather than only resolved.
+    providers: HashMap<String, Vec<usize>>,
+}
+
+/// Why the winning source of a logical path won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinReason {
+    /// No other mounted source provides the path.
+    OnlySource,
+    /// The winner's priority tier is strictly higher than every other
+    /// provider's.
+    Priority,
+    /// The winner ties the runner-up's priority and was mounted later.
+    MountOrder,
+}
+
+impl WinReason {
+    /// One-line explanation, shared by every tool that reports a conflict.
+    pub fn describe(self) -> &'static str {
+        match self {
+            WinReason::OnlySource => "only source providing the path",
+            WinReason::Priority => "higher priority tier than every other source",
+            WinReason::MountOrder => "same priority as the runner-up; mounted later",
+        }
+    }
+}
+
+/// One source that provides a logical path.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    /// Where the path lives inside this source.
+    pub source: ResolvedSource,
+    /// The source's priority tier.
+    pub priority: i32,
+    /// Mount sequence number (0 is the first mount).
+    pub mount_seq: usize,
+}
+
+/// Every source providing one logical path, winner first.
+///
+/// Candidates are ordered exactly as resolution ranks them (priority, then
+/// mount sequence, both descending), so `candidates[0]` is what
+/// [`Vfs::resolve`] returns.
+#[derive(Debug, Clone)]
+pub struct Explanation {
+    /// Normalized logical path.
+    pub logical: String,
+    /// Winner first, then each shadowed source in rank order.
+    pub candidates: Vec<Candidate>,
+    /// Why `candidates[0]` won.
+    pub reason: WinReason,
+}
+
+impl Explanation {
+    /// Whether more than one source provides the path.
+    pub fn is_conflict(&self) -> bool {
+        self.candidates.len() > 1
+    }
+
+    /// Multi-line report: the winner, each shadowed source in rank order,
+    /// and why the winner won. The inspector prints it and the mount log
+    /// summarises the same data, so every tool explains a conflict alike.
+    pub fn render(&self) -> String {
+        let mut out = format!("logical : {}\n", self.logical);
+        for (i, c) in self.candidates.iter().enumerate() {
+            let role = if i == 0 { "winner  " } else { "shadowed" };
+            out.push_str(&format!(
+                "{role}: {} [priority {}, mount #{}]\n",
+                c.source.describe(),
+                c.priority,
+                c.mount_seq
+            ));
+        }
+        out.push_str(&format!("reason  : {}\n", self.reason.describe()));
+        out
+    }
+
+    /// Whether the winner and at least one shadowed source are both mods —
+    /// a conflict between mods, not a mod replacing original content.
+    pub fn is_mod_conflict(&self) -> bool {
+        self.candidates.len() > 1
+            && self.candidates.iter().filter(|c| c.source.is_mod()).count() > 1
+            && self.candidates[0].source.is_mod()
+    }
 }
 
 impl Vfs {
@@ -128,6 +214,7 @@ impl Vfs {
         let seq = self.sources.len();
         let idx = self.sources.len();
         for logical in source.list() {
+            self.providers.entry(logical.clone()).or_default().push(idx);
             match self.index.get(&logical) {
                 Some(&winner) if !self.beats(idx, priority, seq, winner) => {}
                 _ => {
@@ -163,6 +250,57 @@ impl Vfs {
         let logical = normalize_path(path)?;
         let &idx = self.index.get(&logical)?;
         Some(self.resolved(idx, logical))
+    }
+
+    /// Every source that provides `path`, ranked the way resolution ranks
+    /// them, with the reason the winner won. `None` when nothing provides
+    /// the path.
+    pub fn explain(&self, path: &str) -> Option<Explanation> {
+        let logical = normalize_path(path)?;
+        self.explanation(logical)
+    }
+
+    /// Every logical path provided by more than one source, sorted by path.
+    /// This is the complete override map: original content a mod replaces
+    /// and mod-against-mod conflicts alike.
+    pub fn conflicts(&self) -> Vec<Explanation> {
+        let mut paths: Vec<&String> = self
+            .providers
+            .iter()
+            .filter(|(_, idxs)| idxs.len() > 1)
+            .map(|(logical, _)| logical)
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|logical| self.explanation(logical.clone()))
+            .collect()
+    }
+
+    fn explanation(&self, logical: String) -> Option<Explanation> {
+        let mut idxs = self.providers.get(&logical)?.clone();
+        // Rank exactly as `beats` does: priority, then mount sequence.
+        idxs.sort_by_key(|&i| std::cmp::Reverse((self.sources[i].priority, self.sources[i].seq)));
+        let reason = match idxs.as_slice() {
+            [_] => WinReason::OnlySource,
+            [a, b, ..] if self.sources[*a].priority > self.sources[*b].priority => {
+                WinReason::Priority
+            }
+            _ => WinReason::MountOrder,
+        };
+        let candidates = idxs
+            .into_iter()
+            .map(|i| Candidate {
+                source: self.sources[i].source.provenance(&logical),
+                priority: self.sources[i].priority,
+                mount_seq: self.sources[i].seq,
+            })
+            .collect();
+        Some(Explanation {
+            logical,
+            candidates,
+            reason,
+        })
     }
 
     /// Resolve `stem` trying each extension in `exts`.
@@ -267,6 +405,116 @@ mod tests {
         let (bytes, r) = vfs.read_path("texture/foo.tex").unwrap();
         assert_eq!(bytes, b"high");
         assert_eq!(r.source.path, high.join("texture/foo.tex"));
+    }
+
+    fn mod_dir(mods: &Path, id: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let m = mods.join(id);
+        write(&m, "mod.toml", format!("[mod]\nid = \"{id}\"\n").as_bytes());
+        for (rel, bytes) in files {
+            write(&m, rel, bytes);
+        }
+        m
+    }
+
+    #[test]
+    fn explain_ranks_every_provider_and_names_the_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let mods = tmp.path().join("mods");
+        write(&base, "texture/shared.tex", b"base");
+        write(&base, "texture/base_only.tex", b"base");
+        write(&base, "tune/over.txt", b"base");
+        mod_dir(
+            &mods,
+            "a_first",
+            &[("texture/shared.tex", b"a"), ("tune/over.txt", b"a")],
+        );
+        mod_dir(&mods, "b_second", &[("texture/shared.tex", b"b")]);
+
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, priority::LOOSE).unwrap();
+        vfs.mount_mods_dir(&mods, priority::MOD).unwrap();
+
+        // Three providers: the later-stacked mod outranks the earlier mod
+        // (a higher priority tier), which outranks the install.
+        let ex = vfs.explain("Texture\\SHARED.tex").unwrap();
+        assert_eq!(ex.logical, "texture/shared.tex");
+        let labels: Vec<_> = ex
+            .candidates
+            .iter()
+            .map(|c| c.source.label.as_deref())
+            .collect();
+        assert_eq!(labels, [Some("b_second"), Some("a_first"), None]);
+        assert_eq!(ex.reason, WinReason::Priority);
+        assert!(ex.is_conflict() && ex.is_mod_conflict());
+        // The explanation's winner is what resolution serves.
+        let r = vfs.resolve("texture/shared.tex").unwrap();
+        assert_eq!(ex.candidates[0].source.path, r.source.path);
+        assert_eq!(vfs.read(&r).unwrap(), b"b");
+
+        // A mod over the install only: a conflict, not a mod conflict.
+        let ex = vfs.explain("tune/over.txt").unwrap();
+        assert_eq!(ex.candidates.len(), 2);
+        assert!(ex.is_conflict() && !ex.is_mod_conflict());
+
+        // One provider, and no provider.
+        let ex = vfs.explain("texture/base_only.tex").unwrap();
+        assert_eq!(ex.reason, WinReason::OnlySource);
+        assert!(!ex.is_conflict());
+        assert!(vfs.explain("texture/nope.tex").is_none());
+        assert!(vfs.explain("../escape").is_none());
+
+        // `conflicts` lists exactly the multiply-provided paths, sorted.
+        let paths: Vec<_> = vfs.conflicts().into_iter().map(|e| e.logical).collect();
+        assert_eq!(paths, ["texture/shared.tex", "tune/over.txt"]);
+    }
+
+    #[test]
+    fn explain_names_mount_order_when_priorities_tie() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        let first = mod_dir(&mods, "first", &[("texture/x.tex", b"1")]);
+        let second = mod_dir(&mods, "second", &[("texture/x.tex", b"2")]);
+
+        // Same tier, mounted in either order: the later mount wins and the
+        // explanation says so; swapping the order swaps the winner.
+        for (order, winner) in [([&first, &second], "second"), ([&second, &first], "first")] {
+            let mut vfs = Vfs::new();
+            for dir in order {
+                vfs.mount_mod(dir, priority::MOD).unwrap();
+            }
+            let ex = vfs.explain("texture/x.tex").unwrap();
+            assert_eq!(ex.reason, WinReason::MountOrder);
+            assert_eq!(ex.candidates[0].source.label.as_deref(), Some(winner));
+            assert!(ex.candidates[0].mount_seq > ex.candidates[1].mount_seq);
+            let r = vfs.resolve("texture/x.tex").unwrap();
+            assert_eq!(r.source.label.as_deref(), Some(winner));
+        }
+    }
+
+    #[test]
+    fn rendered_explanation_is_stable_and_names_both_sides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let mods = tmp.path().join("mods");
+        write(&base, "a.txt", b"base");
+        mod_dir(&mods, "m", &[("a.txt", b"mod")]);
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, priority::LOOSE).unwrap();
+        vfs.mount_mods_dir(&mods, priority::MOD).unwrap();
+
+        let text = vfs.explain("a.txt").unwrap().render();
+        let expected = format!(
+            "logical : a.txt\nwinner  : mod `m` ({}) [priority 300, mount #1]\nshadowed: directory {} [priority 100, mount #0]\nreason  : higher priority tier than every other source\n",
+            mods.join("m/a.txt").display(),
+            base.join("a.txt").display(),
+        );
+        assert_eq!(text, expected);
+        // Deterministic: a fresh mount of the same sources renders the same.
+        let mut again = Vfs::new();
+        again.mount_dir(&base, priority::LOOSE).unwrap();
+        again.mount_mods_dir(&mods, priority::MOD).unwrap();
+        assert_eq!(again.explain("a.txt").unwrap().render(), text);
     }
 
     #[test]

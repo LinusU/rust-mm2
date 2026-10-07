@@ -14,6 +14,7 @@
 //! authoritative. Supply an explicit list via
 //! [`InstallMount::with_archives`] to control it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::ModManifest;
@@ -124,5 +125,145 @@ pub fn mount_mods(vfs: &mut Vfs, mods_dir: &Path) -> Result<Vec<ModManifest>, As
     if !mods_dir.is_dir() {
         return Ok(Vec::new());
     }
-    vfs.mount_mods_dir(mods_dir, priority::MOD)
+    let manifests = vfs.mount_mods_dir(mods_dir, priority::MOD)?;
+    for o in override_summary(vfs) {
+        if o.between_mods {
+            tracing::warn!(
+                winner = %o.winner,
+                shadowed = %o.shadowed,
+                paths = o.paths,
+                example = %o.example,
+                "mod conflict: the later-mounted mod wins"
+            );
+        } else if o.winner != INSTALL_LABEL {
+            tracing::info!(
+                winner = %o.winner,
+                shadowed = %o.shadowed,
+                paths = o.paths,
+                example = %o.example,
+                "mod overrides original content"
+            );
+        }
+    }
+    Ok(manifests)
+}
+
+/// Label used in an [`OverrideSummary`] for any non-mod source (archives,
+/// loose install files, override directories).
+pub const INSTALL_LABEL: &str = "install";
+
+/// How many logical paths one source takes from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideSummary {
+    /// Mod id of the winning source, or [`INSTALL_LABEL`].
+    pub winner: String,
+    /// Mod id of the shadowed source, or [`INSTALL_LABEL`].
+    pub shadowed: String,
+    /// Logical paths the winner takes from the shadowed source.
+    pub paths: usize,
+    /// First such path in sorted order.
+    pub example: String,
+    /// Both sides are mods (a conflict, not an intentional replacement of
+    /// original content).
+    pub between_mods: bool,
+}
+
+/// Group every conflict in `vfs` by (winner, shadowed) source pair, sorted
+/// by pair. A path shadowing several sources counts once per shadowed
+/// source. Shared by the game's mount log and `mm2-inspect conflicts`.
+pub fn override_summary(vfs: &Vfs) -> Vec<OverrideSummary> {
+    let mut groups: BTreeMap<(String, String), OverrideSummary> = BTreeMap::new();
+    for ex in vfs.conflicts() {
+        let label = |c: &crate::Candidate| {
+            c.source
+                .label
+                .clone()
+                .unwrap_or_else(|| INSTALL_LABEL.to_string())
+        };
+        let winner = label(&ex.candidates[0]);
+        for shadowed in &ex.candidates[1..] {
+            let shadowed_label = label(shadowed);
+            if !ex.candidates[0].source.is_mod() && !shadowed.source.is_mod() {
+                // Two non-mod sources (archives, loose files) are one
+                // "install" side; that is original-content layering, not
+                // something a mod author did.
+                continue;
+            }
+            groups
+                .entry((winner.clone(), shadowed_label.clone()))
+                .and_modify(|o| o.paths += 1)
+                .or_insert_with(|| OverrideSummary {
+                    winner: winner.clone(),
+                    shadowed: shadowed_label,
+                    paths: 1,
+                    example: ex.logical.clone(),
+                    between_mods: ex.candidates[0].source.is_mod() && shadowed.source.is_mod(),
+                });
+        }
+    }
+    groups.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write(dir: &Path, rel: &str, contents: &[u8]) {
+        let p = dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, contents).unwrap();
+    }
+
+    fn mod_dir(mods: &Path, id: &str, files: &[&str]) {
+        let m = mods.join(id);
+        write(&m, "mod.toml", format!("[mod]\nid = \"{id}\"\n").as_bytes());
+        for rel in files {
+            write(&m, rel, id.as_bytes());
+        }
+    }
+
+    #[test]
+    fn summary_separates_install_overrides_from_mod_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (base, mods) = (tmp.path().join("base"), tmp.path().join("mods"));
+        write(&base, "texture/a.tex", b"base");
+        write(&base, "texture/b.tex", b"base");
+        write(&base, "tune/c.txt", b"base");
+        mod_dir(&mods, "alpha", &["texture/a.tex", "texture/b.tex"]);
+        mod_dir(&mods, "beta", &["texture/a.tex", "texture/new.tex"]);
+
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &base, &InstallMount::default()).unwrap();
+        mount_mods(&mut vfs, &mods).unwrap();
+
+        let got = override_summary(&vfs);
+        let row = |w: &str, s: &str, paths, example: &str, between| OverrideSummary {
+            winner: w.into(),
+            shadowed: s.into(),
+            paths,
+            example: example.into(),
+            between_mods: between,
+        };
+        assert_eq!(
+            got,
+            [
+                // beta (mounted last) takes texture/a from both alpha and
+                // the install; alpha keeps texture/b over the install.
+                row("alpha", INSTALL_LABEL, 1, "texture/b.tex", false),
+                row("beta", "alpha", 1, "texture/a.tex", true),
+                row("beta", INSTALL_LABEL, 1, "texture/a.tex", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_mods_means_no_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "texture/a.tex", b"base");
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, tmp.path(), &InstallMount::default()).unwrap();
+        mount_mods(&mut vfs, &tmp.path().join("absent")).unwrap();
+        assert!(override_summary(&vfs).is_empty());
+    }
 }

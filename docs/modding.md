@@ -110,8 +110,22 @@ the VFS — the limitation is on the import side, not resolution.
 - `mm2-inspect lookup <stem>` explains a texture lookup: every extension
   tried, where each was found, and the winning source with its priority —
   the fastest way to see whether an override is live.
-- Conflicts are silent by design (deterministic last-wins); use
-  `mm2-inspect list` + `lookup` to verify which file is live.
+- Conflicts resolve deterministically (higher priority tier wins; at equal
+  priority the later mount wins; mods are stacked in sorted directory
+  order, so the alphabetically last mod wins). They are explained, not
+  silent:
+  - `mm2-inspect resolve <install> <path>` prints the winner, every
+    shadowed source in rank order (mod id or archive/directory, priority,
+    mount number) and why the winner won (`Vfs::explain`).
+  - `mm2-inspect --mods <dir> conflicts <install>` lists every logical path
+    more than one source provides plus a per-pair summary — `override`
+    (a mod replacing original content) or `CONFLICT` (two mods); `--strict`
+    exits non-zero on a mod-against-mod conflict, `--prefix` narrows the
+    listing.
+  - `mm2_assets::mount_mods` — used by the game, `mm2-host`, `mm2-join` and
+    the inspector alike — logs the same summary at mount: `warn` for a mod
+    conflict, `info` for a mod overriding original content.
+  Use `mm2-inspect list` + `lookup` to verify which file is live.
 
 ## Portable cities with multiple PSDL parts
 

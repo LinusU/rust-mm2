@@ -331,6 +331,49 @@ fn the_later_of_two_conflicting_mods_wins() {
     );
 }
 
+/// F29-AC03: the explanation of a conflict names the mod the production
+/// consumer actually loaded, in either mount order, and lists the mod it
+/// shadowed and the base file beneath both.
+#[test]
+fn a_conflict_explanation_names_the_mod_the_consumer_loaded() {
+    let f = fixture();
+    let heavier = f._tmp.path().join("heavier");
+    std::fs::create_dir_all(&heavier).unwrap();
+    manifest(&heavier, "heavier");
+    let logical = "tune/vehicle/vpt.vehcarsim";
+    write(&heavier, logical, crate::support::vehcarsim(3600.0));
+    let base_mass = observe(&f.base, &[]).vpt_mass;
+    let tune_mass = observe(&f.base, &[&f.handling]).vpt_mass;
+    let heavier_mass = observe(&f.base, &[&heavier]).vpt_mass;
+    assert!(base_mass != tune_mass && tune_mass != heavier_mass);
+
+    let cases = [
+        ([&f.handling, &heavier], ["heavier", "tune"], heavier_mass),
+        ([&heavier, &f.handling], ["tune", "heavier"], tune_mass),
+    ];
+    for (order, ids, expected_mass) in cases {
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&f.base, 0).unwrap();
+        for (i, m) in order.iter().enumerate() {
+            vfs.mount_mod(m, 300 + i as i32).unwrap();
+        }
+        let ex = vfs.explain(logical).unwrap();
+        let labels: Vec<_> = ex
+            .candidates
+            .iter()
+            .map(|c| c.source.label.as_deref())
+            .collect();
+        assert_eq!(
+            labels,
+            [Some(ids[0]), Some(ids[1]), None],
+            "winner, the shadowed mod, then the base file"
+        );
+        assert!(ex.is_mod_conflict());
+        let loaded = load_vehicle(&vfs, "vpt", 0).unwrap().config.mass;
+        assert_eq!(loaded, expected_mass, "the consumer loaded the winner");
+    }
+}
+
 /// A mod mounted over `base` that carries one broken file at `logical`.
 fn broken_mod(root: &Path, id: &str, logical: &str, bytes: &[u8]) -> std::path::PathBuf {
     let d = root.join(id);

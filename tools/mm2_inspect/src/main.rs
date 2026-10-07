@@ -70,6 +70,20 @@ enum Command {
         /// Logical path, e.g. `texture/vpcaddieblue_bk.tex`.
         logical: String,
     },
+    /// List every logical path more than one source provides (mods over the
+    /// install, mod against mod), with the winner and why it won. Pass
+    /// `--mods` to see mod conflicts.
+    Conflicts {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Optional prefix filter, e.g. `texture/`.
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Exit non-zero when two mods conflict (a mod replacing original
+        /// content is not a failure).
+        #[arg(long)]
+        strict: bool,
+    },
     /// Explain a logical texture lookup: every extension tried, the winning
     /// source and why it won.
     Lookup {
@@ -597,6 +611,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Scan { dir, strict } => scan(dir, cli.mods.as_deref(), *strict),
         Command::List { dir, prefix } => list(dir, cli.mods.as_deref(), prefix.as_deref()),
         Command::Resolve { dir, logical } => resolve(dir, cli.mods.as_deref(), logical),
+        Command::Conflicts {
+            dir,
+            prefix,
+            strict,
+        } => conflicts(dir, cli.mods.as_deref(), prefix.as_deref(), *strict),
         Command::Lookup { dir, stem } => lookup(dir, cli.mods.as_deref(), stem),
         Command::Tex {
             dir,
@@ -950,10 +969,61 @@ fn resolve(
             }
             let bytes = vfs.read(&r)?;
             println!("size    : {} bytes", bytes.len());
+            // Shadowed sources and the reason the winner won — the same
+            // report `conflicts` and the mount log are built from.
+            if let Some(ex) = vfs.explain(logical) {
+                println!();
+                print!("{}", ex.render());
+            }
             Ok(())
         }
         None => Err(format!("not found: {logical}").into()),
     }
+}
+
+/// Report every multiply-provided logical path, then a per-source-pair
+/// summary. With `strict`, a conflict between two mods fails the command.
+fn conflicts(
+    dir: &Path,
+    mods: Option<&Path>,
+    prefix: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let prefix = prefix.map(str::to_ascii_lowercase);
+    let all = vfs.conflicts();
+    let shown: Vec<_> = all
+        .iter()
+        .filter(|ex| prefix.as_ref().is_none_or(|p| ex.logical.starts_with(p)))
+        .collect();
+    for ex in &shown {
+        println!("{}", ex.render());
+    }
+    for o in mm2_assets::override_summary(&vfs) {
+        println!(
+            "{} {} over {}: {} path(s), first {}",
+            if o.between_mods {
+                "CONFLICT"
+            } else {
+                "override"
+            },
+            o.winner,
+            o.shadowed,
+            o.paths,
+            o.example
+        );
+    }
+    let mod_conflicts = all.iter().filter(|ex| ex.is_mod_conflict()).count();
+    println!(
+        "{} conflicting path(s), {} between mods ({} shown)",
+        all.len(),
+        mod_conflicts,
+        shown.len()
+    );
+    if strict && mod_conflicts > 0 {
+        return Err(format!("{mod_conflicts} path(s) conflict between mods").into());
+    }
+    Ok(())
 }
 
 /// Explain which file wins a logical texture lookup and why.
