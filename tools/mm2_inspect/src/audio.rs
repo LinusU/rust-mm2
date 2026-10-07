@@ -251,7 +251,15 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             "sgt" | "sty" | "dls" | "bnd" => match riff_form_type(&bytes) {
                 Some(form) => {
                     if ext != "dls" {
-                        music_files.insert(name.to_ascii_lowercase(), logical.clone());
+                        // Cues name a stem, not a path, so two containers
+                        // sharing a file name make the reference ambiguous.
+                        if let Some(prev) =
+                            music_files.insert(name.to_ascii_lowercase(), logical.clone())
+                        {
+                            r.issues.push(format!(
+                                "{logical}: same file name as {prev}; a music cue cannot tell them apart"
+                            ));
+                        }
                     }
                     let form_s = String::from_utf8_lossy(&form).into_owned();
                     *r.riff_forms.entry(form_s.clone()).or_default() += 1;
@@ -715,6 +723,17 @@ mod tests {
         assert_eq!(r.deferred_text, 0);
         assert_eq!(r.unreferenced_music, ["aud/dmusic/spare.sgt"]);
         assert!(r.failures.is_empty());
+    }
+
+    #[test]
+    fn audit_flags_two_music_containers_sharing_a_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "aud/dmusic/a.sgt", &riff(b"DMSG"));
+        write(d, "aud/dmusic/sub/a.sgt", &riff(b"DMSG"));
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.issues.len(), 1, "{:?}", r.issues);
+        assert!(r.issues[0].contains("same file name"));
     }
 
     #[test]

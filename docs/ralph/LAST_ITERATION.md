@@ -1,3 +1,18 @@
+# Last iteration — F08-A.3 review nits (new-run iteration 34 of the 2026-10-07 run)
+
+Selection: the iteration-33 review passed with no blockers; I took its two non-blocking nits as a small repair rather than start a new slice.
+(a) `MusicTable::parse` now strips a leading UTF-8 BOM (`str::trim` keeps U+FEFF, which made the first header an unrecognized column).
+(b) `mm2-inspect audio` keyed music containers by file name only and silently overwrote a same-named file in another directory; it now
+records an issue naming both paths (cues name a stem, not a path, so the reference is ambiguous). Retail dmusic is flat, so retail output is
+unchanged (not re-run here: no retail install in this checkout's tests).
+
+Tests (+2): `mm2_formats::music::a_utf8_byte_order_mark_does_not_hide_the_first_column`,
+`mm2_inspect::audio::audit_flags_two_music_containers_sharing_a_file_name`.
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace`
+exit 0, 2545 passed, 0 failed. Status: implemented candidate, not independently checked. F08-A stays active; nothing new plays.
+
+---
+
 # Last iteration — F08-A.3: music cue-table inventory (new-run iteration 33 of the 2026-10-07 run)
 
 Selection: the iteration-32 review passed with no blockers. I looked at the next announcer cues first and ruled them out: `finallap.csv`
