@@ -1176,6 +1176,8 @@ fn restart_removes_the_lesson_driver() {
             },
             run: mm2_game::LessonRun::new(legs.len()).unwrap(),
             legs,
+            rewards: Default::default(),
+            availability: Default::default(),
         },
     ));
     run(&mut app, 3);

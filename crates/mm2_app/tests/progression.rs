@@ -681,6 +681,76 @@ fn a_bot_driven_finish_records_nothing() {
     assert!(saved.unlocks.is_empty());
 }
 
+/// The lesson key the lesson tests run under.
+fn lesson_key() -> EventKey {
+    EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::CrashCourse,
+        stem: "lesson1".into(),
+    }
+}
+
+/// A one-leg lesson driver over the loaded event's own definition,
+/// plus a reward table paying a paint for passing it (CC-6's shape).
+fn lesson_driver(app: &App) -> mm2_app::lesson::LessonDriver {
+    let legs = vec![mm2_content::LessonLeg {
+        filename: "leg".into(),
+        objective: mm2_content::LessonObjective::Maneuver,
+        source: "crash0:leg".into(),
+        definition: app
+            .world()
+            .resource::<mm2_game::RaceState>()
+            .definition
+            .clone(),
+    }];
+    mm2_app::lesson::LessonDriver::new(race::LessonSetup {
+        key: lesson_key(),
+        run: mm2_game::LessonRun::new(legs.len()).unwrap(),
+        legs,
+        rewards: Default::default(),
+        availability: Default::default(),
+    })
+}
+
+/// Swap the mounted reward surface for one that pays `vpreward` for
+/// passing the lesson.
+fn pay_for_the_lesson(app: &mut App) {
+    app.insert_resource(EventRewards {
+        key: lesson_key(),
+        table: mm2_game::RewardTable {
+            per_event: vec![(
+                lesson_key(),
+                mm2_game::RewardRule {
+                    family: EventTableKind::CrashCourse,
+                    requirement: mm2_game::RewardRequirement::Event(3),
+                    unlock: mm2_game::Unlock::Vehicle("vpreward".into()),
+                    message: "midterm reward".into(),
+                    line: 1,
+                },
+            )],
+            ..mm2_game::RewardTable::default()
+        },
+        availability: mm2_game::AvailabilityTable::default(),
+    });
+}
+
+/// Run `driver` until it observes `state` for its only leg.
+fn observe_leg(driver: &mut mm2_app::lesson::LessonDriver, state: &mm2_game::ParticipantState) {
+    driver.observe(state);
+}
+
+fn finished_state(app: &mut App, ticks: u64) -> mm2_game::ParticipantState {
+    let participant = local_player_id(app);
+    let id = app
+        .world_mut()
+        .resource_mut::<Session>()
+        .mint_result_id(participant);
+    mm2_game::ParticipantState::Finished {
+        race_ticks: ticks,
+        result: id,
+    }
+}
+
 /// A lesson leg's clear reaches the ledger like any race finish, but a
 /// session carrying a `LessonDriver` must not turn it into an event
 /// record or an authored reward — the report says so (F21-B.5).
@@ -693,25 +763,8 @@ fn a_lesson_leg_finish_records_nothing() {
     let (vfs, car) = selected_car(tmp.path());
     let mut app = test_app(event_config(), vfs, car, Some(slot));
     app.update(); // the session loads and installs the event's `RaceState`
-    let legs = vec![mm2_content::LessonLeg {
-        filename: "leg".into(),
-        objective: mm2_content::LessonObjective::Maneuver,
-        source: "crash0:leg".into(),
-        definition: app
-            .world()
-            .resource::<mm2_game::RaceState>()
-            .definition
-            .clone(),
-    }];
-    app.insert_resource(mm2_app::lesson::LessonDriver::new(race::LessonSetup {
-        key: EventKey {
-            city: "testcity".into(),
-            table: EventTableKind::CrashCourse,
-            stem: "lesson1".into(),
-        },
-        run: mm2_game::LessonRun::new(legs.len()).unwrap(),
-        legs,
-    }));
+    let driver = lesson_driver(&app);
+    app.insert_resource(driver);
 
     let pid = local_player_id(&mut app);
     inject_result(&mut app, pid, SessionOutcome::Finished { race_ticks: 60 });
@@ -731,6 +784,110 @@ fn a_lesson_leg_finish_records_nothing() {
         report.note.as_deref().is_some_and(|n| n.contains("lesson")),
         "the results screen is told why: {:?}",
         report.note
+    );
+}
+
+/// The lesson's *pass* — every leg cleared — credits the lesson's own
+/// key exactly once and pays its authored reward (F21-B.9, CC-3/CC-6,
+/// F21-AC04): the beaten flag is what unlocks the next midterm/final,
+/// and a later frame, or the leg results arriving again, never pays or
+/// counts it twice.
+#[test]
+fn a_lesson_pass_credits_the_lesson_once() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Standard);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut app = test_app(event_config(), vfs, car, Some(slot));
+    app.update();
+    pay_for_the_lesson(&mut app);
+    let mut driver = lesson_driver(&app);
+    let cleared = finished_state(&mut app, 75);
+    observe_leg(&mut driver, &cleared);
+    assert_eq!(driver.pass().map(|p| p.total_ticks()), Some(75));
+    app.insert_resource(driver);
+
+    // The leg's own ledger entry arrives beside the pass.
+    let pid = local_player_id(&mut app);
+    inject_result(&mut app, pid, SessionOutcome::Finished { race_ticks: 75 });
+    for _ in 0..4 {
+        app.update();
+    }
+
+    let saved = saved_progress(&mut app, &store);
+    let record = saved
+        .events
+        .iter()
+        .find(|r| r.key == lesson_key())
+        .expect("the passed lesson has its own record");
+    assert!(record.is_beaten());
+    assert_eq!(record.finishes, 1, "one pass, one count");
+    assert_eq!(record.best_race_ticks, Some(75));
+    assert_eq!(saved.events.len(), 1);
+    assert!(saved.unlocks.contains("vehicle:vpreward"));
+    assert_eq!(saved.unlocks.len(), 1);
+    let report = app.world().resource::<progression::SessionReport>();
+    assert!(report.recorded);
+    assert_eq!(report.granted, vec!["midterm reward".to_string()]);
+    assert_eq!(report.note, None);
+}
+
+/// A lesson that did not pass — failed, or quit mid-way — credits
+/// nothing, and neither does a pass on a sandbox identity.
+#[test]
+fn only_a_real_pass_on_a_standard_profile_credits() {
+    // Failed: the leg's time limit expired.
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Standard);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut app = test_app(event_config(), vfs, car, Some(slot));
+    app.update();
+    pay_for_the_lesson(&mut app);
+    let mut driver = lesson_driver(&app);
+    let expired = match finished_state(&mut app, 90) {
+        mm2_game::ParticipantState::Finished { race_ticks, result } => {
+            mm2_game::ParticipantState::TimedOut { race_ticks, result }
+        }
+        other => other,
+    };
+    observe_leg(&mut driver, &expired);
+    assert!(driver.pass().is_none());
+    app.insert_resource(driver);
+    for _ in 0..3 {
+        app.update();
+    }
+    let saved = saved_progress(&mut app, &store);
+    assert!(saved.events.is_empty() && saved.unlocks.is_empty());
+
+    // Sandbox: a genuine pass is still not kept.
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Sandbox);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut app = test_app(event_config(), vfs, car, Some(slot));
+    app.update();
+    pay_for_the_lesson(&mut app);
+    let mut driver = lesson_driver(&app);
+    let cleared = finished_state(&mut app, 75);
+    observe_leg(&mut driver, &cleared);
+    assert!(driver.pass().is_some());
+    app.insert_resource(driver);
+    for _ in 0..3 {
+        app.update();
+    }
+    let saved = saved_progress(&mut app, &store);
+    assert!(saved.events.is_empty() && saved.unlocks.is_empty());
+    let report = app.world().resource::<progression::SessionReport>();
+    assert!(!report.recorded);
+    assert!(
+        report
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("sandbox"))
     );
 }
 

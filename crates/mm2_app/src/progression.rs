@@ -94,6 +94,9 @@ pub struct SessionReport {
 pub struct Consumption {
     generation: u64,
     applied: HashSet<ResultId>,
+    /// This generation's lesson pass has been credited (or refused by
+    /// a gate) — the pass is a once-only event, like a `ResultId`.
+    lesson_credited: bool,
     report: SessionReport,
     dirty: bool,
 }
@@ -105,6 +108,22 @@ fn flush(state: &mut Consumption, commands: &mut Commands) {
         commands.insert_resource(state.report.clone());
         state.dirty = false;
     }
+}
+
+/// Fold one applied outcome into the report; whether it recorded.
+fn note_outcome(state: &mut Consumption, outcome: mm2_game::ApplyOutcome) -> bool {
+    if !outcome.recorded {
+        return false;
+    }
+    state.report.recorded = true;
+    // A recorded pass supersedes an earlier leg-level "kept nothing".
+    state.report.note = None;
+    for grant in outcome.granted {
+        info!(unlock = %grant.unlock.id(), message = %grant.message, "reward unlocked");
+        state.report.granted.push(grant.message);
+    }
+    state.dirty = true;
+    true
 }
 
 /// Drain authoritative results into the bound profile and the
@@ -158,7 +177,13 @@ pub fn record_session_results(
         })
         .cloned()
         .collect();
-    if pending.is_empty() {
+    // A lesson's pass (F21-B.9) — the only thing in a lesson session
+    // that credits the profile; the legs' own ledger entries never do.
+    let pass = lesson
+        .as_deref()
+        .and_then(|l| l.pass().map(|p| (l.key().clone(), p.total_ticks())))
+        .filter(|_| !state.lesson_credited);
+    if pending.is_empty() && pass.is_none() {
         return flush(&mut state, &mut commands);
     }
     let Some(config) = session.config() else {
@@ -169,13 +194,6 @@ pub fn record_session_results(
     // never claim a save that did not happen. The refusal is final for
     // the generation, so the ids are consumed the same either way.
     let blocked = match profile.as_ref() {
-        // A lesson's legs each finish through the ordinary race path,
-        // but a leg clear is not an event finish: neither a record nor
-        // an authored reward may come from one (F21-B.5). The lesson's
-        // own pass credit is a separate, not yet designed, consumer.
-        _ if lesson.is_some() => {
-            Some("crash course lesson - leg results are not event records".to_string())
-        }
         None => Some("no driver profile - progress is not saved".to_string()),
         Some(p) if !p.profile.records_progress() => {
             Some("sandbox profile - records and rewards are not kept".to_string())
@@ -194,6 +212,7 @@ pub fn record_session_results(
             state.dirty = true;
         }
         state.applied.extend(pending.iter().map(|r| r.id.clone()));
+        state.lesson_credited |= pass.is_some();
         return flush(&mut state, &mut commands);
     }
     // Event results imply `EventRewards` was mounted at load; a brief
@@ -201,7 +220,35 @@ pub fn record_session_results(
     let Some(rewards) = rewards else { return };
     let slot = &mut **profile.as_mut().expect("unblocked implies a bound profile");
     let mut earned = false;
-    for result in pending {
+    if lesson.is_some() {
+        // A lesson's legs each finish through the ordinary race path,
+        // but a leg clear is not an event finish: neither a record nor
+        // an authored reward may come from one (F21-B.5).
+        state.applied.extend(pending.iter().map(|r| r.id.clone()));
+        if let Some((key, race_ticks)) = pass {
+            // The pass is the lesson's finish: the sum of its legs'
+            // clear times, a solo place 1 (so both difficulty ranks
+            // reduce to "passed", RACE-3), recorded on the lesson's
+            // own key so the CC-3 chain and CC-6's `crash,N` rewards
+            // read the same `beaten` flags every event does.
+            state.lesson_credited = true;
+            let outcome = apply_result(
+                &mut slot.profile,
+                &key,
+                &SessionOutcome::Finished { race_ticks },
+                Some(1),
+                config.difficulty,
+                &rewards.table,
+            );
+            earned = note_outcome(&mut state, outcome);
+        }
+        if !pending.is_empty() && !state.report.recorded && state.report.note.is_none() {
+            state.report.note =
+                Some("crash course lesson - leg results are not event records".to_string());
+            state.dirty = true;
+        }
+    }
+    for result in pending.into_iter().filter(|_| lesson.is_none()) {
         state.applied.insert(result.id.clone());
         let place = ledger.place_of_in(generation, local);
         let outcome = apply_result(
@@ -225,13 +272,7 @@ pub fn record_session_results(
             }
             continue;
         }
-        earned = true;
-        state.report.recorded = true;
-        for grant in outcome.granted {
-            info!(unlock = %grant.unlock.id(), message = %grant.message, "reward unlocked");
-            state.report.granted.push(grant.message);
-        }
-        state.dirty = true;
+        earned |= note_outcome(&mut state, outcome);
     }
     if earned {
         let id = slot.profile.id.clone();

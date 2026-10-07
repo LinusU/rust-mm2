@@ -82,6 +82,8 @@ fn two_leg_setup(first_limit: Option<u32>) -> LessonSetup {
         },
         run: LessonRun::new(legs.len()).unwrap(),
         legs,
+        rewards: Default::default(),
+        availability: Default::default(),
     }
 }
 

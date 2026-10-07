@@ -1,3 +1,38 @@
+# Last iteration — F21-B.9: lesson-pass credit (new-run iteration 16 of this runner)
+
+Selection: previous review passed with no blockers. Its gap list named
+lesson-pass credit as the next F21-B item (midterms/finals were
+unreachable from the menu without it), so I took it.
+
+Design: no new persistence. A lesson's pass is recorded on the lesson's
+own `EventKey` through the existing `apply_result` (`Finished{sum of leg
+ticks}`, place 1) — DSN-17 already reads CC-3/CC-4 from that record's
+`beaten` flag and `apply_result` already grants indexed `crash,N`
+rewards. `lesson_launch` now carries the city's real reward/availability
+tables. Leg ledger entries still record nothing (F21-B.5). Credit is
+gated like any result (standard profile, eligibility, no scripted
+driver) and happens once per session generation, from
+`LessonDriver::pass` only.
+
+Change: `race.rs` (`LessonSetup` +rewards/availability), `progression.rs`
+(`record_session_results` lesson branch, `note_outcome`), docs (DSN-75,
+PLAN, lesson.rs module doc).
+
+Tests: `tests/progression.rs` +2, `tests/menu.rs` +1 (synthetic).
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` exit 0;
+`cargo test --locked --workspace` exit 0 (2301 passed, 0 failed; was
+2298). No processes left running.
+
+Not verified / open: no retail or windowed run of a pass; no
+results/pass/fail screen text for a lesson; whether the original credits
+per difficulty rank is unverified; instruction flow, pathset/vehicle
+restore, UNK-35 evaluators. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F21-B.8: Crash Course menu entry (new-run iteration 15 of this runner)
 
 Selection: previous review passed (no blockers). The first remaining F21-B

@@ -1025,6 +1025,53 @@ fn crash_course_rows_launch_as_lessons() {
     );
 }
 
+/// CC-3 end to end on the menu: a profile whose lesson pass was credited
+/// (the same `EventRecord` `record_session_results` writes for a passed
+/// lesson) finds the midterm open, while a fresh profile's stays gated.
+#[test]
+fn a_credited_lesson_pass_opens_the_midterm() {
+    let tmp = crash_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    for (name, passed) in [("Fresh", false), ("Alice", true)] {
+        let made = store
+            .create(name, Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap();
+        if passed {
+            let mut loaded = store.load(&made.id).unwrap().profile;
+            loaded
+                .event_mut(EventKey {
+                    city: "testcity".into(),
+                    table: EventTableKind::CrashCourse,
+                    stem: "crash0".into(),
+                })
+                .record_finish(900, Some(1), Difficulty::Amateur);
+            store.save(&mut loaded).unwrap();
+        }
+    }
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    for (name, open) in [("Fresh", false), ("Alice", true)] {
+        activate_row(&mut app, "Driver:");
+        activate_row(&mut app, name);
+        press(&mut app, KeyCode::Escape);
+        activate_row(&mut app, "Events");
+        activate_row(&mut app, "testcity");
+        activate_row(&mut app, "Crash Course");
+        let midterm = shell(&app)
+            .rows
+            .iter()
+            .find(|r| r.text == "Midterm 1")
+            .map(|r| r.enabled.clone())
+            .expect("the midterm is listed");
+        assert_eq!(midterm.is_ok(), open, "{name}: {midterm:?}");
+        // Back to the root for the next driver.
+        press(&mut app, KeyCode::Escape);
+        press(&mut app, KeyCode::Escape);
+        press(&mut app, KeyCode::Escape);
+    }
+}
+
 /// Event rows carry the race names `tune/<city>.cinfo` authors, by
 /// table row; a row past the authored list keeps the stem label, and
 /// Quick Race shows the same name.
