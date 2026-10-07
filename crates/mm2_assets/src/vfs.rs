@@ -447,4 +447,87 @@ mod tests {
         assert!(vfs.resolve("mod.toml").is_none());
         assert!(vfs.resolve("geometry/x.pkg").is_some());
     }
+
+    #[test]
+    fn oversized_loose_file_is_refused_not_read() {
+        use mm2_formats::dave::MAX_ENTRY_SIZE;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write(&base, "ok.bin", b"fine");
+        // Sparse: no real disk or memory is needed for the oversize file.
+        let big = fs::File::create(base.join("huge.bin")).unwrap();
+        big.set_len(MAX_ENTRY_SIZE as u64 + 1).unwrap();
+        let edge = fs::File::create(base.join("edge.bin")).unwrap();
+        edge.set_len(MAX_ENTRY_SIZE as u64).unwrap();
+        drop((big, edge));
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
+        // The file stays visible (provenance can name it) but reading it is
+        // an explicit, typed refusal.
+        assert!(vfs.resolve("huge.bin").is_some());
+        match vfs.read_logical("huge.bin") {
+            Err(AssetsError::TooLarge { size, limit, .. }) => {
+                assert_eq!(size, MAX_ENTRY_SIZE as u64 + 1);
+                assert_eq!(limit, MAX_ENTRY_SIZE as u64);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert_eq!(vfs.read_logical("ok.bin").unwrap(), b"fine");
+    }
+
+    #[test]
+    fn oversized_or_linked_manifest_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        let big = mods.join("big");
+        write(&big, "mod.toml", b"[mod]\nid = \"big\"\n");
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(big.join("mod.toml"))
+            .unwrap();
+        f.set_len(crate::manifest::MAX_MANIFEST_SIZE + 1).unwrap();
+        drop(f);
+        let mut vfs = Vfs::new();
+        assert!(matches!(
+            vfs.mount_mods_dir(&mods, priority::MOD),
+            Err(AssetsError::TooLarge { .. })
+        ));
+        assert_eq!(vfs.source_count(), 0, "a rejected mod is not half-mounted");
+
+        #[cfg(unix)]
+        {
+            let linked = tmp.path().join("linked");
+            write(&linked, "x.txt", b"x");
+            let real = tmp.path().join("real.toml");
+            fs::write(&real, b"[mod]\nid = \"linked\"\n").unwrap();
+            std::os::unix::fs::symlink(&real, linked.join("mod.toml")).unwrap();
+            let mut vfs = Vfs::new();
+            assert!(matches!(
+                vfs.mount_mod(&linked, priority::MOD),
+                Err(AssetsError::ModManifest { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_logical_paths_never_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write(&base, "ok.txt", b"x");
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&base, 0).unwrap();
+        for bad in [
+            "",
+            ".",
+            "..",
+            "\\..\\ok.txt",
+            "C:\\ok.txt",
+            "ok.txt\0.png",
+            "a/../../ok.txt",
+            "//ok.txt",
+        ] {
+            assert!(vfs.resolve(bad).is_none(), "{bad:?} must not resolve");
+            assert!(vfs.read_logical(bad).is_err(), "{bad:?} must not read");
+        }
+    }
 }

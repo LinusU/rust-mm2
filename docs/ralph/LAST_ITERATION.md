@@ -1,3 +1,24 @@
+# Last iteration — F29-A.4: bounded loose-file and manifest reads (new-run iteration 11 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`507a0fa`) passed gates and review, no blockers; its gap list names F29-AC06. Audit of the
+VFS found traversal, symlink and archive-inflate bounds already tested, but `DirSource::read` (`std::fs::read`) and
+`ModManifest::load` (`read_to_string`) had no size bound and the manifest read followed a symlink.
+
+Change: `mm2_assets` — `source::read_bounded` (size from the open handle, read capped at limit+1) now backs loose-file reads
+at `dave::MAX_ENTRY_SIZE` (256 MiB) and manifest reads at the new `MAX_MANIFEST_SIZE` (1 MiB); new `AssetsError::TooLarge`;
+`ModManifest::load` refuses a non-regular-file (symlinked) `mod.toml`. Tests in `vfs.rs`: sparse oversize file → `TooLarge`
+(limit+1 refused, exact limit not), oversize / symlinked manifest fails the mount without half-mounting, and a table of
+malformed logical paths (empty, `.`/`..`, drive, NUL, UNC-like, escaping) never resolve or read. `docs/modding.md` states the
+limits. Mods declare no dependencies, so there is no mod-level reference cycle to test.
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` 0;
+`cargo test --locked --workspace` exit 0 (2461 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: AC06 for model/prop reference cycles and parser-level counts across every format (only DAVE, existing tests), whole-
+archive read of an oversize `.ar` (retail archives are legitimately large, so unbounded by design), AC03, other families for AC04,
+retail-data run.
+
+---
+
 # Last iteration — F29-A.3: malformed selected overrides are reported (new-run iteration 10 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`26f0c7e`) passed gates and review, no blockers; its gap list names F29-AC04 as unobserved.

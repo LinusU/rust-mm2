@@ -18,6 +18,9 @@ use crate::AssetsError;
 /// Filename of the manifest inside a mod directory.
 pub const MANIFEST_FILE: &str = "mod.toml";
 
+/// Largest manifest accepted; a real one is a few hundred bytes.
+pub const MAX_MANIFEST_SIZE: u64 = 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 struct ManifestFile {
     #[serde(rename = "mod")]
@@ -54,7 +57,20 @@ impl ModManifest {
     /// Load `dir/mod.toml`.
     pub fn load(dir: &Path) -> Result<Self, AssetsError> {
         let path = dir.join(MANIFEST_FILE);
-        let text = std::fs::read_to_string(&path).map_err(|e| AssetsError::ModManifest {
+        // Same containment policy as the mounted tree: a manifest that is a
+        // link could point at any file the process can read.
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| AssetsError::ModManifest {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        if !meta.is_file() {
+            return Err(AssetsError::ModManifest {
+                path,
+                reason: "manifest is not a regular file (symlinks are not followed)".to_string(),
+            });
+        }
+        let bytes = crate::source::read_bounded(&path, MANIFEST_FILE, MAX_MANIFEST_SIZE)?;
+        let text = String::from_utf8(bytes).map_err(|e| AssetsError::ModManifest {
             path: path.clone(),
             reason: e.to_string(),
         })?;

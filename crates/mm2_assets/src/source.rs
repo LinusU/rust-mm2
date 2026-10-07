@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mm2_formats::dave::{DaveArchive, DaveEntry, inflate_entry};
+use mm2_formats::dave::{DaveArchive, DaveEntry, MAX_ENTRY_SIZE, inflate_entry};
 
 use crate::{AssetsError, normalize_path};
 
@@ -190,6 +191,31 @@ fn walk(
     Ok(())
 }
 
+/// Read `full` whole, refusing more than `limit` bytes. The size is taken from
+/// the open handle (no stat/open race) and the read itself is capped, so a
+/// sparse or growing file can neither force a huge allocation nor slip past
+/// the check. Archive members get the same bound in `inflate_entry`.
+pub(crate) fn read_bounded(full: &Path, what: &str, limit: u64) -> Result<Vec<u8>, AssetsError> {
+    let too_large = |size| AssetsError::TooLarge {
+        what: what.to_string(),
+        size,
+        limit,
+    };
+    let file = std::fs::File::open(full).map_err(AssetsError::io(full))?;
+    let len = file.metadata().map_err(AssetsError::io(full))?.len();
+    if len > limit {
+        return Err(too_large(len));
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut out)
+        .map_err(AssetsError::io(full))?;
+    if out.len() as u64 > limit {
+        return Err(too_large(out.len() as u64));
+    }
+    Ok(out)
+}
+
 impl Source for DirSource {
     fn list(&self) -> Vec<String> {
         self.index.keys().cloned().collect()
@@ -209,7 +235,7 @@ impl Source for DirSource {
         if !meta.is_file() {
             return Err(AssetsError::NotFound(logical.to_string()));
         }
-        std::fs::read(&full).map_err(AssetsError::io(&full))
+        read_bounded(&full, logical, MAX_ENTRY_SIZE as u64)
     }
 
     fn provenance(&self, logical: &str) -> ResolvedSource {

@@ -70,6 +70,14 @@ You never need to know which archive or physical file shipped the original.
   is Windows-era).
 - Paths are normalized; `..`, absolute paths and drive-relative escapes are
   rejected — a mod cannot read outside the virtual root.
+- Symlinks inside a mounted directory (files, directories, or `mod.toml`
+  itself) are never followed, so link cycles and links out of the mod are
+  inert. A loose file over 256 MiB (the archive-member bound,
+  `dave::MAX_ENTRY_SIZE`) is listed but refuses to read with a typed
+  `TooLarge` error; a `mod.toml` over 1 MiB, or one that is not a regular
+  file, fails the mount. Mods have no dependency declarations, so there is
+  no mod-to-mod reference cycle to check; model/prop reference cycles stay
+  with the format parsers.
 - Top-level folders mirror the game's layout: `texture/`, `geometry/`,
   `city/`, `audio/`, etc. The inspector lists everything currently mounted:
 

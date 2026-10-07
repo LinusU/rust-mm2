@@ -38,6 +38,17 @@ pub enum AssetsError {
         reason: String,
     },
 
+    /// A loose file or manifest is larger than the read limit.
+    #[error("{what} is {size} bytes, over the {limit}-byte limit")]
+    TooLarge {
+        /// Logical path or manifest path.
+        what: String,
+        /// Size found (bytes read so far when the file grew past the limit).
+        size: u64,
+        /// Limit that applies.
+        limit: u64,
+    },
+
     /// A mod manifest could not be read or parsed.
     #[error("failed to load mod manifest {path}: {reason}")]
     ModManifest {
