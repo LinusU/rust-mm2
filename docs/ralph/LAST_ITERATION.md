@@ -1,3 +1,34 @@
+# Last iteration — F23-C.1: focus-loss and pad-disconnect evidence (new-run iteration 20 of this runner)
+
+Selection: previous review passed with no blockers and flagged F23-AC02 as
+unverified. F23-B (rebinding UI/options) is a larger slice; AC02's logic
+(focus gate in `vehicle_input`, bevy's `release_all` on `KeyboardFocusLost`,
+`Gamepad` removal on disconnect) already exists but had no test, so I took
+the small test-only slice.
+
+Change: `crates/mm2_app/tests/device_transitions.rs` (registered in
+`tests/app.rs`), four tests driving bevy's real `InputPlugin` with raw
+events through the production `input::vehicle_input`: focus loss + refocus
+with held keys; unfocused window + held pad (answers again on refocus, the
+device is physically still held); pad disconnect with stick/trigger held
+(neutral, keyboard still drives, reconnect starts neutral); first of two
+pads unplugged → the second drives. No production code changed.
+
+Mutation check: forcing `focused = true` in `vehicle_input` fails the pad
+focus test. The key focus test still passes under that mutation because
+bevy itself releases the keys (the test documents the engine behaviour, it
+does not prove ours). Disconnect behaviour is the engine's; not mutable here.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0 (2323 passed, 0 failed; was 2319). No processes left running.
+
+Not verified / open: synthetic events only — no real window focus change,
+physical pad or hot-plug; F23-AC03 (menu/text input isolation, pad focus
+after hot-plug in menus) untouched; F23-B UI, audio/accessibility options,
+wheel/FFB audit remain. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F23-A.1: rebindable driving controls (new-run iteration 19 of this runner)
 
 Selection: previous review passed with no blockers. The F21-B remainder

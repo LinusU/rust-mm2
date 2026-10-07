@@ -13,6 +13,7 @@ mod contracts;
 mod damage;
 mod damage_fx;
 mod dash;
+mod device_transitions;
 mod environment;
 mod event;
 mod hud;
