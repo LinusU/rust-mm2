@@ -619,6 +619,60 @@ fn routes_cross_intersections_and_respect_direction() {
     assert!(matches!(err, RouteError::Unreachable { .. }), "{err}");
 }
 
+/// The driving line a non-`.opp` driver follows: the routed arcs
+/// sampled and bracketed by the query points, through the junction,
+/// and the router's failure — not a straight line — when the road
+/// graph cannot connect the endpoints.
+#[test]
+fn a_drive_line_follows_the_routed_arcs_and_fails_with_the_router() {
+    let centre0 = [[0.0, 0.0, -30.0], [0.0, 0.0, -4.0]];
+    let centre1 = [[4.0, 0.0, 0.0], [30.0, 0.0, 0.0]];
+    let r0 = road(
+        0,
+        &centre0,
+        vec![1],
+        side(0, &[(3.75, offset(&centre0, 3.75, 0.0))], &[], 2),
+        side(0, &[(-3.75, offset(&centre0, -3.75, 0.0))], &[], 2),
+        dead_end(),
+        connected(0, 0),
+    );
+    let r1 = road(
+        1,
+        &centre1,
+        vec![1],
+        side(0, &[(3.75, offset(&centre1, 0.0, -3.75))], &[], 2),
+        side(0, &[], &[], 2), // one-way eastbound
+        connected(0, 1),
+        dead_end(),
+    );
+    let b = bai(vec![r0, r1], vec![intersection(0, [0.0; 3], &[0, 1])]);
+    let g = NavGraph::build(&b).graph;
+    let from = Vec3::new(3.0, 0.0, -20.0);
+    let to = Vec3::new(20.0, 0.0, -2.0);
+    let line = g
+        .drive_line(from, to, &RouteOptions::default(), 5.0)
+        .unwrap();
+    assert_eq!(line.first(), Some(&from));
+    assert_eq!(line.last(), Some(&to));
+    assert!(line.len() > 4, "{line:?}");
+    // No zero-length leg, and the line passes the junction (x between
+    // the arms at z near 0) rather than cutting the corner at the
+    // start.
+    for w in line.windows(2) {
+        assert!(w[0].distance(w[1]) > 1.0, "{w:?}");
+    }
+    assert!(
+        line.iter()
+            .any(|p| p.x > 3.0 && p.x < 10.0 && p.z.abs() < 6.0),
+        "{line:?}"
+    );
+    // The reverse trip has no route: the router's error comes back.
+    let err = g
+        .drive_line(to, from, &RouteOptions::default(), 5.0)
+        .unwrap_err();
+    assert!(matches!(err, RouteError::Unreachable { .. }), "{err}");
+}
+
 #[test]
 fn disconnected_islands_fail_specifically() {
     // Two parallel strips with no shared intersection.

@@ -1893,6 +1893,36 @@ impl NavGraph {
         out
     }
 
+    /// The road-graph driving line from `from` to `to`: the
+    /// [`NavGraph::route_candidates`] route sampled every `step`
+    /// metres, bracketed by the two query points themselves (the lane
+    /// snap can sit up to `max_snap` from either) and thinned so no two
+    /// consecutive points are within a metre — a zero-length leg has no
+    /// heading. The shared way a driver that is not an authored `.opp`
+    /// follower (the Cops & Robbers evidence driver) turns an objective
+    /// into a line; the failure is the router's, never a guessed
+    /// straight line.
+    pub fn drive_line(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        options: &RouteOptions,
+        step: f32,
+    ) -> Result<Vec<Vec3>, RouteError> {
+        let route = self.route_candidates(from.into(), to.into(), options)?;
+        let mut line = vec![from];
+        for p in self
+            .route_path(&route, step)
+            .into_iter()
+            .chain(std::iter::once(to))
+        {
+            if p.is_finite() && line.last().is_none_or(|q| q.distance(p) > 1.0) {
+                line.push(p);
+            }
+        }
+        Ok(line)
+    }
+
     /// Re-express a sparse authored driving line in road geometry the
     /// physics world can actually carry (F15-B.6, building on F09's
     /// shared graph). `.opp` anchors sit 40–200 m apart and are route
