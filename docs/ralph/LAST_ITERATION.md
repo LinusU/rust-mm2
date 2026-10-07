@@ -1,3 +1,36 @@
+# Last iteration — F26-B.2: late-join process leg (new-run iteration 28 of this runner)
+
+Selection: previous review passed with no blockers (its gaps are
+loopback/synthetic scope, already disclosed). Operator report 6's
+follow-ups 1 (in-process legs landed), 2 (reconciled, DSN-11) are done;
+the remaining open F26 item the prior handoff named was late-join policy.
+F26 req 4 / AC02 had only in-process legs, so I wrote the separate-process
+leg first and let it find what was broken. Nothing was: it passed first
+time and 3/3 on repeat.
+
+Change (test + docs only): `net_drive::a_client_that_joins_a_running_session_is_handed_the_live_one`
+— in-app host `start`s generation 1 with an empty roster, then a
+`--join --ready` process connects; it is handed the running `Start`,
+loads generation 1, spawns the host seat as a remote copy, streams inputs
+and applies snapshots (`mp=gen1 phase=playing`, via `assert_client_drove`);
+the host spawns the late seat and applies its inputs; clean leave/quit.
+Waits spin on process output (`until*`), no fixed frame counts or sleeps.
+Docs: `research/net.md` (late join, process level), DSN-79 note, PLAN.
+
+Gates (foreground, exit statuses checked): `cargo fmt --all -- --check` exit 0;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+exit 0; `cargo test --locked --workspace` exit 0 (2377 passed, 0 failed). No test
+processes left running.
+
+Not verified / open: late-joiner participation/spectator policy in a race
+(races refuse late joiners by MP-5), reconnect with the same identity,
+race ending during a late join, late join of a session with broken props
+at process level (retail install only), LAN/Internet. Loopback, one
+machine, synthetic dev world. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F26-B.1: lobby rematch (new-run iteration 27 of this runner)
 
 Selection: previous review passed with no blockers (its gaps are

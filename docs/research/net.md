@@ -1335,6 +1335,23 @@ session per lobby today), per-stage stale-message checks beyond the
 existing `RemoteSnaps::reset` at `Start`, LAN/Internet scope, windowed
 lobby UI.
 
+### Late join, process level (F26-B.2, no wire change)
+
+`net_drive::a_client_that_joins_a_running_session_is_handed_the_live_one`:
+the in-app host starts generation 1 with an empty roster (the start gate
+passes, open cruise policy — MP-5), and only then does a `--join --ready`
+process connect. It is handed the running `Start` (generation 1, not a
+fresh private session), loads it, spawns the host seat as a remote copy,
+streams inputs and applies snapshots (`mp=gen1 phase=playing`); the host
+spawns the late seat and applies its inputs, then both close cleanly.
+This passed on the first run (no defect found): the in-process legs
+(`LateJoin::Open` hand-off, held snap, props/traffic/clock catch-up)
+already covered the logic and this is their first separate-process
+evidence. Dev-world cruise only — a late joiner's *race* participation
+policy is the closed-lobby refusal (`SessionStarted`, MP-5, covered by
+`net_host`); a spectator mode, reconnect-with-same-identity and "race
+ends during late join" are not implemented or covered.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

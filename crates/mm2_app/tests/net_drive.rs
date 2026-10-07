@@ -370,6 +370,37 @@ fn two_mm2_processes_play_a_rematch_without_reconnecting() {
     quit_and_assert_host_drove(host);
 }
 
+/// F26-AC02's late-join leg at process level (req 4): the host starts
+/// generation 1 *alone* (the empty-roster start gate passes, the open
+/// cruise policy admits joiners — MP-5), plays on, and only then does a
+/// client connect. It must be handed the running session — `Start`
+/// carrying generation 1, not a fresh private one — load it, spawn the
+/// host's seat as a remote copy and stream inputs, while the host
+/// spawns the late seat and applies its inputs. Nothing about the
+/// session is replayed from the start: the client's cap record names
+/// `gen1`, the host's lobby never re-minted a generation.
+#[test]
+fn a_client_that_joins_a_running_session_is_handed_the_live_one() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let addr = listening_addr(&host);
+
+    host.cmd("start");
+    host.until("event=started generation=1");
+    // The session is running with nobody else in it.
+    let late = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "late", 4500));
+    host.until("remote participant spawned");
+
+    let rec = late.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove(&rec, 1);
+    assert!(
+        late.wait().success(),
+        "the late joiner did not exit cleanly"
+    );
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
 /// The v16 surface tail at process level — the review gap the v16
 /// landing disclosed: every earlier leg either staged the
 /// `SurfaceContact` by hand (in-process) or had nothing to resolve
