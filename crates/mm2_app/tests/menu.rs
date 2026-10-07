@@ -924,6 +924,107 @@ fn event_rows_carry_real_availability() {
     }
 }
 
+/// The checkpoint install plus a two-row Crash Course table — `crash0`
+/// a one-leg lesson, `crash1` an exam row — for the F21-B.8 menu entry.
+fn crash_install() -> tempfile::TempDir {
+    let tmp = install();
+    let d = tmp.path();
+    let row = "0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n";
+    write(
+        d,
+        "race/testcity/mmcrashdata.csv",
+        format!("{MM_HEADER}\nlesson1,{row}midtrm1,{row}"),
+    );
+    let crashdata =
+        "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
+    for stem in ["crash0", "crash1"] {
+        write(d, &format!("race/testcity/{stem}.aimap"), "[Opponent]\n0\n");
+        for suffix in ["data", "data_p"] {
+            write(
+                d,
+                &format!("race/testcity/{stem}{suffix}.csv"),
+                format!("{crashdata}slalom,7,1,12,0.05,0,0,0,0,0,0\n"),
+            );
+        }
+    }
+    write(d, "race/testcity/slalom.csv", waypoints_csv());
+    tmp
+}
+
+/// F21-B.8: the Crash Course table is a real menu entry — lessons are
+/// listed by authored name, their options stay closed (a lesson runs as
+/// authored), the midterm keeps its authored gate on the lessons, and an
+/// open row launches as a lesson (driver installed) instead of the old "not loadable yet" refusal.
+#[test]
+fn crash_course_rows_launch_as_lessons() {
+    let tmp = crash_install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    {
+        let rows = &shell(&app).rows;
+        let crash = rows
+            .iter()
+            .find(|r| r.text.starts_with("Crash Course"))
+            .unwrap();
+        assert!(crash.enabled.is_ok(), "{:?}", crash.enabled);
+        assert_eq!(crash.text, "Crash Course (2 lessons)");
+    }
+    activate_row(&mut app, "Crash Course");
+    let listed: Vec<(String, Result<(), String>)> = shell(&app)
+        .rows
+        .iter()
+        .map(|r| (r.text.clone(), r.enabled.clone()))
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0].0, "Lesson 1");
+    assert_eq!(listed[1].0, "Midterm 1");
+    let options = options_of(&app, "Lesson 1");
+    assert_eq!(
+        options.enabled.as_ref().unwrap_err(),
+        "crash course lessons run as authored"
+    );
+
+    // The authored gate stands: the midterm names the lesson it needs
+    // and activating it is a status line, never a launch.
+    assert!(
+        listed[1].1.as_ref().unwrap_err().contains("crash0"),
+        "{:?}",
+        listed[1].1
+    );
+    assert!(listed[0].1.is_ok(), "{:?}", listed[0].1);
+    activate_row(&mut app, "Midterm 1");
+    assert_eq!(phase(&app), SessionPhase::Menu);
+    activate_row(&mut app, "Lesson 1");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the lesson never launched: {:?}",
+        phase(&app)
+    );
+    match app.world().resource::<Session>().config() {
+        Some(cfg) => assert_eq!(
+            cfg.mode,
+            SessionMode::Event(mm2_game::EventRef {
+                city: "testcity".into(),
+                table: EventTableKind::CrashCourse,
+                index: 0,
+            })
+        ),
+        None => panic!("a launched session has a config"),
+    }
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::lesson::LessonDriver>()
+            .is_some(),
+        "a menu-launched Crash Course row runs under a lesson driver"
+    );
+}
+
 /// Event rows carry the race names `tune/<city>.cinfo` authors, by
 /// table row; a row past the authored list keeps the stem label, and
 /// Quick Race shows the same name.
@@ -2135,7 +2236,7 @@ fn unresolvable_records_stay_listed_with_their_reasons() {
             .enabled
             .as_ref()
             .unwrap_err()
-            .contains("crash course"),
+            .contains("not in the testcity catalog"),
         "{:?}",
         by_stem("crash0").enabled
     );

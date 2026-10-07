@@ -1,3 +1,34 @@
+# Last iteration — F21-B.8: Crash Course menu entry (new-run iteration 15 of this runner)
+
+Selection: previous review passed (no blockers). The first remaining F21-B
+item was the menu entry — the only way a player could reach a lesson was
+`--event crash:N`. Lesson-pass credit is next but needs a design on how it
+differs from an event record (F21-B.5 refuses them), so I took the smaller,
+independent slice.
+
+Change: `menu.rs` — Crash Course table row enabled by catalog rows (shows
+`N lessons`), list rows named by the authored tag (`Lesson 1`, `Midterm 1`,
+`Final`), Options entry closed ("crash course lessons run as authored"),
+the three "not loadable yet (F21)" refusals removed (table row, Quick
+Race, Records). Midterms/finals keep the authored CC-2 gate and therefore
+stay locked until lesson-pass credit lands — stated in DSN-75 and PLAN.
+
+Tests: `tests/menu.rs::crash_course_rows_launch_as_lessons` (synthetic);
+the unresolvable-records test now expects the generic catalog reason for a
+stale crash record.
+
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` exit 0;
+`cargo test --locked --workspace` exit 0 (2298 passed, 0 failed; was 2297).
+No processes left running.
+
+Not verified / open: no retail/windowed menu check, no lesson-pass credit
+(midterm/final unreachable from the menu), instruction/pass/fail screens,
+pathset/vehicle restore, UNK-35 evaluators. Status: implemented candidate,
+not independently checked.
+
+---
+
 # Last iteration — F21-B.7: retail lesson launch validation (new-run iteration 47)
 
 Selection: the previous review passed; its first verification gap was

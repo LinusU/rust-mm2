@@ -1370,16 +1370,21 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     let rows_found = status.map(|s| s.rows).unwrap_or(0);
                     let enabled = match status.and_then(|s| s.error.as_ref()) {
                         Some(e) => Err(e.clone()),
-                        None if *kind == EventTableKind::CrashCourse => {
-                            Err("crash course events are not loadable yet (F21)".to_string())
-                        }
                         None if rows_found == 0 => Err("no authored rows".to_string()),
                         None => Ok(()),
                     };
                     // Won counts only the table's authored events, so a
                     // stale record for a since-removed row never
                     // inflates it.
+                    // A lesson's pass is never an event record (DSN-75),
+                    // so a "won" tally would read 0 forever.
                     let progress = match &bound {
+                        _ if rows_found == 0 && *kind == EventTableKind::CrashCourse => {
+                            "no lessons".to_string()
+                        }
+                        _ if *kind == EventTableKind::CrashCourse => {
+                            format!("{rows_found} lessons")
+                        }
                         _ if rows_found == 0 => "no races".to_string(),
                         Some(p) => {
                             let won = catalog
@@ -1459,8 +1464,13 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         })
                         .and_then(Won::of)
                     });
+                    let text = if e.event_ref.table == EventTableKind::CrashCourse {
+                        lesson_name(&e.description)
+                    } else {
+                        data.event_label(vfs, &e.event_ref, &e.stem)
+                    };
                     Row {
-                        text: data.event_label(vfs, &e.event_ref, &e.stem),
+                        text,
                         enabled: enabled.clone(),
                         action: Action::LaunchEvent(e.event_ref.clone()),
                         won,
@@ -1728,12 +1738,6 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         );
     };
     let text = format!("Quick Race: {}", key.stem);
-    if key.table == EventTableKind::CrashCourse {
-        return disabled(
-            text,
-            "crash course events are not loadable yet (F21)".to_string(),
-        );
-    }
     if let Err(reason) = data.city_loadable(vfs, &key.city) {
         return disabled(text, reason);
     }
@@ -2027,6 +2031,11 @@ fn options_row(
 ) -> Row {
     let gate = match event_enabled {
         Err(reason) => Err(reason.clone()),
+        // A lesson runs exactly as authored: the conditions and
+        // densities of its legs are part of what it examines.
+        Ok(()) if e.event_ref.table == EventTableKind::CrashCourse => {
+            Err("crash course lessons run as authored".to_string())
+        }
         Ok(()) => match (bound, avail) {
             (None, _) => Err("no driver profile - options unlock per driver".to_string()),
             (_, Some(a)) if !a.customizable => {
@@ -2306,9 +2315,6 @@ fn record_row(
         won: Won::of(record),
         side: None,
     };
-    if key.table == EventTableKind::CrashCourse {
-        return disabled("crash course events are not loadable yet (F21)".into());
-    }
     if let Err(reason) = data.city_loadable(vfs, &key.city) {
         return disabled(reason);
     }
