@@ -8,7 +8,10 @@
 //! only classified: `aud/spchdata`/`aud/creaturedata` (speech and
 //! pedestrian voices, F08) are probed text-vs-binary, and the
 //! `aud/dmusic` RIFF containers (`DMSG`/`DMST`/`DLS `/`DMBD`) are
-//! classified by form word — DirectMusic playback is not decoded here.
+//! parsed structurally (`mm2_formats::dmus`: tracks, band instruments,
+//! DLS waves, `DMRF` references resolved against the shipped files and
+//! walked from the music-table stems) — DirectMusic playback is not
+//! implemented.
 //! The five `aud/dmusic/csv_files` music cue tables are parsed
 //! (`mm2_formats::music`) and every segment/style/band stem they name
 //! is cross-checked against the shipped containers, with the
@@ -25,6 +28,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_formats::cardata::{self, CardataBody, CardataIssue};
+use mm2_formats::dmus::{DmContainer, DmKind};
 use mm2_formats::music::{self, MusicTable};
 use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
@@ -86,12 +90,85 @@ pub struct AudioReport {
     pub dead_music_refs: Vec<(String, Vec<String>)>,
     /// Shipped `.sgt`/`.sty`/`.bnd` files no music table names.
     pub unreferenced_music: Vec<String>,
+    /// DirectMusic containers that parsed structurally.
+    pub dm_parsed: usize,
+    /// Segment track kinds across every parsed segment → track count.
+    pub dm_tracks: BTreeMap<String, usize>,
+    /// Segments with no tracks, and bands/styles with no instruments,
+    /// are informational; this counts band instruments across every
+    /// container.
+    pub dm_instruments: usize,
+    /// `DMRF` references authored across all containers.
+    pub dm_refs_total: usize,
+    /// …of which name a shipped `aud/dmusic` file.
+    pub dm_refs_resolved: usize,
+    /// Unresolved `DMRF` references: `(owner path, referenced file)`.
+    pub dead_dm_refs: Vec<(String, String)>,
+    /// Shipped containers (any kind) that no music-table stem reaches,
+    /// directly or through `DMRF` references.
+    pub dm_unreached: Vec<String>,
+    /// DLS banks parsed.
+    pub dls_banks: usize,
+    /// DLS instruments across all banks.
+    pub dls_instruments: usize,
+    /// DLS wave-pool entries across all banks.
+    pub dls_waves: usize,
+    /// DLS wave census: `(sample_rate, channels, bits)` of the waves that
+    /// are uncompressed 16-bit PCM → count.
+    pub dls_wave_census: BTreeMap<(u32, u16, u16), usize>,
+    /// DLS waves that are not decodable PCM16.
+    pub dls_unsupported_waves: usize,
+    /// Total DLS PCM16 playtime at authored rates.
+    pub dls_seconds: f64,
     /// Distinct sample names referenced by parsed tables.
     pub refs_total: usize,
     /// …of which resolve to a discovered wave stem.
     pub refs_resolved: usize,
     /// Unresolved references: name → referring tables.
     pub dead_refs: Vec<(String, Vec<String>)>,
+}
+
+impl AudioReport {
+    /// Fold one parsed DirectMusic container into the census; returns the
+    /// case-folded file names it references.
+    fn absorb_dm(&mut self, logical: &str, c: &DmContainer) -> Vec<String> {
+        self.dm_parsed += 1;
+        for t in &c.content.tracks {
+            *self.dm_tracks.entry(t.kind_name()).or_default() += 1;
+        }
+        self.dm_instruments += c.content.instruments.len();
+        for i in &c.issues {
+            self.issues.push(format!("{logical}: {i:?}"));
+        }
+        if let Some(d) = &c.dls {
+            self.dls_banks += 1;
+            self.dls_instruments += d.instruments.len();
+            self.dls_waves += d.waves.len();
+            for w in &d.waves {
+                let f = &w.format;
+                if f.tag == mm2_formats::wav::FORMAT_PCM && f.bits_per_sample == 16 {
+                    *self
+                        .dls_wave_census
+                        .entry((f.sample_rate, f.channels, f.bits_per_sample))
+                        .or_default() += 1;
+                    if let Some(frames) = w.frames()
+                        && f.sample_rate != 0
+                    {
+                        self.dls_seconds += frames as f64 / f64::from(f.sample_rate);
+                    }
+                } else {
+                    self.dls_unsupported_waves += 1;
+                }
+            }
+        }
+        debug_assert!(c.kind != DmKind::Dls || c.dls.is_some());
+        c.references
+            .iter()
+            .filter_map(|r| r.file.as_deref())
+            .filter(|f| !f.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    }
 }
 
 /// The RIFF form word each DirectMusic extension should carry.
@@ -194,6 +271,11 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
     // path) and the ones the music tables name (→ naming tables).
     let mut music_files: BTreeMap<String, String> = BTreeMap::new();
     let mut music_refs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Every DirectMusic container by case-folded file name (DLS banks
+    // included — `DMRF` references name them), and the references each
+    // container authors: owner file name → referenced file names.
+    let mut dm_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut dm_edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     let mut logicals: Vec<String> = vfs
         .list()
@@ -270,6 +352,16 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
                             logical.clone(),
                             format!("expected {}, found {form_s}", String::from_utf8_lossy(want)),
                         ));
+                    }
+                    dm_files.insert(name.to_ascii_lowercase(), logical.clone());
+                    match DmContainer::parse(&bytes) {
+                        Ok(c) => {
+                            let edges = r.absorb_dm(logical, &c);
+                            dm_edges.insert(name.to_ascii_lowercase(), edges);
+                        }
+                        Err(e) => r
+                            .failures
+                            .push((logical.clone(), format!("DirectMusic: {e}"))),
                     }
                 }
                 None => r
@@ -402,6 +494,43 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
         .filter(|(name, _)| !music_refs.contains_key(*name))
         .map(|(_, logical)| logical.clone())
         .collect();
+    // DMRF reference → shipped container cross-check, then reachability
+    // from the stems the music tables name.
+    for (owner, targets) in &dm_edges {
+        for t in targets {
+            r.dm_refs_total += 1;
+            if dm_files.contains_key(t) {
+                r.dm_refs_resolved += 1;
+            } else {
+                let owner = dm_files
+                    .get(owner)
+                    .cloned()
+                    .unwrap_or_else(|| owner.clone());
+                r.dead_dm_refs.push((owner, t.clone()));
+            }
+        }
+    }
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut frontier: Vec<&str> = music_refs
+        .keys()
+        .filter(|k| dm_files.contains_key(*k))
+        .map(String::as_str)
+        .collect();
+    while let Some(n) = frontier.pop() {
+        if !reached.insert(n) {
+            continue;
+        }
+        for t in dm_edges.get(n).into_iter().flatten() {
+            if dm_files.contains_key(t) {
+                frontier.push(t);
+            }
+        }
+    }
+    r.dm_unreached = dm_files
+        .iter()
+        .filter(|(n, _)| !reached.contains(n.as_str()))
+        .map(|(_, logical)| logical.clone())
+        .collect();
     for (path, what) in &r.riff_mismatches {
         r.issues
             .push(format!("{path}: RIFF form mismatch ({what})"));
@@ -494,9 +623,44 @@ pub fn print_report(r: &AudioReport) {
         r.waves, r.wave_bytes, r.wave_seconds
     );
 
-    println!("== DirectMusic containers (recognized, not decoded) ==");
+    println!("== DirectMusic containers (structure parsed, nothing synthesized) ==");
     for (form, n) in &r.riff_forms {
         println!("  RIFF form {form:?}: {n} file(s)");
+    }
+    println!(
+        "  {} parsed; segment tracks: {}; band instruments: {}",
+        r.dm_parsed,
+        r.dm_tracks
+            .iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        r.dm_instruments
+    );
+    println!(
+        "  DLS: {} bank(s), {} instrument(s), {} wave(s) ({} not PCM16), {:.1}s PCM16",
+        r.dls_banks, r.dls_instruments, r.dls_waves, r.dls_unsupported_waves, r.dls_seconds
+    );
+    for ((rate, ch, bits), n) in &r.dls_wave_census {
+        println!("    DLS PCM {rate} Hz {ch}ch {bits}bit: {n} wave(s)");
+    }
+    println!(
+        "  DMRF references: {}/{} resolved to shipped containers",
+        r.dm_refs_resolved, r.dm_refs_total
+    );
+    for (owner, target) in &r.dead_dm_refs {
+        println!("    dead DMRF ref {target:?} ← {owner}");
+    }
+    if !r.dm_unreached.is_empty() {
+        println!(
+            "  {} container(s) no music-table stem reaches, even through DMRF references: {}",
+            r.dm_unreached.len(),
+            r.dm_unreached
+                .iter()
+                .map(|p| p.strip_prefix("aud/dmusic/").unwrap_or(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     for (path, summary) in &r.music_tables {
         println!("  {path:<44} {summary}");
@@ -666,10 +830,7 @@ mod tests {
         write(d, "aud/cardata/player/vpbug.csv", CAR_CSV);
         write(d, "tune/vpbug.info", b"Description = Test\n");
         // A dmusic segment and a deferred speech table.
-        let mut sgt = Vec::from(&b"RIFF"[..]);
-        sgt.extend_from_slice(&8u32.to_le_bytes());
-        sgt.extend_from_slice(b"DMSG");
-        write(d, "aud/dmusic/x.sgt", &sgt);
+        write(d, "aud/dmusic/x.sgt", &riff(b"DMSG"));
         write(d, "aud/spchdata/al1/blitz.csv", b"header\n");
 
         let r = audit(&vfs_of(d));
@@ -689,11 +850,66 @@ mod tests {
         assert!(r.failures.is_empty());
     }
 
+    fn chunk(id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = id.to_vec();
+        v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        v.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    }
+
+    fn container(kind: &[u8; 4], form: &[u8; 4], parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = form.to_vec();
+        parts.iter().for_each(|p| body.extend_from_slice(p));
+        chunk(kind, &body)
+    }
+
+    /// A `DMRF` reference list naming `file`.
+    fn dmrf(file: &str) -> Vec<u8> {
+        let utf16: Vec<u8> = file
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        container(b"LIST", b"DMRF", &[chunk(b"file", &utf16)])
+    }
+
+    /// A structurally complete segment: header, one command track and the
+    /// given style/band references under a style track.
+    fn segment_referencing(files: &[&str]) -> Vec<u8> {
+        let mut hdr = vec![0u8; 24];
+        hdr.extend_from_slice(b"cmnd\0\0\0\0");
+        let refs: Vec<Vec<u8>> = files.iter().map(|f| dmrf(f)).collect();
+        container(
+            b"RIFF",
+            b"DMSG",
+            &[
+                chunk(b"segh", &[0; 24]),
+                container(
+                    b"LIST",
+                    b"trkl",
+                    &[
+                        container(b"RIFF", b"DMTK", &[chunk(b"trkh", &hdr)]),
+                        container(
+                            b"RIFF",
+                            b"DMTK",
+                            &[chunk(b"trkh", &hdr), container(b"LIST", b"strf", &refs)],
+                        ),
+                    ],
+                ),
+            ],
+        )
+    }
+
+    /// The smallest container of `form` that parses without findings.
     fn riff(form: &[u8; 4]) -> Vec<u8> {
-        let mut out = Vec::from(&b"RIFF"[..]);
-        out.extend_from_slice(&8u32.to_le_bytes());
-        out.extend_from_slice(form);
-        out
+        match form {
+            b"DMSG" => segment_referencing(&[]),
+            b"DMST" => container(b"RIFF", b"DMST", &[chunk(b"styh", &[0; 12])]),
+            other => container(b"RIFF", other, &[]),
+        }
     }
 
     #[test]
@@ -737,6 +953,116 @@ mod tests {
     }
 
     #[test]
+    fn audit_follows_dmrf_references_and_reports_the_dead_and_the_unreached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        // enemystart → enemy.sty + Gone.bnd (dead); enemy.sty is reached
+        // through the segment, spare.sgt by nothing.
+        write(
+            d,
+            "aud/dmusic/enemystart.sgt",
+            &segment_referencing(&["Enemy.STY", "Gone.bnd"]),
+        );
+        write(d, "aud/dmusic/enemy.sty", &riff(b"DMST"));
+        write(d, "aud/dmusic/spare.sgt", &riff(b"DMSG"));
+        write(
+            d,
+            "aud/dmusic/csv_files/ui.csv",
+            b"Music segment\nEnemyStart\n",
+        );
+        let r = audit(&vfs_of(d));
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+        assert_eq!(r.dm_parsed, 3);
+        assert_eq!(r.dm_tracks["command"], 4);
+        assert_eq!(r.dm_refs_total, 2);
+        assert_eq!(r.dm_refs_resolved, 1);
+        assert_eq!(
+            r.dead_dm_refs,
+            [(
+                "aud/dmusic/enemystart.sgt".to_string(),
+                "gone.bnd".to_string()
+            )]
+        );
+        // The style is named by no table but reached through the segment.
+        assert!(
+            r.unreferenced_music
+                .contains(&"aud/dmusic/enemy.sty".to_string())
+        );
+        assert_eq!(r.dm_unreached, ["aud/dmusic/spare.sgt"]);
+    }
+
+    #[test]
+    fn audit_fails_a_container_whose_chunk_tree_is_damaged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let mut sgt = segment_referencing(&["x.sty"]);
+        // Inflate the style-track chunk past its parent.
+        let at = sgt.windows(4).position(|w| w == b"strf").unwrap() - 8 + 4;
+        sgt[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        write(d, "aud/dmusic/bad.sgt", &sgt);
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.failures.len(), 1, "{:?}", r.failures);
+        assert!(r.failures[0].1.starts_with("DirectMusic:"));
+        assert_eq!(r.dm_parsed, 0);
+    }
+
+    #[test]
+    fn audit_surfaces_a_containers_findings_as_issues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        // A segment with neither header nor tracks.
+        write(d, "aud/dmusic/empty.sgt", &container(b"RIFF", b"DMSG", &[]));
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.issues.len(), 2, "{:?}", r.issues);
+        assert!(r.issues.iter().any(|i| i.contains("MissingSegmentHeader")));
+    }
+
+    #[test]
+    fn audit_censuses_dls_waves_and_flags_a_non_pcm_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let wave = |tag: u16, rate: u32, frames: usize| {
+            let mut fmt = Vec::new();
+            fmt.extend_from_slice(&tag.to_le_bytes());
+            fmt.extend_from_slice(&1u16.to_le_bytes());
+            fmt.extend_from_slice(&rate.to_le_bytes());
+            fmt.extend_from_slice(&(rate * 2).to_le_bytes());
+            fmt.extend_from_slice(&2u16.to_le_bytes());
+            fmt.extend_from_slice(&16u16.to_le_bytes());
+            container(
+                b"LIST",
+                b"wave",
+                &[chunk(b"fmt ", &fmt), chunk(b"data", &vec![0u8; frames * 2])],
+            )
+        };
+        let waves = [wave(1, 22050, 22050), wave(0x11, 22050, 8)];
+        let off = waves[0].len() as u32;
+        let mut ptbl = Vec::new();
+        for w in [8u32, 2, 0, off] {
+            ptbl.extend_from_slice(&w.to_le_bytes());
+        }
+        let dls = container(
+            b"RIFF",
+            b"DLS ",
+            &[
+                chunk(b"colh", &0u32.to_le_bytes()),
+                chunk(b"ptbl", &ptbl),
+                container(b"LIST", b"wvpl", &waves),
+            ],
+        );
+        write(d, "aud/dmusic/bank.dls", &dls);
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.dls_banks, 1);
+        assert_eq!(r.dls_waves, 2);
+        assert_eq!(r.dls_wave_census[&(22050, 1, 16)], 1);
+        assert_eq!(r.dls_unsupported_waves, 1);
+        assert!((r.dls_seconds - 1.0).abs() < 1e-9);
+        assert_eq!(r.issues.len(), 1, "{:?}", r.issues);
+        assert!(r.issues[0].contains("UnsupportedWave"));
+    }
+
+    #[test]
     fn audit_flags_a_ragged_music_row_as_an_issue() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
@@ -752,10 +1078,7 @@ mod tests {
         let d = tmp.path();
         write(d, "aud/aud11/broken.wav", b"not a riff at all");
         // A .sty carrying a segment form word is a mismatch.
-        let mut sty = Vec::from(&b"RIFF"[..]);
-        sty.extend_from_slice(&8u32.to_le_bytes());
-        sty.extend_from_slice(b"DMSG");
-        write(d, "aud/dmusic/x.sty", &sty);
+        write(d, "aud/dmusic/x.sty", &riff(b"DMSG"));
         // A binary blob masquerading as csv (creaturedata shape).
         write(d, "aud/creaturedata/voice.csv", &[0xf3, 0xcd, 0xcc, 0x53]);
         write(d, "aud/cardata/player/vpx.bat", b"echo hi\n");

@@ -15,6 +15,7 @@ pub mod cpvs;
 pub mod crashdata;
 pub mod dash;
 pub mod dave;
+pub mod dmus;
 pub mod fog;
 pub mod hudmap;
 pub mod info;

@@ -363,7 +363,7 @@ impl<'a> Wav<'a> {
 }
 
 /// Parse the fixed 16-byte fmt record plus any extended tail.
-fn parse_fmt(payload: &[u8], offset: usize) -> Result<WaveFormat, FormatError> {
+pub(crate) fn parse_fmt(payload: &[u8], offset: usize) -> Result<WaveFormat, FormatError> {
     if payload.len() < 16 {
         return Err(FormatError::InvalidValue {
             offset,

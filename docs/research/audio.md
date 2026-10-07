@@ -262,18 +262,50 @@ is unverified (the `aud11` tree looks speech-dominated).
 
 ## DirectMusic (`aud/dmusic`)
 
-95 RIFF containers, recognized by form word only — not decoded:
+95 RIFF containers (62 `.sgt` `DMSG` segments, 17 `.sty` `DMST` styles,
+14 `.dls` `DLS ` banks, 2 `.bnd` `DMBD` bands). `mm2_formats::dmus`
+(`DmContainer::parse`) walks the chunk tree under hard depth/node bounds
+and reports what each declares; `mm2-inspect audio` runs it on every
+container and fails on structural damage or any finding. It is an
+*inventory* reader — nothing is synthesized. Retail (2026-10-07): all 95
+parse, 0 findings.
 
-| Ext | Form | Files | Role (inferred) |
-| --- | --- | --- | --- |
-| `.sgt` | `DMSG` | 62 | DirectMusic segments |
-| `.sty` | `DMST` | 17 | DirectMusic styles |
-| `.dls` | `DLS ` | 14 | Downloadable sound banks |
-| `.bnd` | `DMBD` | 2 | DirectMusic bands |
+| Form | Reader extracts | Retail |
+| --- | --- | --- |
+| `DMSG` | `segh` (repeats, length, play/loop points, resolution), `guid`/`vers`/`UNAM`, `trkh` per track (kind from `ckid`/`fccType`), `DMRF` references | tracks: band 62, command 61, style 62, tempo 62, chord/sequence/time-sig 1 each (`bigair.sgt`) |
+| `DMST` | `styh` (time signature, tempo), `part`/`pttn` counts, embedded `DMBD` | — |
+| `DMBD` | `lbin`/`bins` instruments (MSB/LSB/program, PChannel, flags), `DMRF` to a DLS bank | 2 073 band instruments across all containers |
+| `DLS ` | `colh`/`insh`/`rgnh`/`wlnk`, `ptbl` cues, `wvpl` waves (`fmt `/`data`) | 14 banks, 204 instruments, 368 waves |
+
+Findings the reader raises: header/track/style-header missing, short
+fixed records, odd UTF-16 strings, a `DMRF` with no file, `colh`/`insh`
+count drift, `ptbl` cue count ≠ waves, a cue not landing on a `LIST wave`,
+a region linking past the pool, a wave without `fmt `/`data`, a non-PCM16
+wave.
+
+**Measured facts.** A segment names its style, band and sound bank only by
+`DMRF` file *name* (`DLS Collection1.dls` → `aud/dmusic/dls collection1.dls`,
+case-folded, spaces kept): 1 865 references, 1 865 resolve. Every DLS wave
+is uncompressed mono 16-bit PCM (8–44.1 kHz, 357 s total), so DLS sample
+data decodes with no new codec (`DlsWave::samples_i16`). Segment `repeats`
+is 99 on 54 segments (90 ×3, 100 ×2, 33 ×2, 0 on `bigair.sgt`) — read as
+a loop count, unverified. The 28 containers no cue table names reduce to
+**14 reached by nothing** (also through `DMRF`), plus one unreferenced DLS bank: the `groover*` segments +
+style, `londontrans1`, `nightroamstart`, `sunidlecops`, `useforsomething`,
+`vanilla1/2`, `undergrounambience.sgt`/`undergroundambience.sty`/
+`undergroundamb.dls`, `pimphand.bnd` — they may be dev leftovers or driven
+by code (unrecovered).
+
+**Not decoded / unsupported state.** Track payloads (command, tempo, style
+reference, chord, sequence) and the style pattern/note-generation layer,
+band→DLS instrument mapping, DLS articulation (`art1`/`wsmp`), segment
+transitions and the mixer are not implemented, so **no music plays**
+(UNK-25). The format is not a MIDI file and not a plain WAV loop — a
+constant replacement loop would not be original music compatibility.
 
 Plus 5 text CSVs under `aud/dmusic/csv_files/`, the music cue tables
-(below). Playback is F08 scope; the audit fails a container whose form
-word disagrees with its extension (none do on retail).
+(below). The audit also fails a container whose form word disagrees with
+its extension (none do on retail).
 
 ### Music cue tables (`aud/dmusic/csv_files`, F08-A.3, AUD-13)
 
@@ -291,7 +323,8 @@ DirectMusic stems; columns found by header text, never position —
 `mm2-inspect audio` cross-checks every stem against the shipped
 containers (`Name` → `aud/dmusic/name.sgt`; the big-air style cell →
 `.sty`, the band cell → `.bnd`): **53 distinct stems, 53 resolved, 0
-dead**. 28 shipped `.sgt`/`.sty`/`.bnd` are named by no table (styles,
+dead**. 28 shipped `.sgt`/`.sty`/`.bnd` are named by no table (14 of them are
+reached through `DMRF` references — see above; styles,
 the `grooveridle`/`groovercops` segments, `londontrans1`,
 `nightroamstart`, `vanilla1/2`, `undergroundambience`,
 `useforsomething`, and `sunidlecops` — the `SunRoof` row's idle-cops

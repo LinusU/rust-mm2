@@ -1,3 +1,28 @@
+# Last iteration — F08-A.4: DirectMusic container reader (new-run iteration 35 of the 2026-10-07 run)
+
+Selection: the iteration-34 review passed with no blockers. F08 req 4/6 (determine the music formats; unsupported state explicit) still
+had only form-word counts for the 95 `aud/dmusic` RIFF containers, and the cue-table slice had left "28 containers named by no table, a
+segment may reach them" open. Ruled out again: `finallap` (dead ref), `UNLOCK*` (guessed mapping).
+
+Change: `mm2_formats::dmus::DmContainer::parse` — bounded RIFF walker (depth 16, 200k nodes; child past parent / bad form = error, authored
+anomalies = `DmIssue`) for `DMSG` (segh, tracks by `ckid`/`fccType`, DMRF refs), `DMST` (styh, part/pttn counts, embedded band), `DMBD`
+(bins patches) and `DLS ` (colh/insh/wlnk/ptbl/wvpl; `DlsWave::samples_i16`). `wav::parse_fmt` became `pub(crate)` for the DLS waves.
+`mm2-inspect audio` parses all containers (failures fail strict, findings are issues), resolves each `DMRF` file name against the shipped
+files case-folded and walks reachability from the music-table stems. Retail: 95/95 parse, 0 findings, 1865/1865 refs resolve, 368 DLS
+waves all PCM16 mono 8–44.1 kHz (357 s), tracks band/command/style/tempo ×62 (+chord/seqt/tims on `bigair.sgt`), 14 segments/styles/bands
++ `undergroundamb.dls` reached by nothing. AUD-14 in `docs/original-rules.md`, `docs/research/audio.md` DirectMusic section, PLAN F08-A row.
+
+Tests (+20): `mm2_formats::dmus` 16 (segment/style/band/DLS shape, missing header, dangling link, cue out of range, count drift, non-PCM and
+incomplete wave, structural errors, depth bomb, trailing bytes, odd string, nested guid/name not hijacking), `mm2_inspect::audio` +4
+(DMRF closure + dead + unreached, damaged tree fails, findings become issues, DLS census); two older audit tests now use structurally
+complete stub containers.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` 2565 passed, 0 failed; retail `mm2-inspect audio --strict` rc 0. Status: implemented candidate, not independently checked. Not shown:
+nothing plays — track payload meaning, pattern/note generation, band→DLS mapping, DLS articulation and transitions are unrecovered (UNK-25);
+`repeats` read as a loop count is inferred.
+
+---
+
 # Last iteration — F08-A.3 review nits (new-run iteration 34 of the 2026-10-07 run)
 
 Selection: the iteration-33 review passed with no blockers; I took its two non-blocking nits as a small repair rather than start a new slice.
