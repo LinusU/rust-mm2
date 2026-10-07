@@ -27,6 +27,7 @@ pub mod object_audio;
 pub mod opponent;
 pub mod parked;
 pub mod ped;
+pub mod police;
 pub mod profile;
 pub mod progression;
 pub mod props;
@@ -85,6 +86,7 @@ pub use ped::{
     PED_STATE_FPS, PedAnimError, PedAnimState, PedAnimator, PedBonePose, PedPose, PedRig,
     PedRigBone, PedRigError, PedSampleError, PedTick,
 };
+pub use police::{PoliceIssue, PoliceRoster, PoliceSpec, normalize_heading};
 pub use profile::{
     EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,
     ProfileId, ProfileKind, ProfileLoad, ProfileMeta, ProfileProgress, ProfileSelections,

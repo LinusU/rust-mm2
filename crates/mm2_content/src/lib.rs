@@ -25,6 +25,7 @@ pub mod garage;
 pub mod model;
 pub mod nav;
 pub mod opponents;
+pub mod police;
 pub mod race_def;
 pub mod rewards;
 pub mod surface;
@@ -68,6 +69,10 @@ pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides, load_routing_nav
 pub use opponents::{
     EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
     RosterSummary, audit_roster, event_aimap, opponent_roster, opponent_roster_from_aimap,
+};
+pub use police::{
+    ExtraPolice, PoliceBuild, PoliceEntry, PoliceReport, PoliceSummary, cruise_police_roster,
+    police_roster, police_roster_from_aimap,
 };
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
