@@ -254,6 +254,18 @@ profiles. `--shadows <off|low|high>` and `--msaa <off|2|4>` override
 them for a single run without saving, which is how to compare settings
 with `--perf-log`.
 
+Beside the CSV, `frames.csv.report.json` (schema `mm2-perf-report/1`)
+makes the numbers reproducible rather than anecdotal: engine commit and
+build profile (`debug` here means debug assertions are on — measure a
+`--release` build), OS/CPU/logical cores, the GPU adapter and backend the
+renderer reported, the content fingerprints (the structural catalog hash
+and the gameplay-byte hash with its file/byte counts) and mounted mods,
+the scene and settings the run named, and the post-warm-up percentile
+timings. A field the process could not observe is `null`. The report is
+local evidence — it embeds nothing from the install except hashes and
+counts — and a run is only comparable with another that has the same
+commit, build, hardware, fingerprints and settings.
+
 For a CPU profile of where inside those stages the time goes, macOS's
 `sample <pid> 20 1 -file out.txt` works on the stock release binary
 (Instruments is not required).

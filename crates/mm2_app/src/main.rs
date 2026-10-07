@@ -658,10 +658,12 @@ fn main() {
         }
     };
     let mut has_mods = false;
+    let mut mod_ids: Vec<String> = Vec::new();
     if let Some(mods) = &cli.mods {
         match mount_mods(&mut vfs, mods) {
             Ok(manifests) => {
                 has_mods = !manifests.is_empty();
+                mod_ids = manifests.iter().map(|m| m.id.clone()).collect();
                 for m in &manifests {
                     info!(mod_id = %m.id, dir = %mods.display(), "mounted mod");
                 }
@@ -2159,7 +2161,7 @@ fn main() {
             world: if menu_mode {
                 "menu".to_string()
             } else {
-                world_label
+                world_label.clone()
             },
             screenshot: cli.screenshot.clone(),
             frames_left: cli.frames.unwrap_or(600),
@@ -2169,7 +2171,50 @@ fn main() {
         app.add_systems(Update, smoke_test);
     }
     if let Some(path) = cli.perf_log.clone() {
-        perf::enable(&mut app, path);
+        // The report names what was asked for; the recorder adds what it
+        // can observe (build, host, GPU, content fingerprint).
+        let driver = if cli.bot {
+            "bot"
+        } else if cli.parked {
+            "parked"
+        } else if cli.seq {
+            "seq"
+        } else {
+            "live"
+        };
+        let mut scene = vec![("driver".to_string(), driver.to_string())];
+        for (key, value) in [
+            ("city", cli.city.clone()),
+            ("event", cli.event.clone()),
+            ("car", cli.car.clone()),
+            ("paint", cli.paint.map(|p| p.to_string())),
+            ("frames", cli.frames.map(|f| f.to_string())),
+        ] {
+            if let Some(value) = value {
+                scene.push((key.to_string(), value));
+            }
+        }
+        let settings = vec![
+            (
+                "vsync".to_string(),
+                if cli.no_vsync { "off" } else { "on" }.to_string(),
+            ),
+            ("msaa".to_string(), format!("{:?}", graphics.antialiasing)),
+            ("shadows".to_string(), format!("{:?}", graphics.shadows)),
+            ("window".to_string(), "1280x720".to_string()),
+            ("fixed_hz".to_string(), "120".to_string()),
+        ];
+        perf::enable(
+            &mut app,
+            path,
+            perf::RunContext {
+                world: world_label,
+                install: has_mm2,
+                mods: mod_ids,
+                scene,
+                settings,
+            },
+        );
     }
     let exit = app.run();
     if let AppExit::Error(code) = exit {

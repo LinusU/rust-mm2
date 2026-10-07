@@ -24,6 +24,14 @@
 //! over the file. It is a developer aid: nothing reads it back, and it
 //! costs one `Instant::now()` pair per stage when enabled and nothing
 //! when not.
+//!
+//! Next to the CSV it writes `<csv>.report.json` (F30-AC01): the numbers
+//! a stranger needs to *reproduce or distrust* the measurement — engine
+//! commit and build profile, OS/CPU/GPU, the content fingerprint and
+//! mods, the scene and settings the run named, and the percentile
+//! timings. A percentile with no hardware, build or content next to it
+//! is an anecdote. The report records what the process could observe;
+//! a field it could not observe says `null`, never a guess.
 
 use std::{
     fs::File,
@@ -35,6 +43,47 @@ use std::{
 use avian3d::collision::CollisionDiagnostics;
 use avian3d::dynamics::solver::SolverDiagnostics;
 use bevy::prelude::*;
+use bevy::render::renderer::RenderAdapterInfo;
+use mm2_game::Mm2Vfs;
+use serde_json::{Value, json};
+
+/// Schema tag of the JSON report; bump when a field changes meaning.
+pub const REPORT_SCHEMA: &str = "mm2-perf-report/1";
+
+/// What the caller says about the run. `scene` and `settings` are
+/// ordered `key → value` rows the caller owns (what was asked for —
+/// city, event, car, driver; MSAA, shadows, vsync); the recorder adds
+/// everything it can observe itself.
+#[derive(Clone, Debug, Default)]
+pub struct RunContext {
+    /// `dev-world` or the city's logical path.
+    pub world: String,
+    /// Whether a retail installation was mounted.
+    pub install: bool,
+    /// Mods mounted over it (ids, in mount order).
+    pub mods: Vec<String>,
+    pub scene: Vec<(String, String)>,
+    pub settings: Vec<(String, String)>,
+}
+
+/// The content the run measured, hashed once before the first frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContentFingerprint {
+    /// `mm2_assets::fingerprint::catalog` — the resolution map.
+    catalog: String,
+    /// `mm2_content::fingerprint::gameplay` — the gameplay bytes.
+    gameplay: Result<(String, usize, u64), String>,
+}
+
+/// What the render adapter said it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Gpu {
+    name: String,
+    backend: String,
+    device_type: String,
+    driver: String,
+    driver_info: String,
+}
 
 /// A frame longer than this many times the median counts as a hitch in
 /// the summary.
@@ -63,6 +112,31 @@ struct Row {
     contacts: u32,
 }
 
+/// Aggregates over the post-warm-up frames, in milliseconds.
+#[derive(Clone, Copy, Debug)]
+struct Stats {
+    frames: usize,
+    median: f64,
+    p95: f64,
+    p99: f64,
+    max: f64,
+    mean_total: f64,
+    hitches: usize,
+    multi_step: usize,
+    worst: Row,
+    max_fixed: f64,
+    max_update: f64,
+    max_render: f64,
+    mean_fixed: f64,
+    mean_update: f64,
+    mean_render: f64,
+    broad_per_step: f64,
+    narrow_per_step: f64,
+    solver_per_step: f64,
+    steps_per_frame: f64,
+    max_contacts: u32,
+}
+
 /// The recorder's state — present only when `--perf-log` was given.
 #[derive(Resource)]
 struct PerfLog {
@@ -80,12 +154,20 @@ struct PerfLog {
     narrow: Duration,
     solver: Duration,
     contacts: u32,
+    context: RunContext,
+    content: Option<ContentFingerprint>,
+    /// Filled by [`capture_adapter`] once the renderer exists; stays
+    /// `None` in a run that never created one.
+    gpu: Option<Gpu>,
 }
 
 impl PerfLog {
-    fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf, context: RunContext) -> Self {
         Self {
             path,
+            context,
+            content: None,
+            gpu: None,
             rows: Vec::new(),
             frame: 0,
             frame_start: None,
@@ -128,27 +210,23 @@ impl PerfLog {
         self.contacts = 0;
     }
 
-    /// Percentile summary of the post-warmup frames.
-    fn summary(&self) -> String {
+    /// Aggregate the post-warmup frames; `None` when the run was shorter
+    /// than the warm-up.
+    fn stats(&self) -> Option<Stats> {
         let rows = self.rows.get(WARMUP_FRAMES..).unwrap_or(&[]);
         if rows.is_empty() {
-            return format!(
-                "perf: {} frames recorded, fewer than the {WARMUP_FRAMES} warm-up frames \
-                 — run longer",
-                self.rows.len()
-            );
+            return None;
         }
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let mut totals: Vec<f64> = rows.iter().map(|r| ms(r.total)).collect();
         totals.sort_by(f64::total_cmp);
         let pct = |p: f64| totals[((totals.len() - 1) as f64 * p).round() as usize];
         let median = pct(0.5);
-        let hitches: Vec<&Row> = rows
+        let hitches = rows
             .iter()
             .filter(|r| ms(r.total) > median * HITCH_FACTOR)
-            .collect();
-        let multi_step = rows.iter().filter(|r| r.steps > 1).count();
-        let worst = rows.iter().max_by_key(|r| r.total).expect("rows non-empty");
+            .count();
+        let worst = *rows.iter().max_by_key(|r| r.total).expect("rows non-empty");
         let stage_max = |f: fn(&Row) -> Duration| ms(rows.iter().map(f).max().unwrap());
         let mean = |f: fn(&Row) -> Duration| {
             rows.iter().map(|r| ms(f(r))).sum::<f64>() / rows.len() as f64
@@ -157,6 +235,41 @@ impl PerfLog {
         let per_step = |f: fn(&Row) -> Duration| {
             rows.iter().map(|r| ms(f(r))).sum::<f64>() / steps.max(1) as f64
         };
+        Some(Stats {
+            frames: rows.len(),
+            median,
+            p95: pct(0.95),
+            p99: pct(0.99),
+            max: totals[totals.len() - 1],
+            mean_total: totals.iter().sum::<f64>() / totals.len() as f64,
+            hitches,
+            multi_step: rows.iter().filter(|r| r.steps > 1).count(),
+            worst,
+            max_fixed: stage_max(|r| r.fixed),
+            max_update: stage_max(|r| r.update),
+            max_render: stage_max(|r| r.render),
+            mean_fixed: mean(|r| r.fixed),
+            mean_update: mean(|r| r.update),
+            mean_render: mean(|r| r.render),
+            broad_per_step: per_step(|r| r.broad),
+            narrow_per_step: per_step(|r| r.narrow),
+            solver_per_step: per_step(|r| r.solver),
+            steps_per_frame: steps as f64 / rows.len() as f64,
+            max_contacts: rows.iter().map(|r| r.contacts).max().unwrap_or(0),
+        })
+    }
+
+    /// Percentile summary of the post-warmup frames.
+    fn summary(&self) -> String {
+        let Some(st) = self.stats() else {
+            return format!(
+                "perf: {} frames recorded, fewer than the {WARMUP_FRAMES} warm-up frames \
+                 — run longer",
+                self.rows.len()
+            );
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let worst = st.worst;
         format!(
             "perf: {n} frames after warm-up | frame ms: median {median:.2} p95 {p95:.2} \
              p99 {p99:.2} max {max:.2} | hitches (>{HITCH_FACTOR}x median): {h} ({hp:.1}%) \
@@ -166,30 +279,146 @@ impl PerfLog {
              perf: mean ms per frame: fixed {mfx:.2} update {mup:.2} render {mrn:.2} \
              | avian ms per fixed step: broad {sb:.2} narrow {sn:.2} solver {ss:.2} \
              | fixed steps per frame {spf:.2} | max contacts {mc}",
-            n = rows.len(),
-            p95 = pct(0.95),
-            p99 = pct(0.99),
-            max = totals[totals.len() - 1],
-            h = hitches.len(),
-            hp = 100.0 * hitches.len() as f64 / rows.len() as f64,
-            fx = stage_max(|r| r.fixed),
-            up = stage_max(|r| r.update),
-            rn = stage_max(|r| r.render),
+            n = st.frames,
+            median = st.median,
+            p95 = st.p95,
+            p99 = st.p99,
+            max = st.max,
+            h = st.hitches,
+            hp = 100.0 * st.hitches as f64 / st.frames as f64,
+            multi_step = st.multi_step,
+            fx = st.max_fixed,
+            up = st.max_update,
+            rn = st.max_render,
             wf = worst.frame,
             wt = ms(worst.total),
             wfx = ms(worst.fixed),
             wup = ms(worst.update),
             wrn = ms(worst.render),
             ws = worst.steps,
-            mfx = mean(|r| r.fixed),
-            mup = mean(|r| r.update),
-            mrn = mean(|r| r.render),
-            sb = per_step(|r| r.broad),
-            sn = per_step(|r| r.narrow),
-            ss = per_step(|r| r.solver),
-            spf = steps as f64 / rows.len() as f64,
-            mc = rows.iter().map(|r| r.contacts).max().unwrap_or(0),
+            mfx = st.mean_fixed,
+            mup = st.mean_update,
+            mrn = st.mean_render,
+            sb = st.broad_per_step,
+            sn = st.narrow_per_step,
+            ss = st.solver_per_step,
+            spf = st.steps_per_frame,
+            mc = st.max_contacts,
         )
+    }
+
+    /// The reproducibility report (F30-AC01). Pure over what the recorder
+    /// holds, so it is testable without a window or an install.
+    fn report(&self) -> Value {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let kv = |rows: &[(String, String)]| {
+            Value::Object(
+                rows.iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect(),
+            )
+        };
+        let content = match &self.content {
+            None => Value::Null,
+            Some(c) => {
+                let gameplay = match &c.gameplay {
+                    Ok((hash, files, bytes)) => {
+                        json!({ "hash": hash, "files": files, "bytes": bytes })
+                    }
+                    Err(e) => json!({ "error": e }),
+                };
+                json!({ "catalog": c.catalog, "gameplay": gameplay })
+            }
+        };
+        let gpu = self.gpu.as_ref().map_or(Value::Null, |g| {
+            json!({
+                "name": g.name,
+                "backend": g.backend,
+                "device_type": g.device_type,
+                "driver": g.driver,
+                "driver_info": g.driver_info,
+            })
+        });
+        let timings = self.stats().map_or(Value::Null, |st| {
+            json!({
+                "frame_ms": {
+                    "median": st.median, "p95": st.p95, "p99": st.p99,
+                    "max": st.max, "mean": st.mean_total,
+                },
+                "hitches": {
+                    "factor": HITCH_FACTOR,
+                    "count": st.hitches,
+                    "frames_with_multiple_fixed_steps": st.multi_step,
+                },
+                "stage_max_ms": {
+                    "fixed": st.max_fixed, "update": st.max_update, "render": st.max_render,
+                },
+                "stage_mean_ms": {
+                    "fixed": st.mean_fixed, "update": st.mean_update, "render": st.mean_render,
+                },
+                "avian_ms_per_fixed_step": {
+                    "broad": st.broad_per_step,
+                    "narrow": st.narrow_per_step,
+                    "solver": st.solver_per_step,
+                },
+                "fixed_steps_per_frame": st.steps_per_frame,
+                "max_contacts": st.max_contacts,
+                "worst_frame": {
+                    "frame": st.worst.frame,
+                    "total_ms": ms(st.worst.total),
+                    "fixed_steps": st.worst.steps,
+                },
+            })
+        });
+        let wall: Duration = self.rows.iter().map(|r| r.total).sum();
+        json!({
+            "schema": REPORT_SCHEMA,
+            "engine": {
+                "commit": crate::smoke::COMMIT,
+                "version": env!("CARGO_PKG_VERSION"),
+                "build": if cfg!(debug_assertions) { "debug" } else { "release" },
+            },
+            "host": {
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "cpu": cpu_brand(),
+                "logical_cpus": std::thread::available_parallelism().ok().map(|n| n.get()),
+                "gpu": gpu,
+            },
+            "content": {
+                "world": self.context.world,
+                "install": self.context.install,
+                "mods": self.context.mods,
+                "fingerprint": content,
+            },
+            "scene": kv(&self.context.scene),
+            "settings": kv(&self.context.settings),
+            "run": {
+                "csv": self.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "frames_recorded": self.rows.len(),
+                "warmup_frames_dropped": WARMUP_FRAMES.min(self.rows.len()),
+                "frames_measured": self.rows.len().saturating_sub(WARMUP_FRAMES),
+                "wall_seconds": wall.as_secs_f64(),
+            },
+            "timings": timings,
+        })
+    }
+
+    /// Where the report lands: the CSV's name plus `.report.json`, so a
+    /// CSV literally called `x.json` is not overwritten by its own report.
+    fn report_path(&self) -> PathBuf {
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".report.json");
+        self.path.with_file_name(name)
+    }
+
+    fn write_report(&self) -> std::io::Result<PathBuf> {
+        let path = self.report_path();
+        let mut text =
+            serde_json::to_string_pretty(&self.report()).map_err(std::io::Error::other)?;
+        text.push('\n');
+        std::fs::write(&path, text)?;
+        Ok(path)
     }
 
     fn write_csv(&self) -> std::io::Result<()> {
@@ -226,6 +455,10 @@ impl Drop for PerfLog {
         match self.write_csv() {
             Ok(()) => info!(path = %self.path.display(), "perf log written"),
             Err(e) => warn!(path = %self.path.display(), error = %e, "perf log not written"),
+        }
+        match self.write_report() {
+            Ok(path) => info!(path = %path.display(), "perf report written"),
+            Err(e) => warn!(error = %e, "perf report not written"),
         }
         println!("{}", self.summary());
     }
@@ -279,11 +512,69 @@ fn frame_main_end(mut log: ResMut<PerfLog>) {
     log.main_end = Some(Instant::now());
 }
 
-/// Record per-frame stage timings into `path` (CSV) and print a summary
-/// when the app exits.
-pub fn enable(app: &mut App, path: PathBuf) {
+/// The CPU's marketing name, if the OS will say. Best-effort: `None`
+/// is reported as `null`, not a made-up string.
+fn cpu_brand() -> Option<String> {
+    let text = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())?
+    } else if cfg!(target_os = "linux") {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("model name").map(str::to_owned))?
+            .trim_start_matches([' ', '\t', ':'])
+            .to_owned()
+    } else {
+        std::env::var("PROCESSOR_IDENTIFIER").ok()?
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Hash the mounted content once, before the first frame, so the cost
+/// lands in start-up and never in the measurement.
+fn fingerprint(vfs: &mm2_assets::Vfs) -> ContentFingerprint {
+    ContentFingerprint {
+        catalog: mm2_assets::fingerprint::catalog(vfs),
+        gameplay: mm2_content::fingerprint::gameplay(vfs)
+            .map(|g| (g.display(), g.files, g.bytes))
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// Read the adapter once the renderer has produced it.
+fn capture_adapter(info: Option<Res<RenderAdapterInfo>>, mut log: ResMut<PerfLog>) {
+    if log.gpu.is_some() {
+        return;
+    }
+    if let Some(info) = info {
+        log.gpu = Some(Gpu {
+            name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver.clone(),
+            driver_info: info.driver_info.clone(),
+        });
+    }
+}
+
+/// Record per-frame stage timings into `path` (CSV), with a
+/// reproducibility report beside it, and print a summary when the app
+/// exits.
+pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
     use bevy::app::RunFixedMainLoopSystems::{AfterFixedMainLoop, BeforeFixedMainLoop};
-    app.insert_resource(PerfLog::new(path))
+    let mut log = PerfLog::new(path, context);
+    log.content = app
+        .world()
+        .get_resource::<Mm2Vfs>()
+        .map(|vfs| fingerprint(&vfs.0));
+    app.insert_resource(log)
         .add_systems(First, frame_begin)
         .add_systems(
             RunFixedMainLoop,
@@ -292,6 +583,7 @@ pub fn enable(app: &mut App, path: PathBuf) {
         .add_systems(RunFixedMainLoop, fixed_loop_end.in_set(AfterFixedMainLoop))
         .add_systems(FixedFirst, fixed_step)
         .add_systems(FixedLast, fixed_step_physics)
+        .add_systems(Update, capture_adapter)
         .add_systems(Last, frame_main_end);
 }
 
@@ -316,7 +608,10 @@ mod tests {
 
     #[test]
     fn summary_counts_hitches_past_warmup() {
-        let mut log = PerfLog::new(std::env::temp_dir().join("mm2_perf_summary_test.csv"));
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_summary_test.csv"),
+            RunContext::default(),
+        );
         // A 1000 ms warm-up frame must not reach the maximum.
         log.rows.push(row(0, 1000, 1));
         for f in 1..WARMUP_FRAMES as u64 {
@@ -336,7 +631,10 @@ mod tests {
 
     #[test]
     fn begin_frame_splits_stages() {
-        let mut log = PerfLog::new(std::env::temp_dir().join("mm2_perf_stages_test.csv"));
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_stages_test.csv"),
+            RunContext::default(),
+        );
         let t0 = Instant::now();
         log.begin_frame(t0);
         log.fixed = Duration::from_millis(3);
@@ -349,5 +647,139 @@ mod tests {
         assert_eq!(r.update, Duration::from_millis(7));
         assert_eq!(r.render, Duration::from_millis(6));
         assert_eq!(r.steps, 2);
+    }
+
+    fn long_log(context: RunContext) -> PerfLog {
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_report_test.csv"),
+            context,
+        );
+        for f in 0..(WARMUP_FRAMES as u64 + 100) {
+            log.rows.push(row(f, 16, 1));
+        }
+        log
+    }
+
+    #[test]
+    fn the_report_names_the_build_the_host_the_scene_and_the_percentiles() {
+        let log = long_log(RunContext {
+            world: "city/sf.psdl".into(),
+            install: true,
+            mods: vec!["paint-pack".into()],
+            scene: vec![
+                ("car".into(), "vpbug".into()),
+                ("driver".into(), "bot".into()),
+            ],
+            settings: vec![("msaa".into(), "4".into()), ("vsync".into(), "off".into())],
+        });
+        let r = log.report();
+        assert_eq!(r["schema"], REPORT_SCHEMA);
+        assert_eq!(r["engine"]["commit"], crate::smoke::COMMIT);
+        let build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        assert_eq!(r["engine"]["build"], build);
+        assert_eq!(r["host"]["os"], std::env::consts::OS);
+        assert_eq!(r["host"]["arch"], std::env::consts::ARCH);
+        assert!(r["host"]["logical_cpus"].as_u64().unwrap() >= 1);
+        assert_eq!(r["content"]["world"], "city/sf.psdl");
+        assert_eq!(r["content"]["install"], true);
+        assert_eq!(r["content"]["mods"][0], "paint-pack");
+        assert_eq!(r["scene"]["car"], "vpbug");
+        assert_eq!(r["settings"]["vsync"], "off");
+        assert_eq!(r["run"]["frames_recorded"], WARMUP_FRAMES + 100);
+        assert_eq!(r["run"]["warmup_frames_dropped"], WARMUP_FRAMES);
+        assert_eq!(r["run"]["frames_measured"], 100);
+        assert_eq!(r["run"]["csv"], "mm2_perf_report_test.csv");
+        assert_eq!(r["timings"]["frame_ms"]["median"], 16.0);
+        assert_eq!(r["timings"]["frame_ms"]["p99"], 16.0);
+        assert_eq!(r["timings"]["frame_ms"]["max"], 16.0);
+    }
+
+    #[test]
+    fn a_field_the_run_could_not_observe_is_null_not_invented() {
+        // No renderer ever reported an adapter, no VFS was fingerprinted,
+        // and the run was too short to leave the warm-up.
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_null_test.csv"),
+            RunContext::default(),
+        );
+        log.rows.push(row(0, 16, 1));
+        let r = log.report();
+        assert!(r["host"]["gpu"].is_null());
+        assert!(r["content"]["fingerprint"].is_null());
+        assert!(r["timings"].is_null());
+        assert_eq!(r["run"]["frames_measured"], 0);
+        assert_eq!(r["run"]["warmup_frames_dropped"], 1);
+    }
+
+    #[test]
+    fn the_report_carries_the_gpu_and_the_content_fingerprint_when_known() {
+        let mut log = long_log(RunContext::default());
+        log.gpu = Some(Gpu {
+            name: "Apple M-test".into(),
+            backend: "Metal".into(),
+            device_type: "IntegratedGpu".into(),
+            driver: String::new(),
+            driver_info: String::new(),
+        });
+        log.content = Some(ContentFingerprint {
+            catalog: "fnv1a64:0000000000000001".into(),
+            gameplay: Ok(("fnv1a64:0000000000000002".into(), 3, 40)),
+        });
+        let r = log.report();
+        assert_eq!(r["host"]["gpu"]["name"], "Apple M-test");
+        assert_eq!(r["host"]["gpu"]["backend"], "Metal");
+        let c = &r["content"]["fingerprint"];
+        assert_eq!(c["catalog"], "fnv1a64:0000000000000001");
+        assert_eq!(c["gameplay"]["hash"], "fnv1a64:0000000000000002");
+        assert_eq!(c["gameplay"]["files"], 3);
+        assert_eq!(c["gameplay"]["bytes"], 40);
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_mounted_gameplay_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let tune = dir.path().join("tune");
+        std::fs::create_dir_all(&tune).unwrap();
+        std::fs::write(tune.join("a.asnode"), b"mass 1000").unwrap();
+        let mount = |dir: &std::path::Path| {
+            let mut vfs = mm2_assets::Vfs::new();
+            vfs.mount_dir(dir, 0).unwrap();
+            fingerprint(&vfs)
+        };
+        let before = mount(dir.path());
+        let (hash, files, bytes) = before.gameplay.clone().unwrap();
+        assert_eq!((files, bytes), (1, 9));
+        assert_eq!(before, mount(dir.path()), "same content, same fingerprint");
+        std::fs::write(tune.join("a.asnode"), b"mass 2000").unwrap();
+        let after = mount(dir.path()).gameplay.unwrap();
+        assert_ne!(after.0, hash, "an edited tuning file must move the hash");
+    }
+
+    #[test]
+    fn the_report_lands_beside_the_csv_and_never_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        // A CSV that is itself called `x.json` must keep its own file.
+        let csv = dir.path().join("x.json");
+        let mut log = PerfLog::new(csv.clone(), RunContext::default());
+        for f in 0..(WARMUP_FRAMES as u64 + 2) {
+            log.rows.push(row(f, 16, 1));
+        }
+        assert_eq!(log.report_path(), dir.path().join("x.json.report.json"));
+        log.write_csv().unwrap();
+        let written = log.write_report().unwrap();
+        assert_ne!(written, csv);
+        let parsed: Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
+        assert_eq!(parsed["schema"], REPORT_SCHEMA);
+        assert!(
+            std::fs::read_to_string(&csv)
+                .unwrap()
+                .starts_with("frame,total_ms"),
+            "the CSV survives its report"
+        );
     }
 }

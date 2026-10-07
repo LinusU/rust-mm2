@@ -1,3 +1,32 @@
+# Last iteration — F30-A.1: the benchmark report (new-run iteration 37 of this runner)
+
+Selection: previous review passed, no blockers, no failing gate. The F30-B write-guard
+items left are packaging/real-OS-layout (not provable here); F30-AC01 was entirely open —
+`--perf-log` had percentiles but nothing that names the hardware, build, content or
+settings, so a number could not be reproduced or distrusted. Smallest ready slice.
+
+Change: `perf::RunContext` (scene/settings rows + world/install/mods from `main.rs`) and a
+`<csv>.report.json` written beside the CSV on exit: engine commit, build profile
+(debug assertions), OS/arch/CPU brand/logical cores, GPU adapter (read from Bevy's
+`RenderAdapterInfo` once it exists), catalog + gameplay content fingerprints (computed
+before frame 1), percentile/stage timings. Unobserved → `null`. `summary()` and the report
+share one `Stats`. README "Frame-time profiling" documents it.
+
+Tests: 5 unit in `perf::tests`. Windowed run on this machine (Apple M1, Metal, retail sf,
+vpbug `--bot`, 400 frames, `--no-vsync`, dev profile) wrote a populated report
+(gameplay fingerprint 5593 files / 28.8 MB; median 26.7 ms, p99 29.4 ms — a dev-profile
+number, not a baseline).
+
+Gates (foreground, exit statuses checked): fmt --check pass; clippy --locked -D warnings clean;
+test --locked --workspace exit 0 (2423 passed, 0 failed). No test processes left running.
+
+Not verified / open: no release-profile baseline recorded; no process-level test (needs a
+window; hosted CI has none) — the windowed run is manual evidence; memory/draw-call/voice/
+bandwidth columns; AC02 soak. AC01 advanced, not complete. Status: implemented candidate,
+not independently checked.
+
+---
+
 # Last iteration — F30-B.4: the default profile root against the protected dirs (new-run iteration 36 of this runner)
 
 Selection: previous review passed, no blockers. Its open items for F30-AC05 included
