@@ -1,3 +1,17 @@
+# Last iteration — recovery of F19-B.1 review rejection (new-run iteration 39)
+
+Root cause: the iteration-38 review rejected the candidate because the pedestrian ledger row was labelled `DSN-80`, an ID already used by the
+"On-screen text size" row (F23 req 4). Highest used DSN was DSN-87, so the pedestrian row is now `DSN-88`. Implementation was otherwise accepted.
+
+Actions: renumbered the row in `docs/original-rules.md`; updated the F19-B.1 PLAN row and the iteration-38 handoff below (they meant the pedestrian
+row). The older `DSN-80` mentions (F23 text size) are untouched. Regression: `mm2_app` `tests/rules_ledger.rs` (wired into `tests/app.rs`) fails
+if any ledger ID labels more than one row, plus a self-test of the detector.
+
+Results: `cargo test -p mm2_app --test app rules_ledger` 2 passed; `cargo clippy -p mm2_app --tests -- -D warnings` clean; `cargo fmt --check` clean.
+Full workspace test run left to the external verify. F19-B.1 stays "implemented, not independently checked"; F19-B.2 (runtime spawn) still pending.
+
+---
+
 # Last iteration — F19-B.1: pedestrian sidewalk net, planner and walker (new-run iteration 38 of the 2026-10-07 run)
 
 Selection: the iteration-37 review passed with no blockers (its gaps were retail visual evidence only). F19 req 3 (sidewalk movement, density/seed,
@@ -8,7 +22,7 @@ so the runtime spawner (B.2) lands on tested, measured ground; no crowd appears 
 Change: `mm2_game::pedwalk` (new): `SidewalkNet` (walkable curves, kerb-corner joins, vehicle-lane severing), `plan_pedestrians` (seeded density
 placement in a spawn annulus), `SidewalkNet::advance` (corner hop / dead-end turn-around, step clamp), `in_walk_band`/`within_bubble`.
 `PedAnimState::locomotion_speed` (walk speed from the authored `Y AXIS DISTANCE`). `LaneId::key` made `pub(crate)`. `mm2-inspect nav`: sidewalk census,
-join-radius sweep, 2 km soak. Docs: DSN-80 (designed policy), UNK-42 (navigation semantics unknown), `docs/research/pedanim.md` sidewalk section, PLAN rows.
+join-radius sweep, 2 km soak. Docs: DSN-88 (designed policy), UNK-42 (navigation semantics unknown), `docs/research/pedanim.md` sidewalk section, PLAN rows.
 
 Measured (retail, local): corner gaps are not clustered — joined ends rise steadily with radius (London 176 @1 m → 1791 @12 m of 2160). My first
 default (3 m) left 792 regions of mostly single curves (walkers just paced), so the default is 8 m plus a structural guard: a join is refused when the line
