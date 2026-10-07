@@ -1,3 +1,23 @@
+# Last iteration — F29-A.2: per-consumer mod-override run (new-run iteration 9 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`a492907`) passed gates and review, no blockers; its gap list names the missing
+per-consumer override evidence (F29-AC01/AC02/AC05). The coverage audit's priority 4.
+
+Change: `crates/mm2_app/tests/mod_override.rs` (module added to `tests/app.rs`); `import_pipeline.rs` fixture builders
+`synthetic_psdl/inst/pkg` made `pub(crate)` and `synthetic_pkg_scaled` added (same topology, scaled vertices). A synthetic base
+(two cars, a one-prop city, two cue waves, skins) is observed through the production consumers — `MaterialCache::get`
+(car/prop texture path), `mm2_content::load_vehicle`, `load_city` prop stamping, `WaveBank` — with four single-purpose
+mods mounted alone, all together, and not at all. Asserts: each mod moves only its consumer; bystanders (`vpu` tune/skin,
+grass cue, world vertices) are unchanged; the base-only remount equals the first observation; of two conflicting mods the
+later mount wins and order swaps the winner; `fingerprint::gameplay` unchanged by texture/audio mods, changed by the tuning and
+prop mods (AC05 at integration level; unit cases already existed).
+
+Not shown: other families (race rules, surface tables, UI, localization), malformed-override errors (AC04), traversal/size
+caps (AC06), provenance across app/inspector/server (AC03), a retail-data override run. Status: implemented candidate,
+not independently checked; AC01/AC02/AC05 stay open for the remaining families.
+
+---
+
 # Last iteration — F29-A.1: VFS-only audit of production filesystem reach (new-run iteration 8 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`0ae2006`) passed gates and review, no blockers. Took the audit's priority 4 (F29

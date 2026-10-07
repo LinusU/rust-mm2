@@ -29,6 +29,7 @@ mod lesson_setup;
 mod light_bar;
 mod menu;
 mod mirror;
+mod mod_override;
 mod nav_overlay;
 mod navarrow;
 mod navarrow3d;

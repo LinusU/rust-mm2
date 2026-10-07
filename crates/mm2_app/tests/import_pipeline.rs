@@ -39,7 +39,7 @@ fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
 /// - a roof fan with a height override,
 /// - a road-tunnel attribute (decoded, applies to following roads — it is
 ///   last, so it contributes no wall geometry but is still emitted).
-fn synthetic_psdl() -> Vec<u8> {
+pub(crate) fn synthetic_psdl() -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"PSD0");
     d.extend_from_slice(&2u32.to_le_bytes()); // target_size
@@ -248,7 +248,7 @@ fn surface_tables() -> SurfaceTables {
 }
 
 /// INST file placing one `testprop` PKG at (40, 0, 5) via the simple form.
-fn synthetic_inst() -> Vec<u8> {
+pub(crate) fn synthetic_inst() -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(&1u16.to_le_bytes()); // room
     d.extend_from_slice(&0u16.to_le_bytes()); // modifiers
@@ -376,7 +376,13 @@ fn proprule_psdl() -> Vec<u8> {
 }
 
 /// PKG3 with one tetrahedron geometry chunk (`testprop_h`), no shaders.
-fn synthetic_pkg() -> Vec<u8> {
+pub(crate) fn synthetic_pkg() -> Vec<u8> {
+    synthetic_pkg_scaled(1.0)
+}
+
+/// [`synthetic_pkg`] with every vertex position multiplied by `scale` —
+/// a same-topology variant a mod can ship in its place.
+pub(crate) fn synthetic_pkg_scaled(scale: f32) -> Vec<u8> {
     // Geometry payload.
     let mut geo = Vec::new();
     geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
@@ -395,7 +401,7 @@ fn synthetic_pkg() -> Vec<u8> {
         ([0., 0., 1.], [0., 1., 0.], [0., 1.]),
         ([0., 1., 0.], [0., 1., 0.], [0.5, 0.5]),
     ] {
-        push_f32s(&mut geo, &p);
+        push_f32s(&mut geo, &p.map(|c: f32| c * scale));
         push_f32s(&mut geo, &n);
         push_f32s(&mut geo, &uv);
     }
