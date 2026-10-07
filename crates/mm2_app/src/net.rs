@@ -1105,7 +1105,7 @@ impl SessionChange {
         let city = match &config.world {
             WorldMode::City { psdl } => psdl
                 .strip_prefix("city/")
-                .and_then(|p| p.strip_suffix(".psdl"))
+                .and_then(crate::city::psdl_stem)
                 .unwrap_or("london")
                 .to_string(),
             // The CLI's `--event` over the dev world resolves London's
@@ -1788,7 +1788,7 @@ fn summarize(config: &SessionConfig) -> String {
         WorldMode::DevWorld => "dev world".to_string(),
         WorldMode::City { psdl } => psdl
             .strip_prefix("city/")
-            .and_then(|s| s.strip_suffix(".psdl"))
+            .and_then(crate::city::psdl_stem)
             .unwrap_or(psdl)
             .to_string(),
     };
@@ -1815,7 +1815,7 @@ pub fn late_join_policy(mode: &SessionMode) -> LateJoin {
 
 /// `city/<stem>.psdl` → `<stem>`.
 pub(crate) fn city_stem(psdl: &str) -> Option<&str> {
-    psdl.strip_prefix("city/")?.strip_suffix(".psdl")
+    crate::city::psdl_stem(psdl.strip_prefix("city/")?)
 }
 
 fn variant_label(variant: CnrVariant) -> &'static str {

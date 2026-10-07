@@ -1,3 +1,22 @@
+# Last iteration — F29-A.10 repair: environment siblings and stems share the case-insensitive helper (new-run iteration 18 of the 2026-10-07 run)
+
+Selection: iteration 17's review rejected `02974a0`: `environment.rs` derived `.ltNN`/`_fog.csv`/`.sky` with a case-sensitive
+`strip_suffix(".psdl")`, so a primary `city/Test.PSDL` silently fell back to the generic rig while `docs/modding.md` claimed every
+sibling was found; and the integration test never proved the `.inst` was read. Root cause: implementation (a second, unmigrated
+copy of the derivation), not data or gates.
+
+Change: `psdl_stem`/`psdl_sibling` are `pub(crate)` in `city.rs`; `environment.rs` (both sites), `net.rs` (`summarize`, `apply`,
+`city_stem`) and `menu.rs` (city scan) use them instead of their own `strip_suffix(".psdl")` (no second copy). Tests: new
+`environment::a_capitalised_primary_finds_its_lighting_fog_and_sky` (`Test.PSDL` + `Test.lt08`/`Test_fog.csv`/`Test.sky` bind the
+preset, fog row and dome, no fallback); `chunked_city::a_primary_file_with_capital_letters_...` now asserts `props_failed == 1`
+(the `Test.INST` placement names a missing package, only a read INST reports it) equal to the lowercase city's. `docs/modding.md`
+now lists the environment files honestly.
+
+Gates (foreground): fmt 0; clippy (-D warnings) 0; `cargo test --locked --workspace` exit 0 (2484 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: no retail/two-process run (retail names are lower-case, unchanged); other families remain open per PLAN.
+
+---
+
 # Last iteration — F29-A.10: city sibling files found case-insensitively (new-run iteration 17 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`5e760d2`) passed gates and review, no blockers. Its verification gap: `load_city` derived the

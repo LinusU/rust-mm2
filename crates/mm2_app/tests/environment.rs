@@ -359,6 +359,65 @@ fn configured_conditions_bind_the_authored_preset() {
     assert!((a.blue - 90.0 / 255.0).abs() < 1e-3);
 }
 
+/// The VFS ignores case, so a city spelled `Test.PSDL` finds the lighting,
+/// fog and sky files its author spelled `Test.lt08` / `Test_fog.csv` /
+/// `Test.sky` — a miss would silently fall back to the generic rig.
+#[test]
+fn a_capitalised_primary_finds_its_lighting_fog_and_sky() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/Test.PSDL", city_psdl());
+    write(
+        d,
+        "texture/test_road.png",
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    );
+    write(
+        d,
+        "city/Test.lt08",
+        lt_record("clear-evening", [1.0, 0.75, 0.6], -14795686),
+    );
+    write(d, "city/Test_fog.csv", fog_table(&fog_rows()));
+    write(d, "city/Test.sky", "testdome 10 0.9 0.25\n");
+    write(d, "geometry/testdome.pkg", dome_pkg(2));
+    for i in 0..2 {
+        write(
+            d,
+            &format!("texture/dome_{i}.png"),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        );
+    }
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/Test.PSDL".into(),
+        },
+        conditions: mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(2).unwrap(),
+            weather: Weather::new(0).unwrap(),
+        },
+        ..SessionConfig::default()
+    };
+    let mut app = city_app(config, vfs_of(d));
+    app.update();
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        SessionPhase::Playing
+    ));
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.path, "city/Test.lt08");
+    assert_eq!(report.name.as_deref(), Some("clear-evening"));
+    assert!(!report.fallback, "the capitalised preset was found");
+    assert_eq!(report.fog.path, "city/Test_fog.csv");
+    assert_eq!(report.fog.bound.expect("slot 8's row binds").start, 108.0);
+    assert_eq!(report.sky.path, "city/Test.sky");
+    assert_eq!(report.sky.absent, None);
+    assert_eq!(
+        report.smoke_detail(),
+        "lt08(clear-evening) fog=108-908 sky=testdome:dome_0"
+    );
+}
+
 /// A preset the VFS cannot provide is an explicit fallback — the
 /// previous fixed rig plus a report that says so — never a silent
 /// default that reads as a bound preset (F18-AC06).

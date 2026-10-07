@@ -574,7 +574,7 @@ impl MenuData {
             .iter()
             .filter_map(|p| {
                 p.strip_prefix("city/")
-                    .and_then(|rest| rest.strip_suffix(".psdl"))
+                    .and_then(crate::city::psdl_stem)
                     .filter(|stem| !stem.contains('/'))
                     .map(|stem| stem.to_string())
             })

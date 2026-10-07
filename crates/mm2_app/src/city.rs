@@ -3720,7 +3720,7 @@ fn merge_city_reports(total: &mut CityReport, part: CityReport) {
 
 /// `path` without its `.psdl` extension, matched ASCII case-insensitively
 /// like every other VFS lookup (`city/Test.PSDL` is `city/Test`).
-fn psdl_stem(path: &str) -> Option<&str> {
+pub(crate) fn psdl_stem(path: &str) -> Option<&str> {
     let split = path.len().checked_sub(".psdl".len())?;
     let (stem, ext) = path.split_at_checked(split)?;
     ext.eq_ignore_ascii_case(".psdl").then_some(stem)
@@ -3729,7 +3729,7 @@ fn psdl_stem(path: &str) -> Option<&str> {
 /// The file a city's PSDL names beside itself (`.inst`, `.chunks`,
 /// `/props.pathset`, ...). A path with no `.psdl` extension gets the tail
 /// appended whole, so a sibling can never alias the path it was derived from.
-fn psdl_sibling(psdl_path: &str, tail: &str) -> String {
+pub(crate) fn psdl_sibling(psdl_path: &str, tail: &str) -> String {
     format!("{}{tail}", psdl_stem(psdl_path).unwrap_or(psdl_path))
 }
 

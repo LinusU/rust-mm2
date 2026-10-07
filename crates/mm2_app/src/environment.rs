@@ -45,6 +45,7 @@ use mm2_formats::sky::SkyDef;
 use mm2_game::{SessionConditions, SessionEntity};
 use tracing::{info, warn};
 
+use crate::city::psdl_sibling;
 use crate::settings::KeyLight;
 
 /// Illuminance shared by the three authored directional lights
@@ -281,9 +282,8 @@ pub fn spawn_environment(
     owner: SessionEntity,
 ) -> EnvironmentReport {
     let slot = conditions.time_of_day.get() as usize * 4 + conditions.weather.get() as usize;
-    let base = psdl_path.strip_suffix(".psdl").unwrap_or(psdl_path);
-    let path = format!("{base}.lt{slot:02}");
-    let fog_path = format!("{base}_fog.csv");
+    let path = psdl_sibling(psdl_path, &format!(".lt{slot:02}"));
+    let fog_path = psdl_sibling(psdl_path, "_fog.csv");
     let mut report = EnvironmentReport {
         slot,
         path: path.clone(),
@@ -451,8 +451,7 @@ pub fn spawn_sky_dome(
     materials: &mut Assets<StandardMaterial>,
     owner: SessionEntity,
 ) -> SkyReport {
-    let base = psdl_path.strip_suffix(".psdl").unwrap_or(psdl_path);
-    let path = format!("{base}.sky");
+    let path = psdl_sibling(psdl_path, ".sky");
     let mut report = SkyReport {
         path: path.clone(),
         ..SkyReport::default()

@@ -114,6 +114,10 @@ fn a_primary_file_with_capital_letters_finds_its_manifest_and_parts() {
         one.report.rooms * 2,
         "the manifest was found"
     );
+    // `Test.INST` was found too: its one placement names a package that does
+    // not exist, which only an INST that was read can report.
+    assert_eq!(one.report.props_failed, 1);
+    assert_eq!(two.report.props_failed, one.report.props_failed);
 
     // Its visibility file is found under the same spelling and refused.
     write(tmp.path(), "city/Test.CPVS", b"CPVS");
