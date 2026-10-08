@@ -63,6 +63,25 @@ pub enum GlowKind {
 #[derive(Component)]
 pub struct GlowPart(pub GlowKind);
 
+/// A flare's sprite node (a cop's `SRNn` light-bar lamps, a car's
+/// `HEADLIGHTn` lenses): [`face_flares`] turns it to the view every
+/// frame so the shine reads from any angle. The authored quad is flat
+/// in the car's XY plane, edge-on from the side.
+#[derive(Component)]
+pub struct FlareSprite;
+
+/// Edge multiplier on an authored flare quad (0.5 m on `vpcop`'s `SRNn`
+/// and every `HEADLIGHTn`). A
+/// glow sprite's falloff leaves only its core readable at the authored
+/// size; the retail sprite size is unrecovered, so this is an enhanced
+/// policy (ledger COP-10), not an original value.
+pub const FLARE_SCALE: f32 = 3.0;
+
+/// The retail glow sprite every lamp shader binds (`fxltglow`, a white
+/// radial falloff, black at the edge); the `SRNn` shaders carry no
+/// texture of their own and take this one.
+const FLARE_TEXTURE: &str = "fxltglow";
+
 /// `L`-toggled headlight state.
 #[derive(Resource, Default)]
 pub struct HeadlightsOn(pub bool);
@@ -173,11 +192,24 @@ pub(crate) fn group_material(
     if !glow {
         return handle;
     }
-    // Glow quads are self-lit: unlit + emissive so they read as lit lamps
-    // without paying for real lights.
+    // Glow quads are self-lit sprites. The lamp shaders author a black,
+    // fully transparent diffuse and carry the lamp colour in `emissive`
+    // over a radial `fxltglow*` falloff texture, so the quad is that
+    // texture tinted by the emissive colour and added to the frame —
+    // the black falloff edge then vanishes instead of showing as a
+    // box (rendered unlit and alpha-blended on the black diffuse it was
+    // a flat grey rectangle).
+    let tint = model
+        .shaders
+        .get(idx)
+        .map(|s| [s.emissive[0], s.emissive[1], s.emissive[2]])
+        .filter(|e| e.iter().any(|c| *c > 0.0))
+        .unwrap_or([1.0; 3]);
     mats.adjusted(&handle, |m| {
+        m.base_color = Color::srgb(tint[0], tint[1], tint[2]);
+        m.alpha_mode = AlphaMode::Add;
         m.unlit = true;
-        m.emissive = LinearRgba::rgb(4.0, 4.0, 4.0);
+        m.cull_mode = None;
     })
 }
 
@@ -222,6 +254,93 @@ fn spawn_groups(
         commands
             .entity(parent)
             .with_child((Mesh3d(mesh), MeshMaterial3d(mat)));
+    }
+}
+
+/// Texture coordinates for a flat flare quad. Retail's `SRNn` vertices
+/// carry no usable UVs (the parsed values are uninitialised memory,
+/// e.g. -4.2e37) and `HEADLIGHTn`'s are all (0,0), so the glow sprite is mapped across the quad's own
+/// extent in the car's XY plane — corner to corner, (0,0) top-left.
+fn flare_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
+    let span = |axis: usize| {
+        let (lo, hi) = positions.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p[axis]), hi.max(p[axis]))
+        });
+        (lo, (hi - lo).max(f32::EPSILON))
+    };
+    let (x0, xs) = span(0);
+    let (y0, ys) = span(1);
+    positions
+        .iter()
+        .map(|p| [(p[0] - x0) / xs, 1.0 - (p[1] - y0) / ys])
+        .collect()
+}
+
+/// The sprite material of one flare quad (`SRNn`, `HEADLIGHTn`): the
+/// shader's glow texture (`fxltglow` when it names none — the `SRNn`
+/// shaders carry no texture of their own) tinted by the shader's
+/// colour — the diffuse for a coloured shader (blue / red / cream on
+/// `vpcop`), the emissive for a lamp shader that authors a black,
+/// transparent diffuse — and added to the frame so the black falloff
+/// edge vanishes into the scene instead of showing as a box.
+fn flare_material(
+    model: &VehicleModel,
+    paint: usize,
+    offset: usize,
+    mats: &mut MaterialCache<'_>,
+) -> Handle<StandardMaterial> {
+    let shader = model
+        .shaders
+        .get(paint * model.shaders_per_paint_job + offset);
+    let tint = shader.map_or([1.0; 3], |s| {
+        let c = if s.diffuse[3] < 0.01 {
+            s.emissive
+        } else {
+            s.diffuse
+        };
+        if c[..3].iter().any(|v| *v > 0.0) {
+            [c[0], c[1], c[2]]
+        } else {
+            [1.0; 3]
+        }
+    });
+    let texture = shader
+        .map(|s| s.texture.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(FLARE_TEXTURE);
+    let base = mats.get(texture);
+    mats.adjusted(&base, |m| {
+        m.base_color = Color::srgb(tint[0], tint[1], tint[2]);
+        m.alpha_mode = AlphaMode::Add;
+        m.unlit = true;
+        m.cull_mode = None;
+    })
+}
+
+/// Spawn one flare's sprite quads under `parent` (the flare's
+/// glow node, already at the part's attach point).
+fn spawn_flare(
+    commands: &mut Commands,
+    parent: Entity,
+    model: &VehicleModel,
+    paint: usize,
+    part: &ModelPart,
+    mats: &mut MaterialCache<'_>,
+    meshes: &mut Assets<Mesh>,
+) {
+    let Some(groups) = part.best_nonempty_lod().or_else(|| part.best_lod()) else {
+        return;
+    };
+    commands.entity(parent).insert(FlareSprite);
+    for g in groups.iter().filter(|g| !g.indices.is_empty()) {
+        let mut mesh = group_mesh(g, part.recenter.map(Vec3::from));
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, flare_uvs(&g.positions));
+        let mat = flare_material(model, paint, g.shader_offset, mats);
+        commands.entity(parent).with_child((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(mat),
+            bevy::light::NotShadowCaster,
+        ));
     }
 }
 
@@ -423,6 +542,15 @@ pub fn spawn_vehicle_model(
                         .entity(node)
                         .insert((GlowPart(kind), Visibility::Hidden));
                 }
+                if matches!(glow, Some(GlowKind::Siren(_)) | Some(GlowKind::Headlight))
+                    && matches!(role, PartRole::Siren(_) | PartRole::Headlight(_))
+                {
+                    commands.entity(node).insert(
+                        Transform::from_translation(attach).with_scale(Vec3::splat(FLARE_SCALE)),
+                    );
+                    spawn_flare(commands, node, model, paint, part, &mut mats, meshes);
+                    continue;
+                }
                 spawn_groups(
                     commands,
                     node,
@@ -616,6 +744,35 @@ pub fn update_glows(
         };
         if *vis != want {
             *vis = want;
+        }
+    }
+}
+
+/// Turn every [`FlareSprite`] to the view the player sees through —
+/// the HUD map's top-down camera is not that view — so a light-bar
+/// flare reads as a shine from any angle (billboarding is render
+/// policy: the authored quad is flat and its retail orientation
+/// unrecovered). Only the rotation changes, so the attach offset and
+/// the glow visibility toggle are untouched.
+pub fn face_flares(
+    cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
+    parents: Query<&GlobalTransform, Without<FlareSprite>>,
+    mut flares: Query<(&ChildOf, &mut Transform), With<FlareSprite>>,
+) {
+    let Some(view) = cameras
+        .iter()
+        .find(|(cam, _)| cam.is_active)
+        .map(|(_, xf)| xf.compute_transform().rotation)
+    else {
+        return;
+    };
+    for (parent, mut xf) in &mut flares {
+        let Ok(parent) = parents.get(parent.parent()) else {
+            continue;
+        };
+        let local = parent.compute_transform().rotation.inverse() * view;
+        if xf.rotation != local {
+            xf.rotation = local;
         }
     }
 }

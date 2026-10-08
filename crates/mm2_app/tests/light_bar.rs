@@ -5,10 +5,13 @@
 //! Self-authored fixture: a synthetic model, no original data.
 
 use bevy::prelude::*;
-use mm2_app::car_visual::{self, GlowKind, GlowPart, HeadlightsOn, update_glows};
+use mm2_app::car_visual::{
+    self, FLARE_SCALE, FlareSprite, GlowKind, GlowPart, HeadlightsOn, face_flares, update_glows,
+};
 use mm2_app::settings::GraphicsSettings;
 use mm2_assets::Vfs;
 use mm2_content::model::{Lod, MeshGroup, ModelPart, PartRole, VehicleModel};
+use mm2_formats::pkg::PkgShader;
 use mm2_game::{EmergencyLights, LIGHT_BAR_HALF_PERIOD};
 use mm2_vehicle::{VehicleConfig, VehicleInput, VehicleState};
 
@@ -48,11 +51,25 @@ fn model() -> VehicleModel {
             part("srn3", PartRole::Siren(3), Some(0.19)),
         ],
         paint_jobs: 1,
+        shaders_per_paint_job: 1,
+        // Retail's `SRNn` shaders: no texture, a solid colour diffuse.
+        shaders: vec![PkgShader {
+            texture: String::new(),
+            diffuse: [0.07, 0.0, 1.0, 1.0],
+            ambient: [0.07, 0.0, 1.0, 1.0],
+            specular: None,
+            emissive: [0.0, 0.0, 0.0, 1.0],
+            shininess: 0.25,
+        }],
         ..VehicleModel::default()
     }
 }
 
 fn app_with_car() -> (App, Entity) {
+    app_with_model(model())
+}
+
+fn app_with_model(model: VehicleModel) -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -71,7 +88,6 @@ fn app_with_car() -> (App, Entity) {
             Visibility::Visible,
         ))
         .id();
-    let model = model();
     let vfs = Vfs::new();
     let (mut images, mut materials, mut meshes) = {
         let world = app.world_mut();
@@ -217,4 +233,146 @@ fn reduced_flashing_holds_every_flare_lit_while_the_signals_are_on() {
         .insert(EmergencyLights::default());
     app.update();
     assert_eq!(lit(&mut app), vec![-0.56, -0.19], "the flash is back");
+}
+
+/// Report 7 item 2: the `SRNn` quads must not render as solid coloured
+/// boxes. Each flare is a sprite — the authored quad mapped corner to
+/// corner (retail's own UVs are uninitialised memory), additive, unlit,
+/// two-sided and tinted by the shader's diffuse — grown by
+/// `FLARE_SCALE`; the housing boxes stay ordinary opaque geometry.
+#[test]
+fn the_srn_quads_are_additive_glow_sprites_not_solid_boxes() {
+    let (mut app, _car) = app_with_car();
+    app.update();
+    let world = app.world_mut();
+    let nodes: Vec<(Entity, Vec3)> = world
+        .query_filtered::<(Entity, &Transform), (With<FlareSprite>, With<GlowPart>)>()
+        .iter(world)
+        .map(|(e, t)| (e, t.scale))
+        .collect();
+    assert_eq!(nodes.len(), 4, "one sprite node per SRN flare");
+    for (node, scale) in nodes {
+        assert_eq!(scale, Vec3::splat(FLARE_SCALE));
+        let children = world.get::<Children>(node).expect("the quad child");
+        assert_eq!(children.len(), 1);
+        let quad = children[0];
+        let mat = world.get::<MeshMaterial3d<StandardMaterial>>(quad).unwrap();
+        let mat = world
+            .resource::<Assets<StandardMaterial>>()
+            .get(&mat.0)
+            .unwrap();
+        assert!(
+            matches!(mat.alpha_mode, AlphaMode::Add),
+            "added, not opaque"
+        );
+        assert!(mat.unlit && mat.cull_mode.is_none());
+        let c = mat.base_color.to_srgba();
+        assert_eq!((c.red, c.green, c.blue), (0.07, 0.0, 1.0), "diffuse tint");
+        let mesh = world.get::<Mesh3d>(quad).unwrap();
+        let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();
+        let uvs: Vec<[f32; 2]> = match mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap() {
+            bevy::mesh::VertexAttributeValues::Float32x2(v) => v.clone(),
+            other => panic!("uv attribute: {other:?}"),
+        };
+        assert!(
+            uvs.iter()
+                .all(|uv| uv.iter().all(|c| (0.0..=1.0).contains(c))),
+            "the sprite is mapped across the quad: {uvs:?}"
+        );
+        assert!(
+            uvs.windows(2).any(|w| w[0] != w[1]),
+            "not one texel: {uvs:?}"
+        );
+    }
+    // The housing boxes stay ordinary geometry: no sprite, no glow.
+    let housing = world
+        .query_filtered::<&Name, With<FlareSprite>>()
+        .iter(world)
+        .count();
+    assert_eq!(housing, 0);
+}
+
+/// A flare turns to the view the player sees through, whatever the
+/// car's own orientation, and only its rotation moves.
+#[test]
+fn a_flare_sprite_faces_the_camera_whatever_the_car_does() {
+    let (mut app, car) = app_with_car();
+    app.add_systems(Update, face_flares);
+    let car_rot = Quat::from_rotation_y(1.2);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(GlobalTransform::from(Transform::from_rotation(car_rot)));
+    let view = Quat::from_euler(EulerRot::YXZ, -0.7, -0.4, 0.0);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        GlobalTransform::from(Transform::from_xyz(3.0, 2.0, 9.0).with_rotation(view)),
+    ));
+    app.update();
+    let world = app.world_mut();
+    let flares: Vec<Transform> = world
+        .query_filtered::<&Transform, With<FlareSprite>>()
+        .iter(world)
+        .copied()
+        .collect();
+    assert_eq!(flares.len(), 4);
+    for t in flares {
+        let facing = car_rot * t.rotation;
+        assert!(facing.angle_between(view) < 1e-4, "{facing:?} vs {view:?}");
+        assert_eq!(t.scale, Vec3::splat(FLARE_SCALE), "scale untouched");
+    }
+}
+
+/// The other lamp glows share the defect: their shaders author a black,
+/// transparent diffuse and carry the colour in `emissive`, so they tint
+/// by the emissive and add — a `HEADLIGHTn` lens is a flare sprite, an
+/// `HLIGHT` quad keeps its authored UVs and orientation.
+#[test]
+fn lamp_shaders_with_a_black_diffuse_glow_by_their_emissive() {
+    let lamp = |emissive: [f32; 4]| PkgShader {
+        texture: String::new(),
+        diffuse: [0.0; 4],
+        ambient: [0.0; 4],
+        specular: None,
+        emissive,
+        shininess: 0.0,
+    };
+    let model = VehicleModel {
+        parts: vec![
+            part("hlight", PartRole::HeadlightGlow, None),
+            part("headlight0", PartRole::Headlight(0), Some(0.6)),
+        ],
+        paint_jobs: 1,
+        shaders_per_paint_job: 1,
+        shaders: vec![lamp([1.0, 0.97, 0.68, 1.0])],
+        ..VehicleModel::default()
+    };
+    let (mut app, _car) = app_with_model(model);
+    app.update();
+    let world = app.world_mut();
+    let sprites = world
+        .query_filtered::<Entity, (With<FlareSprite>, With<GlowPart>)>()
+        .iter(world)
+        .count();
+    assert_eq!(sprites, 1, "only the HEADLIGHTn lens is a billboard");
+    let glows: Vec<Entity> = world
+        .query_filtered::<Entity, With<GlowPart>>()
+        .iter(world)
+        .collect();
+    assert_eq!(glows.len(), 2);
+    for node in glows {
+        let quad = world.get::<Children>(node).unwrap()[0];
+        let mat = world.get::<MeshMaterial3d<StandardMaterial>>(quad).unwrap();
+        let mat = world
+            .resource::<Assets<StandardMaterial>>()
+            .get(&mat.0)
+            .unwrap();
+        assert!(
+            matches!(mat.alpha_mode, AlphaMode::Add),
+            "{:?}",
+            mat.alpha_mode
+        );
+        assert!(mat.unlit && mat.cull_mode.is_none());
+        let c = mat.base_color.to_srgba();
+        assert_eq!((c.red, c.green, c.blue), (1.0, 0.97, 0.68), "emissive tint");
+    }
 }

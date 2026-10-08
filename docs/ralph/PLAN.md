@@ -3195,7 +3195,7 @@ for item 1, a measured run) shows it fixed.
    - Record the new policy in the ledger (update the DSN row and COP-4's
      notes; operator recollection is the evidence).
    - Prove it with a run that counts cop-on-player impacts.
-2. **Police light bar renders as two solid blocks**
+2. **[implemented, candidate — iteration 2 of the new run; see LAST_ITERATION and ledger DSN-100]** **Police light bar renders as two solid blocks**
    (`1-police-lights-sf.webp`, sf, `--cam=2.4,2.5,63.9,-70,-17`).
    - The `SRNn` flare parts show as opaque red and blue boxes. They should
      read as a faded, glowing shine.

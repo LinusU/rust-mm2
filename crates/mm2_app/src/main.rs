@@ -1899,6 +1899,9 @@ fn main() {
         Update,
         (damage_fx::drive_smoke, damage_fx::advance_smoke).chain(),
     )
+    // Light-bar flare sprites turn to the view; own slot for the same
+    // reason (the main Update tuple is full).
+    .add_systems(Update, car_visual::face_flares)
     // F05-B.8: authored impact sparks — emission consumes the
     // deduplicated impact stream the FixedLast systems publish, then
     // the advance step integrates the streaks it just spawned. Same

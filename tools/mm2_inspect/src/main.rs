@@ -126,6 +126,9 @@ enum Command {
         /// Also dump per-section vertex positions/UVs.
         #[arg(long)]
         verts: bool,
+        /// Also dump every shader record (texture, diffuse, emissive, ...).
+        #[arg(long)]
+        shaders: bool,
     },
     /// Parse and describe a PSDL city file.
     Psdl {
@@ -688,7 +691,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             logical,
             verts,
-        } => pkg(dir, cli.mods.as_deref(), logical, *verts),
+            shaders,
+        } => pkg(dir, cli.mods.as_deref(), logical, *verts, *shaders),
         Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
         Command::Dump { dir, logical } => dump(dir, cli.mods.as_deref(), logical),
         Command::Cars { dir } => cars(dir, cli.mods.as_deref()),
@@ -1279,6 +1283,7 @@ fn pkg(
     mods: Option<&Path>,
     logical: &str,
     verts: bool,
+    shaders: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
@@ -1327,10 +1332,25 @@ fn pkg(
                     }
                 }
             }
-            PkgChunk::Shaders(s) => println!(
-                "  {:20} shaders: {} paint jobs x {} shaders",
-                file.name, s.paint_jobs, s.shaders_per_paint_job
-            ),
+            PkgChunk::Shaders(s) => {
+                println!(
+                    "  {:20} shaders: {} paint jobs x {} shaders (type {:#x})",
+                    file.name, s.paint_jobs, s.shaders_per_paint_job, s.shader_type
+                );
+                if shaders {
+                    for (i, sh) in s.shaders.iter().enumerate() {
+                        println!(
+                            "    [{i}] tex {:?} diffuse {:?} ambient {:?} specular {:?} emissive {:?} shininess {}",
+                            sh.texture,
+                            sh.diffuse,
+                            sh.ambient,
+                            sh.specular,
+                            sh.emissive,
+                            sh.shininess
+                        );
+                    }
+                }
+            }
             PkgChunk::Offset(o) => println!("  {:20} offset: {o:?}", file.name),
             PkgChunk::Xref(x) => println!("  {:20} xref: {} refs", file.name, x.len()),
             PkgChunk::Raw(b) => println!("  {:20} raw (preserved): {} bytes", file.name, b.len()),
