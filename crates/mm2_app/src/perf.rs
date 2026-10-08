@@ -607,6 +607,8 @@ impl PerfLog {
                 "device_type": g.device_type,
                 "driver": g.driver,
                 "driver_info": g.driver_info,
+                "max_texture_dimension_2d": crate::texture_budget::device_limit(),
+                "texture_ceiling": crate::texture_budget::ceiling(),
             })
         });
         let timings = self.stats().map_or(Value::Null, |st| {
@@ -1050,6 +1052,10 @@ mod tests {
         let r = log.report();
         assert_eq!(r["host"]["gpu"]["name"], "Apple M-test");
         assert_eq!(r["host"]["gpu"]["backend"], "Metal");
+        // No render device was adopted in this process: the report says
+        // so, and names the default ceiling that was in force.
+        assert!(r["host"]["gpu"]["max_texture_dimension_2d"].is_null());
+        assert_eq!(r["host"]["gpu"]["texture_ceiling"], 8192);
         let c = &r["content"]["fingerprint"];
         assert_eq!(c["catalog"], "fnv1a64:0000000000000001");
         assert_eq!(c["gameplay"]["hash"], "fnv1a64:0000000000000002");

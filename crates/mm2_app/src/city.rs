@@ -2107,7 +2107,7 @@ fn warn_over_budget(logical: &str, width: u32, height: u32) {
         logical = %logical,
         width,
         height,
-        max = texture_budget::MAX_TEXTURE_DIM,
+        max = texture_budget::ceiling(),
         "texture is larger than the supported size; not decoded"
     );
 }

@@ -10,14 +10,89 @@
 //! ceiling is a decode miss, reported by name, like any other unreadable
 //! texture — never decoded, never replaced by a guess.
 //!
+//! The ceiling is the smaller of [`MAX_TEXTURE_DIM`] and what the render
+//! device reports (F30 edge case "low GPU capability"): an adapter that
+//! promises less than 8192 — an old integrated part, a software
+//! rasterizer — refuses the same oversize mod texture by name instead of
+//! failing texture creation inside wgpu.
+//!
 //! This is an implementation choice, not an original rule: the retail
 //! `.tex` files are far smaller, so the ceiling only ever bites on mods.
 
-/// Largest width or height, in pixels, a VFS texture may declare. 8192 is
-/// wgpu's default `max_texture_dimension_2d`, which every desktop adapter
-/// this project targets meets; a bigger texture would need a limit the
-/// device does not promise.
+use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Largest width or height, in pixels, a VFS texture may declare on any
+/// device. 8192 is wgpu's default `max_texture_dimension_2d`, which every
+/// desktop adapter this project targets meets; a bigger texture would
+/// need a limit the device does not promise. A device that reports less
+/// lowers the ceiling through [`adopt_device_limit`].
 pub const MAX_TEXTURE_DIM: u32 = 8192;
+
+/// The render device's `max_texture_dimension_2d`, or 0 while no device
+/// has been adopted (headless runs and tools never have one). Texture
+/// decoding is a free function called from several loaders, none of which
+/// holds the device, and one process has one device — hence a process-wide
+/// value rather than a parameter threaded through each.
+static DEVICE_LIMIT: AtomicU32 = AtomicU32::new(0);
+
+/// The limit adopted from the render device, if one has been.
+pub fn device_limit() -> Option<u32> {
+    match DEVICE_LIMIT.load(Ordering::Relaxed) {
+        0 => None,
+        limit => Some(limit),
+    }
+}
+
+/// The ceiling in force: [`MAX_TEXTURE_DIM`], lowered to the adopted
+/// device limit.
+pub fn ceiling() -> u32 {
+    ceiling_for(device_limit())
+}
+
+/// [`ceiling`] for a given device limit (`None`: no device).
+pub fn ceiling_for(device_limit: Option<u32>) -> u32 {
+    device_limit.map_or(MAX_TEXTURE_DIM, |l| l.min(MAX_TEXTURE_DIM))
+}
+
+/// Record the render device's `max_texture_dimension_2d`. A zero limit is
+/// not a device report (wgpu never promises it) and is ignored rather than
+/// refusing every texture.
+pub fn adopt_device_limit(limit: u32) {
+    if limit > 0 {
+        DEVICE_LIMIT.store(limit, Ordering::Relaxed);
+    }
+}
+
+/// Forget the adopted limit. Test support: the value is process-wide.
+#[doc(hidden)]
+pub fn forget_device_limit() {
+    DEVICE_LIMIT.store(0, Ordering::Relaxed);
+}
+
+/// `PreStartup` and `First`: adopt the render device's texture limit once
+/// the renderer has produced a device. Native startup resolves the device
+/// before the first schedule runs, so the `PreStartup` run lands before
+/// any loader; `First` keeps trying if a backend delivers it later.
+pub fn adopt_render_device(device: Option<Res<RenderDevice>>) {
+    if device_limit().is_some() {
+        return;
+    }
+    let Some(device) = device else { return };
+    let limit = device.limits().max_texture_dimension_2d;
+    adopt_device_limit(limit);
+    if ceiling() < MAX_TEXTURE_DIM {
+        warn!(
+            device_limit = limit,
+            ceiling = ceiling(),
+            "the render device supports smaller textures than the default ceiling; \
+             larger textures are refused by name"
+        );
+    } else {
+        info!(device_limit = limit, ceiling = ceiling(), "texture ceiling");
+    }
+}
 
 /// Width and height a texture container declares, read from its header
 /// alone. `None` when the extension is not one whose header is understood
@@ -52,9 +127,10 @@ pub fn declared_dimensions(bytes: &[u8], ext: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Whether a `width` × `height` texture is inside [`MAX_TEXTURE_DIM`].
+/// Whether a `width` × `height` texture is inside the [`ceiling`].
 pub fn within_budget(width: u32, height: u32) -> bool {
-    width <= MAX_TEXTURE_DIM && height <= MAX_TEXTURE_DIM
+    let max = ceiling();
+    width <= max && height <= max
 }
 
 #[cfg(test)]
@@ -114,6 +190,15 @@ mod tests {
         assert_eq!(declared_dimensions(&png_header(9, 9), "ktx2"), None);
         assert_eq!(declared_dimensions(&[], "tga"), None);
         assert_eq!(declared_dimensions(&png_header(9, 9), "jpg"), None);
+    }
+
+    #[test]
+    fn a_device_limit_can_lower_the_ceiling_but_never_raise_it() {
+        assert_eq!(ceiling_for(None), MAX_TEXTURE_DIM);
+        assert_eq!(ceiling_for(Some(2048)), 2048);
+        assert_eq!(ceiling_for(Some(MAX_TEXTURE_DIM)), MAX_TEXTURE_DIM);
+        // A big-GPU adapter (16384) does not licence what the default refuses.
+        assert_eq!(ceiling_for(Some(16_384)), MAX_TEXTURE_DIM);
     }
 
     #[test]

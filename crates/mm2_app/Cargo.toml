@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 default-run = "mm2"
-# Integration files are modules in the two explicit suites below.
+# Integration files are modules in the explicit suites below; `low_gpu` is
+# its own binary because it changes a process-wide texture ceiling that the
+# other suites' parallel tests must not see.
 autotests = false
 
 [[bin]]
@@ -23,6 +25,10 @@ path = "src/bin/mm2_join.rs"
 [[test]]
 name = "app"
 path = "tests/app.rs"
+
+[[test]]
+name = "low_gpu"
+path = "tests/low_gpu.rs"
 
 [[test]]
 name = "network"

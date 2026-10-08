@@ -1563,6 +1563,10 @@ fn main() {
     // F23-AC06: the input-capability record and each pad the OS reports
     // go to the log, so a run says what it knew about its devices.
     .add_systems(Startup, mm2_app::devices::log_input_capabilities)
+    // F30 low-GPU edge case: the texture ceiling follows the render
+    // device's own limit, before the first loader decodes anything.
+    .add_systems(PreStartup, mm2_app::texture_budget::adopt_render_device)
+    .add_systems(First, mm2_app::texture_budget::adopt_render_device)
     .add_systems(Update, mm2_app::devices::log_pad_connections)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
