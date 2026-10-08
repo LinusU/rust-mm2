@@ -999,13 +999,16 @@ pub fn encode_input(input: &VehicleInput, generation: u64, seq: u64) -> DriveInp
     }
 }
 
-/// A wire sample → `VehicleInput`, the exact complement of
-/// [`encode_input`].
+/// A wire sample → `VehicleInput`, the complement of [`encode_input`].
+/// `steer` is a full `i8` on the wire, so a hostile or corrupt client can
+/// send `-128` — one step past the `-127..=127` contract, decoding to
+/// `-1.008` — and the host's sim reads steering unclamped; the result is
+/// clamped here, at the one place wire controls become sim controls.
 pub fn decode_input(input: &DriveInput) -> VehicleInput {
     VehicleInput {
         throttle: input.throttle as f32 / 255.0,
         brake: input.brake as f32 / 255.0,
-        steering: input.steer as f32 / 127.0,
+        steering: (input.steer as f32 / 127.0).clamp(-1.0, 1.0),
         handbrake: input.handbrake as f32 / 255.0,
         ..VehicleInput::default()
     }
@@ -3445,6 +3448,38 @@ mod tests {
         assert_eq!(back.handbrake, 0.0);
         // A local gear command never rides the wire.
         assert_eq!(back.forced_gear, None);
+    }
+
+    /// A client can put any byte in `steer`, including `i8::MIN`, one step
+    /// past the documented `-127..=127`. The host must never hand the sim
+    /// a control outside the unit range, whatever the wire carried.
+    #[test]
+    fn a_hostile_wire_sample_decodes_inside_the_unit_range() {
+        for steer in i8::MIN..=i8::MAX {
+            for byte in [0u8, 1, 127, 128, 254, 255] {
+                let back = decode_input(&DriveInput {
+                    generation: 1,
+                    seq: 1,
+                    throttle: byte,
+                    brake: byte,
+                    steer,
+                    handbrake: byte,
+                });
+                assert!((-1.0..=1.0).contains(&back.steering), "steer {steer}");
+                assert!((0.0..=1.0).contains(&back.throttle), "throttle {byte}");
+                assert!((0.0..=1.0).contains(&back.brake), "brake {byte}");
+                assert!((0.0..=1.0).contains(&back.handbrake), "handbrake {byte}");
+            }
+        }
+        let past = decode_input(&DriveInput {
+            generation: 1,
+            seq: 1,
+            throttle: 0,
+            brake: 0,
+            steer: i8::MIN,
+            handbrake: 0,
+        });
+        assert_eq!(past.steering, -1.0);
     }
 
     /// Out-of-range analog values clamp rather than wrap the integer
