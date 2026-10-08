@@ -4522,6 +4522,223 @@ fn the_low_time_warning_coalesces_hitches_and_ignores_clock_wobble() {
     assert_eq!(count(&mut app), 2);
 }
 
+/// A `rule` definition with `gates` triggers on a line, a separate
+/// `finish` optionally armed, and `laps` laps.
+fn gate_line_definition(
+    rule: mm2_game::CheckpointRule,
+    gates: usize,
+    finish: bool,
+    laps: u32,
+) -> mm2_game::RaceDefinition {
+    use mm2_game::Checkpoint;
+    let gate = |x: f32| Checkpoint {
+        center: Vec3::new(x, 0.0, 0.0),
+        radius: 5.0,
+        height: 8.0,
+        heading_deg: 0.0,
+        require_direction: false,
+    };
+    mm2_game::RaceDefinition {
+        checkpoints: (0..gates).map(|i| gate(i as f32 * 50.0)).collect(),
+        finish: finish.then(|| gate(gates as f32 * 50.0)),
+        rule,
+        laps,
+        time_limit_ticks: None,
+        params: default(),
+        countdown_ticks: 360,
+        start_slots: vec![],
+    }
+}
+
+/// Every progress state along the course, in the order a driver meets
+/// them, that satisfies the closing-gate predicate. `Ordered` walks every
+/// lap.
+fn closing_gate_states(def: &mm2_game::RaceDefinition) -> Vec<String> {
+    use mm2_app::race_audio::final_gate_is_next;
+    use mm2_game::{CheckpointRule, RaceProgress};
+    let gates = def.checkpoints.len();
+    let mut progress = RaceProgress::new(def);
+    let mut hits = Vec::new();
+    match def.rule {
+        CheckpointRule::AnyOrder => {
+            for cleared in 0..=gates {
+                let mask = if cleared == 0 {
+                    0
+                } else {
+                    (1u64 << cleared) - 1
+                };
+                progress.apply_replicated(mask, 0, 0, cleared as u32, 0);
+                if final_gate_is_next(def, &progress) {
+                    hits.push(format!("{cleared}/{gates} cleared"));
+                }
+            }
+        }
+        CheckpointRule::Ordered => {
+            for lap in 0..def.laps {
+                for next in 0..gates {
+                    progress.apply_replicated(0, next, lap, 0, 0);
+                    if final_gate_is_next(def, &progress) {
+                        hits.push(format!("lap {lap} next {next}"));
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// The state label `closing_gate_states` should report for `def`: the one
+/// with only the finish left to cross.
+fn closing_gate_want(def: &mm2_game::RaceDefinition) -> String {
+    use mm2_game::CheckpointRule;
+    let gates = def.checkpoints.len();
+    match def.rule {
+        CheckpointRule::AnyOrder if def.finish.is_some() => format!("{gates}/{gates} cleared"),
+        CheckpointRule::AnyOrder => format!("{}/{gates} cleared", gates - 1),
+        CheckpointRule::Ordered => format!("lap {} next {}", def.laps - 1, gates - 1),
+    }
+}
+
+/// The announcer's closing-gate line is asked for only when the finish is
+/// the next thing to cross — never a checkpoint early (operator report 7,
+/// item 9: it spoke one gate before the last checkpoint of a checkpoint
+/// race that has a separate finish trigger).
+#[test]
+fn the_closing_gate_line_waits_until_only_the_finish_is_left() {
+    use mm2_game::CheckpointRule::{AnyOrder, Ordered};
+    for (rule, gates, finish, laps) in [
+        // A separate finish: one gate plus the finish left is not yet the call.
+        (AnyOrder, 1, true, 1),
+        (AnyOrder, 2, true, 1),
+        (AnyOrder, 5, true, 1),
+        (AnyOrder, 12, true, 1),
+        // No separate finish: the last gate is the finish.
+        (AnyOrder, 1, false, 1),
+        (AnyOrder, 2, false, 1),
+        (AnyOrder, 5, false, 1),
+        // Ordered: the final lap's closing gate is the finish line itself,
+        // and earlier laps never qualify.
+        (Ordered, 4, false, 1),
+        (Ordered, 4, false, 3),
+        (Ordered, 9, false, 2),
+    ] {
+        let def = gate_line_definition(rule, gates, finish, laps);
+        assert_eq!(
+            closing_gate_states(&def),
+            [closing_gate_want(&def)],
+            "{rule:?} gates={gates} finish={finish} laps={laps}"
+        );
+    }
+}
+
+/// Through the production system: with a separate finish the request is
+/// still unasked after the second-to-last checkpoint and made on the last;
+/// without one it is made on the second-to-last (the last is the finish).
+#[test]
+fn the_closing_gate_cue_reaches_the_announcer_on_the_right_crossing() {
+    use mm2_app::audio::EventCue;
+    use mm2_game::{RacePhase, RaceProgress, RaceState};
+    // (separate finish, cleared gates, whether the cue has been asked)
+    let cases = [
+        (true, 0, false),
+        (true, 1, false),
+        (true, 2, true),
+        (false, 0, false),
+        (false, 1, true),
+    ];
+    for (finish, cleared, asked) in cases {
+        let tmp = race_effect_fixture();
+        let (mut app, player) = race_effect_app(tmp.path());
+        let def = gate_line_definition(mm2_game::CheckpointRule::AnyOrder, 2, finish, 1);
+        app.world_mut().resource_mut::<RaceState>().definition = def;
+        app.insert_resource(
+            CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
+                .unwrap()
+                .with_event_table(Some("checkpoint")),
+        );
+        app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+        app.update();
+        let mask = (1u64 << cleared) - 1;
+        app.world_mut()
+            .get_mut::<RaceProgress>(player)
+            .unwrap()
+            .apply_replicated(mask, 0, 0, cleared as u32, 0);
+        app.update();
+        app.update();
+        // `request` refuses a cue already asked, so a refusal proves the
+        // system asked for it.
+        let refused = !app
+            .world_mut()
+            .resource_mut::<CommentaryAudio>()
+            .request(EventCue::FinalCheckpoint);
+        assert_eq!(
+            refused, asked,
+            "finish={finish} cleared={cleared}: asked={asked}"
+        );
+    }
+}
+
+/// Original-content validation (opt-in: `MM2_RETAIL` names an install;
+/// reports "not run" otherwise). Every race of both cities, at the
+/// production `race_definition`, calls the closing gate exactly once as
+/// its course is driven — at the state with only the finish left. Events
+/// that do not build are listed, not dropped from the denominator.
+#[test]
+fn every_retail_race_calls_the_closing_gate_once_with_only_the_finish_left() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::{CheckpointRule, Difficulty, EventTableKind};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail closing-gate sweep NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let (mut expected, mut checked) = (0, 0);
+    let mut unbuilt = Vec::new();
+    let mut wrong = Vec::new();
+    for city in ["london", "sf"] {
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        for event in &catalog.events {
+            if event.event_ref.table == EventTableKind::CrashCourse {
+                continue;
+            }
+            expected += 1;
+            let label = format!(
+                "{city} {:?} row {}",
+                event.event_ref.table, event.event_ref.index
+            );
+            let def = match mm2_content::race_definition(event, Difficulty::Amateur) {
+                Ok(def) => def,
+                Err(error) => {
+                    unbuilt.push(format!("{label}: {error:?}"));
+                    continue;
+                }
+            };
+            checked += 1;
+            let gates = def.checkpoints.len();
+            // The cleared bitset the walk drives carries 64 gates.
+            if def.rule == CheckpointRule::AnyOrder && gates >= 64 {
+                wrong.push(format!("{label}: {gates} gates exceed the clear mask"));
+                continue;
+            }
+            let (hits, want) = (closing_gate_states(&def), closing_gate_want(&def));
+            if hits != [want.clone()] {
+                wrong.push(format!("{label}: calls at {hits:?}, wanted [{want}]"));
+            }
+        }
+    }
+    eprintln!(
+        "retail closing gate: {expected} races, {checked} built, {} unbuilt, {} wrong\n{}\n{}",
+        unbuilt.len(),
+        wrong.len(),
+        unbuilt.join("\n"),
+        wrong.join("\n")
+    );
+    assert!(checked > 0, "no race built: the sweep would prove nothing");
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 #[test]
 fn race_effects_hold_during_pause_ignore_remote_progress_and_scope_to_restart() {
     use mm2_game::{RacePhase, RaceProgress, RaceState};

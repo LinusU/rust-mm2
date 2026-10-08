@@ -3260,7 +3260,7 @@ for item 1, a measured run) shows it fixed.
    - Update DSN-65 with the operator recollection as evidence.
    - Test that a countdown through the window gives exactly ten beeps, at
      the right ticks.
-9. **"Now go full out for the finish" plays one checkpoint early.** The
+9. **[implemented, candidate — iteration 3 of the new run; see LAST_ITERATION and ledger DSN-86]** **"Now go full out for the finish" plays one checkpoint early.** The
    operator wrote: in the race "Embank On It" (and probably others), the
    announcer says "Now go full out for the finish" on crossing the
    last-but-one checkpoint. At that point one checkpoint and the finish

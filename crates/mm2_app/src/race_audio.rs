@@ -136,9 +136,9 @@ pub fn race_cue_voices(
             }
             _ => {}
         }
-        // The announcer's closing-gate line (F08-A): spoken while one
-        // checkpoint is still to be crossed — before the race can end,
-        // so it lands inside the window commentary plays in. A designed
+        // The announcer's closing-gate line (F08-A): spoken once the
+        // finish is the only gate left — before the race can end, so it
+        // lands inside the window commentary plays in. A designed
         // reading of the `FINALCHECKPOINT` section name.
         if !watch.terminal
             && !watch.final_gate
@@ -204,13 +204,23 @@ fn request_results(commentary: Option<&mut CommentaryAudio>, tier: ResultsTier) 
     }
 }
 
-/// Whether exactly one checkpoint is left to cross: the final lap's
-/// closing gate under `Ordered`, the last uncleared gate under
-/// `AnyOrder` (a separate finish trigger does not count — it is not a
-/// checkpoint).
-fn final_gate_is_next(definition: &RaceDefinition, progress: &RaceProgress) -> bool {
+/// Whether the finish is the only gate left to cross: the final lap's
+/// closing gate under `Ordered` (the lifted start line is the finish),
+/// and under `AnyOrder` either every checkpoint cleared with a separate
+/// finish trigger still armed (RACE-7) or, with no separate finish, the
+/// last uncleared checkpoint. Counting the checkpoint before a separate
+/// finish spoke the line one gate early (operator report 7, item 9).
+pub fn final_gate_is_next(definition: &RaceDefinition, progress: &RaceProgress) -> bool {
     match definition.rule {
-        CheckpointRule::AnyOrder => progress.cleared_count() + 1 == definition.checkpoints.len(),
+        CheckpointRule::AnyOrder => {
+            let gates = definition.checkpoints.len();
+            let left = gates.saturating_sub(progress.cleared_count());
+            if definition.finish.is_some() {
+                gates > 0 && left == 0
+            } else {
+                left == 1
+            }
+        }
         CheckpointRule::Ordered => {
             progress.lap + 1 >= definition.laps && progress.next + 1 == definition.checkpoints.len()
         }
