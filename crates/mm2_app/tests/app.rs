@@ -37,6 +37,7 @@ mod movers;
 mod nav_overlay;
 mod navarrow;
 mod navarrow3d;
+mod non_ascii_paths;
 mod oppind;
 mod opponents;
 mod pedestrian;

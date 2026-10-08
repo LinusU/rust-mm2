@@ -1,3 +1,13 @@
+# Last iteration — F30-B.6: a non-ASCII installation path is exercised (iteration 28 of the recovery run)
+
+Selection: the F30-A.7 review passed with no blockers. Further soak work needs a long real run (London / race / network) or a leak hunt I cannot finish in one slice, and F30-AC02 has had four consecutive slices. The F30 spec lists "non-ASCII installation path" among the edge cases to cover, and nothing in the repo mounted an install under such a path (the only non-ASCII coverage was `write_guard`'s containment unit tests).
+Change: tests only, no production code touched. `crates/mm2_assets/tests/non_ascii_install.rs` (+4): an install at `Spiele — Zoë's Midtown Madness 2 (日本語)` holding a synthetic DAVE archive plus loose files mounts through `mount_install`; archive bytes and provenance read back with the real path; a loose file shadows the archive member as in an ASCII path; the catalog list equals that of an ASCII copy and the fingerprint is repeatable; a mod under `Müll & Mods ñ/zoë-skin` still overrides; a loose file named `café_ñ.tga` lists and reads. `crates/mm2_app/tests/non_ascii_paths.rs` (+3, registered in `tests/app.rs`) drives the real `mm2` binary: it mounts that install (the log names the real directory), binds a `--profile-dir` with accents beside it, and still refuses one inside it (exit 2, nothing created). The first two assert on log lines, not exit status: the 5-frame dev-world smoke exits non-zero ("never grounded") whatever the path.
+Result: all seven pass on the first run — the existing code already handled these paths; this pins it. No mutation was run for the VFS tests (nothing to break: the behaviour is the unmodified `std::path` pass-through), so they are regression guards, not a found bug.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 57 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data on macOS (APFS) only: Windows (UTF-16 paths, `\\?\` prefixes) and Linux with a non-UTF-8 filename are untested, and `--perf-log` cannot be combined with `--headless`, so the perf report's fingerprint under a non-ASCII install was not exercised. Other F30 edge cases (low GPU capability, no audio device, huge mod texture, slow storage, minimized client) remain uncovered. F30-AC02 and the F30-B/C parents stay open.
+
+---
+
 # Last iteration — F30-A.7: the soak budget calibrated against real populated runs (iteration 27 of the recovery run)
 
 Selection: the F30-A.6 review passed; its stated gap was that no populated run had been judged and the slacks were untuned guesses. Running the verdict on the retail SF world was the highest-value ready step for F30-AC02.
