@@ -5569,10 +5569,26 @@ fn a_snap_race_row_re_seeks_the_scenery_clock() {
     });
     assert_eq!(seek(&app), None, "jitter inside the tolerance is ignored");
 
-    // Real drift queues a seek to the host's tick.
+    // Real drift right after the first seek is held to the production
+    // limits: throttled (counted), the row still mirrored.
+    let throttled = |a: &App| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .world_row_throttled
+    };
     host.ctl().broadcast(&race_snap(7, running(600))).unwrap();
+    spin(&mut app, |a| throttled(a) > 0);
+    assert_eq!(seek(&app), None, "a second seek inside the interval waits");
+    assert_eq!(app.world().resource::<mm2_game::RaceState>().clock, 600);
+
+    // With the interval relaxed, real drift queues a seek to the
+    // host's tick.
+    app.world_mut()
+        .resource_mut::<netdrive::RemoteSnaps>()
+        .set_world_limits(mm2_app::worldclock::WorldLimits::UNBOUNDED);
+    host.ctl().broadcast(&race_snap(7, running(601))).unwrap();
     spin(&mut app, |a| seek(a).is_some());
-    assert_eq!(seek(&app), Some(780));
+    assert_eq!(seek(&app), Some(781));
 }
 
 /// F26-A, protocol v20 host half: the authority publishes its world

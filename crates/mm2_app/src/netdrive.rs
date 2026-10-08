@@ -1031,6 +1031,10 @@ pub struct NetDriveReport {
     /// [`MAX_SEEK_TICKS`](crate::worldclock::MAX_SEEK_TICKS): the seek
     /// was refused (the row's phase and clock still mirror).
     pub world_row_refused: u64,
+    /// Race-row seeks dropped for arriving sooner than
+    /// [`WorldLimits::min_interval`](crate::worldclock::WorldLimits)
+    /// after the last one let through (the row still mirrors).
+    pub world_row_throttled: u64,
     /// Cops & Robbers frames the host published (F27-B, protocol v21).
     pub cnr_sent: u64,
     /// Cops & Robbers frames a client folded into its replica (F27-B).
@@ -2857,7 +2861,14 @@ pub fn apply_snapshots(
     // it stages off the pose watermark precisely because the
     // authority's frozen countdown tick would otherwise hold it.
     if let Some((generation, row)) = snaps.race.take() {
-        apply_race_snap(generation, row, &mut session, &mut mirror, &mut report);
+        apply_race_snap(
+            generation,
+            row,
+            &mut session,
+            &mut mirror,
+            &mut snaps.world,
+            &mut report,
+        );
     }
     release_resolved_local(&mut session, &players, &mut mirror);
 }
@@ -2881,6 +2892,7 @@ fn apply_race_snap(
     row: SnapRace,
     session: &mut Session,
     mirror: &mut RaceMirror,
+    world_stage: &mut crate::worldclock::WorldStage,
     report: &mut NetDriveReport,
 ) {
     let Some(race) = mirror.race.as_deref_mut() else {
@@ -2908,14 +2920,19 @@ fn apply_race_snap(
     // The scenery keys off the same clock: re-seek it to the
     // authority's world tick when this peer has drifted. The clock is
     // an unvalidated wire value, so the seek goes through the same
-    // `MAX_SEEK_TICKS` gate the `World` frames do; a refusal is
-    // counted, not coerced into a nearer tick.
+    // `MAX_SEEK_TICKS` gate the `World` frames do, and (rows ride every
+    // snapshot) the same rate and growth limits; a refusal or a
+    // throttle is counted, not coerced into a nearer tick.
     if let (Some(world), Some(target)) = (
         mirror.world.as_deref_mut(),
         crate::worldclock::world_ticks(race),
-    ) && world.sync(target) == crate::worldclock::SyncOutcome::Refused
-    {
-        report.world_row_refused += 1;
+    ) {
+        match world.sync_row(target, world_stage) {
+            crate::worldclock::SyncOutcome::Refused => report.world_row_refused += 1,
+            crate::worldclock::SyncOutcome::Throttled => report.world_row_throttled += 1,
+            crate::worldclock::SyncOutcome::InTolerance
+            | crate::worldclock::SyncOutcome::Queued => {}
+        }
     }
     if releasing {
         for mut progress in mirror.progress.p0().iter_mut() {
@@ -4931,6 +4948,97 @@ mod tests {
         assert_eq!(refused(&app), 2);
         assert_eq!(world(&app).seek, None);
         assert_eq!(world(&app).ticks, countdown + 502);
+        assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 3);
+    }
+
+    /// Race rows ride every snapshot, so a host alternating between
+    /// bounded but far-apart clocks would otherwise replay the scenery
+    /// once per snapshot. After one seek is let through the next is
+    /// throttled inside the interval and refused if it outruns the
+    /// clock bound; the rows' own phase and clock keep mirroring.
+    #[test]
+    fn race_row_seeks_are_rate_limited_and_the_row_still_mirrors() {
+        use crate::worldclock::{WorldClock, WorldLimits, advance_world_clock};
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let countdown = u64::from(def.countdown_ticks);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(RaceState::new(def, generation))
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<WorldClock>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, (apply_snapshots, advance_world_clock).chain());
+        let tick = std::cell::Cell::new(0_u64);
+        let push = |app: &mut App, clock: u64| {
+            tick.set(tick.get() + 1);
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                1,
+                tick.get(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(SnapRace {
+                    phase: SNAP_PHASE_RUNNING,
+                    countdown: 0,
+                    clock,
+                }),
+            );
+        };
+        let report = |app: &App| {
+            let r = app.world().resource::<NetDriveReport>();
+            (r.world_row_refused, r.world_row_throttled)
+        };
+
+        // The first seek lands; an immediate far-off second is throttled.
+        push(&mut app, 500);
+        app.update();
+        assert_eq!(app.world().resource::<WorldClock>().ticks, countdown + 500);
+        push(&mut app, 100_000);
+        app.update();
+        assert_eq!(report(&app), (0, 1));
+        assert_eq!(
+            app.world().resource::<WorldClock>().ticks,
+            countdown + 501,
+            "no replay: the clock kept stepping"
+        );
+        assert_eq!(
+            app.world().resource::<RaceState>().clock,
+            100_000,
+            "the row's own clock still mirrors"
+        );
+
+        // With the interval relaxed the growth bound is what refuses it.
+        app.world_mut()
+            .resource_mut::<RemoteSnaps>()
+            .set_world_limits(WorldLimits {
+                min_interval: std::time::Duration::ZERO,
+                max_ticks_per_second: 0.0,
+                slack_ticks: 100,
+            });
+        push(&mut app, 200_000);
+        app.update();
+        assert_eq!(report(&app), (1, 1));
+        assert_eq!(app.world().resource::<WorldClock>().seek, None);
         assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 3);
     }
 

@@ -1153,10 +1153,24 @@ trains) has run since its session entered `Countdown`.
   `wclk=` gains a `rowref<n>` cell only once non-zero) and still mirrors
   its phase and clock — diagnose, do not coerce. `world_ticks` adds the
   countdown with `saturating_add`, so `u64::MAX` cannot overflow.
-  Residual, not claimed closed: the *rate/growth* limits (`WorldLimits`)
-  are not applied to rows, which arrive at the snap rate by design, so a
-  host stepping its row clock upward under the cap can still force a
-  replay per row; the cap bounds each replay, not their frequency.
+  Rows arrive at the snap rate by design, so the cap alone bounded each
+  replay, not their frequency. **Rate/growth limit on rows (iteration 7
+  of the new run):** `WorldClock::sync_row` judges only a seek that would
+  really be queued (a row inside the 6-tick tolerance is free) by the
+  same `WorldLimits` the clock frames use, through a baseline kept in
+  `WorldStage` (`row_seek`: the last seek let through; reset with the
+  stream). The first seek is free; a later one inside `min_interval` is
+  `Throttled` (counted `world_row_throttled`, record cell `rowthr<n>`
+  once non-zero), and one more than `slack + max_rate × elapsed` ticks
+  past the last admitted target is `Refused` (`rowref`). Neither moves
+  the baseline, a regression is never a growth, and the row's phase and
+  clock still mirror. Net effect: at most two row-driven replays a
+  second, as for clock frames. The row and clock-frame paths keep
+  separate baselines, so a host alternating both gets at most twice
+  that. The client is left drifting past tolerance until the next
+  admissible row (≤ 0.5 s), by design. Not measured: no two-process run
+  under a vsync-bound host; the free-running headless harness trips the
+  throttle freely, which is the point of the limit.
 - **Latency.** No round trip is measured on the link, so a client
   applies the host's tick as of send time and trails by the one-way
   delay: a few ticks on a LAN, inside the tolerance. A path with more

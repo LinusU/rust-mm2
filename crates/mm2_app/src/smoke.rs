@@ -1407,16 +1407,19 @@ fn run_headless(
                 + r.world_refused
                 + r.world_throttled
                 + r.world_row_refused
+                + r.world_row_throttled
                 > 0
         })
         .map(|r| {
-            // `rowref` only once a race row's clock was refused, so
+            // `rowref`/`rowthr` only once a race row's clock was refused or throttled, so
             // every record without one stays bit-identical.
-            let row = if r.world_row_refused > 0 {
-                format!(",rowref{}", r.world_row_refused)
-            } else {
-                String::new()
-            };
+            let mut row = String::new();
+            if r.world_row_refused > 0 {
+                row.push_str(&format!(",rowref{}", r.world_row_refused));
+            }
+            if r.world_row_throttled > 0 {
+                row.push_str(&format!(",rowthr{}", r.world_row_throttled));
+            }
             format!(
                 " wclk=sent{},landed{},seek{},ref{},thr{}{row}",
                 r.world_sent, r.world_landed, r.world_seeks, r.world_refused, r.world_throttled

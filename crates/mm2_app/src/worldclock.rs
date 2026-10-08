@@ -133,11 +133,22 @@ pub struct WorldStage {
     limits: WorldLimits,
     /// Zero point of the wall-time stamps, set by the first frame.
     epoch: Option<Instant>,
+    /// The last race-row seek that was let through: its target and the
+    /// wall time (since the epoch) it was admitted at.
+    row_seek: Option<(u64, Duration)>,
     stale: u64,
     throttled: u64,
     refused: u64,
     landed: u64,
     seeks: u64,
+}
+
+/// The stage's verdict on a race row's re-seek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowSeek {
+    Admitted,
+    Throttled,
+    Refused,
 }
 
 /// One generation's newest accepted clock frame.
@@ -224,6 +235,34 @@ impl WorldStage {
     /// survive.
     pub fn reset(&mut self) {
         self.frames.clear();
+        self.row_seek = None;
+    }
+
+    /// Judge a race row's seek to `target` by the same [`WorldLimits`]
+    /// the clock frames are held to, stamped with the wall clock.
+    fn admit_row_seek(&mut self, target: u64) -> RowSeek {
+        let now = self.epoch.get_or_insert_with(Instant::now).elapsed();
+        self.admit_row_seek_at(target, now)
+    }
+
+    /// [`admit_row_seek`](Self::admit_row_seek) at an explicit wall
+    /// time since the stage began. The first seek is free (a late
+    /// joiner lands wherever the host stands, bounded by
+    /// [`MAX_SEEK_TICKS`]); a later one is judged against the last one
+    /// let through, and — like a refused clock frame — neither a
+    /// throttled nor a refused one moves that baseline.
+    fn admit_row_seek_at(&mut self, target: u64, now: Duration) -> RowSeek {
+        if let Some((prev, at)) = self.row_seek {
+            let elapsed = now.saturating_sub(at);
+            if elapsed < self.limits.min_interval {
+                return RowSeek::Throttled;
+            }
+            if !self.limits.allows(prev, target, elapsed) {
+                return RowSeek::Refused;
+            }
+        }
+        self.row_seek = Some((target, now));
+        RowSeek::Admitted
     }
 
     /// Frames dropped as no newer than one already seen.
@@ -376,9 +415,14 @@ pub enum SyncOutcome {
     InTolerance,
     /// A re-seek to the target is queued.
     Queued,
-    /// The target is past [`MAX_SEEK_TICKS`]: nothing queued, and the
-    /// caller reports it as a counted refusal.
+    /// The target is past [`MAX_SEEK_TICKS`], or (a race row) a clock
+    /// that outran [`WorldLimits`]: nothing queued, and the caller
+    /// reports it as a counted refusal.
     Refused,
+    /// A race row's seek arrived sooner than
+    /// [`WorldLimits::min_interval`] after the last one let through:
+    /// nothing queued, counted separately from a refusal.
+    Throttled,
 }
 
 impl WorldClock {
@@ -386,8 +430,10 @@ impl WorldClock {
     /// within [`SYNC_TOLERANCE_TICKS`] of it, or the target is past
     /// [`MAX_SEEK_TICKS`]. A seek replays every actor from its start
     /// inside one fixed step, so a corrupt or hostile target must never
-    /// reach [`advance_world_clock`] — this is the one gate every
-    /// source of a target (clock frame, race row) goes through.
+    /// reach [`advance_world_clock`] — the `MAX_SEEK_TICKS` bound is
+    /// the one gate every source of a target (clock frame, race row)
+    /// goes through; a race row adds the rate bound in
+    /// [`sync_row`](Self::sync_row).
     pub fn sync(&mut self, target: u64) -> SyncOutcome {
         if target > MAX_SEEK_TICKS {
             return SyncOutcome::Refused;
@@ -397,6 +443,30 @@ impl WorldClock {
         }
         self.seek = Some(target);
         SyncOutcome::Queued
+    }
+
+    /// [`sync`](Self::sync) for a target that came off a race row. The
+    /// rows ride every snapshot, so unlike a clock frame nothing about
+    /// their cadence bounds how often a host could ask for a replay;
+    /// a seek that would really be queued is also held to the stage's
+    /// [`WorldLimits`] (a couple a second, at a clock no faster than a
+    /// bounded multiple of real time). A row inside tolerance costs
+    /// nothing and is never judged.
+    pub fn sync_row(&mut self, target: u64, stage: &mut WorldStage) -> SyncOutcome {
+        if target > MAX_SEEK_TICKS {
+            return SyncOutcome::Refused;
+        }
+        if self.ticks.abs_diff(target) <= SYNC_TOLERANCE_TICKS {
+            return SyncOutcome::InTolerance;
+        }
+        match stage.admit_row_seek(target) {
+            RowSeek::Admitted => {
+                self.seek = Some(target);
+                SyncOutcome::Queued
+            }
+            RowSeek::Throttled => SyncOutcome::Throttled,
+            RowSeek::Refused => SyncOutcome::Refused,
+        }
     }
 }
 
@@ -620,6 +690,71 @@ mod tests {
         // honest host that was merely bunched up by a blackout catches up.
         stage.push_at(1, 10_250 + 10 * 100 + 50, 12 * SEC);
         assert_eq!(stage.take_for(1), Some(11_300));
+    }
+
+    #[test]
+    fn race_row_seeks_are_throttled_and_held_to_the_growth_bound() {
+        let limits = WorldLimits {
+            min_interval: SEC / 2,
+            max_ticks_per_second: 100.0,
+            slack_ticks: 50,
+        };
+        let mut stage = WorldStage::with_limits(limits);
+        assert_eq!(
+            stage.admit_row_seek_at(900_000, Duration::ZERO),
+            RowSeek::Admitted,
+            "the first seek is free: a late joiner lands where the host stands"
+        );
+        // Back to back: throttled whatever the target, and it leaves no baseline.
+        assert_eq!(
+            stage.admit_row_seek_at(900_001, SEC / 4),
+            RowSeek::Throttled
+        );
+        // 2 s on: 200 ticks of reach plus 50 slack past the last admitted.
+        assert_eq!(stage.admit_row_seek_at(900_251, 2 * SEC), RowSeek::Refused);
+        assert_eq!(
+            stage.admit_row_seek_at(900_250, 2 * SEC),
+            RowSeek::Admitted,
+            "the bound is inclusive and the refused row moved nothing"
+        );
+        // A jump back costs less than the replay already paid.
+        assert_eq!(
+            stage.admit_row_seek_at(10, 3 * SEC),
+            RowSeek::Admitted,
+            "a regression is never a growth"
+        );
+        stage.reset();
+        assert_eq!(
+            stage.admit_row_seek_at(1_000_000, 3 * SEC),
+            RowSeek::Admitted,
+            "a new stream starts free"
+        );
+    }
+
+    #[test]
+    fn sync_row_only_judges_a_seek_that_would_be_queued() {
+        let mut stage = WorldStage::with_limits(WorldLimits {
+            min_interval: 10 * SEC,
+            ..WorldLimits::default()
+        });
+        let mut clock = WorldClock {
+            ticks: 1_000,
+            seek: None,
+        };
+        // Inside tolerance neither queues nor spends the allowance.
+        assert_eq!(
+            clock.sync_row(1_000 + SYNC_TOLERANCE_TICKS, &mut stage),
+            SyncOutcome::InTolerance
+        );
+        assert_eq!(clock.sync_row(5_000, &mut stage), SyncOutcome::Queued);
+        assert_eq!(clock.seek, Some(5_000));
+        clock.seek = None;
+        assert_eq!(clock.sync_row(9_000, &mut stage), SyncOutcome::Throttled);
+        assert_eq!(clock.seek, None, "nothing was queued");
+        assert_eq!(
+            clock.sync_row(MAX_SEEK_TICKS + 1, &mut stage),
+            SyncOutcome::Refused
+        );
     }
 
     #[test]
