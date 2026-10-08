@@ -461,6 +461,7 @@ fn run_headless(
         .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
         .init_resource::<crate::worldclock::WorldClock>()
+        .init_resource::<crate::cablecar::CableCircuits>()
         .add_systems(
             FixedLast,
             (
@@ -468,6 +469,7 @@ fn run_headless(
                 crate::worldclock::advance_world_clock,
                 crate::drawbridge::drive_drawbridges,
                 crate::movers::drive_movers,
+                crate::cablecar::drive_cable_cars,
             )
                 .chain(),
         )

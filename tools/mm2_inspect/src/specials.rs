@@ -12,18 +12,20 @@
 //!   them, and whether any catalogued event can select it;
 //! - `city/<city>.water` — the water/recovery room record;
 //! - the cable car (`va_cablecar_f`): the model assets it ships, the
-//!   rail curves the city's `.bai` authors, and the executable evidence
-//!   that the original creates cable cars. No runtime consumes it yet,
-//!   so it is reported **unresolved** rather than counted.
+//!   rail curves the city's `.bai` authors, the cars and circuits the
+//!   executable's next-road rule gives them, and what of the original's
+//!   behaviour the runtime does not yet reproduce — reported as
+//!   **partially reproduced**, not complete.
 //!
 //! The expected default files come from
 //! [`mm2_content::EXPECTED_SPECIAL_PATHSETS`]. A city that lacks one
 //! (San Francisco's Underground) is authored that way and is listed as
 //! absent, never invented. `--strict` fails on a missing expected file,
 //! a parse failure, a model that resolves neither by name nor through
-//! the family default, or an unreadable water/BAI record; unresolved
-//! actors are listed (and counted) but are an open implementation item,
-//! not a data failure.
+//! the family default, an unreadable water/BAI record, or a cable-car
+//! terminus with no route; unresolved and partially reproduced actors
+//! are listed (and counted) but are open implementation items, not data
+//! failures.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -187,6 +189,12 @@ enum Rails {
         /// Tram roads whose sides disagree (the terminus rule's side
         /// question; zero means it cannot matter).
         tram_side_asymmetries: usize,
+        /// Cable cars with a circuit to drive, and the distinct circuits.
+        cable_cars: usize,
+        cable_circuits: usize,
+        /// Termini with no route: no curve away from them, or a walk
+        /// that never closes.
+        cable_unrouted: usize,
     },
 }
 
@@ -330,6 +338,7 @@ fn audit_rails(vfs: &Vfs, city: &str) -> Rails {
         train += r;
         with += usize::from(t + r > 0);
     }
+    let plan = bai.tram_plan();
     Rails::Loaded {
         roads: bai.roads.len(),
         roads_with_rails: with,
@@ -337,6 +346,9 @@ fn audit_rails(vfs: &Vfs, city: &str) -> Rails {
         train_curves: train,
         tram_termini: bai.tram_termini().len(),
         tram_side_asymmetries: bai.tram_side_asymmetries(),
+        cable_cars: plan.cars.len(),
+        cable_circuits: plan.circuits.len(),
+        cable_unrouted: plan.no_start + plan.stranded,
     }
 }
 
@@ -396,15 +408,29 @@ impl CityAudit {
             Water::Unreadable(e) => out.push(format!("{0}: city/{0}.water: {e}", self.city)),
             Water::Loaded { .. } => {}
         }
-        if let Rails::Unreadable(e) = &self.rails {
-            out.push(format!("{0}: city/{0}.bai: {e}", self.city));
+        match &self.rails {
+            Rails::Unreadable(e) => out.push(format!("{0}: city/{0}.bai: {e}", self.city)),
+            Rails::Loaded {
+                cable_unrouted, ..
+            } if *cable_unrouted > 0 => out.push(format!(
+                "{0}: {cable_unrouted} cable-car terminus(es) in city/{0}.bai have no route to drive",
+                self.city
+            )),
+            _ => {}
         }
         out
     }
 }
 
-/// The unresolved-actor lines (shared by both cities).
-fn unresolved(vfs: &Vfs) -> Vec<String> {
+/// Special actors that have no runtime at all. None remain once the
+/// cable car runs; the list is kept so a new one has somewhere to land
+/// and the count stays in the summary.
+fn unresolved(_vfs: &Vfs) -> Vec<String> {
+    Vec::new()
+}
+
+/// Special actors that run but reproduce only part of the original.
+fn partial(vfs: &Vfs) -> Vec<String> {
     let assets: Vec<String> = cable_car_assets()
         .iter()
         .map(|a| {
@@ -419,13 +445,13 @@ fn unresolved(vfs: &Vfs) -> Vec<String> {
         })
         .collect();
     vec![format!(
-        "cable car ({CABLE_CAR_ID}): UNRESOLVED — no runtime. Assets: {}. Evidence: \
-         Midtown2.exe creates cable cars in the AI map init (string \"AIMAP.Init: Create the \
-         cable cars.\" at 0x5d66d0, referenced from 0x5358cf; \"Returning a NULL CableCar\" at \
-         0x5d64bc) and ships `cablecar*`/`streetcable` audio; no per-city cable-car pathset \
-         exists. Start sites are recovered (one per BAI tram-line terminus, counted above; \
-         the init's caller of 0x54a200); the cars' motion, speed and stop behaviour are not, so \
-         no behaviour is claimed.",
+        "cable car ({CABLE_CAR_ID}): runs — `mm2_app::cablecar`, one per BAI tram-line terminus \
+         (counted above), driving the circuit the executable's next-road rule gives it at \
+         its recovered speed controller, gated at each road end through the ambient-traffic \
+         junction controller. Assets: {}. Not reproduced: ambient cars and the player as \
+         obstacles, the object audio (`cablecar*`/`streetcable`), networked sessions, and the \
+         init gate (+0x40 of AIMAP.Init's parameters) that decides whether a session has them \
+         at all. The side of each road a car runs on is a choice (docs/research/specials.md).",
         assets.join(", ")
     )]
 }
@@ -505,10 +531,14 @@ fn render(audit: &CityAudit) -> String {
             train_curves,
             tram_termini,
             tram_side_asymmetries,
+            cable_cars,
+            cable_circuits,
+            cable_unrouted,
         } => writeln!(
             s,
             "  rails     city/{}.bai: {roads_with_rails}/{roads} road(s) carry rails — {tram_curves} tram curve(s), {train_curves} train curve(s); \
-             {tram_termini} tram-line terminus(es) (cable-car start sites), {tram_side_asymmetries} one-sided tram road(s)",
+             {tram_termini} tram-line terminus(es) (cable-car start sites), {tram_side_asymmetries} one-sided tram road(s); \
+             {cable_cars} cable car(s) on {cable_circuits} circuit(s), {cable_unrouted} terminus(es) without a route",
             audit.city
         ),
     };
@@ -554,15 +584,21 @@ pub fn run(
     for line in &open {
         println!("  {line}");
     }
+    let part = partial(&vfs);
+    println!("partially reproduced special actors:");
+    for line in &part {
+        println!("  {line}");
+    }
     for f in &failures {
         println!("FAIL {f}");
     }
     println!(
         "specials: {} city(ies); expected default pathsets {found}/{expected}; pathset files loaded {loaded}/{files}; \
-         {} failure(s); {} unresolved actor(s)",
+         {} failure(s); {} unresolved actor(s); {} partially reproduced",
         audits.len(),
         failures.len(),
-        open.len()
+        open.len(),
+        part.len()
     );
     if strict && audits.is_empty() {
         return Err("strict specials audit: no city to audit".into());
@@ -842,19 +878,35 @@ mod tests {
             train_curves: 0,
             tram_termini: 4,
             tram_side_asymmetries: 0,
+            cable_cars: 4,
+            cable_circuits: 2,
+            cable_unrouted: 0,
         };
         let text = render(&a);
         assert!(text.contains("4 tram-line terminus(es) (cable-car start sites)"));
         assert!(text.contains("0 one-sided tram road(s)"));
+        assert!(text.contains("4 cable car(s) on 2 circuit(s), 0 terminus(es) without a route"));
+        assert!(a.failures().iter().all(|f| !f.contains("cable-car")));
+        // A terminus with no route is a data failure, not a quiet drop.
+        if let Rails::Loaded { cable_unrouted, .. } = &mut a.rails {
+            *cable_unrouted = 1;
+        }
+        assert!(
+            a.failures()
+                .iter()
+                .any(|f| f.contains("1 cable-car terminus(es)") && f.contains("no route"))
+        );
     }
 
     #[test]
-    fn the_cable_car_is_listed_unresolved_with_its_asset_state() {
+    fn the_cable_car_is_partially_reproduced_with_its_asset_state() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "geometry/va_cablecar_f.pkg", b"x");
-        let lines = unresolved(&vfs_of(d.path()));
+        assert!(unresolved(&vfs_of(d.path())).is_empty());
+        let lines = partial(&vfs_of(d.path()));
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("UNRESOLVED"));
+        assert!(lines[0].contains("runs"));
+        assert!(lines[0].contains("Not reproduced"));
         assert!(lines[0].contains("geometry/va_cablecar_f.pkg ok"));
         assert!(lines[0].contains("bound/va_cablecar_f_bound.bnd MISSING"));
     }

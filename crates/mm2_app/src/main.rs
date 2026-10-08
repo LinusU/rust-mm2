@@ -1571,6 +1571,7 @@ fn main() {
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
     .init_resource::<mm2_app::worldclock::WorldClock>()
+    .init_resource::<mm2_app::cablecar::CableCircuits>()
     .add_systems(
         FixedLast,
         (
@@ -1578,6 +1579,7 @@ fn main() {
             mm2_app::worldclock::advance_world_clock,
             mm2_app::drawbridge::drive_drawbridges,
             mm2_app::movers::drive_movers,
+            mm2_app::cablecar::drive_cable_cars,
         )
             .chain(),
     )

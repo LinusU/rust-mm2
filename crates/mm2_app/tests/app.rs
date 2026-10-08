@@ -9,6 +9,7 @@ mod banger;
 mod bot;
 mod breakaway;
 mod build_docs;
+mod cablecar;
 mod camtrack;
 mod chunked_city;
 mod cnrvoice;

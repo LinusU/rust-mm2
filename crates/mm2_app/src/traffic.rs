@@ -381,6 +381,13 @@ impl AmbientTraffic {
     pub fn graph(&self) -> &NavGraph {
         &self.graph
     }
+
+    /// The junction controller beside the graph it reads, so a caller
+    /// outside the lane drivers (the cable car) can gate its own route
+    /// through [`Junctions::gate_approach`].
+    pub fn junctions_and_graph(&mut self) -> (&mut Junctions, &NavGraph) {
+        (&mut self.junctions, &self.graph)
+    }
 }
 
 /// How an ambient car is moving: a kinematic lane follower, or a

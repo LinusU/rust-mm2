@@ -1000,6 +1000,20 @@ pub fn load_session_world(
             owner,
         );
         commands.insert_resource(movers);
+        // The AI map's cable cars: one per tram-line terminus, local
+        // sessions only (their stops follow this process's signal clock).
+        let cable = crate::cablecar::spawn_cable_cars(
+            &mut commands,
+            &vfs.0,
+            &city_stem,
+            config.authority == mm2_game::SessionAuthority::Local,
+            config.seed,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            owner,
+        );
+        commands.insert_resource(cable);
         // The city's ambience tables — the river, the Tube stations,
         // the bay — from its ambience container.
         let ambience =

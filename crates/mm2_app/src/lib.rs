@@ -10,6 +10,7 @@ pub mod app_assets;
 pub mod audio;
 pub mod banger;
 pub mod breakaway;
+pub mod cablecar;
 pub mod camera;
 pub mod car_visual;
 pub mod city;

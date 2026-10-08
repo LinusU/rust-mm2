@@ -1,0 +1,333 @@
+//! San Francisco's cable cars: the one special actor the retail
+//! executable builds from the AI map rather than a pathset.
+//!
+//! The session reads the city's `.bai`, finds the tram-line termini
+//! ([`Bai::tram_termini`]), and puts one `va_cablecar_f` at each, on the
+//! circuit the original's next-road rule gives it
+//! ([`Bai::tram_circuit`]): out along the line, round at the far
+//! terminus and home again. [`mm2_game::cablecar`] holds the route and
+//! the speed controller; this module loads the model, spawns the
+//! kinematic bodies and drives them each fixed step, gating each car's
+//! road end through the ambient-traffic junction controller when the
+//! session has one. Rules and constants: `docs/research/specials.md`.
+//!
+//! Not yet reproduced (stated, not hidden): ambient cars and the player
+//! are not obstacles to the controller (a body in the way is shoved by
+//! the kinematic car, not braked for), the object audio, and the
+//! original's init gate, which is unrecovered — local sessions always
+//! spawn the cars; networked ones never do, because a car whose stops
+//! follow this process's signal clock would disagree between peers.
+
+use avian3d::prelude::SimpleCollider;
+use bevy::prelude::*;
+use mm2_assets::Vfs;
+use mm2_formats::bai::{Bai, TramCircuit, TramLeg, VehicleRule};
+use mm2_game::cablecar::{
+    CABLE_CAR_MODEL, CABLE_LOOKAHEAD, CABLE_OBSTACLE_RANGE, CableMotion, CableRoute, CableSense,
+};
+use mm2_game::movers::mover_rotation;
+use mm2_game::parked::ParkedRng;
+use mm2_game::{JunctionGate, SessionEntity, SessionPhase};
+
+use crate::banger::BangerDefs;
+use crate::city::{MovableModels, v3};
+use crate::movers::{BodyQuery, pose_body, spawn_body};
+use crate::traffic::AmbientTraffic;
+
+/// The junction a leg's road ends at, as the ambient-traffic controller
+/// names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CableJunction {
+    /// Intersection index.
+    pub intersection: u16,
+    /// Road index (the controller's member id).
+    pub road: u16,
+    /// The authored rule at that road end.
+    pub rule: Option<VehicleRule>,
+}
+
+/// One closed circuit and the junction each of its legs ends at.
+#[derive(Debug, Clone)]
+pub struct CableCircuit {
+    /// The arc-length table the cars on this circuit drive.
+    pub route: CableRoute,
+    /// The tram legs, in driving order — parallel to `route.legs()`.
+    pub legs: Vec<TramLeg>,
+    /// Per leg, the junction it ends at (`None` for a road end the map
+    /// does not wire to an intersection the controller knows).
+    pub junctions: Vec<Option<CableJunction>>,
+}
+
+/// The session's circuits; cars index into it.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct CableCircuits(pub Vec<CableCircuit>);
+
+/// One cable car.
+#[derive(Component, Debug, Clone)]
+pub struct CableCar {
+    /// Index into [`CableCircuits`].
+    pub circuit: usize,
+    /// Its speed controller and place on the circuit.
+    pub motion: CableMotion,
+    /// Height added to the curve (`CG.y` of the model's bound record).
+    pub lift: f32,
+    /// How far ahead of the model's origin its front is, m.
+    pub nose: f32,
+}
+
+/// What the session's cable-car init produced.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct CableReport {
+    /// Whether the session was eligible (a local city session).
+    pub eligible: bool,
+    /// Tram-line termini the map has — the original creates one car at
+    /// each.
+    pub termini: usize,
+    /// Termini with no drivable start (no tram curve in the direction).
+    pub no_start: usize,
+    /// Termini whose line never closes (a junction the original has no
+    /// next road at), so no circuit is built.
+    pub stranded: usize,
+    /// Distinct circuits built.
+    pub circuits: usize,
+    /// Cars spawned.
+    pub cars: usize,
+    /// The map file failed to parse.
+    pub bai_unreadable: bool,
+    /// `va_cablecar_f` could not be loaded.
+    pub model_missing: bool,
+    /// Texture stems the model could not resolve.
+    pub missing_textures: usize,
+}
+
+/// A junction the controller can gate: the road end's intersection, the
+/// road, and its rule.
+fn junction_of(bai: &Bai, leg: TramLeg) -> Option<CableJunction> {
+    let road = bai.roads.get(leg.road)?;
+    let end = if leg.forward { &road.end } else { &road.start };
+    Some(CableJunction {
+        intersection: u16::try_from(end.intersection).ok()?,
+        road: u16::try_from(leg.road).ok()?,
+        rule: end.vehicle_rule(),
+    })
+}
+
+/// The route of a circuit: every leg's tram curve, in the world's frame.
+fn circuit_route(bai: &Bai, circuit: &TramCircuit) -> Option<CableRoute> {
+    let legs: Option<Vec<Vec<Vec3>>> = circuit
+        .legs
+        .iter()
+        .map(|&leg| bai.tram_curve(leg).map(|c| c.into_iter().map(v3).collect()))
+        .collect();
+    CableRoute::new(&legs?)
+}
+
+/// The circuits one map's cable cars run, and where each car starts
+/// (circuit index, leg index) — without touching the world, so the
+/// coverage report and the tests share the spawn's grouping
+/// ([`Bai::tram_plan`]). A circuit whose route cannot be tabulated
+/// strands its cars.
+pub fn plan_cable_cars(
+    bai: &Bai,
+    report: &mut CableReport,
+) -> (Vec<CableCircuit>, Vec<(usize, usize)>) {
+    let plan = bai.tram_plan();
+    report.termini = plan.termini;
+    report.no_start = plan.no_start;
+    report.stranded = plan.stranded;
+    let mut circuits = Vec::new();
+    let mut placed = Vec::with_capacity(plan.circuits.len());
+    for circuit in plan.circuits {
+        let Some(route) = circuit_route(bai, &circuit) else {
+            placed.push(None);
+            continue;
+        };
+        placed.push(Some(circuits.len()));
+        let junctions = circuit.legs.iter().map(|&l| junction_of(bai, l)).collect();
+        circuits.push(CableCircuit {
+            route,
+            legs: circuit.legs,
+            junctions,
+        });
+    }
+    let mut starts = Vec::with_capacity(plan.cars.len());
+    for (ci, leg) in plan.cars {
+        match placed[ci] {
+            Some(placed) => starts.push((placed, leg)),
+            None => report.stranded += 1,
+        }
+    }
+    report.circuits = circuits.len();
+    (circuits, starts)
+}
+
+/// Spawn the city's cable cars, session-owned. `eligible` is false for
+/// networked sessions (see the module notes).
+#[allow(clippy::too_many_arguments)] // Bevy asset stores have to be threaded separately
+pub fn spawn_cable_cars(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    city: &str,
+    eligible: bool,
+    seed: u64,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+) -> CableReport {
+    let mut report = CableReport {
+        eligible,
+        ..CableReport::default()
+    };
+    commands.insert_resource(CableCircuits::default());
+    if !eligible {
+        return report;
+    }
+    let Ok((bytes, _)) = vfs.read_path(&format!("city/{city}.bai")) else {
+        return report;
+    };
+    let bai = match Bai::parse(&bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(city, error = %e, "cable cars: map unreadable");
+            report.bai_unreadable = true;
+            return report;
+        }
+    };
+    let (circuits, starts) = plan_cable_cars(&bai, &mut report);
+    if starts.is_empty() {
+        return report;
+    }
+    let mut models = MovableModels::new(vfs, meshes, images, materials);
+    let Some(model) = models.load(CABLE_CAR_MODEL, Vec3::ZERO) else {
+        warn!(
+            model = CABLE_CAR_MODEL,
+            "cable car model unresolved; none spawned"
+        );
+        report.model_missing = true;
+        report.missing_textures = models.finish(commands, owner).len();
+        return report;
+    };
+    let lift = BangerDefs::new(vfs)
+        .get(CABLE_CAR_MODEL)
+        .map(|d| d.cg[1])
+        .unwrap_or(0.0);
+    let nose = model
+        .collider
+        .as_ref()
+        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).max.z)
+        .filter(|z| z.is_finite())
+        .unwrap_or(4.0)
+        .clamp(1.0, 12.0);
+    let mut rng = ParkedRng::new(seed ^ 0x6361_626c);
+    for (i, &(ci, leg)) in starts.iter().enumerate() {
+        let route = &circuits[ci].route;
+        let draw = rng.next_roll() as f32 / 32768.0;
+        let motion = CableMotion::new(route, leg, draw);
+        let (pos, dir) = route.pose(motion.s);
+        let transform =
+            Transform::from_translation(pos + Vec3::Y * lift).with_rotation(mover_rotation(dir));
+        let body = spawn_body(commands, &model, transform, owner, format!("cablecar-{i}"));
+        commands.entity(body).insert(CableCar {
+            circuit: ci,
+            motion,
+            lift,
+            nose,
+        });
+        report.cars += 1;
+    }
+    report.missing_textures = models.finish(commands, owner).len();
+    commands.insert_resource(CableCircuits(circuits));
+    info!(
+        termini = report.termini,
+        circuits = report.circuits,
+        cars = report.cars,
+        "cable cars spawned"
+    );
+    report
+}
+
+/// Advance every cable car one fixed step: sense (the junction gate on
+/// its road end, the car ahead on its circuit), run the controller, and
+/// pose the body where it now is, leaving the velocity that reaches the
+/// next step's pose.
+#[allow(clippy::type_complexity)] // Bevy system: the queries are the system's signature
+pub fn drive_cable_cars(
+    session: Res<mm2_game::Session>,
+    time: Res<Time<Fixed>>,
+    circuits: Res<CableCircuits>,
+    mut traffic: Option<ResMut<AmbientTraffic>>,
+    mut cars: Query<(Entity, &mut CableCar, BodyQuery)>,
+) {
+    let running = matches!(
+        session.phase(),
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
+    );
+    let dt = if running { time.delta_secs() } else { 0.0 };
+    // Where every car stands, so each can find the one ahead of it.
+    let others: Vec<(Entity, usize, f32, f32)> = cars
+        .iter()
+        .map(|(e, car, _)| (e, car.circuit, car.motion.s, car.nose))
+        .collect();
+    for (entity, mut car, (mut pos, mut rot, mut lin, mut ang)) in &mut cars {
+        let Some(circuit) = circuits.0.get(car.circuit) else {
+            continue;
+        };
+        let route = &circuit.route;
+        let lift = Vec3::Y * car.lift;
+        let (p0, d0) = route.pose(car.motion.s);
+        if dt > 0.0 {
+            let nose = car.nose;
+            let to_line = car.motion.distance_to_line(route, nose);
+            let gate_open = match (
+                to_line.filter(|&d| d < CABLE_LOOKAHEAD),
+                circuit.junctions.get(car.motion.leg()).copied().flatten(),
+                traffic.as_deref_mut(),
+            ) {
+                (Some(d), Some(j), Some(traffic)) => {
+                    let (junctions, graph) = traffic.junctions_and_graph();
+                    junctions.gate_approach(
+                        graph,
+                        (j.intersection, j.road, j.rule),
+                        entity,
+                        d <= 1.0,
+                        car.motion.speed < 0.05,
+                        false,
+                    ) == JunctionGate::Open
+                }
+                // No controller (no ambient traffic this session) or an
+                // unwired road end: nothing to wait for.
+                _ => true,
+            };
+            // The nearest car ahead on this circuit, front to tail.
+            let obstacle = others
+                .iter()
+                .filter(|&&(e, c, ..)| e != entity && c == car.circuit)
+                .map(|&(_, _, s, n)| route.gap_ahead(car.motion.s, s) - nose - n)
+                .filter(|g| (0.0..CABLE_OBSTACLE_RANGE).contains(g))
+                .min_by(f32::total_cmp);
+            let leg_before = car.motion.leg();
+            car.motion.step(
+                route,
+                dt,
+                nose,
+                CableSense {
+                    gate_open,
+                    obstacle,
+                },
+            );
+            if car.motion.leg() != leg_before
+                && let Some(traffic) = traffic.as_deref_mut()
+            {
+                traffic.junctions.depart(entity);
+            }
+        }
+        let (p1, d1) = route.pose(car.motion.s);
+        pose_body(
+            (&mut pos, &mut rot, &mut lin, &mut ang),
+            (p0 + lift, mover_rotation(d0)),
+            (p1 + lift, mover_rotation(d1)),
+            dt,
+        );
+    }
+}

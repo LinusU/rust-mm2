@@ -50,6 +50,10 @@ Vertical-slice stage. What works today:
 - Their sounds: the drawbridge motor and bell, ferry engines and horns,
   and the Tube's rumble (heard only underground), with the original's
   range and distance falloff.
+- San Francisco's four cable cars: one per tram-line terminus, each
+  driving its line out and back at the original's recovered speed
+  controller and stopping at red lights (silent; ambient cars and the
+  player are not yet obstacles to it).
 - City ambience: gulls and tug horns along the Thames and the Tube
   stations' announcements in London; gulls, buoy bells, sea lions,
   horns and the cable-car slot in San Francisco.

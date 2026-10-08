@@ -108,7 +108,7 @@ fn model_name(vfs: &Vfs, family: MoverFamily, path_name: &str) -> String {
 
 /// Spawn one kinematic body for `model` at `transform`; its origin is
 /// the curve point, so rotation integrates about it.
-fn spawn_body(
+pub(crate) fn spawn_body(
     commands: &mut Commands,
     model: &MovableModel,
     transform: Transform,
@@ -276,7 +276,7 @@ pub fn spawn_movers(
 /// Pose a kinematic body at `(p0, q0)` with the velocities that carry
 /// it to `(p1, q1)` over `dt` — the solver then moves it exactly there,
 /// and anything resting on it rides along.
-fn pose_body(
+pub(crate) fn pose_body(
     (pos, rot, lin, ang): (
         &mut Position,
         &mut Rotation,
@@ -298,7 +298,7 @@ fn pose_body(
     }
 }
 
-type BodyQuery<'a> = (
+pub(crate) type BodyQuery<'a> = (
     &'a mut Position,
     &'a mut Rotation,
     &'a mut LinearVelocity,
