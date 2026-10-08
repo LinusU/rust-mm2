@@ -1496,14 +1496,15 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
 /// everyone). With `impair`, both clients reach the host through a
 /// seeded [`ImpairProxy`] whose recipe is armed on both directions once
 /// the lobby has crossed clean (as in the matrix cells), so the shove
-/// itself is paid for on a bad link.
+/// itself is paid for on a bad link; the proxy's final up/down counters
+/// come back too, so the caller can assert the recipe really bit.
 fn run_shove_trio(
     install: &std::path::Path,
     host_rams: bool,
     alice_frames: u32,
     bob_frames: u32,
     impair: Option<Impair>,
-) -> (String, String) {
+) -> (String, String, Option<(LinkStats, LinkStats)>) {
     let mut host_flags = host_args(install, 9000);
     host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
@@ -1533,6 +1534,9 @@ fn run_shove_trio(
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     assert!(alice.wait().success(), "alice did not exit cleanly");
     assert!(bob.wait().success(), "bob did not exit cleanly");
+    let link = proxy
+        .as_ref()
+        .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));
     // The relay holds socket clones until it drops: the host only sees
     // the clients leave once the proxy is down.
     drop(proxy);
@@ -1540,7 +1544,7 @@ fn run_shove_trio(
         host.until("event=left");
     }
     quit_and_assert_host_drove(host);
-    (alice_rec, bob_rec)
+    (alice_rec, bob_rec, link)
 }
 
 /// F25-AC02's pose leg: a *shoved* car converges to one place on every
@@ -1557,8 +1561,8 @@ fn run_shove_trio(
 #[test]
 fn a_shoved_seat_converges_across_three_processes() {
     let install = tempfile::tempdir().unwrap();
-    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000, None);
-    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500, None);
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1100, 1000, None);
+    let (alice, bob, _) = run_shove_trio(install.path(), true, 2800, 2500, None);
     eprintln!("shove control bob={control_bob}\nshove ram alice={alice}\n bob={bob}");
     assert_shove_converged(&control_bob, &alice, &bob);
 }
@@ -1580,16 +1584,27 @@ fn a_shoved_seat_converges_across_three_processes_on_an_impaired_link() {
         duplicate: 0.10,
         reorder: 0.10,
     };
-    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000, None);
-    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500, Some(recipe));
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1100, 1000, None);
+    let (alice, bob, link) = run_shove_trio(install.path(), true, 2800, 2500, Some(recipe));
     eprintln!("impaired shove control bob={control_bob}\n ram alice={alice}\n bob={bob}");
+    // The convergence below only means something if the link really
+    // misbehaved while the shove played out: both directions carried
+    // the data plane and each lost, duplicated and reordered frames.
+    let (up, down) = link.expect("the impaired run reports its proxy counters");
+    for (dir, stats) in [("up", up), ("down", down)] {
+        assert!(stats.frames_in > 0, "{dir} carried nothing: {stats:?}");
+        assert!(stats.delayed > 0, "{dir} was never held: {stats:?}");
+        assert!(
+            stats.dropped + stats.duplicated + stats.reordered > 0,
+            "{dir} saw no impairment: {stats:?}"
+        );
+    }
     assert_shove_converged(&control_bob, &alice, &bob);
 }
 
 /// The shove leg's verdicts: `control_bob` is the all-parked grid,
 /// `alice`/`bob` the shoved run's mid-session records.
 fn assert_shove_converged(control_bob: &str, alice: &str, bob: &str) {
-    let (control_bob, alice, bob) = (control_bob, alice, bob);
     for rec in [alice, bob] {
         assert_eq!(field(rec, "status"), "pass", "{rec}");
         assert_eq!(field(rec, "phase"), "playing", "{rec}");
