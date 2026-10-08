@@ -1,21 +1,17 @@
-# Last iteration — report 7 item 6: trees in a London intersection (iteration 6 of the new run)
+# Last iteration — report 7 item 7: hole in a London building wall (iteration 7 of the new run)
 
-Selection: report 7 outranks everything; items 1-5 are implemented and the previous gate/review passed with no blocking findings, so item 6 is next.
+Selection: report 7 outranks everything; items 1-6 are implemented, so item 7 is next.
 
-Channel: `mm2-inspect placement` (london) pointed at the `props.pathset` channel — `props.pathset:12:3/12:4 sp_tree1_s` at (214.8, 4.85, -818.9)/(215.0, -817.7), room 1207 `RoadFan`, ~5 m inside the carriageway, a metre apart. Path 12 is a two-point `LineStrip` (49.1 m, spacing 16 m) whose *end vertex* sits in the junction. Not INST, not prop_rule.
+Which candidate (bisected with temporary env-var skips in `city.rs`, since removed): none of the four. The wall is a stack: a shop-front *INST* piece (`cw_b5_store02_20_l`, 20 x 5 m flat strip) with the PSDL `Facade` attributes above it. The Facade bottom (9.8754 at london (238.9, -838.6)) equals the INST's `y + 5.0` exactly, but `simple_transform` scaled the model's height by the heading length too (scale 0.8 here), so the shop front topped out at ~8.9 and left a ~1 m slot under the facade through which the far city shows.
 
-Cause: `line_strip_sites` stamped `ceil(len/spacing)` props at the raw spacing and then capped the row with the final vertex (an inference, UNK-20). The cap stamps the end vertex whatever the spacing, so every row's last two props crowd together at the row's end — here, inside a box junction.
+Fix: a simple INST placement's heading vector stretches the model along local X only; height and depth stay 1 (`mm2_app::city::simple_transform`). Evidence (ledger WLD-34, docs/research/inst.md): over every stretched simple placement that has a Facade/Sliver piece at its vertex, the piece height equals `y + model height` in 93/119 London cases (23/40 SF) and `y + model height x scale` in 1 (0 SF); full-basis records of the same families keep |y|, |z| ~ 1 while |x| varies. The Z (depth) = 1 part is inferred from those records, not measured on a simple placement (almost all stretched pieces are flat).
 
-Fix (recovered from the retail exe, not fudged): the shared strip stamper `Midtown2.exe` `0x466d30` (props loader `0x445130`/`0x4451d0`, parked-car manager `0x579906`), kind 2: per segment skip if `len < spacing`, else `step = len / floor(len/spacing)` (`0x5828a0` is the CRT `floor`; its other caller `0x443aab` is the `floor(x+0.5)` idiom) and stamp `k = floor(len/spacing)` times at stride `step` from the segment start. The end vertex is the next segment's first stamp; the final vertex and a lone vertex are never stamped. `mm2_game::props::line_strip_sites` now does exactly that (still counted arithmetically against the budget). Zero spacing keeps the designed one-per-vertex fallback (the original would divide by zero). Ledger WLD-33 (verified_original); WLD-13/UNK-20/`docs/research/pathset.md` updated.
+Captures (london, Apple M1, local, in `/tmp/it7`, not committed): `before_5.png` / `after_5.png` at `--cam=255.1,7.4,-830.7,45,5` (the operator pose's yaw, pitched up so the facade is in frame) — the slot between the red shop band and the tan facade is closed, the shop front is now the full 5 m; `south.png` / `south_after.png` at `--cam=240.0,7.4,-826.0,0,3`. Same stretched-INST families exist in SF (40 placements), so SF shop fronts grow too.
 
-Effect (placement audit, retail): london `props.pathset` 1188 → 1033 stamps, in-road 185 → 121, RoadFan in-road 48 → 11, Crosswalk 4 → 0, body-in-road 193 → 128; sf 925 → 778 stamps, in-road 34 → 30. Parked cars share the stamper, so their per-path counts shift the same way (spacing floored to 5 m still applies).
+Tests: `mm2_app::city` `simple_placement_heading_rotates_and_stretches_along_x_only` (replaces the uniform-scale test). Original-data measurement was a throwaway scratch example, deleted; not a committed audit.
 
-Capture (london, Apple M1, local, uncommitted in `/tmp/it6`): before/after at `--cam=203.0,7.7,-827.7,-125,-20` — the three/four trunks standing on the beige box junction are gone; the kerb rows of trees stay. Not fixed and out of scope: the flat beige box fill itself reads as a decal with no hatch texture there (not in the report).
+Not verified: the original loader was not decompiled; depth scale; whether 24/17 stretched placements with "neither" match (London/SF) are 3D models, placements without a facade at the vertex, or another rule. The `5-wall-hole-london.webp` exact pose (`pitch -17`) was captured (`after.png`) but not eyeballed beyond the pitch 5 view.
 
-Tests: `mm2_game::props` +2 (whole strides / never stamps the end incl. the retail path-12 numbers; short segment + lone vertex), 2 rewritten; `mm2_app::city` 5 rewritten to the new rule; `tests/event.rs` 3 counts (4 → 2 stamps) for its 12 m / 5 m fixture.
-
-Not verified: the original's behaviour was read from disassembly, not run; the spacing byte's quarter-metre decode into the float at `path+0x34` was taken from the existing parse. Kind 0/1 branches unchanged (read, consistent with the port). Residual in-road pathset stamps (121) are other rows and kinds, not investigated.
-
-Status: candidate; not independently checked. Next is item 7 (hole in a London building wall).
+Status: candidate; not independently checked. Next is item 8 (low-time beep every second).
 
 Gates (foreground): fmt PASS; clippy `--locked --workspace --all-targets --all-features -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (2927 passed, 0 failed).

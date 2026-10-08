@@ -3234,7 +3234,7 @@ for item 1, a measured run) shows it fixed.
      `prop_rule`; `mm2-inspect placement` reports the channel) and why
      they land on the road. Fix the placement rule. Do not delete the
      stamps by position.
-7. **Large rectangular hole in a building wall**
+7. **[implemented, candidate — iteration 7 of the new run; see LAST_ITERATION and ledger WLD-34]** **Large rectangular hole in a building wall**
    (`5-wall-hole-london.webp`, london, `--cam=255.1,7.4,-830.7,45,-17`).
    - A whole section of facade is missing, and the city behind shows
      through.

@@ -15,9 +15,25 @@ Each record:
   - **coordinate** (type bit 7 clear): full basis — images of the unit axes
     plus origin, i.e. `city = origin + M * pkg`
   - **simple** (type bit 7 set): location + a horizontal heading vector
-    whose magnitude is the scale. The vector is the image of the PKG's
-    local X axis: `(1, 0)` means unrotated (verified: `wl_buckpalace_l`'s
-    fence only matches its room perimeter with this reading)
+    whose magnitude stretches the model along that X axis **only**; the
+    model's height and depth are unscaled (ledger WLD-34). The vector is
+    the image of the PKG's local X axis: `(1, 0)` means unrotated
+    (verified: `wl_buckpalace_l`'s fence only matches its room perimeter
+    with this reading)
+
+## Simple-placement scale (measured 2026-10-09)
+
+The earlier port scaled all three axes by the heading length (the
+angel-file-formats wording, "uniform scale"). Retail data says otherwise:
+the stretched pieces are flat shop-front / house-base strips (e.g.
+`cw_b5_store02_20_l`, 20 × 5 m, zero depth) that fit one wall segment's
+length, and the Facade stacked on them starts at `y + model height`
+exactly (store at (238.9, 4.8754) → facade bottom 9.8754; at
+(246.4, 4.9429), scale 0.68 → 9.9429). Over every stretched simple
+placement with a wall piece at its vertex: unscaled height matches 93 of
+119 (London) and 23 of 40 (SF); scaled height matches 1 and 0. The
+full-basis records of the same families have `|x|` varying and `|y|`,
+`|z|` ≈ 1. Depth staying 1 is inferred from the latter.
 
 ## Confidence
 

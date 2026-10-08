@@ -2958,14 +2958,23 @@ fn inst_transform(c: &inst::InstCoordinate) -> Mat4 {
 /// Convert an INST simple placement to a Bevy `Mat4`. The heading vector
 /// is the image of the PKG's X axis — an unrotated object has `(1, 0)`
 /// (verified on retail London: `wl_buckpalace_l`'s fence matches its room
-/// perimeter only with this reading) — and its length the uniform scale.
+/// perimeter only with this reading) — and its length stretches the model
+/// *along that axis only*. The retail height and depth stay 1: the
+/// stretched pieces are storey-high shop fronts and house bases that fit
+/// a wall segment's length, and their top must meet the facade stacked on
+/// them (measured on retail London, 93 of 119 stretched placements have a
+/// wall piece at their vertex whose height equals `y + model height`,
+/// against 1 that equals `y + model height × scale`; SF 23 against 0 —
+/// the uniform reading left a gap of up to a metre under every facade),
+/// and the full-basis records of the same families keep `|y|` and `|z|`
+/// at 1 while `|x|` varies (see `docs/research/inst.md`).
 fn simple_transform(s: &inst::InstSimple) -> Mat4 {
     let (dx, dz) = (s.x_delta, s.z_delta);
     let scale = (dx * dx + dz * dz).sqrt().max(0.001);
     inst_transform(&inst::InstCoordinate {
         x_axis: [dx, 0.0, dz],
-        y_axis: [0.0, scale, 0.0],
-        z_axis: [-dz, 0.0, dx],
+        y_axis: [0.0, 1.0, 0.0],
+        z_axis: [-dz / scale, 0.0, dx / scale],
         origin: s.location,
     })
 }
@@ -4810,15 +4819,18 @@ mod tests {
     }
 
     #[test]
-    fn simple_placement_heading_rotates_and_scales() {
+    fn simple_placement_heading_rotates_and_stretches_along_x_only() {
         let m = simple_transform(&inst::InstSimple {
             x_delta: 0.0,
             z_delta: 2.0,
             location: [0.0, 0.0, 0.0],
         });
-        // Local +X maps onto authored +Z, scaled by the heading length.
+        // Local +X maps onto authored +Z, stretched by the heading length;
+        // height and depth keep their authored size.
         let p = m.transform_point3(v3([1.0, 1.0, 0.0]));
-        assert!((p - v3([0.0, 2.0, 2.0])).length() < 1e-5);
+        assert!((p - v3([0.0, 1.0, 2.0])).length() < 1e-5);
+        let q = m.transform_point3(v3([0.0, 0.0, 1.0]));
+        assert!((q - v3([-1.0, 0.0, 0.0])).length() < 1e-5, "{q:?}");
     }
 
     fn path(points: &[[f32; 3]], kind: u8, spacing: u8) -> pathset::Path {
