@@ -101,7 +101,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F28 city specials | active | retail-data | `mm2-inspect specials` report landed; cable car unresolved (UNK-44); late-join phase (F26) |
 | F29 modding | active | synthetic | **consumer coverage audit still owed** (AC01 spans car texture, handling, prop, audio cue) |
 | F30 performance/packaging | active | local measurement | release-profile baseline for named scenes; memory/draw-call/voice/bandwidth columns; packaging step, real OS layouts |
-| F31 final audit | A.1 this doc; B/C queued | — | everything above |
+| F31 final audit | A.1 this doc; B.1 synthetic single-player journey; C queued | synthetic | B.1: `menu::a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch` (name a driver → locked paint/race → launch → authored finish → results → restart → menu → relaunch). Open: retail-data journey, lesson/C&R/multiplayer journeys, negative-path journeys |
 
 ## 4. Cross-cutting gaps (not owned by one feature)
 
@@ -109,7 +109,9 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
    synthetic evidence; the plan records no offline mix or captured listen
    (F07-AC05, F08-AC05, F18-AC05, F23-AC05).
 2. **No recorded human playthrough** for any journey. Every race/lesson
-   result is a headless or scripted run; F31-AC03 needs complete
+   result is a headless or scripted run (F31-B.1 adds one synthetic
+   menu-driven journey, `tests/menu.rs`, with no human and no retail data);
+   F31-AC03 needs complete
    profile→select→load→race→reward→menu journeys on the production path.
 3. **Original-fidelity comparisons are absent.** Placing, pacing, AI
    difficulty, traction-in-rain, damage thresholds and police behaviour are

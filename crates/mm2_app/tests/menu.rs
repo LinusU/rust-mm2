@@ -4304,3 +4304,227 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
     assert_eq!(saved.key_at(DriveAction::Throttle, 0), Some(KeyCode::KeyP));
     assert_eq!(&saved, app.world().resource::<ControlSettings>());
 }
+
+/// The race systems the binary runs after the physics step, plus the
+/// F16-B result consumer — `menu_app` stops at the menu/session loop,
+/// so the journey adds exactly what a played event needs on top.
+fn add_race_and_progression(app: &mut App) {
+    app.add_message::<mm2_game::RaceStarted>()
+        .add_message::<mm2_game::BangerStateChanged>()
+        .add_systems(
+            FixedLast,
+            (
+                mm2_app::contracts::collect_impacts,
+                mm2_app::contracts::publish_vehicle_telemetry,
+                mm2_app::race::reanchor_teleported_participants,
+                mm2_app::race::advance_race,
+            )
+                .chain(),
+        )
+        .add_systems(Update, mm2_app::progression::record_session_results);
+}
+
+/// Hold full throttle on the player's car (after a short settle) until
+/// the session leaves `Playing`/`Countdown` or `max` updates pass.
+fn drive_until_results(app: &mut App, max: usize) -> bool {
+    for f in 0..max {
+        let car = app
+            .world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .iter(app.world())
+            .next();
+        if let Some(mut input) =
+            car.and_then(|c| app.world_mut().get_mut::<mm2_vehicle::VehicleInput>(c))
+        {
+            *input = mm2_vehicle::VehicleInput {
+                throttle: if f > 200 { 1.0 } else { 0.0 },
+                ..default()
+            };
+        }
+        app.update();
+        if phase(app) == SessionPhase::Results {
+            return true;
+        }
+    }
+    false
+}
+
+/// F31-B.1 / F31-AC03 (synthetic journey): one scripted run over the
+/// production menu → session → results → reward path with no direct
+/// state writes — a driver is named on the menu, a reward-gated paint
+/// and a gated race are shown locked, the first race is launched from
+/// the Events list and driven to its authored finish, the results
+/// screen restarts it into a fresh generation, quitting returns to the
+/// menu where the earned paint is open, the race is badged won and the
+/// gated race's lock no longer names it, and a fresh app over the same profile directory (a
+/// relaunch) sees the same. The saved profile is read back from disk.
+#[test]
+fn a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch() {
+    use mm2_app::results::ResultsUi;
+
+    let tmp = install();
+    // Gates faced down the +x lane (heading -90) so a straight drive
+    // sweeps each one; the shared install's heading-0 gates face +z.
+    let mut course = WAYPOINTS.to_string();
+    for x in [60.0f32, 110.0, 140.0, 165.0, 180.0] {
+        course.push_str(&format!("{x},0,140,-90,15,0,0,0,\n"));
+    }
+    write(tmp.path(), "race/testcity/race0waypoints.csv", course);
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    add_race_and_progression(&mut app);
+    app.update();
+
+    // Profile: the first-run driver is named on the entry screen.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+    type_text(&mut app, "Ada");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Escape);
+    app.update();
+    let id = app
+        .world()
+        .get_resource::<ActiveProfile>()
+        .expect("naming a driver binds it")
+        .profile
+        .id
+        .clone();
+
+    // Before: the earned paint and the gated race are both shut.
+    activate_row(&mut app, "Vehicle:");
+    activate_row(&mut app, "Test Car");
+    let blue = |app: &App| {
+        shell(app)
+            .rows
+            .iter()
+            .find(|r| r.text.contains("Blue"))
+            .map(|r| r.enabled.clone())
+            .expect("the Blue paint is listed")
+    };
+    assert!(blue(&app).unwrap_err().contains("locked"));
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let race3 = |app: &App| {
+        shell(app)
+            .rows
+            .iter()
+            .find(|r| r.text.contains("race3"))
+            .map(|r| r.enabled.clone())
+            .expect("race3 is listed")
+    };
+    assert!(race3(&app).is_err(), "race3 starts gated behind race0");
+
+    // Load + race: launch race0 and drive the authored course.
+    activate_row(&mut app, "race0");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "race0 never launched: {:?}",
+        phase(&app)
+    );
+    let first = app.world().resource::<Session>().generation();
+    assert!(
+        drive_until_results(&mut app, 1500),
+        "the drive never reached the results screen: {:?}",
+        phase(&app)
+    );
+
+    // Outcome + reward: the finish is saved before any menu is shown.
+    let saved = store.load(&id).unwrap().profile;
+    let beaten = |p: &mm2_game::PlayerProfile| {
+        p.progress
+            .events
+            .iter()
+            .find(|r| r.key.stem == "race0")
+            .is_some_and(|r| r.is_beaten())
+    };
+    assert!(beaten(&saved), "the finish is recorded on the driver");
+    assert!(
+        saved.progress.unlocks.contains("paint:vpt:1"),
+        "{:?}",
+        saved.progress
+    );
+    app.update();
+    let shown: Vec<String> = {
+        let mut q = app.world_mut().query_filtered::<&Text, With<ResultsUi>>();
+        q.iter(app.world()).map(|t| t.0.clone()).collect()
+    };
+    assert!(
+        shown.iter().any(|t| t.contains("Continue to menu"))
+            && shown.iter().any(|t| t.contains("Restart race")),
+        "{shown:?}"
+    );
+
+    // Restart: the results row begins a fresh generation, which is
+    // then left through the pause menu.
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 24, |a| {
+            matches!(phase(a), SessionPhase::Countdown | SessionPhase::Playing)
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the restart never began: {:?}",
+        phase(&app)
+    );
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+
+    // Menu again: the badge, the open race and the earned paint.
+    let state = |app: &App| {
+        let won = shell(app)
+            .rows
+            .iter()
+            .find(|r| r.text.contains("race0"))
+            .and_then(|r| r.won);
+        (won.map(|w| w.amateur), race3(app).err())
+    };
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let (badge, gate) = state(&app);
+    assert_eq!(badge, Some(true), "the finished race is badged won");
+    let gate = gate.expect("race3 also needs the rest of the first set");
+    assert!(
+        !gate.contains("race0") && gate.contains("race1"),
+        "the gate now names only what is left: {gate}"
+    );
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Vehicle:");
+    activate_row(&mut app, "Test Car");
+    assert!(blue(&app).is_ok(), "the earned paint is open");
+
+    // Relaunch: a fresh app over the same profile directory remembers.
+    drop(app);
+    let mut app = menu_app(
+        tmp.path(),
+        Some(ProfileStore::open(store_dir.path()).unwrap()),
+    );
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Ada");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Vehicle:");
+    activate_row(&mut app, "Test Car");
+    assert!(blue(&app).is_ok(), "the paint survives a relaunch");
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let (badge, gate) = state(&app);
+    assert_eq!(badge, Some(true), "the win survives a relaunch");
+    assert!(
+        gate.is_some_and(|g| !g.contains("race0")),
+        "so does the narrowed gate"
+    );
+}
