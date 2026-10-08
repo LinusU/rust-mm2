@@ -233,14 +233,17 @@ the byte-level identity of gameplay content.
   carries on without mods, but a trace that silently dropped them would read
   as "no mod serves this city".
   `mm2 … --trace-deps --cue <stem> [--cue <stem> …]` is the audio counterpart
-  (instead of `--city`; naming both, or neither, exits 2). Cues are fetched
+  (instead of `--city`; naming both, or neither target, exits 2). Cues are fetched
   lazily per voice at play time, so a city trace never reads them; this
   target runs each cardata sample stem (`enginesedan1`, `skidcobble`, …)
   through the production `WaveBank` — the same stem index, 22 kHz-first
   preference and decode the game uses — and prints which source served the
   wave. A stem no source provides, or a wave that does not decode, exits 2
-  (the latter after naming the file it read). Siren stems resolve through a
-  separate `sirens/`-scoped map and are not traced yet.
+  (the latter after naming the file it read). `--siren-cue <stem>`
+  (repeatable, usable with or without `--cue`) resolves a stem as a
+  siren-program sample instead: through the `sirens/`-scoped map first, as
+  the game does, so a mod replacing `aud/*/sirens/<stem>.<n>k.wav` is
+  credited there while a mod replacing a same-named flat wave is not.
 
 ## Portable cities with multiple PSDL parts
 

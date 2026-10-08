@@ -656,7 +656,7 @@ fn a_traced_cue_load_credits_the_mod_that_replaced_its_wave() {
     let root = f._tmp.path();
     let mut vfs = mounted(&f.base, &f.audio);
 
-    let (loaded, trace) = trace_cue_reads(&vfs, &["roadskid1".into(), "grassskid".into()]);
+    let (loaded, trace) = trace_cue_reads(&vfs, &["roadskid1".into(), "grassskid".into()], &[]);
     assert_eq!(loaded.expect("both cues load"), "2 cue wave(s)");
     assert_eq!(
         trace.from_mod("cue"),
@@ -670,12 +670,12 @@ fn a_traced_cue_load_credits_the_mod_that_replaced_its_wave() {
         "the untouched cue is traced too: {}",
         trace.render()
     );
-    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()]);
+    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()], &[]);
     assert!(loaded.is_ok());
     assert!(trace.from_mod("cue").is_empty(), "{}", trace.render());
 
     // A stem no source provides fails, naming the stem.
-    let (loaded, _) = trace_cue_reads(&vfs, &["roadskid1".into(), "nosuchcue".into()]);
+    let (loaded, _) = trace_cue_reads(&vfs, &["roadskid1".into(), "nosuchcue".into()], &[]);
     let err = loaded.expect_err("an unknown stem must not load");
     assert!(err.contains("nosuchcue"), "{err}");
 
@@ -688,12 +688,115 @@ fn a_traced_cue_load_credits_the_mod_that_replaced_its_wave() {
         b"RIFFjunk",
     );
     vfs.mount_mod(&bad, 310).unwrap();
-    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()]);
+    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()], &[]);
     assert!(loaded.is_err(), "a junk wave must not decode");
     assert_eq!(
         trace.from_mod("brokencue"),
         ["aud/aud22/surfaces/grassskid.22k.wav"]
     );
+}
+
+/// The siren leg: a siren-program stem resolves through the `sirens/`-scoped
+/// map, so a mod replacing the `sirens/` wave is credited to `--siren-cue`
+/// and a mod replacing the same-named flat wave (which a plain cue lookup
+/// picks, being the higher rate) is credited to `--cue` only.
+#[test]
+fn a_traced_siren_cue_follows_the_sirens_scoped_map() {
+    let f = fixture();
+    let root = f._tmp.path();
+    let extra = root.join("siren_base");
+    std::fs::create_dir_all(&extra).unwrap();
+    write(
+        &extra,
+        "aud/aud22/surfaces/wail.22k.wav",
+        pcm_wav(22050, 220),
+    );
+    write(&extra, "aud/aud22/sirens/wail.11k.wav", pcm_wav(11025, 220));
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(&f.base, 0).unwrap();
+    vfs.mount_dir(&extra, 1).unwrap();
+
+    let scoped = broken_mod(
+        root,
+        "scoped",
+        "aud/aud22/sirens/wail.11k.wav",
+        &pcm_wav(11025, 440),
+    );
+    let flat = broken_mod(
+        root,
+        "flat",
+        "aud/aud22/surfaces/wail.22k.wav",
+        &pcm_wav(22050, 440),
+    );
+    vfs.mount_mod(&scoped, 300).unwrap();
+    vfs.mount_mod(&flat, 301).unwrap();
+
+    let (loaded, trace) = trace_cue_reads(&vfs, &[], &["wail".into()]);
+    assert_eq!(
+        loaded.expect("the siren stem loads"),
+        "0 cue wave(s), 1 siren wave(s)"
+    );
+    assert_eq!(
+        trace.from_mod("scoped"),
+        ["aud/aud22/sirens/wail.11k.wav"],
+        "{}",
+        trace.render()
+    );
+    assert!(trace.from_mod("flat").is_empty(), "{}", trace.render());
+
+    let (loaded, trace) = trace_cue_reads(&vfs, &["wail".into()], &[]);
+    assert_eq!(loaded.expect("the cue stem loads"), "1 cue wave(s)");
+    assert_eq!(
+        trace.from_mod("flat"),
+        ["aud/aud22/surfaces/wail.22k.wav"],
+        "{}",
+        trace.render()
+    );
+    assert!(trace.from_mod("scoped").is_empty(), "{}", trace.render());
+
+    // A stem no wave ships fails naming it as a siren cue.
+    let (loaded, _) = trace_cue_reads(&vfs, &[], &["nosuchsiren".into()]);
+    let err = loaded.expect_err("an unknown siren stem must not load");
+    assert!(err.contains("siren cue \"nosuchsiren\""), "{err}");
+
+    // As a process: `--siren-cue` is a target on its own, conflicts with
+    // `--city`, and `--expect-mod` reads the sirens/ file.
+    let mods = root.join("siren_mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    for (id, logical) in [
+        ("scoped", "aud/aud22/sirens/wail.11k.wav"),
+        ("flat", "aud/aud22/surfaces/wail.22k.wav"),
+    ] {
+        let d = mods.join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        manifest(&d, id);
+        let rate = if id == "scoped" { 11025 } else { 22050 };
+        write(&d, logical, pcm_wav(rate, 440));
+    }
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"))
+            .arg("--mm2-path")
+            .arg(&f.base)
+            .arg("--mods")
+            .arg(&mods)
+            .arg("--trace-deps")
+            .args(args)
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("spawn mm2");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    // The install has no `wail` wave; each mod adds one.
+    let (code, out) = run(&["--siren-cue", "wail", "--expect-mod", "scoped"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("1 siren wave(s)"), "{out}");
+    let (code, out) = run(&["--siren-cue", "wail", "--expect-mod", "flat"]);
+    assert_eq!(code, Some(2), "the flat mod serves no siren sample\n{out}");
+    let (code, out) = run(&["--city", "test", "--siren-cue", "wail"]);
+    assert_eq!(code, Some(2), "one target at a time\n{out}");
 }
 
 /// `mm2 --trace-deps --cue` as a process: the same per-source report as the

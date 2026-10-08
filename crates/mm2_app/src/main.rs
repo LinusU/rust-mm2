@@ -164,6 +164,17 @@ struct Cli {
     )]
     cue: Vec<String>,
 
+    /// With `--trace-deps` instead of `--city`: like `--cue`, but resolve
+    /// the stem as a siren-program sample (the `sirens/`-scoped wave map,
+    /// repeatable).
+    #[arg(
+        long = "siren-cue",
+        value_name = "stem",
+        requires = "trace_deps",
+        conflicts_with = "city"
+    )]
+    siren_cue: Vec<String>,
+
     /// With `--trace-deps`: exit non-zero unless the load read at least
     /// one file from this mod (repeatable) — proof the mod is live for
     /// the city.
@@ -759,9 +770,11 @@ fn main() {
             error!("--mods mounted nothing, so the trace would not show any mod: {why}");
             std::process::exit(2);
         }
-        let (loaded, trace) = if cli.cue.is_empty() {
+        let (loaded, trace) = if cli.cue.is_empty() && cli.siren_cue.is_empty() {
             let Some(city) = cli.city.as_deref() else {
-                error!("--trace-deps needs a target: --city <stem> or --cue <stem>");
+                error!(
+                    "--trace-deps needs a target: --city <stem>, --cue <stem> or --siren-cue <stem>"
+                );
                 std::process::exit(2);
             };
             let stem = city.to_ascii_lowercase();
@@ -769,7 +782,7 @@ fn main() {
                 mm2_app::city::trace_city_reads(&vfs, &format!("city/{stem}.psdl"));
             (loaded.map_err(|e| e.to_string()), trace)
         } else {
-            mm2_app::audio::trace_cue_reads(&vfs, &cli.cue)
+            mm2_app::audio::trace_cue_reads(&vfs, &cli.cue, &cli.siren_cue)
         };
         print!("{}", trace.render());
         let label = match loaded {

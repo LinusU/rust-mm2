@@ -515,22 +515,34 @@ impl WaveBank {
 
 /// Resolve and decode each cue stem through the production [`WaveBank`]
 /// under a read trace, so a mod author can see which source serves the
-/// audio file behind a cue (F29-B's audio `deps` target). The decoded
-/// waves go into a throwaway store; nothing outlives the call. Stops at
-/// the first stem that does not resolve or decode, and a failed call still
-/// returns the reads made. The `Ok` label summarises what loaded.
+/// audio file behind a cue (F29-B's audio `deps` target). `cues` resolve
+/// as [`WaveBank::load`] does for engine/surface/impact voices; `sirens`
+/// as [`WaveBank::load_siren`] does for siren-program samples, so the
+/// `sirens/`-scoped map is the one traced. The decoded waves go into a
+/// throwaway store; nothing outlives the call. Stops at the first stem
+/// that does not resolve or decode, and a failed call still returns the
+/// reads made. The `Ok` label summarises what loaded.
 pub fn trace_cue_reads(
     vfs: &Vfs,
-    stems: &[String],
+    cues: &[String],
+    sirens: &[String],
 ) -> (Result<String, String>, mm2_assets::ReadTrace) {
     vfs.trace_reads(|| {
         let mut bank = WaveBank::index(vfs);
         let mut waves: Assets<PcmAudio> = Assets::default();
-        for stem in stems {
+        for stem in cues {
             bank.load(vfs, &mut waves, stem)
                 .map_err(|e| format!("cue {stem:?}: {e}"))?;
         }
-        Ok(format!("{} cue wave(s)", stems.len()))
+        for stem in sirens {
+            bank.load_siren(vfs, &mut waves, stem)
+                .map_err(|e| format!("siren cue {stem:?}: {e}"))?;
+        }
+        let mut label = format!("{} cue wave(s)", cues.len());
+        if !sirens.is_empty() {
+            label.push_str(&format!(", {} siren wave(s)", sirens.len()));
+        }
+        Ok(label)
     })
 }
 

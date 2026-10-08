@@ -1,3 +1,13 @@
+# Last iteration — F29-B.9: `--trace-deps` traces siren-program stems (iteration 13 of the recovery run)
+
+Selection: the F29-B.8 review passed with no blockers and named siren stems as untraced. It is the smallest open F29 leg that needs no GPU, no unknown rule and no new loader (the other legs — a shippable gameplay example mod, AC03 on a real two-process run — are unchanged).
+Change: `trace_cue_reads(vfs, cues, sirens)` resolves `sirens` through `WaveBank::load_siren` (the `sirens/`-scoped map first, global fallback) beside `cues` through `load`; `mm2 --trace-deps --siren-cue <stem>` (repeatable, conflicts with `--city`, combinable with `--cue`). The OK label gains ", N siren wave(s)" only when sirens were named. `docs/modding.md` Debugging updated. No ledger row (tooling).
+Test (+1, `mod_override.rs`): `a_traced_siren_cue_follows_the_sirens_scoped_map` — a mod replacing the `sirens/` wave is credited to `--siren-cue` and not to `--cue`; a mod replacing the same-named flat (higher-rate) wave is the reverse; unknown siren stem errors naming it; subprocess leg (`--expect-mod` exit 0 / 2, conflict with `--city` exit 2). Mutation: routing the siren stems through `bank.load` fails the test.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass; `cargo test --locked --workspace` rc 0, 2661 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data only (no retail run this iteration). Open on F29: a shippable gameplay example mod, AC03 on a real two-process run, AC06 coverage for other families.
+
+---
+
 # Last iteration — F29-B.8: the audio `deps` target (iteration 12 of the recovery run)
 
 Selection: the F29-B.7 review passed with no blockers. The remaining F29-B legs were the audio `deps` target, a gameplay example mod (none shippable without original-derived tuning) and AC03 on a real two-process run; the audio target is the one that needs no GPU, no unknown rule and no new loader.
