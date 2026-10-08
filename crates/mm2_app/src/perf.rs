@@ -29,7 +29,8 @@
 //! The report also judges the run against declared soak budgets
 //! (F30-AC02, `timings.soak`): the measured frames are split in thirds
 //! and the last third's entity and voice peaks must not exceed the
-//! middle third's by more than a stated slack, and the virtual clock may
+//! middle third's by more than a stated slack (a floor plus, for
+//! entities, a share of the peak), and the virtual clock may
 //! not have discarded any game time. A run too short to fill three
 //! windows with samples says `inconclusive`, never `pass`.
 //!
@@ -133,7 +134,17 @@ const ENTITY_SAMPLE_EVERY: u64 = 30;
 /// and the two peaks sit together; a leak is still climbing and the tail
 /// peak lands above the middle's by more than the slack. The slack
 /// absorbs ordinary spawn/recycle jitter between two windows.
-const SOAK_ENTITY_SLACK: u32 = 32;
+///
+/// The entity slack is a floor plus a share of the middle peak, because a
+/// real city carries ~45,000 entities of which the transient part (wheel
+/// puffs, traffic, crowd) swings by a few hundred as the player moves. A
+/// fixed 32 failed two of three healthy retail-SF runs; the last-minus-
+/// middle peak differences measured there were +81, -98 and +113 (window
+/// ranges up to 470), so 1% (about 450 at that size) clears them. That is
+/// three runs of one city, a calibration and not a guarantee: a leak
+/// slower than the slack per third is invisible to a run this short.
+const SOAK_ENTITY_SLACK_FLOOR: u32 = 32;
+const SOAK_ENTITY_SLACK_PERMILLE: u32 = 10;
 const SOAK_VOICE_SLACK: u32 = 8;
 
 /// A window needs at least this many samples before its peak says
@@ -170,12 +181,15 @@ struct Growth {
 }
 
 impl Growth {
-    fn of(readings: &[u32], slack: u32) -> Self {
+    /// The slack is `floor`, or `permille` thousandths of the middle
+    /// window's peak when that is larger.
+    fn of(readings: &[u32], floor: u32, permille: u32) -> Self {
         let third = readings.len() / 3;
         let enough = third >= SOAK_MIN_SAMPLES_PER_WINDOW * ENTITY_SAMPLE_EVERY as usize;
         let peak = |w: &[u32]| w.iter().copied().max().unwrap_or(0);
         let middle_peak = peak(&readings[third..2 * third]);
         let tail_peak = peak(&readings[2 * third..]);
+        let slack = floor.max((u64::from(middle_peak) * u64::from(permille) / 1000) as u32);
         let verdict = if !enough {
             Verdict::Inconclusive
         } else if tail_peak > middle_peak.saturating_add(slack) {
@@ -215,11 +229,13 @@ impl Soak {
     fn judge(rows: &[Row]) -> Self {
         let entities = Growth::of(
             &rows.iter().map(|r| r.entities).collect::<Vec<_>>(),
-            SOAK_ENTITY_SLACK,
+            SOAK_ENTITY_SLACK_FLOOR,
+            SOAK_ENTITY_SLACK_PERMILLE,
         );
         let voices = Growth::of(
             &rows.iter().map(|r| r.voices).collect::<Vec<_>>(),
             SOAK_VOICE_SLACK,
+            0,
         );
         let overload = if rows.iter().any(|r| !r.clamped.is_zero()) {
             Verdict::Fail
@@ -1142,7 +1158,7 @@ mod tests {
         let report = log.report();
         let j = &report["timings"]["soak"];
         assert_eq!(j["verdict"], "pass");
-        assert_eq!(j["entities"]["slack"], SOAK_ENTITY_SLACK);
+        assert_eq!(j["entities"]["slack"], SOAK_ENTITY_SLACK_FLOOR);
         assert!(log.summary().contains("perf: soak pass"));
     }
 
@@ -1153,7 +1169,7 @@ mod tests {
         assert_eq!(soak.entities.verdict, Verdict::Fail);
         assert_eq!(soak.voices.verdict, Verdict::Pass);
         assert_eq!(soak.overall, Verdict::Fail);
-        assert!(soak.entities.tail_peak > soak.entities.middle_peak + SOAK_ENTITY_SLACK);
+        assert!(soak.entities.tail_peak > soak.entities.middle_peak + SOAK_ENTITY_SLACK_FLOOR);
         let leaky_voices = soak_log(900, |i| (1_000, 10 + i as u32 / 20));
         let v = leaky_voices.stats().unwrap().soak;
         assert_eq!(
@@ -1169,13 +1185,29 @@ mod tests {
     #[test]
     fn a_climb_inside_the_slack_is_jitter_not_a_leak() {
         let log = soak_log(900, |i| {
-            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK / 2), 10)
+            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK_FLOOR / 2), 10)
         });
         assert_eq!(log.stats().unwrap().soak.entities.verdict, Verdict::Pass);
         let over = soak_log(900, |i| {
-            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK + 1), 10)
+            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK_FLOOR + 1), 10)
         });
         assert_eq!(over.stats().unwrap().soak.entities.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_city_sized_population_swinging_by_hundreds_is_not_a_leak() {
+        // The shape measured on retail SF: ~45,000 entities, the transient
+        // part wandering by a few hundred, the last third's peak 113 over
+        // the middle's. The flat 32 slack called that a leak.
+        let wander = |i: usize| 45_000 + [0u32, 240, 90, 330, 150, 460][(i / 40) % 6];
+        let log = soak_log(900, |i| (wander(i) + if i >= 600 { 113 } else { 0 }, 66));
+        let e = log.stats().unwrap().soak.entities;
+        assert_eq!(e.tail_peak - e.middle_peak, 113);
+        assert_eq!(e.slack, 45_460 * SOAK_ENTITY_SLACK_PERMILLE / 1000);
+        assert_eq!(e.verdict, Verdict::Pass);
+        // A few percent of that population climbing is still a leak.
+        let leak = soak_log(900, |i| (wander(i) + (i as u32 / 300) * 1_500, 66));
+        assert_eq!(leak.stats().unwrap().soak.entities.verdict, Verdict::Fail);
     }
 
     #[test]
