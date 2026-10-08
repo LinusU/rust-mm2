@@ -212,6 +212,45 @@ StopSign queue and `+0x160`/`+0x162` flag semantics on roads where they
 matter (no retail tram road ends in a stop sign; all but one end under a
 traffic light, the other `NeverStop`).
 
+## The other AI-map creations: subways and hookmen
+
+`AIMAP.Init` creates two more kinds of actor from `.aimap` data, after
+the cable cars and before the police (`"AIMAP.Init: Create the
+subways."` at `0x5d6704`, pushed at `0x535a20`; `"Returning a NULL
+Hookman. Idx: %d"`, `Hookman %d biffed.`). Both are driven by data
+retail does not ship, so they are cross-checked here rather than built.
+
+**Subways** *(verified_original, disassembly)*. The step runs only when
+the init's parameter block has `+0x44` set **and** the parsed aimap
+carries a train definition (`cfg+0x18`, a name pointer allocated only by
+the `[Subway]` reader at `0x555b38`; the reader's format is `%s %d`,
+into a 16-byte name and a car count read as 16 bits). It then walks the
+intersections with `0x54a290` — the train-rail twin of the tram
+terminus test (`0x54a200`) — and builds **one train per terminus**, each
+of `cars` cars (`0x14c` bytes apiece, constructor `0x541a60`; a count of
+0 or less builds none). Retail never reaches it: the only `[Subway]` in
+the 209 aimaps is `city/london.aimap`'s `#[Subway]` / `#va_ug_l 3`, a
+comment (a `#` line cannot match the reader's `[Subway]` prefix compare
+either way), so nothing is created. London's Underground is the pathset
+train family (`london_train.pathset`: 8 paths, `va_ug_l`, three cars per
+path — the same `va_ug_l 3` the commented line names), already run by
+`mm2_app::movers`. `mm2_formats::aimap::Aimap::subway` parses the
+section for a mod that uncomments it; no runtime consumes it, and
+`mm2-inspect specials` lists any non-commented `[Subway]` as an
+unresolved actor.
+
+**Hookmen** *(row shape verified_original from the aimap writer at
+`0x5558c1`; semantics unknown)*. Each `[Hookmen]` row is a `0x54`-byte
+record written as `%s %s %.2f %.2f %.2f %.2f %d` — two names (record
+`+0x00`, `+0x20`), four floats (`+0x40..+0x4c`: three coordinates and a
+fourth value, probably a heading) and a byte flag (`+0x50`). The
+section is counted. Retail has no row: every `[Hookmen]` in the 209
+files that carries the header is a `0`-count (`mm2-inspect specials`
+counts 0 rows over all 209; SF `race/sf/roam.aimap{,_p}` is one). The first name's meaning (a model? a
+route?) and what a hookman does stay unknown (UNK-45); `Aimap::hookmen`
+keeps the raw rows and `mm2-inspect specials` counts them per city
+(retail: 0), listing any that appear as unresolved.
+
 Out of scope here: the object-audio tables (`drawbridge`, `ferry`,
 `subwaycar`, `trolleycable`, …) are sound emitters covered by
 `movers.md` § Object audio, and the static `giz_*` landmark models are

@@ -15,7 +15,13 @@
 //!   rail curves the city's `.bai` authors, the cars and circuits the
 //!   executable's next-road rule gives them, and what of the original's
 //!   behaviour the runtime does not yet reproduce — reported as
-//!   **partially reproduced**, not complete.
+//!   **partially reproduced**, not complete;
+//! - the other actors the executable's AI-map init can create from an
+//!   `.aimap` — `[Subway]` trains and `[Hookmen]` — counted over every
+//!   `city/<city>.aimap` and `race/<city>/*.aimap{,_p}` file. Retail
+//!   defines none (`city/london.aimap`'s `[Subway]` is a `#` comment;
+//!   every `[Hookmen]` is a 0-count), so any that appears is listed as an
+//!   unresolved actor rather than ignored.
 //!
 //! The expected default files come from
 //! [`mm2_content::EXPECTED_SPECIAL_PATHSETS`]. A city that lacks one
@@ -32,6 +38,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_content::{EXPECTED_SPECIAL_PATHSETS, EventCatalog, race_cities};
+use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::Bai;
 use mm2_formats::pathset::Pathset;
 use mm2_formats::water::WaterDef;
@@ -198,6 +205,21 @@ enum Rails {
     },
 }
 
+/// What the city's `.aimap` files ask the AI-map init to create beyond
+/// ambient traffic, police and opponents (which have their own audits).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AimapActors {
+    /// Files read: `city/<city>.aimap` and `race/<city>/*.aimap{,_p}`.
+    files: usize,
+    /// Files that did not parse, with the error.
+    unreadable: Vec<String>,
+    /// Files defining a `[Subway]` train, as `file: model x cars`.
+    subways: Vec<String>,
+    /// `[Hookmen]` rows over all files, and the files carrying any.
+    hookmen: usize,
+    hookmen_files: Vec<String>,
+}
+
 /// Everything one city's audit measured.
 #[derive(Debug, Clone)]
 struct CityAudit {
@@ -206,6 +228,7 @@ struct CityAudit {
     families: Vec<FamilyRow>,
     water: Water,
     rails: Rails,
+    aimaps: AimapActors,
 }
 
 /// The cable car's assets (shared by both cities — `va_cablecar_f` is
@@ -352,6 +375,46 @@ fn audit_rails(vfs: &Vfs, city: &str) -> Rails {
     }
 }
 
+fn audit_aimaps(vfs: &Vfs, city: &str) -> AimapActors {
+    let city_file = format!("city/{city}.aimap");
+    let race_dir = format!("race/{city}/");
+    let mut out = AimapActors::default();
+    let mut logicals: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| {
+            *p == city_file
+                || (p.starts_with(&race_dir) && (p.ends_with(".aimap") || p.ends_with(".aimap_p")))
+        })
+        .collect();
+    logicals.sort();
+    for logical in logicals {
+        out.files += 1;
+        let parsed = vfs
+            .read_path(&logical)
+            .map_err(|e| e.to_string())
+            .and_then(|(bytes, _)| {
+                std::str::from_utf8(&bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| Aimap::parse(t).map_err(|e| e.to_string()))
+            });
+        match parsed {
+            Err(e) => out.unreadable.push(format!("{logical}: {e}")),
+            Ok(a) => {
+                if let Some(sub) = &a.subway {
+                    out.subways
+                        .push(format!("{logical}: {} x {}", sub.model, sub.cars));
+                }
+                if !a.hookmen.is_empty() {
+                    out.hookmen += a.hookmen.len();
+                    out.hookmen_files.push(logical);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn audit_city(vfs: &Vfs, city: &str) -> CityAudit {
     let events = EventCatalog::scan(vfs, city).events;
     let stems: BTreeSet<String> = events.iter().map(|e| e.stem.clone()).collect();
@@ -365,6 +428,7 @@ fn audit_city(vfs: &Vfs, city: &str) -> CityAudit {
             .collect(),
         water: audit_water(vfs, city),
         rails: audit_rails(vfs, city),
+        aimaps: audit_aimaps(vfs, city),
     }
 }
 
@@ -408,6 +472,7 @@ impl CityAudit {
             Water::Unreadable(e) => out.push(format!("{0}: city/{0}.water: {e}", self.city)),
             Water::Loaded { .. } => {}
         }
+        out.extend(self.aimaps.unreadable.iter().cloned());
         match &self.rails {
             Rails::Unreadable(e) => out.push(format!("{0}: city/{0}.bai: {e}", self.city)),
             Rails::Loaded {
@@ -422,11 +487,29 @@ impl CityAudit {
     }
 }
 
-/// Special actors that have no runtime at all. None remain once the
-/// cable car runs; the list is kept so a new one has somewhere to land
-/// and the count stays in the summary.
-fn unresolved(_vfs: &Vfs) -> Vec<String> {
-    Vec::new()
+/// Special actors that have no runtime at all: the cable car runs, and
+/// retail asks the AI-map init for no subway train or hookman, so this is
+/// empty on a stock install — an installation (or mod) that does define
+/// one gets it listed here.
+fn unresolved(audits: &[CityAudit]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in audits {
+        for sub in &a.aimaps.subways {
+            out.push(format!(
+                "{}: AI-map [Subway] train ({sub}) — the original builds one train per BAI train-rail terminus; no runtime (docs/research/specials.md)",
+                a.city
+            ));
+        }
+        if a.aimaps.hookmen > 0 {
+            out.push(format!(
+                "{}: {} [Hookmen] row(s) in {} — no runtime (row shape: docs/research/specials.md)",
+                a.city,
+                a.aimaps.hookmen,
+                a.aimaps.hookmen_files.join(", ")
+            ));
+        }
+    }
+    out
 }
 
 /// Special actors that run but reproduce only part of the original.
@@ -542,6 +625,15 @@ fn render(audit: &CityAudit) -> String {
             audit.city
         ),
     };
+    let m = &audit.aimaps;
+    let _ = writeln!(
+        s,
+        "  aimaps    {} file(s) read: {} [Subway] train(s), {} [Hookmen] row(s), {} unreadable",
+        m.files,
+        m.subways.len(),
+        m.hookmen,
+        m.unreadable.len()
+    );
     s
 }
 
@@ -579,7 +671,7 @@ pub fn run(
             }
         }
     }
-    let open = unresolved(&vfs);
+    let open = unresolved(&audits);
     println!("unresolved special actors:");
     for line in &open {
         println!("  {line}");
@@ -902,13 +994,65 @@ mod tests {
     fn the_cable_car_is_partially_reproduced_with_its_asset_state() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "geometry/va_cablecar_f.pkg", b"x");
-        assert!(unresolved(&vfs_of(d.path())).is_empty());
+        assert!(unresolved(&[audit_city(&vfs_of(d.path()), "sf")]).is_empty());
         let lines = partial(&vfs_of(d.path()));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("runs"));
         assert!(lines[0].contains("Not reproduced"));
         assert!(lines[0].contains("geometry/va_cablecar_f.pkg ok"));
         assert!(lines[0].contains("bound/va_cablecar_f_bound.bnd MISSING"));
+    }
+
+    #[test]
+    fn aimap_subways_and_hookmen_are_counted_and_listed_unresolved() {
+        let d = tempfile::tempdir().unwrap();
+        // Retail's shape: a commented `[Subway]` and a 0-count `[Hookmen]`.
+        write(
+            d.path(),
+            "city/london.aimap",
+            b"#[Subway]\n#va_ug_l 3\n[Hookmen]\n0\n",
+        );
+        let quiet = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(quiet.aimaps.files, 1);
+        assert_eq!((quiet.aimaps.subways.len(), quiet.aimaps.hookmen), (0, 0));
+        assert!(unresolved(std::slice::from_ref(&quiet)).is_empty());
+        assert!(render(&quiet).contains("1 file(s) read: 0 [Subway] train(s), 0 [Hookmen] row(s)"));
+        // A mod that does define them: both are found in the event
+        // overlays too (`.aimap_p`), and neither is silently accepted.
+        write(
+            d.path(),
+            "race/london/race3.aimap_p",
+            b"[Subway]\nva_ug_l 3\n[Hookmen]\n1\nhook1 pedmodel_man 1.0 2.0 3.0 90.0 0\n",
+        );
+        write(
+            d.path(),
+            "race/london/race3.aimap.bak",
+            b"[Subway]\nignored 1\n",
+        );
+        let loud = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(loud.aimaps.files, 2, "the .bak copy is not an aimap");
+        assert_eq!(
+            loud.aimaps.subways,
+            vec!["race/london/race3.aimap_p: va_ug_l x 3".to_string()]
+        );
+        assert_eq!(loud.aimaps.hookmen, 1);
+        let open = unresolved(std::slice::from_ref(&loud));
+        assert_eq!(open.len(), 2, "{open:?}");
+        assert!(open[0].contains("[Subway]") && open[1].contains("[Hookmen]"));
+        assert!(loud.failures().iter().all(|f| !f.contains("aimap")));
+    }
+
+    #[test]
+    fn an_unparseable_aimap_is_a_failure_not_a_skip() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "race/sf/race0.aimap", b"[Subway]\n");
+        let a = audit_city(&vfs_of(d.path()), "sf");
+        assert_eq!(a.aimaps.unreadable.len(), 1);
+        assert!(
+            a.failures()
+                .iter()
+                .any(|f| f.contains("race/sf/race0.aimap"))
+        );
     }
 
     #[test]
