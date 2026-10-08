@@ -69,6 +69,7 @@ pub mod spark_fx;
 pub mod speedometer;
 pub mod stuck;
 pub mod texel_fx;
+pub mod texture_budget;
 pub mod traffic;
 pub mod underground;
 pub mod water;

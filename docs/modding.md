@@ -108,6 +108,10 @@ You never need to know which archive or physical file shipped the original.
   into the build and supported by the GPU — an unrecognized encoding is a
   decode failure, not silent success. A TEX file can also be supplied
   directly for byte-identical replacement.
+  A PNG/TGA/KTX2/TEX wider or taller than 8192 pixels
+  (`mm2_app::texture_budget`) is refused by name before it is decoded, and the
+  surface gets no texture — the original is not substituted, the same as a
+  corrupt mod file.
 - **Geometry/props**: PKG overrides by same logical path; modern formats
   (`.glb`) are resolved by the preference list — glTF importing is a planned
   importer, not yet implemented.

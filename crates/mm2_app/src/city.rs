@@ -51,6 +51,7 @@ use tracing::{debug, info, warn};
 use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle, mirrored_cg};
 use crate::decals::{self, DecalStampReport};
 use crate::layers::GameLayer;
+use crate::texture_budget;
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
 ///
@@ -1956,6 +1957,10 @@ pub(crate) fn decode_tex_with(
             return None;
         }
     };
+    if !texture_budget::within_budget(tex.header.width as u32, tex.header.height as u32) {
+        warn_over_budget(logical, tex.header.width as u32, tex.header.height as u32);
+        return None;
+    }
     // wgpu requires `mip_level_count <= floor(log2(max(w, h))) + 1`;
     // a file claiming more levels than its size supports decodes
     // degenerate 1×1 repeats — drop them rather than failing texture
@@ -2046,6 +2051,14 @@ pub(crate) fn decode_tex_with(
 /// guarantee: unsupported encodings or missing GPU formats fail the decode
 /// and are reported as a miss, never silently replaced.
 pub(crate) fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Option<(Image, bool)> {
+    // The declared size is read from the header first: a decoder allocates
+    // width × height × 4 bytes before a caller can look at the result.
+    if let Some((w, h)) = texture_budget::declared_dimensions(bytes, ext)
+        && !texture_budget::within_budget(w, h)
+    {
+        warn_over_budget(logical, w, h);
+        return None;
+    }
     let mut image = match Image::from_buffer(
         bytes,
         ImageType::Extension(ext),
@@ -2060,6 +2073,12 @@ pub(crate) fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Opt
             return None;
         }
     };
+    // Backstop for a container whose header was not understood above.
+    let size = image.texture_descriptor.size;
+    if !texture_budget::within_budget(size.width, size.height) {
+        warn_over_budget(logical, size.width, size.height);
+        return None;
+    }
     // City surfaces tile; repeat + anisotropy is the pipeline default.
     let mut sampler = ImageSamplerDescriptor::linear();
     sampler.anisotropy_clamp = 16;
@@ -2081,6 +2100,16 @@ pub(crate) fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Opt
         _ => false,
     };
     Some((image, has_alpha))
+}
+
+fn warn_over_budget(logical: &str, width: u32, height: u32) {
+    warn!(
+        logical = %logical,
+        width,
+        height,
+        max = texture_budget::MAX_TEXTURE_DIM,
+        "texture is larger than the supported size; not decoded"
+    );
 }
 
 /// Whether a texture format carries a meaningful alpha channel.

@@ -22,6 +22,7 @@ mod environment;
 mod event;
 mod hud;
 mod hudmap;
+mod huge_texture;
 mod import_pipeline;
 mod input;
 mod layers;
