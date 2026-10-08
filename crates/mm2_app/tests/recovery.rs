@@ -1261,13 +1261,16 @@ fn a_rescue_keeps_the_gates_already_earned() {
 /// gates and the anchors of every wired opponent `.opp` route, both
 /// difficulties of every ready event) against the city's
 /// real `CityWater` built through the production path (F28-AC04).
-/// Deadly water is scoped to the listed rooms, so a start slot or gate
-/// inside one would drown a car on the authored route; the audit
-/// reports its denominators and fails when a city has no usable water
-/// or a point sits in it. (Six London route anchors lie over a water
-/// footprint on bridges 3.6 m above the surface and are rightly dry.) A positive control samples a grid so the
-/// check cannot pass over empty water. Skipped without the operator's
-/// install (`MM2_RETAIL=<dir>`).
+/// Crash Course lessons go through the production `lesson_race_setup`:
+/// every leg's start slots and gates, the lead-car route anchors and
+/// the police posts of both difficulties. Deadly water is scoped to
+/// the listed rooms, so a start slot or gate inside one would drown a
+/// car on the authored route; the audit reports its denominators and
+/// fails when a city has no usable water or a point sits in it. (Six
+/// London route anchors lie over a water footprint on bridges 3.6 m
+/// above the surface and are rightly dry.) A positive control samples
+/// a grid so the check cannot pass over empty water. Skipped without
+/// the operator's install (`MM2_RETAIL=<dir>`).
 #[test]
 fn retail_no_authored_race_point_stands_in_deadly_water() {
     use mm2_content::{EventCatalog, race_definition};
@@ -1346,9 +1349,77 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
                 }
             }
         }
+
+        // Crash Course lessons: the same points through the lesson
+        // setup the menu launches (the race loop above skips them).
+        let (mut legs, mut lesson_points, mut lead_anchors, mut posts) = (0usize, 0, 0, 0);
+        let mut lessons = 0usize;
+        for event in catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == mm2_game::EventTableKind::CrashCourse)
+        {
+            for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+                let setup = mm2_app::race::lesson_race_setup(&vfs, &event.event_ref, difficulty);
+                let setup = match setup {
+                    Ok(setup) => setup,
+                    Err(e) => {
+                        // An unbuildable lesson is a finding, not a skip.
+                        wading.push(format!(
+                            "{:?} {difficulty:?} lesson did not build: {e}",
+                            event.event_ref
+                        ));
+                        continue;
+                    }
+                };
+                lessons += 1;
+                for leg in &setup.legs {
+                    legs += 1;
+                    let def = &leg.definition;
+                    let gates = def.checkpoints.iter().chain(def.finish.iter());
+                    let spots = def
+                        .start_slots
+                        .iter()
+                        .map(|s| ("start", s.position))
+                        .chain(gates.map(|g| ("gate", g.center)));
+                    for (what, p) in spots {
+                        lesson_points += 1;
+                        if water.is_deadly(p) {
+                            wading.push(format!(
+                                "{:?} {difficulty:?} {} {what} at {p}",
+                                event.event_ref, leg.source
+                            ));
+                        }
+                    }
+                }
+                for (i, entry) in setup.lead_cars.entries.iter().enumerate() {
+                    let Some(route) = &entry.route else { continue };
+                    for (n, row) in route.points.iter().enumerate() {
+                        lead_anchors += 1;
+                        if water.is_deadly(row.position) {
+                            wading.push(format!(
+                                "{:?} {difficulty:?} lead car {i} anchor {n} at {}",
+                                event.event_ref, row.position
+                            ));
+                        }
+                    }
+                }
+                for (i, cop) in setup.police.entries.iter().enumerate() {
+                    posts += 1;
+                    if water.is_deadly(cop.position) {
+                        wading.push(format!(
+                            "{:?} {difficulty:?} police post {i} at {}",
+                            event.event_ref, cop.position
+                        ));
+                    }
+                }
+            }
+        }
         eprintln!(
             "{city}: {} water rooms, {wet} wet grid cells, {events} race definitions, \
              {points} start/gate points, {routes} opponent routes / {route_points} anchors, \
+             {lessons} lesson setups / {legs} legs / {lesson_points} points / \
+             {lead_anchors} lead-car anchors / {posts} police posts, \
              {} in deadly water",
             water.room_count(),
             wading.len()
@@ -1357,6 +1428,10 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
         assert!(
             routes > 0 && route_points > 0,
             "{city}: no opponent route audited"
+        );
+        assert!(
+            lessons > 0 && legs > 0 && lesson_points > 0,
+            "{city}: no Crash Course lesson audited"
         );
         assert!(wading.is_empty(), "{city}: {wading:?}");
     }
