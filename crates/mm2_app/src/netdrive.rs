@@ -4320,6 +4320,81 @@ mod tests {
         assert_eq!(snaps.pending.len(), 1, "the new stream's rows queue");
     }
 
+    /// F30-AC02, the inbox leg: a long stream of distinct impact rows
+    /// that nothing drains leaves the backlog, the dedup window and
+    /// its retire order at their declared bounds — the drops are
+    /// counted, none is silent — and the window still suppresses a
+    /// repeat of a recent row while the retired oldest id is
+    /// admitted again. Frames cross generations too: the generation
+    /// rides the key, so churn cannot grow the window past the bound.
+    #[test]
+    fn a_long_undrained_impact_stream_stays_at_its_bounds() {
+        let mut snaps = RemoteSnaps::default();
+        let frames: u64 = 4_000;
+        let per_frame: u64 = 3;
+        for tick in 1..=frames {
+            // A new generation every 500 frames: ids restart, keys differ.
+            let generation = 1 + tick / 500;
+            let rows = (0..per_frame)
+                .map(|i| snap_impact((tick % 500) * per_frame + i))
+                .collect();
+            snaps.push(generation, tick, vec![snap_entry()], Vec::new(), rows, None);
+            assert!(snaps.pending.len() <= MAX_PENDING_IMPACTS, "tick {tick}");
+            assert!(snaps.seen.len() <= MAX_SEEN_IMPACTS, "tick {tick}");
+            assert_eq!(snaps.seen.len(), snaps.seen_order.len(), "tick {tick}");
+        }
+        let total = frames * per_frame;
+        assert_eq!(snaps.pending.len(), MAX_PENDING_IMPACTS);
+        assert_eq!(snaps.seen.len(), MAX_SEEN_IMPACTS);
+        assert_eq!(
+            snaps.dropped,
+            total - MAX_PENDING_IMPACTS as u64,
+            "every row past the backlog bound is counted, none silent"
+        );
+        assert_eq!(snaps.stale, 0, "every frame was in order");
+
+        // The window still does its job inside its bound: the newest
+        // row's repeat is suppressed, the backlog does not grow.
+        let (generation, newest) = snaps.pending.back().map(|(g, r)| (*g, r.id)).unwrap();
+        let before = snaps.dropped;
+        snaps.push(
+            generation,
+            frames + 1,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(newest)],
+            None,
+        );
+        assert_eq!(snaps.pending.len(), MAX_PENDING_IMPACTS);
+        assert_eq!(snaps.dropped, before, "a duplicate is not a drop");
+
+        // A fresh row retires the window's oldest key, so a repeat of
+        // that oldest id queues again (the window bounds memory; it is
+        // not a ledger of all time).
+        let (old_generation, _, old_id) = *snaps.seen_order.front().unwrap();
+        snaps.push(
+            9,
+            frames + 2,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(1_000_000)],
+            None,
+        );
+        assert_eq!(snaps.seen.len(), MAX_SEEN_IMPACTS);
+        assert_eq!(snaps.dropped, before + 1, "the new row displaced one");
+        assert!(!snaps.seen.contains(&(old_generation, 1, old_id)));
+        snaps.push(
+            old_generation,
+            frames + 3,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(old_id)],
+            None,
+        );
+        assert_eq!(snaps.seen.len(), MAX_SEEN_IMPACTS);
+        assert_eq!(snaps.dropped, before + 2, "the retired id queued again");
+    }
+
     /// The accept-to-begin gap (F25-B): a parked `Start`'s new stream
     /// can queue impact rows while the outgoing session still tears
     /// down — `apply_snapshots` runs every `Update`, gated on the

@@ -1,3 +1,13 @@
+# Last iteration — F30-A.8: the client's impact inbox is pinned to its bounds under a long stream (iteration 33 of the recovery run)
+
+Selection: the F30-B.10 review passed with no blockers. F30 has had six consecutive packaging/edge-case slices; the open F30-AC02 clause "no unbounded entity/voice/queue growth" had a verdict for entities and voices (A.6/A.7) but nothing exercised the network queues. `RemoteSnaps` declares `MAX_PENDING_IMPACTS` (256) and `MAX_SEEN_IMPACTS` (512) but no test referenced either constant; slow storage still has no concrete seam, so it stays open.
+Change: test only, no production code touched. `netdrive::tests::a_long_undrained_impact_stream_stays_at_its_bounds`: 4,000 in-order frames x 3 distinct impact rows (12,000 rows, ids restarting and the generation changing every 500 frames, nothing draining) keep `pending` at 256, `seen`/`seen_order` at 512 and equal in length at every step; `dropped` equals rows minus the backlog bound exactly (none silent), `stale` is 0. The window still works inside its bound (a repeat of the newest row is not queued and not a drop) and is a bound on memory, not a ledger: a fresh row retires the oldest key and a repeat of that retired id queues again (counted).
+Mutation: the window retire disabled fails it; the backlog cap disabled fails it; restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass; `cargo test --locked --workspace` rc 0, 58 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic rows pushed straight into `RemoteSnaps::push`: the prop/traffic/world/Cops & Robbers inboxes, the host's outbound queues, the transport's own buffers and bandwidth are not soaked here, and no real two-process run was measured for growth. F30-AC02 stays open (London, race/network soaks, GPU memory too).
+
+---
+
 # Last iteration — F30-B.10: a packaging step that checks what ships (iteration 32 of the recovery run)
 
 Selection: the F30-B.9 review passed with no blockers. Remaining F30 gaps: slow storage (no concrete seam found), F30-AC02 (needs long real runs), and the packaging half of requirement 4/6 — `docs/building.md` listed "a packaging step and the checks that run on it" as not done, and the `.app`/prefix asset layouts were unit-tested only.
