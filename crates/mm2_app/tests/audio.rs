@@ -3328,6 +3328,18 @@ fn write_commentary_tree(d: &Path) {
 /// `aud/spchdata/sf.csv` registry), fixed 1/60 s updates and the one
 /// system the Update schedules run.
 fn commentary_app(dir: &Path, seed: u64, phase: SessionPhase) -> App {
+    commentary_app_for(dir, seed, phase, None)
+}
+
+/// [`commentary_app`] for a Crash Course lesson when `lesson_table`
+/// names its cue table: the binding `load_session_world` makes, plus
+/// the verdict system the app schedules before the queue drains.
+fn commentary_app_for(
+    dir: &Path,
+    seed: u64,
+    phase: SessionPhase,
+    lesson_table: Option<&str>,
+) -> App {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
     let bank = WaveBank::index(&vfs);
@@ -3358,9 +3370,15 @@ fn commentary_app(dir: &Path, seed: u64, phase: SessionPhase) -> App {
         .insert_resource(bank)
         .init_resource::<Assets<PcmAudio>>()
         .init_resource::<AudioReport>()
-        .add_systems(Update, audio::commentary_voices);
+        .add_systems(
+            Update,
+            (
+                mm2_app::lesson::lesson_verdict_cue.before(audio::commentary_voices),
+                audio::commentary_voices,
+            ),
+        );
     if let Some(commentary) = CommentaryAudio::bind(Some("sf"), commentary_conditions(), seed) {
-        app.insert_resource(commentary);
+        app.insert_resource(commentary.with_lesson_table(lesson_table.map(str::to_owned)));
     }
     app.finish();
     app.cleanup();
@@ -4008,6 +4026,264 @@ fn a_standing_maps_to_its_results_tier() {
     assert_eq!(tier(Some(4), 4), Some(Poor));
     assert_eq!(tier(Some(1), 1), Some(Win));
     assert_eq!(tier(Some(2), 2), Some(Poor));
+}
+
+// ---------------------------------------------------------------------------
+// F21-B.16: a Crash Course lesson's instructor — the school's own cue
+// table (`aud/spchdata/ccl/ccl3.csv`) speaks the intro ahead of the
+// city's environmental lines, then the verdict.
+// ---------------------------------------------------------------------------
+
+const LESSON_TABLE: &str = "aud/spchdata/ccl/ccl3.csv";
+
+/// [`commentary_dir`] plus a lesson table authoring `CCL03INTRO` (3),
+/// `CCL03FAIL` (4) and `CCL03SUCC` (2) and the waves they name, under
+/// the flat `aud11/ccl` dir the retail install ships them in.
+fn lesson_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write_commentary_tree(d);
+    write(
+        d,
+        LESSON_TABLE,
+        b"Name prefix/type header,end sufix value,sufix add value\n\
+          PRERACE header,,\nCCL03INTRO,3,0\n\
+          RESULTSPOOR header,,\nCCL03FAIL,4,0\n\
+          RESULTSWIN header,,\nCCL03SUCC,2,0\n",
+    );
+    for (name, count) in [("intro", 3), ("fail", 4), ("succ", 2)] {
+        for n in 1..=count {
+            write(
+                d,
+                &format!("aud/aud11/ccl/ccl03{name}{n:02}.11k.wav"),
+                &pcm_wav(11025, 11025),
+            );
+        }
+    }
+    tmp
+}
+
+fn lesson_driver() -> mm2_app::lesson::LessonDriver {
+    use mm2_content::{LessonLeg, LessonObjective};
+    use mm2_game::{
+        Checkpoint, CheckpointRule, EventKey, EventTableKind, LessonRun, RaceDefinition,
+    };
+    let leg = LessonLeg {
+        filename: "slalom".into(),
+        objective: LessonObjective::Maneuver,
+        source: "crash3:slalom".into(),
+        definition: RaceDefinition {
+            checkpoints: vec![Checkpoint {
+                center: Vec3::ZERO,
+                radius: 10.0,
+                height: 5.0,
+                heading_deg: 0.0,
+                require_direction: false,
+            }],
+            finish: None,
+            rule: CheckpointRule::Ordered,
+            laps: 1,
+            time_limit_ticks: None,
+            params: mm2_game::EventParams::default(),
+            countdown_ticks: 3,
+            start_slots: Vec::new(),
+        },
+    };
+    mm2_app::lesson::LessonDriver::new(mm2_app::race::LessonSetup {
+        key: EventKey {
+            city: "london".into(),
+            table: EventTableKind::CrashCourse,
+            stem: "lesson1".into(),
+        },
+        run: LessonRun::new(1).unwrap(),
+        legs: vec![leg],
+        rewards: Default::default(),
+        availability: Default::default(),
+        aimap: None,
+    })
+}
+
+fn leg_outcome(finished: bool) -> mm2_game::ParticipantState {
+    let result = mm2_game::ResultId {
+        generation: 1,
+        participant: mm2_game::PlayerId(0),
+        event: None,
+        sequence: 0,
+    };
+    if finished {
+        mm2_game::ParticipantState::Finished {
+            race_ticks: 100,
+            result,
+        }
+    } else {
+        mm2_game::ParticipantState::TimedOut {
+            race_ticks: 100,
+            result,
+        }
+    }
+}
+
+/// The instructor's intro is the first line a lesson speaks — ahead of
+/// the weather and time-of-day lines the city announcer adds — and
+/// nothing is missed.
+#[test]
+fn a_lesson_opens_with_the_instructors_intro() {
+    let dir = lesson_dir();
+    let mut app = commentary_app_for(dir.path(), 7, SessionPhase::Playing, Some(LESSON_TABLE));
+    for _ in 0..3 {
+        app.update();
+    }
+    let first = commentary_voices(&mut app);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].1.starts_with("ccl03intro"), "{first:?}");
+    for _ in 0..400 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed), (3, 0), "intro + weather + time");
+}
+
+/// A session that is not a lesson speaks no instructor line even when
+/// the table ships, and a lesson verdict is refused without a table.
+#[test]
+fn a_non_lesson_session_has_no_instructor() {
+    let dir = lesson_dir();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..400 {
+        app.update();
+    }
+    let said = commentary_voices(&mut app);
+    assert!(
+        said.iter().all(|(_, s, ..)| !s.starts_with("ccl")),
+        "{said:?}"
+    );
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 2);
+
+    use mm2_app::audio::EventCue;
+    let mut bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7).unwrap();
+    assert!(!bound.request(EventCue::LessonPass));
+    let mut bound = bound.with_lesson_table(Some(LESSON_TABLE.into()));
+    assert!(bound.request(EventCue::LessonFail));
+    assert!(
+        !bound.request(EventCue::LessonPass),
+        "one verdict per attempt"
+    );
+    // A lesson does not open the event-kind announcer.
+    assert!(!bound.request(EventCue::FinalCheckpoint));
+}
+
+/// The lesson's pass reads the table's `RESULTSWIN` line, its failure
+/// the `RESULTSPOOR` one, each once however many frames the verdict
+/// stays standing.
+#[test]
+fn a_lesson_verdict_speaks_the_matching_line_once() {
+    for (pass, prefix, waves) in [(true, "ccl03succ", 2), (false, "ccl03fail", 4)] {
+        let dir = lesson_dir();
+        let mut app = commentary_app_for(dir.path(), 7, SessionPhase::Playing, Some(LESSON_TABLE));
+        let mut driver = lesson_driver();
+        // Undecided: the lesson says nothing yet.
+        app.insert_resource(lesson_driver());
+        for _ in 0..400 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<AudioReport>().commentary, 3);
+
+        driver.observe(&leg_outcome(pass));
+        app.insert_resource(driver);
+        for _ in 0..400 {
+            app.update();
+        }
+        let r = app.world().resource::<AudioReport>();
+        assert_eq!((r.commentary, r.failed), (4, 0), "pass={pass}");
+        let verdict: Vec<_> = commentary_voices(&mut app)
+            .into_iter()
+            .filter(|(_, s, ..)| s.starts_with("ccl03") && !s.contains("intro"))
+            .collect();
+        assert_eq!(verdict.len(), 1, "{verdict:?}");
+        let n: usize = verdict[0].1[prefix.len()..].parse().unwrap();
+        assert!(verdict[0].1.starts_with(prefix) && (1..=waves).contains(&n));
+    }
+}
+
+/// Original-content validation (opt-in: `MM2_RETAIL` names an install;
+/// reports "not run" otherwise). Every Crash Course row of both cities
+/// must resolve to a readable lesson table authoring a `PRERACE`, a
+/// `RESULTSPOOR` and a `RESULTSWIN` line, and every wave those lines
+/// can draw is looked up in the real wave bank. Structural gaps fail
+/// the test; draws that name a wave the install does not ship are
+/// authored quirks, listed (never filtered out of the denominator).
+#[test]
+fn every_retail_lesson_resolves_its_instructor_lines() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_formats::spchdata::CueTable;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail lesson speech sweep NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves = Assets::<PcmAudio>::default();
+    let (mut rows, mut lines, mut draws) = (0, 0, 0);
+    let mut structural = Vec::new();
+    let mut missing = Vec::new();
+    for city in ["london", "sf"] {
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        let crash: Vec<usize> = catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == mm2_game::EventTableKind::CrashCourse)
+            .map(|e| e.event_ref.index)
+            .collect();
+        assert!(!crash.is_empty(), "{city}: no Crash Course rows");
+        for row in crash {
+            rows += 1;
+            let label = format!("{city} row {row}");
+            let Some(path) = mm2_game::lesson_speech_table(city, row) else {
+                structural.push(format!("{label}: no lesson table binding"));
+                continue;
+            };
+            let table = vfs
+                .read_logical(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| {
+                    CueTable::parse(&String::from_utf8_lossy(&b)).map_err(|e| e.to_string())
+                });
+            let table = match table {
+                Ok(t) => t,
+                Err(e) => {
+                    structural.push(format!("{label}: {path}: {e}"));
+                    continue;
+                }
+            };
+            for section in ["PRERACE", "RESULTSPOOR", "RESULTSWIN"] {
+                lines += 1;
+                let Some(cue) = table.section(section).and_then(|s| s.rows.first()) else {
+                    structural.push(format!("{label}: {path} authors no {section}"));
+                    continue;
+                };
+                for n in (cue.add + 1)..=cue.end {
+                    draws += 1;
+                    let stem = mm2_game::cue_wave_stem("", &cue.prefix, n);
+                    if let Err(e) = bank.load(&vfs, &mut waves, &stem) {
+                        missing.push(format!("{label} {section}: {stem}: {e}"));
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "retail lesson speech: {rows} rows, {lines} lines, {draws} drawable waves, {} missing:\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
+    assert_eq!(rows, 26, "13 crash rows per school");
+    assert!(structural.is_empty(), "{structural:#?}");
+    // Measured 2026-10-08: three failure-line draws name a wave the
+    // install does not ship (`end` counts the family's files there,
+    // not its top suffix). A change in this count is new evidence.
+    assert_eq!(missing.len(), 3, "{missing:#?}");
 }
 
 /// Each race-end cue is asked for once: a second tier is refused.

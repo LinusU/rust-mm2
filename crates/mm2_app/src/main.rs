@@ -2006,7 +2006,13 @@ fn main() {
             // F27-B.4c: the Cops & Robbers announcer beside it — it
             // reads the match's events (authority) or the replica's
             // changes (client).
-            (audio::commentary_voices, cnrvoice::cnr_commentary_voices)
+            // F21-B.16: a Crash Course lesson's verdict line is asked
+            // for just before the queue drains.
+            (
+                mm2_app::lesson::lesson_verdict_cue.before(audio::commentary_voices),
+                audio::commentary_voices,
+                cnrvoice::cnr_commentary_voices,
+            )
                 .after(session::drive_session),
             // Drawbridge, ferry and Underground sounds — the same
             // despawn ordering as the other rigs.

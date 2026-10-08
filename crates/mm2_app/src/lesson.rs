@@ -44,6 +44,7 @@ use mm2_game::{
 };
 use mm2_vehicle::ResetVehicle;
 
+use crate::audio::{CommentaryAudio, EventCue};
 use crate::netdrive::seat_pose;
 use crate::race::{CheckpointMarker, LessonSetup, spawn_checkpoint_markers};
 use crate::session::SpawnPoint;
@@ -251,6 +252,30 @@ pub fn drive_lesson(
             "lesson failed — restart to retry from the first leg"
         ),
         LegStep::Hold | LegStep::Stale(_) => {}
+    }
+}
+
+/// Ask the instructor for the lesson's verdict line (F21-B.16): the
+/// sequencer's terminal phase — passed, or an attempt a leg ended —
+/// requests the table's `RESULTSWIN` / `RESULTSPOOR` line once.
+/// [`CommentaryAudio::request`](crate::audio::CommentaryAudio::request)
+/// refuses a second ask, so this can read the phase every frame; a
+/// retry rebuilds the driver and the commentary with the session.
+pub fn lesson_verdict_cue(
+    driver: Option<Res<LessonDriver>>,
+    commentary: Option<ResMut<CommentaryAudio>>,
+) {
+    let (Some(driver), Some(mut commentary)) = (driver, commentary) else {
+        return;
+    };
+    match driver.run().phase() {
+        LessonPhase::Passed => {
+            commentary.request(EventCue::LessonPass);
+        }
+        LessonPhase::Failed { .. } => {
+            commentary.request(EventCue::LessonFail);
+        }
+        LessonPhase::Running { .. } | LessonPhase::Abandoned => {}
     }
 }
 

@@ -830,8 +830,8 @@ pub fn prerace_tod_stem(tod: TimeOfDay) -> &'static str {
 /// are the measured data; that the event table kind selects between
 /// them is a designed binding (the exe string set names the sections
 /// and the `%s_prerace` stems, not this mapping). Crash Course
-/// lessons speak through the separate `ccs`/`ccl` grammar and bind
-/// nothing here.
+/// lessons speak through the separate `ccs`/`ccl` grammar
+/// ([`lesson_speech_table`]) and bind nothing here.
 pub fn event_speech_table(table: EventTableKind) -> Option<&'static str> {
     match table {
         EventTableKind::Blitz => Some("blitz"),
@@ -839,6 +839,29 @@ pub fn event_speech_table(table: EventTableKind) -> Option<&'static str> {
         EventTableKind::Circuit => Some("circuit"),
         EventTableKind::CrashCourse => None,
     }
+}
+
+/// The cue table a Crash Course lesson speaks from (F21-B.16):
+/// `aud/spchdata/<school>/<school><row>.csv`, where the school dir is
+/// `ccl` for London's cab course and `ccs` for San Francisco's stunt
+/// course (the exe's `\ccs`/`\ccl` strings) and `row` the lesson's
+/// 0-based row in `mmcrashdata.csv`. The file set is measured (13
+/// tables per school, `…0`–`…12`, one per crash row) and each table
+/// authors a `PRERACE` intro, a `RESULTSPOOR` failure line and a
+/// `RESULTSWIN` success (or unlock) line whose prefixes name the
+/// lesson's own waves (`CCL01INTRO` → `ccl01intro01`). That the
+/// table number is the crash row is a documented reading — the unlock
+/// lines (`CCLUNLOCKRSI` on London row 3) line up with the authored
+/// `crash,N` rewards — and the table is followed verbatim even where
+/// its lesson number looks swapped (London row 1 speaks `CCL03`, row
+/// 2 `CCL02`). `None` for a city with no lesson school (a mod city).
+pub fn lesson_speech_table(city: &str, row: usize) -> Option<String> {
+    let school = match city {
+        "london" => "ccl",
+        "sf" => "ccs",
+        _ => return None,
+    };
+    Some(format!("aud/spchdata/{school}/{school}{row}.csv"))
 }
 
 /// Draw a speaker index inside the authored `Num announcers` domain —
@@ -914,6 +937,15 @@ mod tests {
         assert_eq!(event_speech_table(EventTableKind::Circuit), Some("circuit"));
         // Crash Course lessons speak through the separate ccs/ccl grammar.
         assert_eq!(event_speech_table(EventTableKind::CrashCourse), None);
+        assert_eq!(
+            lesson_speech_table("london", 3).as_deref(),
+            Some("aud/spchdata/ccl/ccl3.csv")
+        );
+        assert_eq!(
+            lesson_speech_table("sf", 12).as_deref(),
+            Some("aud/spchdata/ccs/ccs12.csv")
+        );
+        assert_eq!(lesson_speech_table("modcity", 0), None);
     }
 
     use super::*;

@@ -161,8 +161,11 @@ open question below.
   but `tail[1]`/`tail[3]` have no family reading yet.
 - Whether `Checkpoints` (1 on every retail row) names waypoint gates
   or something else.
-- Instruction/subtitle/audio linkage — no authored reference in
-  these tables points at instruction content; where lesson text
-  lives is unrecovered.
+- Instruction/subtitle linkage — no authored reference in these
+  tables points at instruction content; where lesson *text* lives is
+  unrecovered. The *voice* lines are found: `aud/spchdata/<ccl|ccs>/
+  <school><row>.csv` (one per crash row) names each lesson's intro,
+  failure and success waves (`DSN-92`); the per-gate call-outs
+  (`ccllocation01..22`, `cc_cpoint_*`) and mid-exam lines stay unbound.
 - Professional `TimeofDay`/`Weather` divergence — deliberate harder
   conditions or revision drift.

@@ -1260,10 +1260,24 @@ pub fn load_session_world(
         SessionMode::Event(event) => mm2_game::event_speech_table(event.table),
         _ => None,
     };
+    // F21-B.16: a Crash Course lesson additionally binds its own cue
+    // table (the school's `ccl<row>`/`ccs<row>` file), so the
+    // instructor's intro leads the pre-race window and the verdict
+    // line follows the lesson's pass or failure.
+    let lesson_table = match &config.mode {
+        SessionMode::Event(event) if event.table == mm2_game::EventTableKind::CrashCourse => {
+            mm2_game::lesson_speech_table(&event.city, event.index)
+        }
+        _ => None,
+    };
     if let Some(commentary) =
         crate::audio::CommentaryAudio::bind(siren_city, session_conditions, config.seed)
     {
-        commands.insert_resource(commentary.with_event_table(event_table));
+        commands.insert_resource(
+            commentary
+                .with_event_table(event_table)
+                .with_lesson_table(lesson_table),
+        );
     }
     if world_ok {
         session

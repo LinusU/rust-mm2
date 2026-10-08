@@ -914,6 +914,10 @@ const FINAL_CHECKPOINT_SECTION: &str = "FINALCHECKPOINT";
 const RESULTS_WIN_SECTION: &str = "RESULTSWIN";
 const RESULTS_MID_SECTION: &str = "RESULTSMID";
 const RESULTS_POOR_SECTION: &str = "RESULTSPOOR";
+/// The `header` section of a lesson table (`ccl3.csv` …) that authors
+/// the instructor's intro line — the same cue-type string the
+/// event-kind tables use for their pre-race line.
+const PRERACE_SECTION: &str = "PRERACE";
 
 /// How well the local participant's race ended — which of the
 /// table's `RESULTS*` sections the announcer reads (DSN-87). The
@@ -958,6 +962,11 @@ pub enum EventCue {
     FinalCheckpoint,
     /// The local participant's race ended (`RESULTS*`, DSN-87).
     Results(ResultsTier),
+    /// The lesson was passed (the table's `RESULTSWIN` line — the
+    /// success or unlock call-out; F21-B.16).
+    LessonPass,
+    /// The lesson attempt failed (`RESULTSPOOR`, F21-B.16).
+    LessonFail,
 }
 
 impl EventCue {
@@ -972,7 +981,15 @@ impl EventCue {
             Self::Results(ResultsTier::Win) => &[RESULTS_WIN_SECTION],
             Self::Results(ResultsTier::Mid) => &[RESULTS_MID_SECTION, RESULTS_POOR_SECTION],
             Self::Results(ResultsTier::Poor) => &[RESULTS_POOR_SECTION],
+            Self::LessonPass => &[RESULTS_WIN_SECTION],
+            Self::LessonFail => &[RESULTS_POOR_SECTION],
         }
+    }
+
+    /// Whether this is a lesson verdict — read from the lesson's own
+    /// table, not an event-kind one.
+    fn is_lesson(self) -> bool {
+        matches!(self, Self::LessonPass | Self::LessonFail)
     }
 }
 
@@ -1011,6 +1028,12 @@ pub struct CommentaryAudio {
     /// session's race announcements read; `None` outside a race
     /// event, where [`CommentaryAudio::request`] declines.
     event_table: Option<&'static str>,
+    /// The Crash Course lesson's own cue table
+    /// (`aud/spchdata/ccl/ccl3.csv`, see [`mm2_game::lesson_speech_table`]);
+    /// `None` outside a lesson. A lesson speaks through its school's
+    /// instructor, not the city announcer, so this binding is
+    /// independent of the registry draw.
+    lesson_table: Option<String>,
     /// The speaker dir the pre-race resolve drew (`as1`) — every
     /// later cue of the session is that announcer's.
     speaker: Option<String>,
@@ -1040,6 +1063,7 @@ impl CommentaryAudio {
             next_at: 0.0,
             rng: NavRng::new(seed.wrapping_add(COMMENTARY_DOMAIN)),
             event_table: None,
+            lesson_table: None,
             speaker: None,
             requests: Vec::new(),
             asked: Vec::new(),
@@ -1054,14 +1078,34 @@ impl CommentaryAudio {
         self
     }
 
+    /// Bind a Crash Course lesson's own cue table (F21-B.16): the
+    /// instructor's intro is queued ahead of the environmental lines
+    /// when the pre-race window opens, and the lesson's verdict cues
+    /// become requestable. `None` (every other mode) leaves them
+    /// unbound.
+    pub fn with_lesson_table(mut self, table: Option<String>) -> Self {
+        self.lesson_table = table;
+        self
+    }
+
     /// Ask for a race announcement. Each kind of cue is accepted once per
-    /// session and only when an event table is bound; the line is
+    /// session and only when its table is bound (an event-kind table for
+    /// a race cue, the lesson's table for a lesson verdict); the line is
     /// resolved by [`commentary_voices`] and queued behind whatever
     /// is still speaking. Returns whether the request was accepted.
     pub fn request(&mut self, cue: EventCue) -> bool {
         // A race ends once: whichever tier asks first is the only one.
-        let seen = |asked: &EventCue| std::mem::discriminant(asked) == std::mem::discriminant(&cue);
-        if self.event_table.is_none() || self.asked.iter().any(seen) {
+        // A lesson attempt likewise ends in one verdict, pass or fail.
+        let seen = |asked: &EventCue| {
+            std::mem::discriminant(asked) == std::mem::discriminant(&cue)
+                || (asked.is_lesson() && cue.is_lesson())
+        };
+        let bound = if cue.is_lesson() {
+            self.lesson_table.is_some()
+        } else {
+            self.event_table.is_some()
+        };
+        if !bound || self.asked.iter().any(seen) {
             return false;
         }
         self.asked.push(cue);
@@ -2722,6 +2766,9 @@ pub fn commentary_voices(
     if !commentary.resolved {
         commentary.resolved = true;
         if *phase != SessionPhase::Results {
+            // The instructor's intro leads the queue: it is the lesson,
+            // the weather and time-of-day lines are the city's.
+            queue_lesson_intro(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
             resolve_commentary(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
         }
     }
@@ -2751,6 +2798,30 @@ pub fn commentary_voices(
         report.commentary += 1;
         commentary.next_at = commentary.elapsed + clip_secs + COMMENTARY_GAP;
     }
+}
+
+/// Queue a lesson's `PRERACE` intro from its own cue table — a no-op
+/// outside a lesson. The table's prefixes are speaker-complete
+/// (`CCL01INTRO` → `ccl01intro02`), so no registry or speaker draw is
+/// involved and a failed city registry cannot silence the instructor.
+fn queue_lesson_intro(
+    commentary: &mut CommentaryAudio,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+) {
+    let Some(path) = commentary.lesson_table.clone() else {
+        return;
+    };
+    queue_cue(
+        commentary,
+        vfs,
+        bank,
+        waves,
+        report,
+        ("", &path, &[PRERACE_SECTION]),
+    );
 }
 
 /// The one-shot registry→speaker→cue→wave resolve
@@ -2824,6 +2895,21 @@ fn resolve_event_cue(
     waves: &mut Assets<PcmAudio>,
     report: &mut AudioReport,
 ) {
+    if cue.is_lesson() {
+        // The lesson's table holds the verdict lines; the instructor's
+        // waves carry no speaker prefix (`ccl01succ01`).
+        if let Some(path) = commentary.lesson_table.clone() {
+            queue_cue(
+                commentary,
+                vfs,
+                bank,
+                waves,
+                report,
+                ("", &path, cue.sections()),
+            );
+        }
+        return;
+    }
     let (Some(speaker), Some(table)) = (commentary.speaker.clone(), commentary.event_table) else {
         report.failed += 1;
         warn!("audio: {cue:?} has no announcer — the pre-race resolve drew none");
