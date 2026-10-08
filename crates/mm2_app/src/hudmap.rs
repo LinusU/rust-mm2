@@ -107,6 +107,12 @@ const DOT_GATE: usize = 2;
 const DOT_CLEARED: usize = 3;
 const DOT_TARGET: usize = 4;
 const DOT_FINISH: usize = 5;
+/// The Cops & Robbers dots — authored paint jobs 6/7/8 of
+/// `hudmap_square.pkg` bind the `GOLD_DOT`/`BANK_DOT`/`HIDEOUT_DOT`
+/// textures (read from the package's shader records).
+const DOT_GOLD: usize = 6;
+const DOT_BANK: usize = 7;
+const DOT_HIDEOUT: usize = 8;
 
 /// Marker for the map's own camera — `drive_hud_map` moves, aims and
 /// frames it. Session-owned like everything else it serves.
@@ -146,6 +152,12 @@ pub enum MarkerRole {
     Gate(usize),
     /// Dot over `RaceDefinition::finish`.
     Finish,
+    /// Cops & Robbers: the gold — at its site, or on the car carrying it.
+    Gold,
+    /// Cops & Robbers: the hideout.
+    Hideout,
+    /// Cops & Robbers: the bank.
+    Bank,
 }
 
 /// A session-owned map marker entity.
@@ -358,6 +370,7 @@ pub fn spawn_hud_map(
     vfs: &Vfs,
     psdl_path: &str,
     race: Option<&RaceDefinition>,
+    cnr: bool,
     opponent_count: usize,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
@@ -511,7 +524,7 @@ pub fn spawn_hud_map(
     }
 
     if let Some(square) = &square_pkg
-        && let Some(def) = race
+        && (race.is_some() || cnr)
     {
         let extent = authored_extent(square).max(1.0);
         let mesh = pkg_paint_parts(square, &mut mats, meshes, &mut missing_prims, 0)
@@ -534,30 +547,54 @@ pub fn spawn_hud_map(
                 .get(DOT_FINISH)
                 .cloned()
                 .unwrap_or_default();
-            for (i, cp) in def.checkpoints.iter().enumerate() {
-                spawn_marker(
-                    commands,
-                    &mut report,
-                    &dot_mesh,
-                    gate_mat.clone(),
-                    MarkerRole::Gate(i),
-                    extent,
-                    cp.center,
-                );
+            if let Some(def) = race {
+                for (i, cp) in def.checkpoints.iter().enumerate() {
+                    spawn_marker(
+                        commands,
+                        &mut report,
+                        &dot_mesh,
+                        gate_mat.clone(),
+                        MarkerRole::Gate(i),
+                        extent,
+                        cp.center,
+                    );
+                }
+                if let Some(finish) = &def.finish {
+                    spawn_marker(
+                        commands,
+                        &mut report,
+                        &dot_mesh,
+                        finish_mat,
+                        MarkerRole::Finish,
+                        extent,
+                        finish.center,
+                    );
+                }
             }
-            if let Some(finish) = &def.finish {
-                spawn_marker(
-                    commands,
-                    &mut report,
-                    &dot_mesh,
-                    finish_mat,
-                    MarkerRole::Finish,
-                    extent,
-                    finish.center,
-                );
+            // The match's three sites; `drive_hud_map` places them
+            // from the live match every frame.
+            if cnr {
+                for (role, paint) in [
+                    (MarkerRole::Gold, DOT_GOLD),
+                    (MarkerRole::Hideout, DOT_HIDEOUT),
+                    (MarkerRole::Bank, DOT_BANK),
+                ] {
+                    match report.dot_materials.get(paint).cloned() {
+                        Some(mat) => spawn_marker(
+                            commands,
+                            &mut report,
+                            &dot_mesh,
+                            mat,
+                            role,
+                            extent,
+                            Vec3::ZERO,
+                        ),
+                        None => warn!(?role, "hudmap_square.pkg has no paint job for this dot"),
+                    }
+                }
             }
         }
-    } else if race.is_some() {
+    } else if race.is_some() || cnr {
         warn!("geometry/hudmap_square.pkg unavailable — no gate map markers");
     }
 
@@ -849,6 +886,7 @@ pub fn drive_hud_map(
     race: Option<Res<RaceState>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     ui_scale: Option<Res<UiScale>>,
+    cnr: crate::cnrhud::CnrScene,
     participants: MapParticipants,
     mut camera: MapCam,
     mut markers: MapMarkers,
@@ -988,6 +1026,7 @@ pub fn drive_hud_map(
         ),
         _ => None,
     };
+    let cnr_objective = cnr.objective();
     for (marker, mut xf, mut vis, mut mat) in &mut markers {
         match marker.role {
             MarkerRole::Player => match player_pose {
@@ -1043,6 +1082,23 @@ pub fn drive_hud_map(
                 };
                 if let Some(m) = report.dot_materials.get(paint) {
                     *mat = MeshMaterial3d(m.clone());
+                }
+            }
+            MarkerRole::Gold | MarkerRole::Hideout | MarkerRole::Bank => {
+                // The match's sites, off the same objective the arrow
+                // reads; the gold has no dot while the local car holds it
+                // (and none for a carrier out of view).
+                let at = cnr_objective.and_then(|o| match marker.role {
+                    MarkerRole::Gold => o.gold,
+                    MarkerRole::Hideout => Some(o.hideout),
+                    _ => Some(o.bank),
+                });
+                match at {
+                    Some(at) => {
+                        xf.translation = Vec3::new(at.x, report.marker_y, at.z);
+                        *vis = Visibility::Visible;
+                    }
+                    None => *vis = Visibility::Hidden,
                 }
             }
         }

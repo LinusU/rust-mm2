@@ -26,7 +26,9 @@
 //! replacing the authored binding. Geometry depth and presentation are designed.
 //!
 //! - [`spawn_nav_arrow`] runs in `load_session_world`'s event arm
-//!   with the event's table so the family variant binds.
+//!   with the event's table so the family variant binds; a Cops &
+//!   Robbers session binds [`GENERIC_ARROW_PKG`] through
+//!   [`spawn_nav_arrow_pkg`] and aims it at the match's objective.
 //! - [`update_nav_arrow`] owns visibility, rotation and the
 //!   ahead/behind sprite pick every frame off authoritative race
 //!   state, hidden under the `H` gate like every `mmHUD` member;
@@ -45,8 +47,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use mm2_assets::Vfs;
 use mm2_formats::pkg::{Pkg, PkgShader, lod_split};
 use mm2_game::{
-    EventTableKind, ParticipantState, RacePhase, RaceProgress, RaceState, Session, SessionEntity,
-    TargetSelection, cycle_target, navigation_target, relative_bearing,
+    EventTableKind, ParticipantState, Player, PlayerControl, RacePhase, RaceProgress, RaceState,
+    Session, SessionEntity, TargetSelection, cycle_target, navigation_target, relative_bearing,
 };
 
 /// Square raster canvas the authored mesh renders into — also the
@@ -77,6 +79,12 @@ fn arrow_pkg_path(table: EventTableKind) -> &'static str {
         _ => "geometry/hudarrow01.pkg",
     }
 }
+
+/// The arrow a mode with no event family binds (Cops & Robbers): the
+/// generic green one. *Implementation choice* — the original's arrow
+/// for that mode is unrecovered, and no `hudarrow*` package is named
+/// for it.
+pub const GENERIC_ARROW_PKG: &str = "geometry/hudarrow01.pkg";
 
 /// Marker on the session-owned navigation-arrow node: an
 /// `ARROW_CANVAS_PX`-square image at screen top-center whose
@@ -456,7 +464,19 @@ pub fn spawn_nav_arrow(
     owner: SessionEntity,
     table: EventTableKind,
 ) -> NavArrowReport {
-    let pkg_path = arrow_pkg_path(table);
+    spawn_nav_arrow_pkg(commands, vfs, images, owner, arrow_pkg_path(table))
+}
+
+/// [`spawn_nav_arrow`] for an explicit arrow package — the entry a mode
+/// without an event table (Cops & Robbers, [`GENERIC_ARROW_PKG`]) binds
+/// through.
+pub fn spawn_nav_arrow_pkg(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    images: &mut Assets<Image>,
+    owner: SessionEntity,
+    pkg_path: &'static str,
+) -> NavArrowReport {
     let mut report = NavArrowReport {
         pkg_path: pkg_path.to_string(),
         sprites: 0,
@@ -611,12 +631,21 @@ pub fn nav_target_input(
 /// participant already resolved — and while the `H` HUD gate is off
 /// (the arrow is an `mmHUD` instrument, F22-A.3). The report's
 /// `facing` records the same demand whether or not the node shows.
+///
+/// A Cops & Robbers match has no race, so its target comes from the
+/// match instead ([`crate::cnrhud::objective`]): the gold, or the local
+/// side's delivery site while the local car carries it.
+// A Bevy system: the race state, the two participant views (race
+// progress / local car) and the C&R scene are what the 8 arguments are.
+#[allow(clippy::too_many_arguments)]
 pub fn update_nav_arrow(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
     hud: Res<crate::hud::HudVisible>,
     mut report: Option<ResMut<NavArrowReport>>,
     players: Query<(&Position, &Rotation, &RaceProgress, &TargetSelection)>,
+    locals: Query<(&Position, &Rotation, &Player)>,
+    cnr: crate::cnrhud::CnrScene,
     mut arrow: Query<
         (
             &mut UiTransform,
@@ -647,6 +676,16 @@ pub fn update_nav_arrow(
             let yaw = (-fwd.x).atan2(-fwd.z);
             Some(relative_bearing(yaw, pos.0, target_pos))
         })
+    });
+    // The race arrow wins when both exist (no session runs both modes).
+    let target = target.or_else(|| {
+        let goal = cnr.objective()?.target?;
+        let (pos, rot, _) = locals
+            .iter()
+            .find(|(.., p)| p.control == PlayerControl::Local)?;
+        let fwd = rot.0 * Vec3::NEG_Z;
+        let yaw = (-fwd.x).atan2(-fwd.z);
+        Some(relative_bearing(yaw, pos.0, goal))
     });
     let facing = target.map(|b| {
         if b.abs() > std::f32::consts::FRAC_PI_2 {

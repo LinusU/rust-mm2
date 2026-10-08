@@ -239,6 +239,103 @@ pub fn scoreboard_lines(view: &GoldView, me: Option<PlayerId>, hz: u32) -> Vec<S
     lines
 }
 
+/// What the local driver is heading for, from the match's observable
+/// state — the one answer the navigation arrow and the map's dots both
+/// read, so the two instruments cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CnrObjective {
+    /// Where the gold is: its drawn/drop site while nobody carries it,
+    /// the carrier's car while another driver does, and `None` while the
+    /// local car carries it (the gold is *in* the car — there is nothing
+    /// to point at or mark) or when the carrier's car is not in view.
+    pub gold: Option<Vec3>,
+    /// The hideout marker's site.
+    pub hideout: Vec3,
+    /// The bank marker's site.
+    pub bank: Vec3,
+    /// The arrow's target: the delivery site of the local side while the
+    /// local car carries the gold, otherwise the gold. `None` once the
+    /// match is decided, or while the local participant is not seated
+    /// (it has no side to deliver for).
+    pub target: Option<Vec3>,
+}
+
+/// Work out the local driver's [`CnrObjective`]. `cars` yields every
+/// car's participant id and position, so a carried gold can be followed
+/// to its carrier. *Implementation choice*: the original's arrow
+/// retargeting while a rival holds the gold is unrecovered; chasing the
+/// carrier is the only sensible reading of "point at the gold" once it
+/// is inside a car, and a robber/cop who is not carrying has nothing
+/// else to hunt.
+pub fn objective(
+    view: &GoldView,
+    me: Option<PlayerId>,
+    cars: impl IntoIterator<Item = (PlayerId, Vec3)>,
+) -> CnrObjective {
+    let sites = view.sites;
+    let carrier = view.carrier();
+    let gold = match view.state {
+        GoldState::Carried { by } if Some(by) == me => None,
+        GoldState::Carried { by } => cars.into_iter().find(|(id, _)| *id == by).map(|(_, at)| at),
+        GoldState::Resting { at } | GoldState::Dropped { at, .. } => Some(at),
+    };
+    let target = if view.outcome.is_some() {
+        None
+    } else if carrier.is_some() && carrier == me {
+        me.and_then(|id| view.side_of(id))
+            .map(|side| sites.target(side.delivery_target()))
+    } else {
+        // Not carrying: seated participants hunt the gold; an unseated
+        // process has no part in the match yet.
+        me.and_then(|id| view.side_of(id)).and(gold)
+    };
+    CnrObjective {
+        gold,
+        hideout: sites.hideout,
+        bank: sites.bank,
+        target,
+    }
+}
+
+/// Everything a presentation system needs to read the match's
+/// [`objective`]: whichever end of the match this process is, plus the
+/// cars (local and remote) the carrier is found among.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct CnrScene<'w, 's> {
+    host: Option<Res<'w, CnrHost>>,
+    replica: Option<Res<'w, CnrReplica>>,
+    cars: Query<
+        'w,
+        's,
+        (
+            &'static Player,
+            Option<&'static NetPlayer>,
+            &'static GlobalTransform,
+        ),
+    >,
+}
+
+impl CnrScene<'_, '_> {
+    /// The local driver's objective, or `None` with no match in this
+    /// process (a race or cruise session, or a client before its first
+    /// frame).
+    pub fn objective(&self) -> Option<CnrObjective> {
+        let view = match_view(self.host.as_deref(), self.replica.as_deref())?;
+        let me = self
+            .cars
+            .iter()
+            .find(|(p, ..)| p.control == PlayerControl::Local)
+            .map(|(p, net, _)| participant_id(p, net));
+        Some(objective(
+            &view,
+            me,
+            self.cars
+                .iter()
+                .map(|(p, net, gt)| (participant_id(p, net), gt.translation())),
+        ))
+    }
+}
+
 /// Fill the readout from whichever end of the match this process is —
 /// the authority's [`CnrHost`] or a client's [`CnrReplica`]; empty (and
 /// hidden) with neither, and hidden while the `H` HUD gate is off.
@@ -575,5 +672,161 @@ mod tests {
             .insert_resource(CnrHost::new(hosted));
         app.update();
         assert!(read(&app).0.contains("first to 250"));
+    }
+    /// Grant the gold to `who` at the gold's own site.
+    fn give_gold(m: &mut GoldMatch, who: PlayerId) {
+        let round = m.round();
+        let position = m.gold_position().unwrap();
+        m.resolve_pickups(&[mm2_game::gold::Contact {
+            player: who,
+            round,
+            position,
+        }]);
+        assert_eq!(m.carrier(), Some(who));
+    }
+
+    #[test]
+    fn the_objective_is_the_gold_until_the_local_car_carries_it() {
+        let (mut m, _) = game(
+            CnrVariant::CopsVsRobbers,
+            EndRule::None,
+            &[(A, Side::Robbers), (B, Side::Cops)],
+        );
+        let sites = m.sites();
+        // Resting: both sides hunt the gold, and the map marks it.
+        for me in [A, B] {
+            let o = objective(&m.view(), Some(me), []);
+            assert_eq!(o.gold, Some(sites.gold));
+            assert_eq!(o.target, Some(sites.gold));
+            assert_eq!((o.hideout, o.bank), (sites.hideout, sites.bank));
+        }
+        // A robber carries it: the robber is sent to the hideout, with
+        // no gold dot on its own car; the cop follows the carrier's car.
+        give_gold(&mut m, A);
+        let cars = [
+            (A, Vec3::new(5.0, 0.0, 6.0)),
+            (B, Vec3::new(-9.0, 0.0, 2.0)),
+        ];
+        let mine = objective(&m.view(), Some(A), cars);
+        assert_eq!((mine.gold, mine.target), (None, Some(sites.hideout)));
+        let cop = objective(&m.view(), Some(B), cars);
+        assert_eq!(cop.gold, Some(cars[0].1));
+        assert_eq!(cop.target, Some(cars[0].1));
+        // A carrier whose car is not in view leaves nothing to point at.
+        assert_eq!(
+            objective(&m.view(), Some(B), [(B, Vec3::ZERO)]).target,
+            None
+        );
+    }
+
+    #[test]
+    fn a_cop_carrying_the_gold_is_sent_to_the_bank() {
+        let (mut m, _) = game(
+            CnrVariant::CopsVsRobbers,
+            EndRule::None,
+            &[(A, Side::Robbers), (B, Side::Cops)],
+        );
+        give_gold(&mut m, B);
+        let o = objective(&m.view(), Some(B), [(B, Vec3::ZERO)]);
+        assert_eq!(o.target, Some(m.sites().bank));
+    }
+
+    #[test]
+    fn nobody_is_pointed_anywhere_when_unseated_or_after_the_match() {
+        let (m, _) = game(
+            CnrVariant::FreeForAll,
+            EndRule::Points(100),
+            &[(A, Side::Solo)],
+        );
+        // Not seated (or no local car): the map still has its dots.
+        let o = objective(&m.view(), None, []);
+        assert_eq!(o.target, None);
+        assert_eq!(o.gold, Some(m.sites().gold));
+        assert_eq!(objective(&m.view(), Some(C), []).target, None);
+        // A decided match points nowhere.
+        let mut view = m.view();
+        view.outcome = Some(mm2_game::gold::Outcome {
+            winner: Winner::Player(A),
+            reason: EndReason::PointLimit,
+            at_tick: 10,
+        });
+        assert_eq!(objective(&view, Some(A), []).target, None);
+    }
+
+    /// The arrow system end to end on a match with no race: it shows,
+    /// turns to the gold's bearing, flips to the behind sprite when the
+    /// gold is astern, and follows the carry to the delivery site.
+    #[test]
+    fn the_nav_arrow_follows_a_cops_and_robbers_match() {
+        use crate::navarrow::{NavArrow, NavArrowSprites, update_nav_arrow};
+        use avian3d::prelude::{Position, Rotation};
+        let (m, _) = game(
+            CnrVariant::CopsVsRobbers,
+            EndRule::None,
+            &[(A, Side::Robbers)],
+        );
+        let sites = m.sites();
+        let mut app = App::new();
+        app.init_resource::<Session>()
+            .insert_resource(crate::hud::HudVisible(true))
+            .insert_resource(CnrHost::new(m))
+            .add_systems(Update, update_nav_arrow);
+        let ahead = Handle::<Image>::default();
+        let node = app
+            .world_mut()
+            .spawn((
+                NavArrow,
+                NavArrowSprites {
+                    ahead: ahead.clone(),
+                    behind: ahead,
+                },
+                UiTransform::default(),
+                ImageNode::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        // Facing −Z (the default rotation) at a spot well off the sites.
+        let at = Vec3::new(1000.0, 0.0, 1000.0);
+        app.world_mut().spawn((
+            Player {
+                id: A,
+                control: PlayerControl::Local,
+            },
+            Position(at),
+            Rotation::default(),
+            GlobalTransform::from_translation(at),
+        ));
+        let expect = |goal: Vec3| mm2_game::relative_bearing(0.0, at, goal);
+        app.update();
+        let shown = |app: &App| {
+            let w = app.world();
+            (
+                *w.get::<Visibility>(node).unwrap(),
+                w.get::<UiTransform>(node).unwrap().rotation.as_radians(),
+            )
+        };
+        let (vis, rot) = shown(&app);
+        assert_eq!(vis, Visibility::Visible);
+        assert!((rot - expect(sites.gold)).abs() < 1e-4, "{rot}");
+
+        // Carrying it: the arrow swings to the hideout.
+        {
+            let mut host = app.world_mut().resource_mut::<CnrHost>();
+            give_gold(&mut host.game, A);
+        }
+        app.update();
+        let (_, rot) = shown(&app);
+        assert!((rot - expect(sites.hideout)).abs() < 1e-4, "{rot}");
+
+        // The `H` gate hides it without losing the target.
+        app.insert_resource(crate::hud::HudVisible(false));
+        app.update();
+        assert_eq!(shown(&app).0, Visibility::Hidden);
+
+        // No match, no arrow.
+        app.insert_resource(crate::hud::HudVisible(true));
+        app.world_mut().remove_resource::<CnrHost>();
+        app.update();
+        assert_eq!(shown(&app).0, Visibility::Hidden);
     }
 }

@@ -1,16 +1,22 @@
-# Last iteration — report 7 item 4: tram rails in the outer lanes (iteration 4 of the new run)
+# Last iteration — report 7 item 5: Cops & Robbers arrow and map markers (iteration 5 of the new run)
 
-Selection: report 7 outranks everything; items 1-3 are implemented and the previous gate/review passed with no blocking findings, so item 4 is next.
+Selection: report 7 outranks everything; items 1-4 are implemented and the previous gate/review passed with no blocking findings, so item 5 is next.
 
-Cause (measured on retail): not the tram runtime and not a flipped section — every road's texture v was mapped backwards. `emit_road_surface` and the divided-road carriageways put the centre line at v = 0 and the kerb at v = 1. The data says the reverse: SF room 689 carries `r4_track_f` on a 20 m road (centre z = 163.19). The texture's rail band is centred on row 190/256, so v = 0.74 from the kerb, 0.26 from the centre: 2.6 m off the centre line. The authored `r4i_rails_f` decals in the junction beside it sit at z = 160.62 / 165.75, 2.57 m either side of the same centre. Only centre-at-v=1 lines the baked rails up with the decals (the old mapping put them 7.4 m out and flipped them back at each junction). `r2_f` agrees (white edge line inset at v~0.03, yellow at v = 1).
+Cause: the premise in the report was slightly off — `hudmap.rs` had *no* gold/bank/hideout roles (its `MarkerRole` was Player/Opponent/Gate/Finish; the three in `cnr.rs` are the 3D world markers). Both instruments were race-only: `spawn_nav_arrow` ran in the event arm and `update_nav_arrow` read `RaceState`; `spawn_hud_map` drew dots only from a `RaceDefinition`. A C&R match has no race, so neither existed.
 
-Change: `city.rs` gains `carriageway_uv` (kerb → centre/median, v 0 → 1), used by `emit_road_surface` and both divided carriageways. This is the global road mapping, so every road texture changes with it: SF's double yellow now sits on the centre line and the white edge lines at the kerbs, as seen in the captures. Ledger WLD-32 and `docs/research/psdl.md` record the measurement. Tests: `road_surface_mirrors_texture_about_the_centre_line` now calls the production helper (centre v = 1, kerb v = 0); new `a_divided_carriageway_runs_kerb_to_median`.
+Change:
+- `cnrhud::objective` + `CnrScene` (SystemParam): one answer off the host's match or the client's replica — gold position (carrier's car while a rival holds it, none while the local car does), hideout/bank sites, and the arrow target (gold, or the local side's `delivery_target` site while carrying; none after the match ends or while unseated).
+- `navarrow`: `spawn_nav_arrow_pkg` + `GENERIC_ARROW_PKG`; `update_nav_arrow` falls back to the C&R objective with the local car's bearing. `session.rs` spawns the arrow (and its 3D view) after `start_match`.
+- `hudmap`: `MarkerRole::{Gold,Hideout,Bank}` with the authored `hudmap_square` paint jobs 6/7/8 (shader records `GOLD_DOT`/`BANK_DOT`/`HIDEOUT_DOT`, read with `mm2-inspect pkg --shaders`); `spawn_hud_map` takes a `cnr` flag; `drive_hud_map` places them from the objective every frame. Host and client share the path (the client reads `CnrReplica`).
+- Ledger DSN-101 (designed): arrow family, chasing the carrier's car, hiding while carrying are implementation choices.
 
-Captures (local, uncommitted, `/tmp/rm4`): `--cam=-1027.6,91.0,165.5,-90,-27` on retail SF, before `before.png` (rails against both kerbs, double white centre) and after `after.png` (rails 2.6 m either side of a double yellow centre, lining up with the junction's rails). London `--cam=203.0,7.7,-827.7,-125,-20` after only (`london_after.png`): dashed white centre, no visible breakage; not compared against a before.
+Tests: `cnrhud::tests` +4 — objective for resting/carried (robber → hideout, cop → bank, rival carrier followed, carrier out of view), unseated/decided match, and `update_nav_arrow` end to end with no race (visible, bearing = gold, swings to hideout on carry, `H` gate hides, no match hides).
 
-Not done / open: divided roads and London were checked by data reasoning (US yellow-on-the-median-edge; UK dashed centre), not by a before/after capture. Whether the original loader mirrors per section the same way is unrecovered; the evidence is the data alone.
+Retail evidence (sf, Apple M1, local, uncommitted in `/tmp/rm5`): `--city sf --cnr cops --frames 240 --screenshot` shows the green 3D arrow at top-centre and the scoreboard; headless smoke `arr=hudarrow01/ahead map=inset/north/z1195/hudmap_sf.pkg/6t/4m` (markers 1 → 4). `--pause-map` capture shows the gold, bank and hideout dots at their sites on the full-screen map. No before capture: the before state is structural (no arrow node, 1 map marker), not a rendering difference.
 
-Status: candidate; not independently checked. Next is item 5 (Cops & Robbers navigation arrow and map markers).
+Not done / open: the dots use the authored `IconScale`, so they are small on the full-screen map (same as race gate dots); not enlarged. The arrow's pointing direction was only checked by the unit test and the screenshot showing it live, not against a driven approach to the gold. Remote cars still have no opponent tri on the C&R map (opponent pool is sized from the race roster, 0 here) — a candidate follow-up. Two-process client check not run; the client path is the same `CnrScene` reading `CnrReplica` (the replica branch is exercised by the existing scoreboard test, not by a new arrow test).
+
+Status: candidate; not independently checked. Next is item 6 (trees standing in a London intersection).
 
 Gates: see below.
 Gates (foreground): fmt PASS; clippy `--locked --workspace --all-targets --all-features -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (73 `test result` lines, none failed).

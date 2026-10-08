@@ -3218,7 +3218,7 @@ for item 1, a measured run) shows it fixed.
      sections (mirrored or flipped mapping, or the wrong texture for the
      lane count) rather than tram runtime. Compare against how the
      intersection and neighbouring sections map the same texture.
-5. **Cops & Robbers needs the navigation arrow and map markers.**
+5. **[implemented, candidate — iteration 5 of the new run; see LAST_ITERATION and ledger DSN-101]** **Cops & Robbers needs the navigation arrow and map markers.**
    - In a Cops & Robbers match the 3D navigation arrow must be visible.
      It should point at the gold, or at your side's delivery target while
      you carry it.

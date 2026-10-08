@@ -932,6 +932,26 @@ pub fn load_session_world(
                     missing_textures = report.missing_textures.len(),
                     "cops & robbers match built"
                 );
+                // The navigation arrow: no event table, so the generic
+                // authored arrow; `update_nav_arrow` aims it at the gold
+                // (or the side's delivery site while carrying it).
+                let arrow_report = crate::navarrow::spawn_nav_arrow_pkg(
+                    &mut commands,
+                    &vfs.0,
+                    &mut assets.images,
+                    owner,
+                    crate::navarrow::GENERIC_ARROW_PKG,
+                );
+                if arrow_report.absent.is_none() {
+                    crate::navarrow3d::spawn_nav_arrow_view(
+                        &mut commands,
+                        &mut assets.meshes,
+                        &mut assets.images,
+                        &mut assets.materials,
+                        owner,
+                    );
+                }
+                commands.insert_resource(arrow_report);
             }
             Err(reason) => {
                 error!(%reason, "cops & robbers match failed to start");
@@ -1092,6 +1112,7 @@ pub fn load_session_world(
             &vfs.0,
             psdl,
             event_race.as_ref().map(|(def, ..)| def),
+            matches!(config.mode, SessionMode::CopsAndRobbers(_)),
             event_race
                 .as_ref()
                 .map(|(_, roster, ..)| roster.entries.len())
