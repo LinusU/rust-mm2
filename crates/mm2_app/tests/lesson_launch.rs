@@ -300,6 +300,28 @@ fn a_lesson_that_cannot_build_fails_the_session_with_no_driver() {
 }
 
 #[test]
+fn a_lesson_with_a_malformed_aimap_fails_the_session_not_a_bare_launch() {
+    let tmp = lesson_install();
+    // crash0's legs build, but its aimap record is truncated (count 2,
+    // one row): the session fails rather than driving the lesson on the
+    // city's ambient defaults with its police and lead cars dropped.
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Exceptions]\n2\n1 0.0 0\n",
+    );
+    let mut app = event_app(lesson_config(0), vfs_of(tmp.path()));
+    app.update();
+    assert!(
+        matches!(phase(&app), SessionPhase::Failed(_)),
+        "got {:?}",
+        phase(&app)
+    );
+    assert!(app.world().get_resource::<LessonDriver>().is_none());
+    assert!(app.world().get_resource::<RaceState>().is_none());
+}
+
+#[test]
 fn a_non_crash_row_never_installs_a_lesson_driver() {
     let tmp = lesson_install();
     // The install authors no Checkpoint table, so this row fails the
@@ -319,7 +341,8 @@ fn a_non_crash_row_never_installs_a_lesson_driver() {
 /// its ambient-traffic overrides reach the session's traffic load
 /// (CC-7; sf crash1/2/4/12 author ten per-road speed limits). The Professional record
 /// wins at Professional, the Amateur one at Amateur; a lesson without a
-/// resolvable record launches on the city's own aimap.
+/// resolvable record launches on the city's own aimap, and a malformed
+/// one refuses the launch.
 #[test]
 fn a_lesson_launch_carries_its_difficulty_selected_aimap() {
     use mm2_game::Difficulty;
@@ -361,8 +384,9 @@ fn a_lesson_launch_carries_its_difficulty_selected_aimap() {
     };
     let (setup, _driver) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
     assert!(setup.aimap.unwrap().exceptions.is_empty());
-    // And an unreadable one degrades to the city's own aimap, the
-    // lesson still launching.
+    // An unreadable one is refused rather than launched on the city's
+    // own aimap with no police or lead cars (F29-AC04): the lesson is a
+    // sibling-independent unit, so crash0 still launches beside it.
     write(
         tmp.path(),
         "race/london/crash1.aimap",
@@ -373,8 +397,14 @@ fn a_lesson_launch_carries_its_difficulty_selected_aimap() {
         "race/london/crash1.aimap_p",
         "[Exceptions]\n2\n1 0.0 0\n",
     );
-    let (setup, _driver) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
-    assert!(setup.aimap.is_none());
+    let err = race::lesson_launch(&vfs, &other, Difficulty::Amateur)
+        .err()
+        .expect("a malformed lesson aimap refuses the launch");
+    assert!(
+        matches!(err, race::LessonSetupError::Aimap(_)),
+        "unexpected error: {err}"
+    );
+    assert!(race::lesson_launch(&vfs, &event_ref, Difficulty::Amateur).is_ok());
 }
 
 /// A cop-chase lesson's own `[Police]` lineup (F21-B.18; retail london

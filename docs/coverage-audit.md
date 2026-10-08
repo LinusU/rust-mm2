@@ -99,7 +99,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F26 shared world/races | active | synthetic + loopback | late-joiner bulk ledger, spectator/race-ends-during-late-join, two-process breakdown leg |
 | F27 Cops & Robbers | active | synthetic + loopback | what knocks gold loose, pickup radius, respawn, disconnect/out-of-bounds (UNK-10) — stock variants each need status (AC06) |
 | F28 city specials | active | retail-data | `mm2-inspect specials` report landed; cable car unresolved (UNK-44); late-join phase (F26) |
-| F29 modding | active | synthetic | per-consumer override tests exist for car texture, handling, prop, audio cue (`mod_override.rs`) and race rules — Checkpoint, Blitz and Circuit tables, waypoints, grids, and the `.aimap`/`.opp` roster with a malformed aimap refused (`mod_override_race.rs`); open: Crash Course lesson aimaps (still degrade on an unreadable aimap), surface tables, menu art, localization, a real-install run |
+| F29 modding | active | synthetic | per-consumer override tests exist for car texture, handling, prop, audio cue (`mod_override.rs`) and race rules — Checkpoint, Blitz and Circuit tables, waypoints, grids, and the `.aimap`/`.opp` roster with a malformed aimap refused (`mod_override_race.rs`); a Crash Course lesson's malformed aimap is refused too (`lesson_launch.rs`); open: lesson `.opp`/sequence mods through `lesson_race_setup`, surface tables, menu art, localization, a real-install run |
 | F30 performance/packaging | active | local measurement | release-profile baseline for named scenes; memory/draw-call/voice/bandwidth columns; packaging step, real OS layouts |
 | F31 final audit | A.1 this doc; B.1 synthetic single-player journey; C queued | synthetic | B.1: `menu::a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch` (name a driver → locked paint/race → launch → authored finish → results → restart → menu → relaunch). Open: retail-data journey, lesson/C&R/multiplayer journeys, negative-path journeys |
 
@@ -134,7 +134,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
    data is already inventoried.
 2. F19 runtime spawn/skin render — the other hole; unblocks F20/F28 reaction.
 3. An audible offline mix harness (closes four audio ACs at once).
-4. F29 consumer coverage for the remaining record families (Crash Course, surface tables, menu art, localization).
+4. F29 consumer coverage for the remaining record families (Crash Course mod overrides, surface tables, menu art, localization).
 5. A scripted full-journey harness (F31-B) over the real menu → session →
    results → reward path, run on retail data.
 6. LAN-scope two-machine run once an operator can supply the second host.

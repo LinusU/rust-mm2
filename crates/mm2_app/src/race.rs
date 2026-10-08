@@ -226,6 +226,13 @@ pub enum LessonSetupError {
     /// The lesson has no legs to run.
     #[error(transparent)]
     NoLegs(#[from] mm2_game::NoLegs),
+    /// The lesson's own `.aimap` record resolved but is unreadable or
+    /// malformed. Refused rather than launched on the city's ambient
+    /// defaults with no police or lead cars: a broken lesson lineup must
+    /// not pass for a working one (F29-AC04). Every retail aimap parses,
+    /// so this only ever names a mod's file.
+    #[error("lesson aimap failed: {0}")]
+    Aimap(mm2_content::RosterBuildError),
 }
 
 /// A Crash Course lesson's runnable setup (F21-B): the stable save
@@ -254,8 +261,9 @@ pub struct LessonSetup {
     /// The traffic overrides ride on the launch setup; the lesson's
     /// `[Police]` rows become [`LessonSetup::police`] and its
     /// `[Opponent]` lead cars [`LessonSetup::lead_cars`]. `None` when no
-    /// record resolves or parses — the lesson then runs on the city's
-    /// own aimap.
+    /// record exists — the lesson then runs on the city's own aimap. A
+    /// record that exists but is malformed is refused
+    /// ([`LessonSetupError::Aimap`]).
     pub aimap: Option<mm2_formats::aimap::Aimap>,
     /// The lesson's authored `[Police]` lineup at the chosen difficulty
     /// (F21-B.18; the cop-chase lessons — retail london crash10/11, sf
@@ -314,14 +322,7 @@ pub fn lesson_race_setup(
             mm2_game::PoliceRoster::default(),
             mm2_game::OpponentRoster::default(),
         ),
-        Err(e) => {
-            warn!(error = %e, "lesson aimap unreadable — city ambient defaults apply");
-            (
-                None,
-                mm2_game::PoliceRoster::default(),
-                mm2_game::OpponentRoster::default(),
-            )
-        }
+        Err(e) => return Err(LessonSetupError::Aimap(e)),
     };
     Ok(LessonSetup {
         key: mm2_game::EventKey {
