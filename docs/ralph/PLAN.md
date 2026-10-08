@@ -40,6 +40,9 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
+**Operator report 7 (2026-10-08, human play-test) comes first: work its
+items 1–9 in order, then 10–11, before anything else in this plan.**
+
 **Operator report 6 (2026-10-06) confirms this selection and adds
 networking follow-ups created by the operator's batch on `main` —
 read it before choosing within F25-B.**
@@ -3157,6 +3160,152 @@ translate them.
 - **Tooling.** CI builds without debug info and frees runner disk.
   `AGENTS.md` now tells new worktrees to clone the main checkout's
   `target/`; the loop's worktree keeps its own.
+
+## Operator report 7 (2026-10-08, human play-test — PRIORITY)
+
+Source: the operator drove a recent windowed build in San Francisco and
+London, in Cruise and in Cops & Robbers. This is
+direct observation of rendered gameplay. **It outranks every other row in
+this plan, and every evidence claim the loop has made about these areas.**
+The counters and tests that cover these features all pass today, so they
+cannot see these defects. Fix each one against what is on screen.
+
+Screenshots: `/Users/linus/coding/ralph-run-state/operator-report-7/`
+(outside the repo; read them, do not commit them). Each one has the HUD's
+camera pose burnt in at the top. `--cam=<x,y,z,yaw,pitch>` reproduces
+the view exactly (see AGENTS.md "Rendering work"). Take a before and an
+after capture of the same pose for every visual fix, and record both in
+LAST_ITERATION. A passing test without a matching capture does not close
+a visual item.
+
+Take the items in this order. Use one slice per item unless two
+genuinely share a cause. Do not mark an item done until a capture (or,
+for item 1, a measured run) shows it fixed.
+
+1. **Police do not ram.** The operator wrote: "When a police chases me,
+   they should try and drive straight into me, knocking me off my
+   course. Now they stay a few meters away."
+   - Cause: `SHADOW_RANGE = 8.0` in `crates/mm2_app/src/police.rs`. A
+     pursuing cop deliberately brakes to a halt 8 m short of its goal and
+     shadows the target. That was a designed reading (COP-4: catch
+     behaviour unverified). This report overrides it.
+   - Required: a pursuing cop drives through the target's position at
+     speed and makes contact. While still in contact it keeps pressing
+     into the target rather than backing off.
+   - Record the new policy in the ledger (update the DSN row and COP-4's
+     notes; operator recollection is the evidence).
+   - Prove it with a run that counts cop-on-player impacts.
+2. **Police light bar renders as two solid blocks**
+   (`1-police-lights-sf.webp`, sf, `--cam=2.4,2.5,63.9,-70,-17`).
+   - The `SRNn` flare parts show as opaque red and blue boxes. They should
+     read as a faded, glowing shine.
+   - Check how the retail flare geometry and textures are authored (alpha,
+     additive blending, a glow texture) and bind them the way the
+     original does. The other glow parts (`HLIGHT`/`BLIGHT`) go through
+     `car_visual.rs`, so check whether they share the defect.
+3. **Cable cars hover above the tracks**
+   (`2-cable-car-hovering-sf.webp`, sf, `--cam=-1117.3,80.9,-175.5,90,-4`).
+   - The car floats well above the rails.
+   - Establish the model's authored origin and bound offset and the route
+     height datum (BAI tram curve height versus road surface). Set the car
+     on the rails. Operator report 1 hit the same class of defect for
+     props, which was a content offset, so do not fudge a constant.
+4. **Tram track drawn on the outer lane, flipping back at junctions**
+   (`3-tram-track-lane-sf.webp`, sf, `--cam=-1027.6,91.0,165.5,-90,-27`).
+   - Some road sections show the tram rails in the outer lanes. At an
+     intersection they abruptly flip back to the inner lanes.
+   - This is likely the road texture or UV orientation of those PSDL
+     sections (mirrored or flipped mapping, or the wrong texture for the
+     lane count) rather than tram runtime. Compare against how the
+     intersection and neighbouring sections map the same texture.
+5. **Cops & Robbers needs the navigation arrow and map markers.**
+   - In a Cops & Robbers match the 3D navigation arrow must be visible.
+     It should point at the gold, or at your side's delivery target while
+     you carry it.
+   - The gold, the hideout and the bank must show on the HUD minimap and
+     the full-screen map. `hudmap.rs` already has gold, bank and hideout
+     marker roles, so bind them to the live match state on host and
+     client.
+6. **Trees standing in the middle of an intersection**
+   (`4-trees-in-intersection-london.webp`, london,
+   `--cam=203.0,7.7,-827.7,-125,-20`).
+   - A group of trees stands in the carriageway at a junction.
+   - Find which channel stamped them (INST, `props.pathset`, PSDL
+     `prop_rule`; `mm2-inspect placement` reports the channel) and why
+     they land on the road. Fix the placement rule. Do not delete the
+     stamps by position.
+7. **Large rectangular hole in a building wall**
+   (`5-wall-hole-london.webp`, london, `--cam=255.1,7.4,-830.7,45,-17`).
+   - A whole section of facade is missing, and the city behind shows
+     through.
+   - Candidates:
+     - a facade or `.inst` part not loaded;
+     - a wrong cull or winding on that face;
+     - PVS culling hiding a room that should be visible;
+     - a LOD mismatch.
+
+   Establish which one before fixing.
+8. **The low-time warning beeps once instead of every second.** The
+   operator wrote: "when there is low time (10 seconds) there is
+   currently a single beep. But this beep should be repeated for every
+   second <= 10 to really give the urgency that the time is about to run
+   out." They remember this clearly from playing the original.
+   - Cause: `race_audio.rs` plays `timerwarning` once, behind the
+     one-shot `watch.warned` flag, when `time_remaining()` first drops to
+     `LOW_TIME_TICKS` or below.
+   - Required: play it once on each whole-second boundary from 10 down
+     to 1. That means tracking the last second announced instead of a
+     bool, so a pause, a frame hitch or a restart neither skips a beep
+     nor repeats one.
+   - Update DSN-65 with the operator recollection as evidence.
+   - Test that a countdown through the window gives exactly ten beeps, at
+     the right ticks.
+9. **"Now go full out for the finish" plays one checkpoint early.** The
+   operator wrote: in the race "Embank On It" (and probably others), the
+   announcer says "Now go full out for the finish" on crossing the
+   last-but-one checkpoint. At that point one checkpoint and the finish
+   line are still left.
+   - Lead: `final_gate_is_next` in `crates/mm2_app/src/race_audio.rs`
+     requests `EventCue::FinalCheckpoint` when
+     `progress.next + 1 == checkpoints.len()` (Ordered) or
+     `cleared_count() + 1 == len` (AnyOrder).
+   - Establish from the race definition whether the finish is the last
+     entry of `checkpoints` or separate from it, and fix the off-by-one so
+     the line plays only when the finish is the next gate.
+   - Find "Embank On It" through the authored race names (city `cinfo`).
+   - Cover every rule (Ordered with laps, AnyOrder) with a test. Check
+     the whole retail catalog that the cue fires exactly once, with only
+     the finish remaining.
+
+Lower priority. Take these after items 1–9, and before any unrelated work:
+
+10. **Bound the race-row world-clock seek.**
+   - `WorldClock::sync` in `crates/mm2_app/src/worldclock.rs` queues a
+     re-seek to `countdown_ticks + row.clock`. `row.clock` is an
+     unvalidated wire value from the race row (`apply_race_snap`), and
+     `advance_world_clock` then replays the scenery one step per tick
+     inside a single fixed step.
+   - A host sending a huge clock freezes the client. The newer `World`
+     frame path refuses ticks past `MAX_SEEK_TICKS` and rate-limits
+     jumps, but the race-row path still has no bound.
+   - Apply the same refusal to the race-row seek (report it as a counted
+     refusal, per report 5's diagnose-not-coerce rule). Add a test that
+     an absurd race clock is refused, and that the client stays
+     responsive.
+11. **Make the three-process collision test wait on its condition, not on
+   frame budgets.**
+   - `net_drive::a_driven_collision_replicates_across_three_processes`
+     failed once (run 20261008T121456, iteration 10): the uninvolved
+     client exited before the replicated impact reached it. The repair
+     (`70d53a5`) only raised the clients' frame budgets (1400→2800,
+     1000→2500), which is the shape report 6's flaky-test rule forbids.
+   - Have the uninvolved client run until it has applied the impact, or
+     until a wall-clock deadline expires, then record. For example, give
+     the headless smoke an exit-on-condition flag rather than a fixed
+     frame count. Keep the exact-count assertions.
+
+The standing rules still apply: vehicle handling stays operator-owned,
+and the re-anchor recovery must not be widened.
 
 ## Task table
 
