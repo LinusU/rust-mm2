@@ -207,8 +207,13 @@ rows, blank slots, unmapped names and dead csv→mtl refs all carry
 `SurfaceMaterial::Unspecified`; unmapped names land in
 `CityReport.surfaces.unmapped` and table issues in `.issues`. A
 missing pair leaves every collider `Unspecified` (the pre-F06 single
-collider per room); a broken pair warns and does the same with
-`.failure` set.
+collider per room); a broken pair is refused — `load_city` returns
+`LoadCityError::Surfaces` and the session (dev world included) fails
+(F29-C.7, F29-AC04: grip and drag are gameplay, so blanket
+`Unspecified` colliders under a mod's malformed table would be a
+different game, not a degraded one). A well-formed map naming a
+material the set lacks is not a broken file: it loads and counts an
+issue (F06-AC04).
 
 `SurfaceTables::issues()` = `validate()` on both halves +
 `undefined_refs` — the same counts the audit reports.

@@ -558,3 +558,106 @@ fn a_surface_override_moves_physics_without_touching_any_texture() {
     );
     assert_eq!(tire_at(&mut modded, 15.0, 5.0), None);
 }
+
+/// Run the production `load_city` against `vfs` into a throwaway world.
+fn try_load(vfs: &Vfs) -> Result<mm2_app::city::LoadedCity, mm2_app::city::LoadCityError> {
+    let mut world = World::new();
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let mut session = mm2_game::Session::new();
+    let mut commands = Commands::new(&mut queue, &world);
+    let loaded = load_city(
+        &mut commands,
+        vfs,
+        "city/test.psdl",
+        &mut meshes,
+        &mut images,
+        &mut materials,
+        SessionEntity(1),
+        &mut session,
+    )?;
+    queue.apply(&mut world);
+    Ok(loaded)
+}
+
+fn surface_mod(root: &Path, id: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+    let d = root.join(id);
+    write(
+        &d,
+        "mod.toml",
+        format!("[mod]\nid = \"{id}\"\neffect = \"gameplay\"\n"),
+    );
+    for (rel, body) in files {
+        write(&d, rel, body);
+    }
+    d
+}
+
+#[test]
+fn a_malformed_surface_override_is_refused_not_papered_over() {
+    // F29-AC04 for the surface consumer: a mod whose table half is
+    // unparsable, not UTF-8, or a lone half of the pair fails the city
+    // load. It neither falls back to the stock tables it shadows nor
+    // loads on blanket `Unspecified` colliders. Unmounting restores the
+    // stock city, and each mod is gameplay content that moves the
+    // fingerprint.
+    use mm2_app::city::LoadCityError;
+    use mm2_content::fingerprint;
+
+    let base = tempfile::tempdir().unwrap();
+    let mods = tempfile::tempdir().unwrap();
+    let stock = stock_install(base.path());
+    let loaded = try_load(&stock).expect("the stock install loads");
+    assert_eq!(loaded.report.surfaces.named, 2);
+    assert!(loaded.surfaces.is_some());
+    let stock_hash = fingerprint::gameplay(&stock).unwrap().hash;
+
+    let broken: [(&str, std::path::PathBuf); 2] = [
+        (
+            "unparsable material set",
+            surface_mod(mods.path(), "bad-mtl", &[(MTL_PATH, b"mtl cobblestone {")]),
+        ),
+        (
+            "non-UTF-8 map",
+            surface_mod(mods.path(), "bad-csv", &[(CSV_PATH, &[0xff, 0xfe, 0x00])]),
+        ),
+    ];
+    for (why, dir) in &broken {
+        let mut vfs = stock_install(base.path());
+        vfs.mount_mod(dir, 300).unwrap();
+
+        let err = try_load(&vfs)
+            .err()
+            .unwrap_or_else(|| panic!("{why}: loaded"));
+        assert!(matches!(err, LoadCityError::Surfaces(_)), "{why}: {err}");
+
+        let reports = fingerprint::mod_reports(&vfs);
+        assert_eq!(reports.len(), 1, "{why}");
+        assert!(!reports[0].is_cosmetic_only(), "{why}: {reports:?}");
+        assert!(reports[0].contradiction().is_none(), "{why}: {reports:?}");
+        assert_ne!(
+            fingerprint::gameplay(&vfs).unwrap().hash,
+            stock_hash,
+            "{why}"
+        );
+    }
+
+    // A *well-formed* map that names a material the set lacks is not a
+    // broken file: it loads, and the dangling name is a counted issue on
+    // the conservative default (F06-AC04), unlike the refusals above.
+    let dangling = surface_mod(
+        mods.path(),
+        "dangling",
+        &[(CSV_PATH, b"texture,physics\ntest_road,no_such_material\n")],
+    );
+    let mut vfs = stock_install(base.path());
+    vfs.mount_mod(&dangling, 300).unwrap();
+    let loaded = try_load(&vfs).expect("a dangling name is diagnosed, not refused");
+    assert!(loaded.report.surfaces.issues > 0);
+
+    // Unmounted, the stock tables serve again.
+    let again = try_load(&stock_install(base.path())).expect("stock restored");
+    assert_eq!(again.report.surfaces.named, 2);
+}

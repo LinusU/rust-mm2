@@ -8,7 +8,7 @@ use bevy::ecs::world::{CommandQueue, World};
 use bevy::image::Image;
 use bevy::mesh::Mesh;
 use bevy::pbr::StandardMaterial;
-use mm2_app::city::{emit_psdl, load_city, load_image, load_image_sequence};
+use mm2_app::city::{LoadCityError, emit_psdl, load_city, load_image, load_image_sequence};
 use mm2_assets::Vfs;
 use mm2_content::{SurfaceTables, surface};
 use mm2_formats::materials::{MaterialMap, MaterialSet};
@@ -592,7 +592,6 @@ fn emit_psdl_groups_colliders_by_authored_surface() {
     assert_eq!(import.colliders.len(), 1);
     assert_eq!(import.colliders[0].surface, SurfaceMaterial::Unspecified);
     assert!(!import.report.surfaces.loaded);
-    assert!(import.report.surfaces.failure.is_none());
 }
 
 /// End to end through `load_city`: the VFS-resolved tables classify
@@ -669,11 +668,11 @@ fn vfs_to_city_marks_colliders_with_their_authored_surfaces() {
     );
 }
 
-/// A present-but-broken table pair warns and falls back — the city
-/// still loads, every collider is `Unspecified`, and the report
-/// records the failure rather than hiding it (F06-AC04).
+/// A present-but-broken table pair refuses the city (F29-AC04): grip
+/// and drag are gameplay, so the load never substitutes blanket
+/// `Unspecified` colliders for the tables the install carries.
 #[test]
-fn vfs_to_city_with_a_broken_table_pair_marks_everything_unspecified() {
+fn vfs_to_city_with_a_broken_table_pair_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::create_dir_all(root.join("city")).unwrap();
@@ -698,7 +697,7 @@ fn vfs_to_city_with_a_broken_table_pair_marks_everything_unspecified() {
     let mut images: Assets<Image> = Assets::default();
     let mut materials: Assets<StandardMaterial> = Assets::default();
 
-    let loaded = {
+    let err = {
         let mut commands = Commands::new(&mut queue, &world);
         let mut session = mm2_game::Session::new();
         load_city(
@@ -711,18 +710,21 @@ fn vfs_to_city_with_a_broken_table_pair_marks_everything_unspecified() {
             SessionEntity(1),
             &mut session,
         )
-        .expect("city loads")
+        .err()
+        .expect("a broken pair is refused")
     };
     queue.apply(&mut world);
 
-    assert!(loaded.surfaces.is_none());
-    assert!(!loaded.report.surfaces.loaded);
-    assert!(loaded.report.surfaces.failure.is_some());
-
+    assert!(
+        matches!(err, LoadCityError::Surfaces(_)),
+        "wrong refusal: {err}"
+    );
     let mut q = world.query_filtered::<&SurfaceMaterial, With<CityEntity>>();
-    let surfaces: Vec<SurfaceMaterial> = q.iter(&world).copied().collect();
-    assert!(!surfaces.is_empty());
-    assert!(surfaces.iter().all(|s| *s == SurfaceMaterial::Unspecified));
+    assert_eq!(
+        q.iter(&world).count(),
+        0,
+        "nothing spawned before the refusal"
+    );
 }
 
 #[test]

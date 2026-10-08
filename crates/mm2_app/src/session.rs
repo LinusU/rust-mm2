@@ -710,14 +710,19 @@ pub fn load_session_world(
             // `_default` block's `sound` class / `ptx` channels through
             // the same inheritance an unmarked city collider applies.
             // Same failure policy as the city loader: a broken pair
-            // warns and stays unmounted rather than substituting.
+            // (a malformed mod override included) fails the session
+            // rather than substituting blanket defaults.
             match mm2_content::load_surface_tables(&vfs.0) {
                 Ok(Some(tables)) => {
                     commands.insert_resource(tables);
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    warn!(error = %e, "surface tables failed; dev world colliders stay Unspecified");
+                    error!(error = %e, "surface tables failed to load");
+                    session
+                        .fail(format!("surface tables unusable: {e}"))
+                        .expect("Loading → Failed is a legal transition");
+                    world_ok = false;
                 }
             }
         }

@@ -602,12 +602,9 @@ pub struct CityReport {
 #[derive(Debug, Default)]
 pub struct SurfaceReport {
     /// The global `materials.{csv,mtl}` pair loaded and classified the
-    /// texture table. `false` = absent pair, or a present pair that
-    /// failed — `failure` carries the reason.
+    /// texture table. `false` = the install carries no pair (a present
+    /// but broken pair never reaches a report — `load_city` refuses it).
     pub loaded: bool,
-    /// Why a present pair did not load (parse/UTF-8/partial pair).
-    /// `None` when the pair is simply absent.
-    pub failure: Option<String>,
     /// Texture names mapped to a named material.
     pub named: usize,
     /// Texture names mapped to the `none` keyword.
@@ -698,8 +695,6 @@ impl std::fmt::Display for CityReport {
                 s.unmapped.len(),
                 s.issues,
             )
-        } else if s.failure.is_some() {
-            write!(f, "; surfaces: table failed")
         } else {
             write!(f, "; surfaces: no tables")
         }
@@ -3675,6 +3670,10 @@ pub enum LoadCityError {
     /// The file parsed but produced no renderable or collidable geometry —
     /// spawning into an empty world would be a fake success.
     Empty(String),
+    /// The global `materials.{csv,mtl}` pair is present but unusable
+    /// (parse error, non-UTF-8, one half missing). Refused rather than
+    /// loading with every collider `Unspecified`.
+    Surfaces(String),
 }
 
 impl std::fmt::Display for LoadCityError {
@@ -3683,6 +3682,7 @@ impl std::fmt::Display for LoadCityError {
             Self::Missing(m) => write!(f, "city data missing: {m}"),
             Self::Malformed(m) => write!(f, "city data malformed: {m}"),
             Self::Empty(m) => write!(f, "city produced no geometry: {m}"),
+            Self::Surfaces(m) => write!(f, "surface tables unusable: {m}"),
         }
     }
 }
@@ -3742,9 +3742,6 @@ fn merge_city_reports(total: &mut CityReport, part: CityReport) {
     total.missing_textures.extend(part.missing_textures);
     total.surfaces.unmapped.extend(part.surfaces.unmapped);
     total.surfaces.loaded |= part.surfaces.loaded;
-    if total.surfaces.failure.is_none() {
-        total.surfaces.failure = part.surfaces.failure;
-    }
 }
 
 /// `path` without its `.psdl` extension, matched ASCII case-insensitively
@@ -3946,15 +3943,11 @@ fn load_city_part(
     // Surface identity (F06-A): the global `materials.{csv,mtl}` pair
     // classifies every collider triangle's texture. An absent pair
     // leaves every collider `Unspecified`; a present-but-broken pair
-    // warns and does the same — never a silently partial
-    // classification.
-    let (surfaces, surface_failure) = match mm2_content::load_surface_tables(vfs) {
-        Ok(t) => (t, None),
-        Err(e) => {
-            warn!(error = %e, "surface tables failed; colliders default to Unspecified");
-            (None, Some(e.to_string()))
-        }
-    };
+    // (a malformed mod override included, F29-AC04) refuses the city —
+    // grip and drag are gameplay, so a run on blanket defaults is a
+    // different game, not a degraded one.
+    let surfaces = mm2_content::load_surface_tables(vfs)
+        .map_err(|e| LoadCityError::Surfaces(e.to_string()))?;
 
     let import = emit_psdl(&psdl, surfaces.as_ref());
     if import.meshes.is_empty() && import.colliders.is_empty() {
@@ -3963,7 +3956,6 @@ fn load_city_part(
 
     let mut mats = MaterialCache::new(vfs, images, materials);
     let mut report = import.report;
-    report.surfaces.failure = surface_failure;
 
     // Render meshes: one entity per (room, texture) — spatially bounded,
     // retaining the room id in the entity name.
