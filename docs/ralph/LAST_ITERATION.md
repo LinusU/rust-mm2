@@ -1,13 +1,13 @@
-# Last iteration — F25-C.3: the shove on an impaired link (iteration 7 of the run)
+# Last iteration — F23-B.9: windowed resolution option (iteration 8 of the run)
 
-Selection: checkpoint `9fc43a1` passed gates and review with no blocking findings, so no repair was owed beyond the reviewer's doc nit (net_app test comment said 1.5 m; the bound is 0.75 m — fixed). Next-highest F25-C item that is deterministic enough to land: AC02 (collision converges) under AC03 (impairment) — the first collision run on anything but a clean link.
+Selection: the previous checkpoint (`abd3a55`, F25-C.3) passed gates and review with no blocking findings, so no repair was owed. The reviewer's verification gaps (the impairment proxy is not asserted to have bitten in the test itself; cosmetic no-op shadowing in `assert_shove_converged`) are test-hardening nits inside F25-C, which has taken three iterations in a row; I moved to an independent ready item instead — F23 (controls/options/accessibility), whose req 2 still lacked "resolution/scaling" and whose edge-case list names "invalid display mode". Left on F25-C's list: assert the proxy's drop/dup counters in the impaired shove test; drop the no-op `let` shadowing.
 
 Change:
-- `net_drive::run_shove_trio` gains `impair: Option<Impair>`; when set, both clients join through a seeded `ImpairProxy` (`0xAC02`) armed on both directions 400 ms after `Start` (same one-shot-verb reasoning as the matrix cells), dropped before awaiting `event=left`.
-- The clean leg's assertions moved into `assert_shove_converged(control_bob, alice, bob)`, shared by both legs.
-- New `a_shoved_seat_converges_across_three_processes_on_an_impaired_link`: `combined` recipe (40 ms + 30 ms jitter, 5 % loss, 10 % dup, 10 % reorder); same verdicts as the clean leg. Evidence the recipe bit: alice's `snap…/≈1.9k x` stale drops vs 0 clean.
-- `docs/research/net.md` and PLAN row updated.
+- `settings::WindowSize` (4 listed 16:9 sizes), `GraphicsSettings.window_size`, `cycled_window_size`, `window_size_row` ("Window size: 1280 x 720", with a "(windowed mode)" note under fullscreen), loaded field-by-field like the other settings.
+- `apply_display_settings` now also takes the primary `Monitor`: resizes the window when the (display, size) pair changes — not on unrelated settings changes, so a dragged window is left alone — and clamps to the largest listed size that fits the monitor's logical size (`WindowSize::fitting`) without rewriting the saved choice.
+- Startup window built from the setting (the `WINDOW_SIZE` const is gone); perf report `settings.window` follows the setting.
+- Menu Options screen and pause graphics page each gain the row; existing tests' hard-coded Options/pause row indexes re-pinned (+1 after VSync).
 
-Results (foreground): impaired leg 6/6 in isolation, clean leg 3/3 (one ran the settle bound for real: `fix1`, `resets=1`). Gates: `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed.
+Results (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed. New: 5 settings unit tests (steps/persist/invalid, `fitting`, apply with a stand-in 2x monitor incl. drag-survival and fullscreen round trip, oversize startup, headless), menu + session tests step the row and persist it.
 
-Not covered / open: other seven recipe cells against a collision; divergence while moving is unbounded; kinematic-copy shove asymmetry; trailer/extra-wheel/reset legs at process level; dev world, loopback only, no rendered observation. F25-C stays open. Status: implemented candidate; not independently checked.
+Not covered / open: no real display or monitor exercised (stand-in `Monitor` component only); no revert-countdown for mode switches; no exclusive fullscreen/mode list; no render-scale; subtitles, pad rebinding, auto-reverse row still open in F23. Status: implemented candidate; not independently checked.

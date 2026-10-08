@@ -292,6 +292,8 @@ pub enum Action {
     CycleFlashing,
     /// Cycle the Options screen's window mode.
     CycleDisplay,
+    /// Cycle the Options screen's windowed size.
+    CycleWindowSize,
     /// Toggle the Options screen's vsync.
     CycleVsync,
     /// Cycle the Options screen's camera field of view.
@@ -1039,6 +1041,7 @@ impl MenuShell {
             | Action::CycleTextSize
             | Action::CycleFlashing
             | Action::CycleDisplay
+            | Action::CycleWindowSize
             | Action::CycleVsync
             | Action::CycleFieldOfView
             | Action::ToggleAutoRight
@@ -1252,6 +1255,9 @@ impl MenuShell {
             }
             Action::CycleDisplay => {
                 self.set_settings(data, data.settings.cycled_display(forward), effects);
+            }
+            Action::CycleWindowSize => {
+                self.set_settings(data, data.settings.cycled_window_size(forward), effects);
             }
             Action::CycleVsync => {
                 self.set_settings(data, data.settings.toggled_vsync(), effects);
@@ -2343,6 +2349,7 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         row(s.flashing_row(), Ok(()), Action::CycleFlashing),
         row(s.display_row(), Ok(()), Action::CycleDisplay),
         row(s.vsync_row(), Ok(()), Action::CycleVsync),
+        row(s.window_size_row(), Ok(()), Action::CycleWindowSize),
         row(s.field_of_view_row(), Ok(()), Action::CycleFieldOfView),
         row(s.auto_right_row(), Ok(()), Action::ToggleAutoRight),
     ];

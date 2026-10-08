@@ -1481,7 +1481,7 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "rust-mm2".into(),
-                    resolution: WINDOW_SIZE.into(),
+                    resolution: graphics.window_size.logical().into(),
                     // Built from the settings so the first frame already
                     // has the saved mode (`apply_display_settings` then
                     // finds nothing to change).
@@ -2379,7 +2379,13 @@ fn main() {
             ),
             ("msaa".to_string(), format!("{:?}", graphics.antialiasing)),
             ("shadows".to_string(), format!("{:?}", graphics.shadows)),
-            ("window".to_string(), window_label(WINDOW_SIZE)),
+            (
+                "window".to_string(),
+                match graphics.display {
+                    settings::DisplayMode::Windowed => window_label(graphics.window_size.logical()),
+                    settings::DisplayMode::Fullscreen => "borderless fullscreen".to_string(),
+                },
+            ),
             ("fixed_hz".to_string(), FIXED_HZ.to_string()),
         ];
         perf::enable(
@@ -2553,15 +2559,12 @@ fn smoke_test(
     exit.write(AppExit::Success);
 }
 
-/// The primary window's size in logical pixels; the perf report's
-/// `settings.window` row is formatted from this same value.
-const WINDOW_SIZE: (u32, u32) = (1280, 720);
-
 /// The fixed-step rate (Hz); the perf report's `settings.fixed_hz` row
 /// is formatted from this same value.
 const FIXED_HZ: f64 = 120.0;
 
-/// `1280x720` — how the perf report names a window size.
+/// `1280x720` — how the perf report names a window size; the window is
+/// built from the same [`settings::WindowSize`] value.
 fn window_label((w, h): (u32, u32)) -> String {
     format!("{w}x{h}")
 }
@@ -2862,8 +2865,9 @@ mod report_label_tests {
     fn the_report_names_the_window_and_step_rate_the_app_runs_at() {
         assert_eq!(window_label((1280, 720)), "1280x720");
         assert_eq!(
-            window_label(WINDOW_SIZE),
-            format!("{}x{}", WINDOW_SIZE.0, WINDOW_SIZE.1)
+            window_label(settings::WindowSize::default().logical()),
+            "1280x720",
+            "the shipped window is the report's baseline size"
         );
         // `f64`'s Display drops a whole number's fraction: the row reads `120`.
         assert_eq!(FIXED_HZ.to_string(), "120");

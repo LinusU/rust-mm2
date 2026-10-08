@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
 use bevy::prelude::*;
+use bevy::window::{Monitor, PrimaryMonitor};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -271,6 +272,74 @@ impl DisplayMode {
     }
 }
 
+/// The size of the window in windowed mode, in logical pixels. A short
+/// list rather than free entry: every value is a standard 16:9 size the
+/// HUD and menu lay out at, and a hand-edited unknown value falls back
+/// to the shipped size like any other invalid field. Fullscreen ignores
+/// it (the monitor sets the size there).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowSize {
+    /// The shipped window.
+    #[default]
+    #[serde(rename = "1280x720")]
+    Hd720,
+    #[serde(rename = "1600x900")]
+    Hd900,
+    #[serde(rename = "1920x1080")]
+    Hd1080,
+    #[serde(rename = "2560x1440")]
+    Qhd1440,
+}
+
+impl WindowSize {
+    /// Every value, smallest first (the menu order).
+    pub const ALL: [Self; 4] = [Self::Hd720, Self::Hd900, Self::Hd1080, Self::Qhd1440];
+
+    /// Width and height in logical pixels.
+    pub fn logical(self) -> (u32, u32) {
+        match self {
+            Self::Hd720 => (1280, 720),
+            Self::Hd900 => (1600, 900),
+            Self::Hd1080 => (1920, 1080),
+            Self::Qhd1440 => (2560, 1440),
+        }
+    }
+
+    /// The menu label.
+    pub fn label(self) -> String {
+        let (w, h) = self.logical();
+        format!("{w} x {h}")
+    }
+
+    /// The largest size at or below this one that fits `available`
+    /// (the monitor, in logical pixels), or the smallest when none does
+    /// — a saved size from a bigger screen must not open a window the
+    /// current one cannot show.
+    pub fn fitting(self, available: (f32, f32)) -> Self {
+        Self::ALL
+            .into_iter()
+            .rev()
+            .filter(|size| *size <= self)
+            .find(|size| {
+                let (w, h) = size.logical();
+                w as f32 <= available.0 && h as f32 <= available.1
+            })
+            .unwrap_or(Self::ALL[0])
+    }
+}
+
+impl PartialOrd for WindowSize {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WindowSize {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.logical().0.cmp(&other.logical().0)
+    }
+}
+
 /// `vsync` defaults on: serde fills a field an older file lacks from
 /// this, not from `bool::default`.
 fn vsync_on() -> bool {
@@ -427,6 +496,8 @@ pub struct GraphicsSettings {
     pub reduce_flashing: bool,
     /// Window or borderless fullscreen.
     pub display: DisplayMode,
+    /// The window's size in windowed mode.
+    pub window_size: WindowSize,
     /// Wait for the display's refresh when presenting a frame.
     #[serde(default = "vsync_on")]
     pub vsync: bool,
@@ -447,6 +518,7 @@ impl Default for GraphicsSettings {
             text_size: TextSize::default(),
             reduce_flashing: false,
             display: DisplayMode::default(),
+            window_size: WindowSize::default(),
             vsync: true,
             field_of_view: FieldOfView::default(),
             auto_right: true,
@@ -525,6 +597,14 @@ impl GraphicsSettings {
         }
     }
 
+    /// These settings with the windowed size stepped.
+    pub fn cycled_window_size(self, forward: bool) -> Self {
+        Self {
+            window_size: cycle_wrapping(&WindowSize::ALL, self.window_size, forward),
+            ..self
+        }
+    }
+
     /// These settings with vsync flipped (either step direction flips
     /// it).
     pub fn toggled_vsync(self) -> Self {
@@ -565,6 +645,16 @@ impl GraphicsSettings {
     /// The display row's text.
     pub fn display_row(&self) -> String {
         format!("Display: {}", self.display.label())
+    }
+
+    /// The window-size row's text; fullscreen says the size waits for
+    /// windowed mode.
+    pub fn window_size_row(&self) -> String {
+        let note = match self.display {
+            DisplayMode::Windowed => "",
+            DisplayMode::Fullscreen => " (windowed mode)",
+        };
+        format!("Window size: {}{note}", self.window_size.label())
     }
 
     /// The vsync row's text.
@@ -655,6 +745,7 @@ impl GraphicsSettings {
             text_size: pick(&map, "text_size", d.text_size, &mut issues),
             reduce_flashing: pick(&map, "reduce_flashing", d.reduce_flashing, &mut issues),
             display: pick(&map, "display", d.display, &mut issues),
+            window_size: pick(&map, "window_size", d.window_size, &mut issues),
             vsync: pick(&map, "vsync", d.vsync, &mut issues),
             field_of_view: pick(&map, "field_of_view", d.field_of_view, &mut issues),
             auto_right: pick(&map, "auto_right", d.auto_right, &mut issues),
@@ -958,13 +1049,19 @@ pub fn apply_auto_right(
     }
 }
 
-/// Push [`GraphicsSettings::display`] and [`GraphicsSettings::vsync`]
-/// onto the primary window when the settings change. Each field is
-/// written only when it differs, so a frame that changes something else
-/// (the shadows row) never touches the window; the startup window is
-/// built from the same settings, so the first run writes nothing.
+/// Push [`GraphicsSettings::display`], [`GraphicsSettings::window_size`]
+/// and [`GraphicsSettings::vsync`] onto the primary window when the
+/// settings change. Each field is written only when it differs, so a
+/// frame that changes something else (the shadows row) never touches
+/// the window, and a window the person dragged to another size is left
+/// alone until they pick one; the startup window is built from the same
+/// settings, so the first run writes nothing unless the saved size does
+/// not fit the monitor, in which case the window shrinks to the largest
+/// listed size that does.
 pub fn apply_display_settings(
     settings: Res<GraphicsSettings>,
+    monitors: Query<&Monitor, With<PrimaryMonitor>>,
+    mut sized_for: Local<Option<(DisplayMode, WindowSize)>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
 ) {
     if !settings.is_changed() {
@@ -972,9 +1069,35 @@ pub fn apply_display_settings(
     }
     let mode = settings.display.window_mode();
     let present = settings.present_mode();
+    let available = monitors.iter().next().map(|m| {
+        let scale = m.scale_factor.max(f64::EPSILON);
+        (
+            (m.physical_width as f64 / scale) as f32,
+            (m.physical_height as f64 / scale) as f32,
+        )
+    });
+    let size = match available {
+        Some(available) => settings.window_size.fitting(available),
+        None => settings.window_size,
+    };
+    let (width, height) = size.logical();
+    // The size is written when the person changes the size or comes
+    // back to windowed mode, not on every settings change: a window they
+    // dragged to their own size survives an unrelated row.
+    let resize = *sized_for != Some((settings.display, settings.window_size));
+    *sized_for = Some((settings.display, settings.window_size));
     for mut window in &mut windows {
         if window.mode != mode {
             window.mode = mode;
+        }
+        if resize
+            && mode == bevy::window::WindowMode::Windowed
+            && (
+                window.resolution.width().round() as u32,
+                window.resolution.height().round() as u32,
+            ) != (width, height)
+        {
+            window.resolution.set(width as f32, height as f32);
         }
         if window.present_mode != present {
             window.present_mode = present;
@@ -1117,6 +1240,7 @@ mod tests {
             text_size: TextSize::Larger,
             reduce_flashing: true,
             display: DisplayMode::Fullscreen,
+            window_size: WindowSize::Hd1080,
             vsync: false,
             field_of_view: FieldOfView::Wide,
             auto_right: false,
@@ -1420,6 +1544,198 @@ mod tests {
         // `with` clamps, so a row can never read past 100.
         assert_eq!(levels.with(AudioLevel::Master, 200).master, MAX_LEVEL);
     }
+    #[test]
+    fn the_window_size_steps_persists_and_an_unknown_value_keeps_the_shipped_window() {
+        let d = GraphicsSettings::default();
+        assert_eq!(d.window_size.logical(), (1280, 720), "the shipped window");
+        assert_eq!(d.window_size_row(), "Window size: 1280 x 720");
+        let up = d.cycled_window_size(true);
+        assert_eq!(up.window_size_row(), "Window size: 1600 x 900");
+        assert_eq!(
+            up,
+            GraphicsSettings {
+                window_size: WindowSize::Hd900,
+                ..d
+            },
+            "only the size moved"
+        );
+        assert_eq!(
+            d.cycled_window_size(false).window_size,
+            WindowSize::Qhd1440,
+            "down from the smallest wraps to the largest"
+        );
+        let mut round = d;
+        for _ in 0..WindowSize::ALL.len() {
+            round = round.cycled_window_size(true);
+        }
+        assert_eq!(round, d, "a full cycle comes back");
+        assert_eq!(
+            GraphicsSettings {
+                display: DisplayMode::Fullscreen,
+                ..d
+            }
+            .window_size_row(),
+            "Window size: 1280 x 720 (windowed mode)"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(&path, br#"{"window_size":"1920x1080","shadows":"low"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!(loaded.window_size, WindowSize::Hd1080);
+        assert_eq!(loaded.shadows, ShadowQuality::Low);
+        for bad in [
+            &br#"{"window_size":"640x480","shadows":"low"}"#[..],
+            br#"{"window_size":7,"shadows":"low"}"#,
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            let loaded = GraphicsSettings::load(&path);
+            assert_eq!(
+                loaded.window_size,
+                WindowSize::Hd720,
+                "invalid keeps the default"
+            );
+            assert_eq!(loaded.shadows, ShadowQuality::Low, "the rest survives");
+        }
+        // A file from before the field existed opens at the shipped size.
+        std::fs::write(&path, br#"{"shadows":"low"}"#).unwrap();
+        assert_eq!(GraphicsSettings::load(&path).window_size, WindowSize::Hd720);
+    }
+
+    #[test]
+    fn a_saved_size_larger_than_the_screen_falls_back_to_one_that_fits() {
+        assert_eq!(
+            WindowSize::Qhd1440.fitting((1920.0, 1080.0)),
+            WindowSize::Hd1080,
+            "exact fit stays"
+        );
+        assert_eq!(
+            WindowSize::Qhd1440.fitting((2560.0, 1440.0)),
+            WindowSize::Qhd1440
+        );
+        assert_eq!(
+            WindowSize::Hd1080.fitting((1700.0, 1000.0)),
+            WindowSize::Hd900
+        );
+        assert_eq!(
+            WindowSize::Hd1080.fitting((3000.0, 1000.0)),
+            WindowSize::Hd900,
+            "height alone can disqualify a size"
+        );
+        assert_eq!(
+            WindowSize::Hd900.fitting((1000.0, 500.0)),
+            WindowSize::Hd720,
+            "nothing fits: the smallest"
+        );
+        assert_eq!(
+            WindowSize::Hd720.fitting((9999.0, 9999.0)),
+            WindowSize::Hd720,
+            "never grows past the request"
+        );
+    }
+
+    /// A one-window app running the real [`apply_display_settings`]
+    /// against a stand-in monitor of `monitor` physical pixels at 2x.
+    fn window_app(settings: GraphicsSettings, monitor: Option<(u32, u32)>) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .add_systems(Update, apply_display_settings);
+        if let Some((physical_width, physical_height)) = monitor {
+            app.world_mut().spawn((
+                Monitor {
+                    name: None,
+                    physical_height,
+                    physical_width,
+                    physical_position: IVec2::ZERO,
+                    refresh_rate_millihertz: None,
+                    scale_factor: 2.0,
+                    video_modes: Vec::new(),
+                },
+                PrimaryMonitor,
+            ));
+        }
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), bevy::window::PrimaryWindow))
+            .id();
+        (app, window)
+    }
+
+    fn logical_size(app: &App, window: Entity) -> (f32, f32) {
+        let r = &app.world().get::<Window>(window).unwrap().resolution;
+        (r.width(), r.height())
+    }
+
+    #[test]
+    fn the_chosen_window_size_reaches_the_window_and_is_clamped_to_the_monitor() {
+        // 3840x2160 physical at 2x is a 1920x1080 logical screen.
+        let (mut app, window) = window_app(GraphicsSettings::default(), Some((3840, 2160)));
+        app.update();
+        assert_eq!(
+            logical_size(&app, window),
+            (1280.0, 720.0),
+            "the shipped size writes nothing new"
+        );
+
+        let set = |app: &mut App, size: WindowSize| {
+            app.world_mut()
+                .resource_mut::<GraphicsSettings>()
+                .window_size = size;
+            app.update();
+        };
+        set(&mut app, WindowSize::Hd900);
+        assert_eq!(logical_size(&app, window), (1600.0, 900.0));
+        set(&mut app, WindowSize::Qhd1440);
+        assert_eq!(
+            logical_size(&app, window),
+            (1920.0, 1080.0),
+            "2560x1440 does not fit this screen, so the largest that does"
+        );
+        // The settings still say 1440p: a bigger screen later gets it.
+        assert_eq!(
+            app.world().resource::<GraphicsSettings>().window_size,
+            WindowSize::Qhd1440
+        );
+
+        // The person drags the window to their own size: another
+        // setting changing leaves it alone.
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set(1000.0, 600.0);
+        app.world_mut().resource_mut::<GraphicsSettings>().shadows = ShadowQuality::Low;
+        app.update();
+        assert_eq!(logical_size(&app, window), (1000.0, 600.0));
+
+        // Fullscreen leaves the size to the monitor; back to windowed
+        // restores the chosen one.
+        app.world_mut().resource_mut::<GraphicsSettings>().display = DisplayMode::Fullscreen;
+        app.update();
+        assert_eq!(logical_size(&app, window), (1000.0, 600.0));
+        app.world_mut().resource_mut::<GraphicsSettings>().display = DisplayMode::Windowed;
+        app.update();
+        assert_eq!(logical_size(&app, window), (1920.0, 1080.0));
+    }
+
+    #[test]
+    fn a_saved_size_that_does_not_fit_shrinks_the_startup_window_and_no_monitor_trusts_the_setting()
+    {
+        // First frame on a 1440x900 logical screen with 1080p saved.
+        let saved = GraphicsSettings {
+            window_size: WindowSize::Hd1080,
+            ..GraphicsSettings::default()
+        };
+        let (mut app, window) = window_app(saved, Some((2880, 1800)));
+        app.update();
+        assert_eq!(logical_size(&app, window), (1280.0, 720.0));
+
+        // With no monitor known (headless) the setting is applied as is.
+        let (mut app, window) = window_app(saved, None);
+        app.update();
+        assert_eq!(logical_size(&app, window), (1920.0, 1080.0));
+    }
+
     #[test]
     fn display_and_vsync_step_both_ways_and_an_old_file_keeps_the_shipped_window() {
         let d = GraphicsSettings::default();

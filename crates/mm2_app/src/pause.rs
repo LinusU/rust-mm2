@@ -77,6 +77,8 @@ enum PauseAction {
     CycleFlashing,
     /// Cycle the window mode.
     CycleDisplay,
+    /// Cycle the windowed size.
+    CycleWindowSize,
     /// Cycle the camera field of view.
     CycleFieldOfView,
     /// Toggle automatic flip recovery.
@@ -143,6 +145,7 @@ fn pause_rows(
                 row(settings.flashing_row(), Ok(PauseAction::CycleFlashing)),
                 row(settings.display_row(), Ok(PauseAction::CycleDisplay)),
                 row(settings.vsync_row(), Ok(PauseAction::CycleVsync)),
+                row(settings.window_size_row(), Ok(PauseAction::CycleWindowSize)),
                 row(
                     settings.field_of_view_row(),
                     Ok(PauseAction::CycleFieldOfView),
@@ -423,6 +426,7 @@ pub fn pause_input(
                     | PauseAction::CycleTextSize
                     | PauseAction::CycleFlashing
                     | PauseAction::CycleDisplay
+                    | PauseAction::CycleWindowSize
                     | PauseAction::CycleVsync
                     | PauseAction::CycleFieldOfView
                     | PauseAction::ToggleAutoRight
@@ -505,6 +509,7 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
         PauseAction::CycleTextSize => settings.cycled_text_size(forward),
         PauseAction::CycleFlashing => settings.toggled_reduce_flashing(),
         PauseAction::CycleDisplay => settings.cycled_display(forward),
+        PauseAction::CycleWindowSize => settings.cycled_window_size(forward),
         PauseAction::CycleVsync => settings.toggled_vsync(),
         PauseAction::CycleFieldOfView => settings.cycled_field_of_view(forward),
         PauseAction::ToggleAutoRight => settings.toggled_auto_right(),

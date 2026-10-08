@@ -28,7 +28,7 @@ use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::settings::{
     Antialiasing, DisplayMode, FieldOfView, GraphicsSettings, RunOverrides, ShadowQuality,
-    TextSize, settings_path,
+    TextSize, WindowSize, settings_path,
 };
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -3228,6 +3228,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
             "Flashing: Normal",
             "Display: Windowed",
             "VSync: On",
+            "Window size: 1280 x 720",
             "Field of view: Authored",
             "Flip recovery: Automatic",
             "Master volume: 100%",
@@ -3239,7 +3240,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         ]
     );
     assert_eq!(
-        shell(&app).rows[12].enabled,
+        shell(&app).rows[13].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3290,7 +3291,7 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[12].enabled.is_ok());
+    assert!(shell(&app).rows[13].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
@@ -3303,7 +3304,7 @@ fn option_changes_apply_persist_and_reset() {
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[12].enabled.is_err());
+    assert!(shell(&app).rows[13].enabled.is_err());
 }
 
 /// The volume rows step by ten percent, wrap at both ends, reach the
@@ -3325,15 +3326,15 @@ fn volume_rows_step_wrap_persist_and_reset() {
 
     focus_row(&mut app, "Master volume");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[8].text, "Master volume: 90%");
+    assert_eq!(shell(&app).rows[9].text, "Master volume: 90%");
     assert_eq!(app.world().resource::<GraphicsSettings>().audio.master, 90);
     assert_eq!(GraphicsSettings::load(&path).audio.master, 90);
     // Right from the top wraps to silence, Left from silence to the top.
     press(&mut app, KeyCode::ArrowRight);
     press(&mut app, KeyCode::ArrowRight);
-    assert_eq!(shell(&app).rows[8].text, "Master volume: 0%");
+    assert_eq!(shell(&app).rows[9].text, "Master volume: 0%");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[8].text, "Master volume: 100%");
+    assert_eq!(shell(&app).rows[9].text, "Master volume: 100%");
 
     // Each bus row moves its own level and nothing else.
     focus_row(&mut app, "City sounds");
@@ -3344,12 +3345,12 @@ fn volume_rows_step_wrap_persist_and_reset() {
         (audio.master, audio.effects, audio.commentary, audio.city),
         (100, 100, 100, 80)
     );
-    assert_eq!(shell(&app).rows[11].text, "City sounds volume: 80%");
+    assert_eq!(shell(&app).rows[12].text, "City sounds volume: 80%");
 
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert_eq!(shell(&app).rows[11].text, "City sounds volume: 100%");
+    assert_eq!(shell(&app).rows[12].text, "City sounds volume: 100%");
 }
 
 /// The field-of-view row steps Authored/+10°/+20° and wraps, reaches the
@@ -3636,10 +3637,28 @@ fn the_display_and_vsync_rows_toggle_persist_and_reset() {
     press(&mut app, KeyCode::ArrowRight);
     assert!(!GraphicsSettings::load(&path).vsync);
 
+    focus_row(&mut app, "Window size");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[6].text, "Window size: 1600 x 900");
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().window_size,
+        WindowSize::Hd900
+    );
+    assert_eq!(GraphicsSettings::load(&path).window_size, WindowSize::Hd900);
+    press(&mut app, KeyCode::ArrowLeft);
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[6].text, "Window size: 2560 x 1440");
+    assert_eq!(
+        GraphicsSettings::load(&path).window_size,
+        WindowSize::Qhd1440,
+        "left from the smallest wraps to the largest"
+    );
+
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
     assert_eq!(shell(&app).rows[5].text, "VSync: On");
+    assert_eq!(shell(&app).rows[6].text, "Window size: 1280 x 720");
 }
 
 /// A menu with nowhere to save (an evidence run) still applies the
@@ -4333,7 +4352,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..13 {
+    for _ in 0..14 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
