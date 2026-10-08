@@ -1,3 +1,13 @@
+# Last iteration — F29-B.7: `--trace-deps` refuses a `--mods` directory that did not mount (iteration 11 of the recovery run)
+
+Selection: the F29-B.6 review passed with no blockers but named a gap — a `--mods` directory that fails to mount (or is not a directory) only logged a warn, so `mm2 --city <stem> --trace-deps` without `--expect-mod` printed a report with no mod files and exited 0, reading as "no mod serves this city". Repairing a reviewer-named gap precedes the remaining F29-B legs (audio `deps` target, gameplay example, AC03 two-process run), which are unchanged.
+Change: `mm2` remembers why `--mods` mounted nothing (`mods_problem`: not a directory, or the scan error such as `DuplicateModId`); `--trace-deps` prints an error and exits 2 before tracing. Normal play is unchanged (still runs with no mods). `docs/modding.md` says so. No ledger row (tooling).
+Test (+1): `trace_deps_refuses_a_mods_directory_that_did_not_mount` (subprocess; duplicate-id mods dir -> exit 2 and no report; missing mods dir -> exit 2). Mutation: neutralising the new check fails the test on the duplicate-id leg.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass; `cargo test --locked --workspace` rc 0, 2658 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data only. Open on F29: audio `deps` target, a shippable gameplay example mod, AC03 on a real two-process run, AC06 coverage for other families.
+
+---
+
 # Last iteration — F29-B.6: a city's geometry gets a `deps` target (iteration 10 of the recovery run)
 
 Selection: the F29-B.5 review passed with no blockers. Of the F29-B remainder (city/audio `deps` targets, gameplay example, AC03 on a real run) the city target is the one with a production loader that runs without a GPU. `mm2-inspect` cannot call `load_city` (Bevy meshes/materials; no tool depends on `mm2_app`, and adding Bevy to the inspector would break the layering), so the target lives on the game binary.

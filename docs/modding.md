@@ -228,7 +228,10 @@ the byte-level identity of gameplay content.
   the same per-source report — the PSDL, `.inst`, `.cpvs`/`.water`, prop PKGs,
   textures, the surface tables, pathsets and prop rules the city pulled in. A
   failing load prints what it read first and exits 2, as does an unmet
-  `--expect-mod`. It traces the city load only: audio cues are fetched lazily
+  `--expect-mod`. A `--mods` path that is not a directory, or whose scan fails
+  (a duplicate id, a bad manifest), also exits 2 before any report: play
+  carries on without mods, but a trace that silently dropped them would read
+  as "no mod serves this city". It traces the city load only: audio cues are fetched lazily
   per voice, so audio has no `deps` target yet.
 
 ## Portable cities with multiple PSDL parts

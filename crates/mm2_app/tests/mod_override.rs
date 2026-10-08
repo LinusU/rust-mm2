@@ -596,6 +596,56 @@ fn the_trace_deps_flag_reports_and_checks_which_mod_serves_a_city() {
     assert!(out.contains("city/nowhere.psdl (read failed)"), "{out}");
 }
 
+/// A `--mods` directory that fails to mount (or is not a directory) must not
+/// let `--trace-deps` print a report with no mod in it and exit 0: that reads
+/// as "no mod serves this city" when the mods were never mounted.
+#[test]
+fn trace_deps_refuses_a_mods_directory_that_did_not_mount() {
+    let f = fixture();
+    let root = f._tmp.path();
+    let dupes = root.join("dupe_mods");
+    let a = dupes.join("a");
+    let b = dupes.join("b");
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+        manifest(d, "same-id");
+    }
+    let run = |mods: &Path| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"))
+            .arg("--mm2-path")
+            .arg(&f.base)
+            .arg("--mods")
+            .arg(mods)
+            .args(["--city", "test", "--trace-deps"])
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("spawn mm2");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (code, out, err) = run(&dupes);
+    assert_eq!(
+        code,
+        Some(2),
+        "duplicate mod ids fail the mount\n{out}{err}"
+    );
+    assert!(
+        !out.contains("city/test.psdl ("),
+        "no report is printed\n{out}"
+    );
+
+    let (code, out, err) = run(&root.join("no_such_mods_dir"));
+    assert_eq!(code, Some(2), "a missing mods directory fails\n{out}{err}");
+    assert!(
+        !out.contains("city/test.psdl ("),
+        "no report is printed\n{out}"
+    );
+}
+
 /// A mod mounted over `base` that carries one broken file at `logical`.
 fn broken_mod(root: &Path, id: &str, logical: &str, bytes: &[u8]) -> std::path::PathBuf {
     let d = root.join(id);

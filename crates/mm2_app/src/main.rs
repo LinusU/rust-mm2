@@ -687,7 +687,14 @@ fn main() {
     // Stays false (the safe answer) unless the mounted mods were
     // classified cosmetic-only below.
     let mut mods_cosmetic_only = false;
+    // Why `--mods` mounted nothing, when it was asked to. Play carries on
+    // without mods; `--trace-deps` must not, or its report would read as
+    // "no mod serves this" for a directory that never mounted.
+    let mut mods_problem: Option<String> = None;
     if let Some(mods) = &cli.mods {
+        if !mods.is_dir() {
+            mods_problem = Some(format!("{} is not a directory", mods.display()));
+        }
         match mount_mods(&mut vfs, mods) {
             Ok(manifests) => {
                 has_mods = !manifests.is_empty();
@@ -721,7 +728,8 @@ fn main() {
                     .all(mm2_content::fingerprint::ModReport::is_cosmetic_only);
             }
             Err(e) => {
-                warn!(dir = %mods.display(), error = %e, "failed to mount mods; running with none")
+                warn!(dir = %mods.display(), error = %e, "failed to mount mods; running with none");
+                mods_problem = Some(format!("{}: {e}", mods.display()));
             }
         }
     }
@@ -736,6 +744,10 @@ fn main() {
     // `--trace-deps` needs the VFS only; the city loads into a throwaway
     // world, so no window or GPU is involved.
     if cli.trace_deps {
+        if let Some(why) = &mods_problem {
+            error!("--mods mounted nothing, so the trace would not show any mod: {why}");
+            std::process::exit(2);
+        }
         let stem = cli.city.as_deref().unwrap_or("london").to_ascii_lowercase();
         let (loaded, trace) = mm2_app::city::trace_city_reads(&vfs, &format!("city/{stem}.psdl"));
         print!("{}", trace.render());
