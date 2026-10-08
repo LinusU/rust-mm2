@@ -403,6 +403,34 @@ pub enum AmbientDrive {
     Knocked,
 }
 
+/// A body that is neither a participant nor an ambient car but sits on
+/// the road network — a cable car — which ambient cars must queue
+/// behind rather than drive into. [`drive_ambient`] senses it along the
+/// body's local +Z axis (nose first) at a car's own sensing grain.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoadObstacle {
+    /// Distance from the body's origin to its front and tail, m.
+    pub half_length: f32,
+}
+
+impl RoadObstacle {
+    /// Points standing for the body in the corridor sense, which reads
+    /// centres: the origin plus a nose and a tail point one car's
+    /// half-length (2 m) inside each end, so a car stops short of the
+    /// body's edge and not of its middle.
+    pub fn sense_points(&self, at: Vec3, rotation: Quat) -> impl Iterator<Item = Vec3> {
+        let reach = (self.half_length.min(12.0) - OBSTACLE_END_INSET).max(0.0);
+        let fwd = rotation * Vec3::Z;
+        [at, at + fwd * reach, at - fwd * reach]
+            .into_iter()
+            .filter(|p| p.is_finite())
+    }
+}
+
+/// How far inside a [`RoadObstacle`]'s ends its sensing points sit (m):
+/// about half a car, so an ambient car queues as it would behind one.
+const OBSTACLE_END_INSET: f32 = 2.0;
+
 /// One ambient car on the network.
 #[derive(Component)]
 pub struct AmbientCar {
@@ -929,7 +957,7 @@ fn spawn_ambient_car(
 /// F10-B.1 obstruction response: before advancing, each car senses a
 /// forward corridor (`corridor_gap`) against every `Player`
 /// participant — the local driver and AI opponents alike — and every
-/// other ambient car, then the `follow_speed` law sets its kinematic
+/// other ambient car and [`RoadObstacle`] (a cable car), then the `follow_speed` law sets its kinematic
 /// `speed`: road limit on a clear corridor, a bounded brake to
 /// `follow_gap` behind a blocker, an outright stop inside
 /// `panic_gap`, and a `turn_speed` cap across intersections. A queued
@@ -957,6 +985,10 @@ pub fn drive_ambient(
         Without<Player>,
     >,
     players: Query<(Entity, &Position), (With<Player>, Without<AmbientCar>)>,
+    obstacles: Query<
+        (Entity, &Position, &Rotation, &RoadObstacle),
+        (Without<AmbientCar>, Without<Player>),
+    >,
     mut commands: Commands,
 ) {
     let Some(mut traffic) = traffic else {
@@ -977,6 +1009,10 @@ pub fn drive_ambient(
     // distinguishing who it is.
     let mut blockers: Vec<(Entity, Vec3)> = players.iter().map(|(e, p)| (e, p.0)).collect();
     blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
+    // Cable cars: a body the sense reads at its nose and tail as well.
+    for (e, p, r, body) in &obstacles {
+        blockers.extend(body.sense_points(p.0, r.0).map(|at| (e, at)));
+    }
     // The junction each lane-following ambient car's current lane is
     // bound for (the downstream end of its arc). The box-yield must
     // not count a car as occupying the junction it is still

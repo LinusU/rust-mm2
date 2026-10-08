@@ -18,7 +18,7 @@ mm2-inspect specials <install> [--city london|sf] [--strict]
 | parked-car strips | `…_parkedcar[_<stem>].pathset` | `mm2_app::city::spawn_parked_cars` |
 | water / recovery rooms | `city/<city>.water` | `mm2_app::water`, `mm2_app::recovery` |
 | rail curves | `city/<city>.bai` tram/train curve counts | measured only |
-| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; audio, networking and the init gate not reproduced; cable cars, ambient cars and participants are obstacles (UNK-44) |
+| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; audio, networking and the init gate not reproduced; cable cars, ambient cars and participants are obstacles to each other (UNK-44) |
 
 Every family file is found by name (default, `_<event stem>` overlays and
 backup variants), parsed by the production `Pathset` parser, and each
@@ -188,9 +188,20 @@ does not stop a tram under it), and the controller sees the distance to
 the centre less 2 m (a car's half-length). The corridor follows the
 curve, so a car parked beside a bend is not ahead. Unchanged from the
 original: no braking while in the junction between roads, constant-rate
-braking to 2.5 m. Not done: ambient cars do not brake for a cable car
-(their blocker list is participants and ambient cars), so a lane that
-crosses the rails relies on the junction gate alone.
+braking to 2.5 m.
+
+Ambient cars brake for a cable car (iteration 22). The original's probe
+is symmetric — a cable car is one of "any other AI vehicle" to an
+ambient car — so `drive_ambient` adds each tram as three centres to its
+corridor blockers (`RoadObstacle`: the origin, plus a point 2 m inside the
+nose and the tail, since the sense reads centres and a car's own
+half-length is 2 m). An ambient car then queues behind a tram under the
+same follow law as behind a car and stops at least a car's length short
+of the body, tail first or head-on. The tram's extent is the nose
+(`aabb.max.z`) taken as symmetric; the retail origin-to-tail distance is
+not measured. A tram in the junction box also counts as an occupant of
+it for the box yield. Synthetic lane only (no windowed run with retail
+traffic).
 
 Still unrecovered or unreproduced: audio triggers (`cablecar`,
 `cablecarstart/stop`, `cablecarbell*`, `streetcable`), the `+0x40` gate,

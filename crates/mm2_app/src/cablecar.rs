@@ -18,8 +18,8 @@
 //! of shoving them. Which bodies the original's sensor counts is not
 //! recovered (UNK-44): this is the same rule applied to every car body.
 //! A car already inside the junction between two roads does not brake
-//! (the original's controller does not either), and ambient cars do not
-//! yet brake for a cable car.
+//! (the original's controller does not either). Ambient cars queue
+//! behind a cable car the same way ([`RoadObstacle`]).
 //!
 //! Not yet reproduced (stated, not hidden): the object audio, and the
 //! original's init gate, which is unrecovered — local sessions always
@@ -41,7 +41,7 @@ use mm2_game::{JunctionGate, Player, SessionEntity, SessionPhase};
 use crate::banger::BangerDefs;
 use crate::city::{MovableModels, v3};
 use crate::movers::{BodyQuery, pose_body, spawn_body};
-use crate::traffic::{AmbientCar, AmbientTraffic};
+use crate::traffic::{AmbientCar, AmbientTraffic, RoadObstacle};
 
 /// The junction a leg's road ends at, as the ambient-traffic controller
 /// names it.
@@ -253,6 +253,9 @@ pub fn spawn_cable_cars(
             nose,
             half_width,
         });
+        commands
+            .entity(body)
+            .insert(RoadObstacle { half_length: nose });
         report.cars += 1;
     }
     report.missing_textures = models.finish(commands, owner).len();

@@ -13,7 +13,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::cablecar::{
     CableCar, CableCircuits, CableReport, drive_cable_cars, plan_cable_cars, spawn_cable_cars,
 };
-use mm2_app::traffic::{AmbientCar, AmbientDrive};
+use mm2_app::traffic::{AmbientCar, AmbientDrive, RoadObstacle};
 use mm2_assets::Vfs;
 use mm2_formats::bai::Side;
 use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide};
@@ -574,6 +574,13 @@ fn spawn_into_world(vfs: &Vfs, city: &str, eligible: bool) -> (CableReport, usiz
     };
     queue.apply(&mut world);
     let cars = world.query::<&CableCar>().iter(&world).count();
+    // Each car is also a body the ambient traffic queues behind, as
+    // long as the car's nose.
+    for (car, obstacle) in world.query::<(&CableCar, &RoadObstacle)>().iter(&world) {
+        assert_eq!(obstacle.half_length, car.nose);
+    }
+    let obstacles = world.query::<&RoadObstacle>().iter(&world).count();
+    assert_eq!(obstacles, cars, "every cable car must be sensed by traffic");
     for car in world.query::<&CableCar>().iter(&world) {
         // The body the obstacle sensor measures: a tram, not the
         // fallback sizes.

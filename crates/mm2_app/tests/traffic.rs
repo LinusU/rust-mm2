@@ -17,7 +17,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic, TrafficSignal};
+use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic, RoadObstacle, TrafficSignal};
 use mm2_assets::Vfs;
 use mm2_formats::bai::{Side, VehicleRule};
 use mm2_game::{
@@ -1515,6 +1515,86 @@ fn ambient_cars_queue_behind_a_blocker() {
     assert!(
         app.world().resource::<AmbientTraffic>().queued >= 2,
         "held followers did not report queued"
+    );
+}
+
+/// Run one follower at 15 m/s down a lane toward a stationary cable-car
+/// body (`RoadObstacle`) 20 m along it, facing `facing` (+1 along the
+/// lane, −1 head-on), for `obstacle` true; without the component the
+/// body is invisible to the sense. Returns the closest the follower's
+/// centre came to the body's centre and its final speed.
+fn follower_toward_cable_car(facing: f32, obstacle: bool) -> (f32, f32) {
+    const HALF_LENGTH: f32 = 4.36;
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_bytes());
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    let mut app = test_app(city_config(), vfs_of(d));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let (lane, at, tangent) = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        let lane = traffic
+            .graph()
+            .lanes()
+            .iter()
+            .find(|l| l.arc.is_some() && l.length > 22.0)
+            .map(|l| l.id)
+            .expect("the fixture authors routable lanes");
+        let s = traffic.graph().sample_lane(lane, 20.0).unwrap();
+        (lane, Vec3::from(s.position), Vec3::from(s.tangent))
+    };
+    let rot = mm2_game::movers::mover_rotation(tangent * facing);
+    let mut body = app.world_mut().spawn((
+        Position(at),
+        Rotation(rot),
+        Transform::from_translation(at).with_rotation(rot),
+    ));
+    if obstacle {
+        body.insert(RoadObstacle {
+            half_length: HALF_LENGTH,
+        });
+    }
+    let follower = spawn_follower(&mut app, lane, 2.0, 15.0);
+    let mut closest = f32::MAX;
+    for _ in 0..360 {
+        app.update();
+        if let Some((fp, _, _)) = car_state(&mut app, follower) {
+            closest = closest.min(fp.distance(at));
+        }
+    }
+    let speed = car_state(&mut app, follower).map_or(f32::NAN, |(_, v, _)| v);
+    (closest, speed)
+}
+
+/// Ambient cars queue behind a cable car as behind any car: held short
+/// of its tail when it points away, and short of its nose head-on,
+/// whose edge is 4.36 m from the origin — never inside the body.
+#[test]
+fn ambient_cars_queue_behind_a_cable_car_on_the_lane() {
+    for facing in [1.0, -1.0] {
+        let (closest, speed) = follower_toward_cable_car(facing, true);
+        assert!(
+            closest >= 4.36 + 2.0,
+            "facing {facing}: the follower's centre reached {closest} m of the tram's centre"
+        );
+        assert!(speed <= 1.0, "facing {facing}: never held ({speed} m/s)");
+    }
+}
+
+/// The same body without the sense component is not seen: the follower
+/// drives into it, so the test above is the sense's doing.
+#[test]
+fn an_unmarked_body_on_the_lane_is_not_sensed() {
+    let (closest, _) = follower_toward_cable_car(1.0, false);
+    assert!(
+        closest < 3.0,
+        "the follower stopped {closest} m short anyway"
     );
 }
 
