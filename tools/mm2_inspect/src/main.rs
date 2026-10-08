@@ -4945,21 +4945,8 @@ fn deps(
             return Err(e);
         }
     };
-    let missing = trace.missing();
-    for logical in &missing {
-        println!("(not found): {logical}");
-    }
-    let origins = trace.by_origin();
-    println!(
-        "{label}: {} file(s) from {} source(s), {} not provided",
-        origins.values().map(Vec::len).sum::<usize>() - missing.len(),
-        origins.keys().filter(|k| *k != "(not found)").count(),
-        missing.len()
-    );
-    let absent: Vec<_> = expect_mod
-        .iter()
-        .filter(|m| trace.from_mod(m).is_empty())
-        .collect();
+    print!("{}", trace.render_summary(&label));
+    let absent = trace.absent_mods(expect_mod);
     if !absent.is_empty() {
         return Err(format!("no file was read from mod(s) {absent:?}").into());
     }

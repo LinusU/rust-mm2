@@ -977,6 +977,13 @@ mod tests {
         assert_eq!(original.1[0].len, Some(6));
         assert_eq!(groups.len(), 3, "{groups:?}");
         assert!(trace.render().contains("mod `pack`: 1 file(s)"));
+        assert_eq!(
+            trace.render_summary("probe"),
+            "(not found): tune/absent.txt\n(not found): tune/also_absent.txt\n\
+             probe: 2 file(s) from 2 source(s), 2 not provided\n"
+        );
+        let expected = ["pack".to_string(), "idle".to_string()];
+        assert_eq!(trace.absent_mods(&expected), [&"idle".to_string()]);
 
         // The trace closed with the call: later reads are not recorded.
         let ((), again) = vfs.trace_reads(|| {});

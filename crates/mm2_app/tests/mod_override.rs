@@ -18,7 +18,7 @@ use bevy::image::Image;
 use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::StandardMaterial;
 use mm2_app::audio::{PcmAudio, WaveBank};
-use mm2_app::city::{MaterialCache, load_city};
+use mm2_app::city::{MaterialCache, load_city, trace_city_reads};
 use mm2_assets::Vfs;
 use mm2_content::{fingerprint, load_vehicle};
 use mm2_game::SessionEntity;
@@ -501,6 +501,99 @@ fn a_traced_load_names_the_mod_files_each_consumer_pulled_in() {
     let (_, grass) = vfs.trace_reads(|| cue(&vfs, "grassskid"));
     assert!(grass.from_mod("cue").is_empty());
     assert!(!grass.accesses.is_empty());
+}
+
+/// The city leg of `mm2 --trace-deps`: the production loader runs in a
+/// throwaway world, a mod that replaces the city's own geometry is credited
+/// with that file, a mod aimed at another city is not, and a load that
+/// fails still reports the mod file it choked on.
+#[test]
+fn a_traced_city_load_credits_the_mod_that_replaced_its_geometry() {
+    let f = fixture();
+    let root = f._tmp.path();
+
+    let live = broken_mod(root, "reshape", "city/test.psdl", &synthetic_psdl());
+    let elsewhere = broken_mod(root, "elsewhere", "city/other.psdl", &synthetic_psdl());
+    let mut vfs = mounted(&f.base, &live);
+    vfs.mount_mod(&elsewhere, 301).unwrap();
+    let (loaded, trace) = trace_city_reads(&vfs, "city/test.psdl");
+    let label = loaded.expect("the replaced city still loads");
+    assert!(label.starts_with("city/test.psdl (1 room"), "{label}");
+    assert_eq!(trace.from_mod("reshape"), ["city/test.psdl"]);
+    assert!(trace.from_mod("elsewhere").is_empty(), "{}", trace.render());
+    assert_eq!(
+        trace.absent_mods(&["reshape".into(), "elsewhere".into()]),
+        [&"elsewhere".to_string()]
+    );
+    assert!(
+        trace
+            .by_origin()
+            .keys()
+            .any(|k| k.starts_with("original") && k.contains("base")),
+        "the prop and inst the mod left alone come from the install: {}",
+        trace.render()
+    );
+
+    // The unmodded city credits no mod.
+    let mut plain = Vfs::new();
+    plain.mount_dir(&f.base, 0).unwrap();
+    let (loaded, trace) = trace_city_reads(&plain, "city/test.psdl");
+    assert!(loaded.is_ok());
+    assert!(trace.from_mod("reshape").is_empty());
+
+    // A mod whose geometry does not parse fails the load, and the trace
+    // still names the file that was read from it.
+    let bad = broken_mod(root, "brokencity", "city/test.psdl", b"not a psdl");
+    let vfs = mounted(&f.base, &bad);
+    let (loaded, trace) = trace_city_reads(&vfs, "city/test.psdl");
+    assert!(loaded.is_err(), "garbage geometry must not load");
+    assert_eq!(trace.from_mod("brokencity"), ["city/test.psdl"]);
+
+    // A city no source provides is an error with a recorded miss.
+    let (loaded, trace) = trace_city_reads(&plain, "city/nowhere.psdl");
+    assert!(loaded.is_err());
+    assert_eq!(trace.missing(), ["city/nowhere.psdl"]);
+}
+
+/// `mm2 --trace-deps` as a process: prints the per-source report without a
+/// window, `--expect-mod` turns "is my mod live for this city" into an exit
+/// status, and a city nothing provides fails with the miss listed.
+#[test]
+fn the_trace_deps_flag_reports_and_checks_which_mod_serves_a_city() {
+    let f = fixture();
+    let mods = f._tmp.path().join("deps_mods");
+    broken_mod(&mods, "reshape", "city/test.psdl", &synthetic_psdl());
+    let run = |city: &str, expect: Option<&str>| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"));
+        cmd.arg("--mm2-path")
+            .arg(&f.base)
+            .arg("--mods")
+            .arg(&mods)
+            .args(["--city", city, "--trace-deps"])
+            .env_remove("RUST_LOG");
+        if let Some(id) = expect {
+            cmd.args(["--expect-mod", id]);
+        }
+        let out = cmd.output().expect("spawn mm2");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (code, out) = run("test", Some("reshape"));
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("mod `reshape`: 1 file(s)"), "{out}");
+    assert!(out.contains("  city/test.psdl ("), "{out}");
+    assert!(out.contains("city/test.psdl (1 room"), "{out}");
+
+    let (code, out) = run("test", Some("not-mounted"));
+    assert_eq!(code, Some(2), "a mod that served nothing fails\n{out}");
+
+    let (code, out) = run("nowhere", None);
+    assert_eq!(code, Some(2), "{out}");
+    assert!(out.contains("load failed after"), "{out}");
+    assert!(out.contains("city/nowhere.psdl (read failed)"), "{out}");
 }
 
 /// A mod mounted over `base` that carries one broken file at `logical`.

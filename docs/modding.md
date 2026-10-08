@@ -221,8 +221,15 @@ the byte-level identity of gameplay content.
   records, and the race-definition and roster builds. The scan reads the whole
   city's event tables and records, so a mod that replaces any of that city's
   race files is credited, not just the named row's; another city's mod is not.
-  Race-family files only — a city's geometry and audio have no `deps` target
-  yet.
+  `mm2 --mm2-path <install> [--mods <dir>] --city <stem> --trace-deps
+  [--expect-mod <id>]` is the city-geometry counterpart. It lives in the game
+  binary because the city loader builds Bevy meshes and materials: it runs the
+  production `load_city` into a throwaway world (no window, no GPU) and prints
+  the same per-source report — the PSDL, `.inst`, `.cpvs`/`.water`, prop PKGs,
+  textures, the surface tables, pathsets and prop rules the city pulled in. A
+  failing load prints what it read first and exits 2, as does an unmet
+  `--expect-mod`. It traces the city load only: audio cues are fetched lazily
+  per voice, so audio has no `deps` target yet.
 
 ## Portable cities with multiple PSDL parts
 

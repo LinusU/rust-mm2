@@ -3852,6 +3852,41 @@ pub fn load_city(
     Ok(loaded)
 }
 
+/// Run the production [`load_city`] into a throwaway world with the VFS
+/// tracing its reads, so a mod author can see which source served each
+/// file the city pulled in (geometry, materials, textures, props, surface
+/// tables). Nothing outlives the call; a failed load still returns the
+/// reads made before it. The `Ok` label summarises what loaded.
+pub fn trace_city_reads(
+    vfs: &Vfs,
+    psdl_path: &str,
+) -> (Result<String, LoadCityError>, mm2_assets::ReadTrace) {
+    vfs.trace_reads(|| {
+        let mut world = World::new();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut meshes: Assets<Mesh> = Assets::default();
+        let mut images: Assets<Image> = Assets::default();
+        let mut materials: Assets<StandardMaterial> = Assets::default();
+        let mut session = Session::new();
+        let mut commands = Commands::new(&mut queue, &world);
+        let loaded = load_city(
+            &mut commands,
+            vfs,
+            psdl_path,
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )?;
+        queue.apply(&mut world);
+        Ok(format!(
+            "{psdl_path} ({} room(s), {} prop(s) placed, {} failed)",
+            loaded.report.rooms, loaded.report.props_spawned, loaded.report.props_failed
+        ))
+    })
+}
+
 /// Load a city from `psdl_path` (e.g. `city/london.psdl`) plus its sibling
 /// `.inst` placement file. Every spawned entity is stamped with `owner`
 /// so session teardown can remove the city wholesale.

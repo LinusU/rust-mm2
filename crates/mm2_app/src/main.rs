@@ -142,6 +142,23 @@ struct Cli {
     #[arg(long)]
     list_cars: bool,
 
+    /// Load `--city` through the production city loader without a
+    /// window, print which source (the original or a mod) served each
+    /// file it read, and exit. The city counterpart of
+    /// `mm2-inspect deps` for cars and events.
+    #[arg(
+        long,
+        requires = "city",
+        conflicts_with_all = ["list_cars", "dev_world", "event", "cnr", "join", "headless"]
+    )]
+    trace_deps: bool,
+
+    /// With `--trace-deps`: exit non-zero unless the load read at least
+    /// one file from this mod (repeatable) — proof the mod is live for
+    /// the city.
+    #[arg(long = "expect-mod", requires = "trace_deps")]
+    expect_mod: Vec<String>,
+
     /// Optional TOML vehicle tuning file. With `--car` it is a full
     /// handling override applied *after* the import (wheel positions and
     /// radii stay pinned to the imported rig; a wheel-count mismatch is
@@ -713,6 +730,28 @@ fn main() {
     if cli.list_cars {
         let catalog = VehicleCatalog::scan(&vfs);
         print_roster(&catalog, &mm2_content::scan_garage(&vfs));
+        return;
+    }
+
+    // `--trace-deps` needs the VFS only; the city loads into a throwaway
+    // world, so no window or GPU is involved.
+    if cli.trace_deps {
+        let stem = cli.city.as_deref().unwrap_or("london").to_ascii_lowercase();
+        let (loaded, trace) = mm2_app::city::trace_city_reads(&vfs, &format!("city/{stem}.psdl"));
+        print!("{}", trace.render());
+        let label = match loaded {
+            Ok(label) => label,
+            Err(e) => {
+                println!("load failed after {} read(s): {e}", trace.accesses.len());
+                std::process::exit(2);
+            }
+        };
+        print!("{}", trace.render_summary(&label));
+        let absent = trace.absent_mods(&cli.expect_mod);
+        if !absent.is_empty() {
+            error!("no file was read from mod(s) {absent:?}");
+            std::process::exit(2);
+        }
         return;
     }
 

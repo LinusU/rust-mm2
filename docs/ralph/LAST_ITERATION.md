@@ -1,3 +1,14 @@
+# Last iteration — F29-B.6: a city's geometry gets a `deps` target (iteration 10 of the recovery run)
+
+Selection: the F29-B.5 review passed with no blockers. Of the F29-B remainder (city/audio `deps` targets, gameplay example, AC03 on a real run) the city target is the one with a production loader that runs without a GPU. `mm2-inspect` cannot call `load_city` (Bevy meshes/materials; no tool depends on `mm2_app`, and adding Bevy to the inspector would break the layering), so the target lives on the game binary.
+Change: `mm2_app::city::trace_city_reads(vfs, psdl)` runs `load_city` into a throwaway `World` under `Vfs::trace_reads` (failed load still returns the reads made). `mm2 --city <stem> --trace-deps [--expect-mod <id>]` prints the per-source report and exits (2 on failed load or an unmet `--expect-mod`); clap conflicts it with `--dev-world/--event/--cnr/--join/--headless/--list-cars`. The report tail (`(not found)` lines + summary, the unmet-mod check) moved to `ReadTrace::render_summary`/`absent_mods` so the inspector's `deps` and `mm2` share one implementation. `docs/modding.md` documents it; audio stays without a target (cues load lazily per voice, so a city trace would never read them). No ledger row (tooling).
+Tests (+2, +assertions): `mod_override::a_traced_city_load_credits_the_mod_that_replaced_its_geometry` (mod replacing `city/test.psdl` credited, a mod aimed at another city not, unmodded city credits none, garbage PSDL fails but names the mod file, missing city records the miss); `the_trace_deps_flag_reports_and_checks_which_mod_serves_a_city` (subprocess: exit 0 / `--expect-mod` unmet exit 2 / absent city exit 2); `mm2_assets` trace test covers `render_summary`/`absent_mods`.
+Retail (read-only): `mm2 --mm2-path <retail> --city sf --trace-deps` → 1171 rooms, 3763 props, 926 files from 2 sources (mm2core.ar 345, mm2tex.ar 581), 1 not provided (`tune/banger/r4i_rails_f.dgbangerdata`, an optional lookup).
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass; `cargo test --locked --workspace` rc 0, no failures.
+Status: implemented candidate, not independently checked. Open on F29: audio `deps` target, a shippable gameplay example mod, AC03 on a real two-process run, AC06 coverage for other families.
+
+---
+
 # Last iteration — F29-B.5: a mod declares its effect and the engine checks the claim (iteration 9 of the recovery run)
 
 Selection: the F29-B.4 review passed with no blockers. Of the F29-B remainder (city/audio `deps` targets, examples with a declared classification, AC03 on a real run) the declared-classification leg needs no GPU, no unknown rule and no new loader, and the only shipped example mod made no claim at all.

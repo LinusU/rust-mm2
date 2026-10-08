@@ -83,6 +83,34 @@ impl ReadTrace {
         paths
     }
 
+    /// The mods among `expected` that served no file — the ones a
+    /// `--expect-mod` check reports as not live for this load.
+    pub fn absent_mods<'a>(&self, expected: &'a [String]) -> Vec<&'a String> {
+        expected
+            .iter()
+            .filter(|m| self.from_mod(m).is_empty())
+            .collect()
+    }
+
+    /// The lines that follow [`render`](Self::render): each path no source
+    /// provided, then one summary naming `label`, the files read, the
+    /// sources that served them and the paths nobody provided.
+    pub fn render_summary(&self, label: &str) -> String {
+        let missing = self.missing();
+        let mut out = String::new();
+        for logical in &missing {
+            out.push_str(&format!("(not found): {logical}\n"));
+        }
+        let origins = self.by_origin();
+        out.push_str(&format!(
+            "{label}: {} file(s) from {} source(s), {} not provided\n",
+            origins.values().map(Vec::len).sum::<usize>() - missing.len(),
+            origins.keys().filter(|k| *k != "(not found)").count(),
+            missing.len()
+        ));
+        out
+    }
+
     /// Human-readable report: a block per origin listing its files.
     pub fn render(&self) -> String {
         let mut out = String::new();
