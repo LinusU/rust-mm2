@@ -735,6 +735,7 @@ fn lesson_driver(app: &App) -> mm2_app::lesson::LessonDriver {
         availability: Default::default(),
         aimap: None,
         police: mm2_game::PoliceRoster::default(),
+        lead_cars: mm2_game::OpponentRoster::default(),
     })
 }
 

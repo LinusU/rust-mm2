@@ -609,7 +609,35 @@ pub fn spawn_pose(
     player_pos: Vec3,
     player_yaw: f32,
 ) -> (Vec3, f32) {
-    let slot = definition.start_slots.get(index + 1);
+    pose_at(
+        definition.start_slots.get(index + 1),
+        index,
+        spec,
+        player_pos,
+        player_yaw,
+    )
+}
+
+/// Where a lesson's lead car stands: its route's own staging pose
+/// (row 0 and its heading), never a grid slot — a lesson leg's start
+/// grid seats the player alone, and the lead car belongs to its route.
+/// The designed stagger behind the player applies only to a dead route.
+pub fn lead_car_pose(
+    index: usize,
+    spec: &OpponentSpec,
+    player_pos: Vec3,
+    player_yaw: f32,
+) -> (Vec3, f32) {
+    pose_at(None, index, spec, player_pos, player_yaw)
+}
+
+fn pose_at(
+    slot: Option<&mm2_game::RaceStart>,
+    index: usize,
+    spec: &OpponentSpec,
+    player_pos: Vec3,
+    player_yaw: f32,
+) -> (Vec3, f32) {
     let position = slot.map(|s| s.position).unwrap_or_else(|| {
         spec.route
             .as_ref()
@@ -1032,6 +1060,62 @@ pub fn spawn_opponents(
     player_yaw: f32,
     nav: Option<&NavGraph>,
 ) -> usize {
+    spawn_roster(
+        commands, vfs, meshes, images, materials, roster, definition, owner, session, player_pos,
+        player_yaw, nav, true,
+    )
+}
+
+/// Spawn a Crash Course lesson's `[Opponent]` lead cars (F21-B.19):
+/// the same authored vehicles, `.opp` routes and AI driver as the race
+/// opponents ([`spawn_opponents`]), but **not participants** — no
+/// `RaceProgress`, so the lesson's leg gates, results and sequencer
+/// never see them, and each stands at its route's own staging pose
+/// ([`lead_car_pose`]) instead of a grid slot. The driver holds them
+/// still through the countdown and drives them while the field races;
+/// the lineup stands for the whole session (lessons swap legs under
+/// it), and a retry refields it with the rest of the session-owned
+/// world. Single-player only, like the opponents. Returns the number
+/// spawned.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_lead_cars(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    roster: &OpponentRoster,
+    definition: &RaceDefinition,
+    owner: SessionEntity,
+    session: &mut Session,
+    player_pos: Vec3,
+    player_yaw: f32,
+    nav: Option<&NavGraph>,
+) -> usize {
+    spawn_roster(
+        commands, vfs, meshes, images, materials, roster, definition, owner, session, player_pos,
+        player_yaw, nav, false,
+    )
+}
+
+/// The body behind [`spawn_opponents`] (`participant`) and
+/// [`spawn_lead_cars`] (not).
+#[allow(clippy::too_many_arguments)]
+fn spawn_roster(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    roster: &OpponentRoster,
+    definition: &RaceDefinition,
+    owner: SessionEntity,
+    session: &mut Session,
+    player_pos: Vec3,
+    player_yaw: f32,
+    nav: Option<&NavGraph>,
+    participant: bool,
+) -> usize {
     for issue in &roster.issues {
         warn!(issue = %issue, "opponent roster issue");
     }
@@ -1049,7 +1133,11 @@ pub fn spawn_opponents(
                 continue;
             }
         };
-        let (mut pos, yaw) = spawn_pose(definition, i, spec, player_pos, player_yaw);
+        let (mut pos, yaw) = if participant {
+            spawn_pose(definition, i, spec, player_pos, player_yaw)
+        } else {
+            lead_car_pose(i, spec, player_pos, player_yaw)
+        };
         // The chased line is the authored route re-pathed through the
         // road graph where one is bound — `spec` itself stays verbatim.
         let route = spec
@@ -1070,7 +1158,7 @@ pub fn spawn_opponents(
         // authored-miss defect class the F14-A.2 matrix named.
         // AnyOrder stays trigger-bound; a route-less entry binds
         // nothing.
-        let route_line = (definition.rule == CheckpointRule::Ordered)
+        let route_line = (participant && definition.rule == CheckpointRule::Ordered)
             .then(|| {
                 route.as_ref().and_then(|r| {
                     RouteGateLine::bind(r, &definition.checkpoints, route_is_closed(r), pos, next)
@@ -1100,7 +1188,6 @@ pub fn spawn_opponents(
                 },
                 role,
                 DamageSignals::default(),
-                RaceProgress::new(definition),
                 OpponentDriver {
                     index: i,
                     spec: spec.clone(),
@@ -1146,6 +1233,11 @@ pub fn spawn_opponents(
         equip_authored_vehicle(
             commands, vfs, meshes, images, materials, vehicle, &def, object, pos, yaw,
         );
+        if participant {
+            commands
+                .entity(vehicle)
+                .insert(RaceProgress::new(definition));
+        }
         // Route-bound Ordered progress (DSN-45) — only present on
         // Circuit definitions with a resolvable route.
         if let Some(line) = route_line {
@@ -1154,7 +1246,11 @@ pub fn spawn_opponents(
         spawned += 1;
     }
     if spawned > 0 {
-        info!(opponents = spawned, "opponent roster spawned");
+        if participant {
+            info!(opponents = spawned, "opponent roster spawned");
+        } else {
+            info!(lead_cars = spawned, "lesson lead cars spawned");
+        }
     }
     spawned
 }
@@ -1352,7 +1448,7 @@ pub fn opponent_drive(
             &Rotation,
             &Vehicle,
             &VehicleState,
-            &RaceProgress,
+            Option<&RaceProgress>,
             &mut OpponentDriver,
             Option<&mut RouteGateLine>,
         )>,
@@ -1414,10 +1510,14 @@ pub fn opponent_drive(
                 driver.pass_ban = None;
             }
         }
-        let racing = matches!(
-            progress.state,
-            ParticipantState::AwaitingStart | ParticipantState::Racing
-        );
+        // A lesson's lead car carries no progress: it drives while the
+        // field races, with nothing of its own to finish.
+        let racing = progress.is_none_or(|p| {
+            matches!(
+                p.state,
+                ParticipantState::AwaitingStart | ParticipantState::Racing
+            )
+        });
         // Where the car sits on its line this frame — the speed plan
         // scans ahead from here.
         let mut cursor: Option<RouteCursor> = None;
@@ -1495,7 +1595,8 @@ pub fn opponent_drive(
                 && let Some(route) = driver.route.clone()
             {
                 let gates: Vec<mm2_game::Checkpoint> = race
-                    .map(|r| {
+                    .zip(progress)
+                    .map(|(r, progress)| {
                         progress
                             .remaining()
                             .filter_map(|i| r.definition.checkpoints.get(i))
@@ -1704,8 +1805,8 @@ pub fn opponent_drive(
         // same swept triggers. `driver.catch_up` is the observable
         // the `cu=` record counts; it is not a re-anchor and stays
         // out of `reanchors`.
-        let assist = match (race, leader) {
-            (Some(r), Some(l)) => mm2_game::catch_up_factor(
+        let assist = match (race, leader, progress) {
+            (Some(r), Some(l), Some(progress)) => mm2_game::catch_up_factor(
                 l - mm2_game::course_progress(&r.definition, progress, pos.0, leg_ref),
                 &driver.catch_up_policy,
             ),

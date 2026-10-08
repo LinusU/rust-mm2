@@ -502,6 +502,194 @@ fn a_cop_chase_lessons_police_is_fielded_and_refielded_on_retry() {
     assert!(cops(&mut app).is_empty());
 }
 
+const OPP_HEADER: &str =
+    "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n";
+
+/// A one-vehicle `.opp` route on the +Z axis from `z0` in 40 m steps.
+fn lead_route(z0: f32, steps: usize) -> String {
+    let mut s = OPP_HEADER.to_string();
+    for i in 0..steps {
+        s.push_str(&format!("20,0,{},0,0,0,0,0,0\n", z0 + 40.0 * i as f32));
+    }
+    s
+}
+
+/// A follow lesson's `[Opponent]` lead car (F21-B.19; retail london
+/// crash3, sf crash6/7/10/11 among them) rides on the launch setup as
+/// `lead_cars`, never as a race opponent, difficulty-selected, with its
+/// `.opp` route resolved. The lesson table's `Opponents` column (0 on
+/// every retail row) is not a count to disagree with.
+#[test]
+fn a_lesson_launch_carries_its_difficulty_selected_lead_cars() {
+    use mm2_game::Difficulty;
+
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Opponent]\n1\nvpcab slalom-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\n",
+    );
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap_p",
+        "[Opponent]\n3\nvpcab slalom-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\nvpford slalom-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\nvpbullet Elsewhere-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\n",
+    );
+    write(tmp.path(), "race/london/slalom-0.opp", &lead_route(30.0, 4));
+    // A route no record of this lesson claims — resolved through the
+    // VFS by its authored (mixed-case) name, not left dead.
+    write(
+        tmp.path(),
+        "race/london/elsewhere-0.opp",
+        &lead_route(90.0, 3),
+    );
+    let vfs = vfs_of(tmp.path());
+    let event_ref = EventRef {
+        city: "london".into(),
+        table: EventTableKind::CrashCourse,
+        index: 0,
+    };
+    let (setup, _) = race::lesson_launch(&vfs, &event_ref, Difficulty::Amateur).unwrap();
+    assert_eq!(setup.lead_cars.entries.len(), 1);
+    assert_eq!(setup.lead_cars.entries[0].vehicle, "vpcab");
+    assert!(
+        setup.lead_cars.entries[0]
+            .route
+            .as_ref()
+            .is_some_and(|r| r.points.len() == 4),
+        "the wired .opp resolved to its route"
+    );
+    assert!(
+        setup.lead_cars.issues.is_empty(),
+        "no table-count disagreement is reported: {:?}",
+        setup.lead_cars.issues
+    );
+    assert!(
+        setup.roster.entries.is_empty(),
+        "a lead car is not a race opponent"
+    );
+    let (setup, _) = race::lesson_launch(&vfs, &event_ref, Difficulty::Professional).unwrap();
+    assert_eq!(setup.lead_cars.entries.len(), 3, "the _p record wins");
+    assert!(
+        setup.lead_cars.entries[2]
+            .route
+            .as_ref()
+            .is_some_and(|r| r.points.len() == 3),
+        "a route outside the lesson's records resolves through the VFS"
+    );
+    assert!(
+        setup.lead_cars.issues.is_empty(),
+        "{:?}",
+        setup.lead_cars.issues
+    );
+
+    // crash1 wires no opponent: no lead car.
+    let other = EventRef {
+        index: 1,
+        ..event_ref
+    };
+    let (setup, _) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
+    assert!(setup.lead_cars.entries.is_empty());
+}
+
+/// The production loader fields the lead car as a session-owned AI car
+/// standing at its route's staging pose, not a participant of the
+/// lesson's race; once the countdown releases it drives its route while
+/// the player stands still; a retry refields it under the new generation
+/// without doubling, and a lesson with none fields none.
+#[test]
+fn a_lessons_lead_car_is_fielded_drives_its_route_and_refields_on_retry() {
+    use mm2_app::opponents::OpponentDriver;
+
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Opponent]\n1\nvpcab slalom-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\n",
+    );
+    write(tmp.path(), "race/london/slalom-0.opp", &lead_route(30.0, 6));
+    crate::support::tuned_car(tmp.path(), "vpcab", 1500.0);
+    let leads = |app: &mut App| -> Vec<(Entity, u64, Vec3)> {
+        app.world_mut()
+            .query_filtered::<(Entity, &SessionEntity, &Position), With<OpponentDriver>>()
+            .iter(app.world())
+            .map(|(e, owner, pos)| (e, owner.0, pos.0))
+            .collect()
+    };
+
+    let mut app = event_app(lesson_config(0), vfs_of(tmp.path()));
+    app.add_systems(Update, mm2_app::opponents::opponent_drive);
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+    let first = leads(&mut app);
+    assert_eq!(first.len(), 1, "the authored row became a car");
+    assert_eq!(first[0].1, 1);
+    // Staged at the route's row 0 (x=20, z=30), never a grid slot.
+    assert!(
+        (first[0].2.x - 20.0).abs() < 1.0 && (first[0].2.z - 30.0).abs() < 1.0,
+        "lead car stands at its staging pose, got {:?}",
+        first[0].2
+    );
+    // Not a participant: only the player carries progress.
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<RaceProgress>>()
+            .iter(app.world())
+            .count(),
+        1,
+        "only the player carries progress"
+    );
+
+    // Held through the countdown, driving once the race is released.
+    let mut moved = 0.0_f32;
+    for _ in 0..400 {
+        app.update();
+        if phase(&app) == SessionPhase::Playing {
+            let now = leads(&mut app)[0].2;
+            moved = moved.max(now.distance(first[0].2));
+        }
+    }
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    assert!(
+        moved > 3.0,
+        "the lead car drove its route once released (moved {moved})"
+    );
+    let driver_stats = app
+        .world_mut()
+        .query::<&OpponentDriver>()
+        .single(app.world())
+        .unwrap()
+        .next;
+    assert!(driver_stats > 0, "the route cursor advanced");
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..40 {
+        app.update();
+        if phase(&app) == SessionPhase::Countdown
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Countdown");
+    let second = leads(&mut app);
+    assert_eq!(second.len(), 1, "refielded, none doubled or left over");
+    assert_eq!(second[0].1, 2);
+    assert_ne!(second[0].0, first[0].0, "a new entity, not the first's");
+    assert!(
+        second[0].2.distance(first[0].2) < 1.0,
+        "back at its staging pose, got {:?}",
+        second[0].2
+    );
+
+    // crash1 wires no opponent.
+    let mut app = event_app(lesson_config(1), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+    assert!(leads(&mut app).is_empty());
+}
+
 /// Original-content validation (opt-in: `MM2_RETAIL` names an install).
 /// Every Crash Course row of both cities, at both difficulties, loads
 /// through the real `load_session_world` into `Countdown` on leg 0 with
@@ -566,6 +754,70 @@ fn every_retail_lesson_launches_at_both_difficulties() {
     eprintln!("retail lessons: expected {expected}, launched {launched}");
     assert!(failures.is_empty(), "{failures:?}");
     assert_eq!(expected, launched);
+}
+
+/// Original-content validation (opt-in: `MM2_RETAIL` names an install):
+/// every `[Opponent]` row a retail lesson's own aimap wires, at both
+/// difficulties of both cities, becomes a lead car on the launch setup
+/// with its `.opp` route resolved and drivable — including the routes
+/// the lesson's catalog records do not carry (london crash11's reused
+/// `crash3-0.opp`, sf `race0-a-6.opp`, `Follow-1.opp`). The denominator
+/// is the catalog's own wiring audit (`crash_lesson`), not the roster
+/// builder's output.
+#[test]
+fn every_retail_lesson_wired_opponent_becomes_a_lead_car_with_a_route() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::Difficulty;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail lead-car sweep NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let (mut wired, mut fielded, mut routed) = (0, 0, 0);
+    let mut failures = Vec::new();
+    for city in ["london", "sf"] {
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        for event in catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == EventTableKind::CrashCourse)
+        {
+            let lesson = mm2_content::crash_lesson(&vfs, &catalog, event);
+            for (slot, difficulty) in [Difficulty::Amateur, Difficulty::Professional]
+                .into_iter()
+                .enumerate()
+            {
+                let label = format!("{city} crash:{} {difficulty:?}", event.event_ref.index);
+                let authored = lesson.wiring[slot]
+                    .as_ref()
+                    .map_or(0, |w| w.opponents.len());
+                let setup = race::lesson_race_setup(&vfs, &event.event_ref, difficulty).unwrap();
+                wired += authored;
+                fielded += setup.lead_cars.entries.len();
+                routed += setup
+                    .lead_cars
+                    .entries
+                    .iter()
+                    .filter(|e| e.route.is_some())
+                    .count();
+                if setup.lead_cars.entries.len() != authored {
+                    failures.push(format!(
+                        "{label}: {authored} wired, {} fielded",
+                        setup.lead_cars.entries.len()
+                    ));
+                }
+                for issue in &setup.lead_cars.issues {
+                    eprintln!("{label}: roster issue: {issue}");
+                }
+            }
+        }
+    }
+    eprintln!("retail lead cars: wired {wired}, fielded {fielded}, routed {routed}");
+    assert!(wired > 0, "retail wires lesson opponents");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(wired, routed, "every wired lead car has a drivable route");
 }
 
 /// F21-AC05, vehicle half: a retry hands back a fresh car, not the

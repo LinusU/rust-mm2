@@ -127,6 +127,22 @@ code belongs to the row, not the filename.
   crash7); a cop sees the standing player and begins a pursuit in
   crash5/crash11, the others stay out of sight at the start. What
   makes a cop-chase lesson pass or fail is still unrecovered.
+- **Lead cars** are fielded (F21-B.19): `lesson_opponent_roster`
+  turns each `[Opponent]` row into a lead car on its authored vehicle
+  and `.opp` route, as a non-participant (no `RaceProgress`) staged at
+  the route's row 0. Nine lessons wire one — london `crash3` (also
+  reused by `crash11`), `crash6`, `crash7`, `crash12`; sf `crash6`
+  (`vpford` on `race0-a-6.opp`, not the `stop-1.opp` its own records
+  carry — reported as an unreferenced record), `crash7`, `crash10`
+  (`Follow-1.opp`, mixed-case on disk), `crash11` — and a route the
+  lesson's own records do not carry resolves through the VFS
+  (`crash3-0.opp` for london `crash11`, `race0-a-6.opp`, `Follow-1.opp`).
+  Retail: 18/18 lesson×difficulty wirings field a car with a drivable
+  route (opt-in sweep), and headless runs (`--event crash:<row>`, 900
+  frames, both difficulties) report `lead=<slot>:<vehicle>/<m>m` with
+  122–343 m driven. The lead car drives for the whole session, not per
+  leg, and drives its route regardless of the player; what a follow
+  or stop lesson asks of the player relative to it is unrecovered.
 - **Exceptions**: four sf lessons — `crash1` (slalom), `crash2`
   (corner), `crash4` (oneeighty) and `crash12` (final) — wire an
   identical ten-road `[Exceptions]` block (roads 10–19, `1.0 35.0`)

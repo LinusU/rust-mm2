@@ -806,6 +806,7 @@ pub fn load_session_world(
     // The event's authored police lineup (F20-A.1), fielded beside the
     // opponents once the world exists.
     let mut event_police = mm2_game::PoliceRoster::default();
+    let mut event_lead_cars = mm2_game::OpponentRoster::default();
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
     let mut event_key = None;
@@ -829,6 +830,7 @@ pub fn load_session_world(
             Ok(setup) => {
                 event_key = Some(setup.key);
                 event_police = setup.police;
+                event_lead_cars = setup.lead_cars;
                 let mut def = setup.definition;
                 let mut roster = setup.roster;
                 // RACE-3's Circuit parenthetical (UI-2): the player's
@@ -1780,6 +1782,25 @@ pub fn load_session_world(
                     &mut assets.images,
                     &mut assets.materials,
                     &roster,
+                    &def,
+                    owner,
+                    &mut session,
+                    spawn.position,
+                    spawn.yaw,
+                    nav,
+                );
+            }
+            // F21-B.19: a lesson's `[Opponent]` lead cars drive their
+            // routes as non-participants (no `RaceProgress`) — same
+            // single-player rule as the opponents above.
+            if config.authority == SessionAuthority::Local {
+                opponents::spawn_lead_cars(
+                    &mut commands,
+                    &vfs.0,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    &event_lead_cars,
                     &def,
                     owner,
                     &mut session,

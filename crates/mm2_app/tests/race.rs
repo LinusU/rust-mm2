@@ -1180,6 +1180,7 @@ fn restart_removes_the_lesson_driver() {
             availability: Default::default(),
             aimap: None,
             police: mm2_game::PoliceRoster::default(),
+            lead_cars: mm2_game::OpponentRoster::default(),
         },
     ));
     run(&mut app, 3);

@@ -1431,7 +1431,12 @@ fn run_headless(
                     let Some(driver) = e.get::<opponents::OpponentDriver>() else {
                         return (n, d, rec, c);
                     };
-                    let progress = e.get::<RaceProgress>();
+                    // A lesson's lead car (F21-B.19) carries no progress
+                    // and is reported by `lead=`, not as a racer.
+                    let Some(progress) = e.get::<RaceProgress>() else {
+                        return (n, d, rec, c);
+                    };
+                    let progress = Some(progress);
                     let resolved = progress.and_then(|p| match p.state {
                         ParticipantState::Finished { .. } => Some('F'),
                         ParticipantState::TimedOut { .. } => Some('T'),
@@ -1650,6 +1655,17 @@ fn run_headless(
         .filter(|f| f.any())
         .map(|f| format!(" pol={}", f.smoke_detail()))
         .unwrap_or_default();
+    // F21-B.19 lead-car evidence: `<slot>:<vehicle>/<m driven>m` per
+    // lesson lead car — the AI cars that carry no `RaceProgress`.
+    // Absent without any, so every other record stays bit-identical.
+    let lead_detail = lead_car_detail(
+        world_ecs
+            .iter_entities()
+            .filter(|e| e.get::<RaceProgress>().is_none())
+            .filter_map(|e| e.get::<opponents::OpponentDriver>())
+            .map(|d| (d.index, d.spec.vehicle.as_str(), d.stats.distance))
+            .collect(),
+    );
     // F20-A.3 pursuit evidence: `<chases begun>/<given up>/<peak
     // simultaneous>`, beside `pol=` and only where cops are fielded.
     let pur_detail = world_ecs
@@ -2143,7 +2159,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),
@@ -2368,6 +2384,20 @@ struct OppRow<'a> {
     route_clears: u32,
 }
 
+/// The `lead=` record field (F21-B.19): `<slot>:<vehicle>/<m>m` per
+/// lesson lead car, metres of route driven so far; empty without any.
+fn lead_car_detail(mut leads: Vec<(usize, &str, f32)>) -> String {
+    if leads.is_empty() {
+        return String::new();
+    }
+    leads.sort_by_key(|l| l.0);
+    let rows: Vec<String> = leads
+        .iter()
+        .map(|(i, vehicle, m)| format!("{i}:{vehicle}/{m:.0}m"))
+        .collect();
+    format!(" lead={}", rows.join(","))
+}
+
 /// The `opps=` record field — one row per spawned opponent in authored
 /// roster order: `<slot>:<vehicle>/<cleared>c[/<lap>l][/F|/T]`
 /// followed by the recovery counters when nonzero (`<escapes>e`,
@@ -2521,6 +2551,15 @@ mod tests {
     /// counters only when they fired. This is the field that replaced
     /// out-of-tree instrumentation for "which cars cleared their
     /// gates" (F15 req 6).
+    #[test]
+    fn lead_detail_lists_each_lead_car_by_slot_and_is_empty_without_any() {
+        assert_eq!(lead_car_detail(Vec::new()), "");
+        assert_eq!(
+            lead_car_detail(vec![(1, "vpford", 12.4), (0, "vpcab", 86.0)]),
+            " lead=0:vpcab/86m,1:vpford/12m"
+        );
+    }
+
     #[test]
     fn opponent_detail_reports_progress_and_recovery_per_slot() {
         let mut rows = vec![

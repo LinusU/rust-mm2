@@ -71,7 +71,8 @@ pub use model::{
 pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides, load_routing_nav_graph};
 pub use opponents::{
     EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
-    RosterSummary, audit_roster, event_aimap, opponent_roster, opponent_roster_from_aimap,
+    RosterSummary, audit_roster, event_aimap, lesson_opponent_roster, opponent_roster,
+    opponent_roster_from_aimap,
 };
 pub use ped::{PedArchetype, PedLoadError};
 pub use police::{

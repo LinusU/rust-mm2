@@ -168,7 +168,60 @@ pub fn opponent_roster_from_aimap(
     if event.event_ref.table == EventTableKind::CrashCourse {
         return Err(RosterBuildError::CrashCourseUnsupported);
     }
+    Ok(build_roster(
+        event,
+        difficulty,
+        aimap,
+        picked,
+        Some(event.race_params(difficulty).opponents),
+        None,
+    ))
+}
 
+/// The `[Opponent]` lead cars a Crash Course lesson's own
+/// `crash<N>.aimap{,_p}` wires (F21-B.19; the follow and stop lessons,
+/// among others). The lesson counterpart of
+/// [`opponent_roster_from_aimap`], which refuses Crash Course rows: the
+/// lesson is `Ready`-checked and the rows are distilled the same way,
+/// but the `Opponents` column is **not** cross-checked — a lesson's
+/// `mmcrashdata` params author `0` opponents on every retail row
+/// (CC-7), so a count comparison would only report the authored
+/// disagreement as noise. A missing difficulty variant, a dead or
+/// degenerate route and an unreferenced route are still reported. The
+/// caller passes a Crash Course row.
+pub fn lesson_opponent_roster(
+    vfs: &Vfs,
+    event: &CatalogEvent,
+    difficulty: Difficulty,
+    aimap: &Aimap,
+    picked: &EventAimap,
+) -> Result<OpponentRoster, RosterBuildError> {
+    if !event.status.is_ready() {
+        return Err(RosterBuildError::NotReady(event.status.clone()));
+    }
+    Ok(build_roster(
+        event,
+        difficulty,
+        aimap,
+        picked,
+        None,
+        Some(vfs),
+    ))
+}
+
+/// The roster body shared by the race and lesson producers.
+/// `table_count` is the table row's authored `Opponents` claim to
+/// cross-check, or `None` where the table authors no such claim;
+/// `route_vfs` is where a route no event record claims is looked up
+/// (lessons only).
+fn build_roster(
+    event: &CatalogEvent,
+    difficulty: Difficulty,
+    aimap: &Aimap,
+    picked: &EventAimap,
+    table_count: Option<i64>,
+    route_vfs: Option<&Vfs>,
+) -> OpponentRoster {
     let tag = picked.tag;
 
     let mut issues = Vec::new();
@@ -182,18 +235,21 @@ pub fn opponent_roster_from_aimap(
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     let mut entries = Vec::new();
     for row in &aimap.opponents {
-        referenced.insert(row.waypoints.clone());
-        let route = match event
-            .records
-            .iter()
-            .find(|r| r.kind == RaceFileKind::Opp && record_basename(r) == row.waypoints)
-        {
-            None => {
-                issues.push(OpponentIssue::UnresolvedRoute {
-                    name: row.waypoints.clone(),
-                });
-                None
-            }
+        referenced.insert(row.waypoints.to_ascii_lowercase());
+        let route = match event.records.iter().find(|r| {
+            r.kind == RaceFileKind::Opp && record_basename(r).eq_ignore_ascii_case(&row.waypoints)
+        }) {
+            None => match route_vfs {
+                Some(vfs) => {
+                    route_from_vfs(vfs, &event.event_ref.city, &row.waypoints, &mut issues)
+                }
+                None => {
+                    issues.push(OpponentIssue::UnresolvedRoute {
+                        name: row.waypoints.clone(),
+                    });
+                    None
+                }
+            },
             Some(rec) => match &rec.content {
                 RecordContent::Opp(file) => {
                     if let Some(t) = rec.difficulty
@@ -242,8 +298,9 @@ pub fn opponent_roster_from_aimap(
     // The table row's authored count is a claim about the lineup, not
     // the lineup — a disagreement is reported, never padded or trimmed
     // (RACE-11's `sf/race0` anomaly is exactly this shape).
-    let table = event.race_params(difficulty).opponents;
-    if entries.len() as i64 != table {
+    if let Some(table) = table_count
+        && entries.len() as i64 != table
+    {
         issues.push(OpponentIssue::CountMismatch {
             wired: entries.len(),
             table,
@@ -258,12 +315,51 @@ pub fn opponent_roster_from_aimap(
             continue;
         }
         let name = record_basename(rec).to_string();
-        if !referenced.contains(&name) {
+        if !referenced.contains(&name.to_ascii_lowercase()) {
             issues.push(OpponentIssue::UnreferencedRoute { name });
         }
     }
 
-    Ok(OpponentRoster { entries, issues })
+    OpponentRoster { entries, issues }
+}
+
+/// A lesson-wired route no event record claims, read through the VFS
+/// from `race/<city>/<name>`. Pushes the issue the record path would
+/// have for the same failure; no difficulty-tag check, since the lesson
+/// wires the file by name.
+fn route_from_vfs(
+    vfs: &Vfs,
+    city: &str,
+    name: &str,
+    issues: &mut Vec<OpponentIssue>,
+) -> Option<OpponentRoute> {
+    let logical = format!("race/{city}/{name}");
+    let Ok(bytes) = vfs.read_logical(&logical) else {
+        issues.push(OpponentIssue::UnresolvedRoute {
+            name: name.to_string(),
+        });
+        return None;
+    };
+    match OppFile::parse(&String::from_utf8_lossy(&bytes)) {
+        Err(e) => {
+            issues.push(OpponentIssue::RouteFailed {
+                name: name.to_string(),
+                reason: e.to_string(),
+            });
+            None
+        }
+        Ok(file) => {
+            let route = distill_route(&file);
+            if route.drivable() {
+                Some(route)
+            } else {
+                issues.push(OpponentIssue::DegenerateRoute {
+                    name: name.to_string(),
+                });
+                None
+            }
+        }
+    }
 }
 
 /// The basename of a record's logical path (`race/london/race0-a-0.opp`
