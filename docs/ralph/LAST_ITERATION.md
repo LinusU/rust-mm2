@@ -1,3 +1,12 @@
+# Last iteration — F26-C.1: a client cannot award itself a result (iteration 15 of the recovery run)
+
+Selection: the F29-C.1 review passed with no blockers. F29 has had a long run of tooling/test slices with its remaining legs gated on original-derived tuning; F26-C (queued, deps F12-B/F13-B/F14-B/F26-B implemented) names "malicious-state" tests and F26-AC04 ("a client cannot award itself a checkpoint, lap, win, repair or score by submitting state") had per-verb tests for Props/Traffic/World/Cnr/Start/Cancel/VehicleRefused/Roster but none for the headline `Snap` (progress tails + race row) and no table over the whole set. The reader already refuses by allowlist (`Input`/`ResetRequest`/`SetReady`/`SetVehicle`/`Leave`), so no production change was needed.
+Change: tests only, `mm2_net/src/lobby.rs` (+2): `a_client_cannot_award_itself_a_finish` (forged `Snap`: own seat `prog_state` finished, max lap/cleared/crossings, `SnapRace` past the end -> `Left{Malformed}`, no further host event, empty input mailbox, socket closed) and `every_host_side_verb_sent_by_a_client_drops_it` (fresh host per verb: `Hello`, `Accept`, `Reject`, `Welcome`, `Session`, `Roster`, `VehicleRefused`, `Start`, `Cancel`). Mutation (reader allowlist admitting `Snap`/`Accept`) fails both tests; restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 2667 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic loopback, wire layer only. Advances F26-AC04; AC01-AC03/05/06 unchanged. Open on F26-C: multi-process world/race consistency under restart, hostile `Input` pacing, AC03 on a real impaired run.
+
+---
+
 # Last iteration — F29-C.1: race-rule mods through the production race consumer (iteration 14 of the recovery run)
 
 Selection: the F29-B.9 review passed with no blockers. F29-B's remaining legs (a shippable gameplay example mod, AC03 on a real two-process run) need original-derived tuning or a longer process harness; F29-C ("override/revert/conflict/security tests across vehicle/world/audio/race consumers") was queued and its race leg was the one consumer family F29-A.2 never exercised. Tooling slices on F29-B stop here.

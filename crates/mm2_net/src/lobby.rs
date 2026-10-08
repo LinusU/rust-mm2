@@ -2603,6 +2603,129 @@ mod tests {
         }
     }
 
+    /// F26-AC04, the headline case: a client that submits a snapshot
+    /// claiming its own seat finished first with every gate cleared,
+    /// and a race row saying the race is over, is dropped — the claim
+    /// is never absorbed into the mailbox or reported to the consumer.
+    /// Progress and results are the authority's to derive from its own
+    /// sim of the seat; a client's only voice is its `Input`.
+    #[test]
+    fn a_client_cannot_award_itself_a_finish() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::Snap {
+                generation: 1,
+                tick: 1,
+                entries: vec![SnapEntry {
+                    player: 1,
+                    pos: [0.0; 3],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0; 3],
+                    angvel: [0.0; 3],
+                    epoch: 0,
+                    steer: 0,
+                    spin: 0,
+                    compression: 0,
+                    flags: 0,
+                    damage: 0,
+                    breaks: 0,
+                    prog_state: 2,
+                    prog_ticks: 1,
+                    prog_lap: u32::MAX,
+                    prog_next: 0,
+                    prog_cleared: u64::MAX,
+                    prog_crossings: u32::MAX,
+                    prog_route_clears: u32::MAX,
+                    rpm: 0,
+                    surf_skid: SNAP_NO_SURFACE,
+                    skid_slip: 0,
+                    skid_speed: 0,
+                    surf_roll: SNAP_NO_SURFACE,
+                }],
+                trailers: Vec::new(),
+                impacts: Vec::new(),
+                race: Some(crate::proto::SnapRace {
+                    phase: u8::MAX,
+                    countdown: 0,
+                    clock: 1,
+                }),
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+        // Nothing the dropped peer said reached the consumer, and the
+        // socket is closed on it.
+        assert!(host.try_recv().is_err());
+        assert!(host.remote_inputs().latest(1).is_none());
+        assert!(mallory.recv().is_err());
+    }
+
+    /// F26-AC04 as a table: the client→host set is exactly `SetReady`,
+    /// `SetVehicle`, `Leave`, `Input` and `ResetRequest`. Every other
+    /// verb, sent by a rostered client, drops it `Malformed` — a client
+    /// can neither answer for the host (handshake or lifecycle verbs)
+    /// nor re-handshake mid-lobby. A new wire verb that is not on the
+    /// reader's allowlist is refused by default; this pins the ones
+    /// that exist.
+    #[test]
+    fn every_host_side_verb_sent_by_a_client_drops_it() {
+        let hello_again = hello("b".to_string(), "mallory".to_string(), FP);
+        let spoofs = [
+            ("Hello", Message::Hello(hello_again)),
+            ("Accept", Message::Accept),
+            (
+                "Reject",
+                Message::Reject {
+                    code: RejectCode::LobbyFull,
+                    message: "go away".to_string(),
+                },
+            ),
+            ("Welcome", Message::Welcome { player_id: 0 }),
+            ("Session", Message::Session(ad("spoofed"))),
+            ("Roster", Message::Roster { players: vec![] }),
+            (
+                "VehicleRefused",
+                Message::VehicleRefused {
+                    reason: "no".to_string(),
+                },
+            ),
+            (
+                "Start",
+                Message::Start {
+                    generation: 1,
+                    session: ad("spoofed"),
+                    host_pick: None,
+                },
+            ),
+            ("Cancel", Message::Cancel { generation: 1 }),
+        ];
+        for (name, spoof) in spoofs {
+            let host = sessioned_host();
+            let mut mallory = join_sessioned(&host, "mallory");
+            host.recv_timeout(WAIT).unwrap();
+            recv_roster(&mut mallory, 1);
+            mallory.send(&spoof).unwrap();
+            match host.recv_timeout(WAIT) {
+                Ok(HostEvent::Left {
+                    id: 1,
+                    cause: LeaveCause::Malformed,
+                    ..
+                }) => {}
+                other => panic!("{name}: expected a Malformed Left, got {other:?}"),
+            }
+            assert!(host.try_recv().is_err(), "{name}: nothing else surfaced");
+        }
+    }
+
     /// The roster stays the shared truth through a session (MP-5's
     /// leaver rule): mid-session pick changes and departures still
     /// land and rebroadcast.
