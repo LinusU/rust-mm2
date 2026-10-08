@@ -1,18 +1,13 @@
-# Last iteration — report 7 item 11: the three-process collision test waits on its condition (iteration 5 of the new run)
+# Last iteration — refuse the wire stop conditions on a lone headless run (iteration 6 of the new run)
 
-Selection: iteration 4's commit (`cd74a45`) passed gates and review with no blocking findings; item 11 is the last of report 7.
+Selection: iteration 5's commit (`4a0a9c9`) passed gates and review with no blocking findings. The review left one non-blocking nit: `--until-impacts`, `--until-peer-left` and `--deadline` were accepted with `--headless` but silently ignored on the single-process `headless_smoke` path (only `budget.frames` was passed), so a lone run reported a pass having waited on nothing. Report 7 items 1–11 are all implemented candidates; report 6 follow-up 2 is already reconciled (ledger DSN-11); follow-up 1's two-process leg needs a retail Blitz/Checkpoint wreck that the dev-world process harness cannot produce (no authored damage), and follow-up 3 is F26-A scope — those stay open.
 
-Cause: `a_driven_collision_replicates_across_three_processes` ended its clients on frame budgets (raised to 2800/2500 by `70d53a5`). A frame budget is not a clock: under load the ram's first strike lands late in host ticks and the uninvolved client can exit before the impact row reaches it.
+Change: `main.rs` — when a stop condition is armed and the run is neither `--join` nor `--host`, print a `status=fail` record ("need --join or --host: a single-process run only counts --frames") and exit with the Fail code, rather than running `--frames` and passing. Records without an armed condition are unchanged.
 
-Change:
-- Headless smoke gains `smoke::StopWhen` / `RunBudget` (`headless_lobby`/`headless_host` take a `RunBudget` in place of `frames`; `headless_smoke` unchanged). `--frames` stays the ceiling. CLI (all `requires = headless`): `--until-impacts <n>` (applied replicated impact rows), `--until-peer-left` with `--with-impacts <n>` (a held remote copy is gone and this process has emitted `n` impacts of its own), `--deadline <secs>` (wall-clock bound). The record prints `stop=impacts|peer-left|deadline` and counts the updates actually run in `updates=`; records without an armed condition are bit-identical.
-- The driven run: bob `--until-impacts 1 --deadline 120`, alice `--until-peer-left --with-impacts 1 --deadline 150`, frames 100000 as ceiling. The test asserts `stop=impacts` / `stop=peer-left`, so a deadline fallback fails loudly. Exact-count assertions are unchanged. The control run (nothing may collide, no condition to wait for) keeps its fixed 2800/2500 frames.
-- Alice's `--with-impacts 1` came from a first parallel stress run: 3 of 10 copies failed because bob left (and alice with him) before alice's own predicted sim had registered the contact (`impacts=0`).
+Test: `net_edge::a_lone_headless_run_refuses_wire_stop_conditions` runs the real `mm2` binary with `--until-impacts 1` and with `--deadline 5` on the dev world and asserts the failed record and exit code.
 
-Tests: 3 unit (`mm2_app` `smoke::tests`: stop fires on its event and not before, peer-left needs a held peer first, deadline). Process level: the collision test alone ~10 s; 12 and then 16 copies in parallel all pass (before the `--with-impacts` fix: 7/10).
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass; `cargo test --locked --workspace` exit 0.
 
-Gates: see the commit; fmt, clippy -D warnings, `cargo test --locked --workspace` run in the foreground.
+Not verified: no windowed, retail or GPU run (CLI validation only). Residual from iteration 4 stands (rate/growth limit not applied to race rows). The review's other note (peer-left from a leave/rejoin scenario) is unchanged: a link `Closed` is terminal by design.
 
-Not verified: no windowed or retail run (networking test harness only). Residual from iteration 4 stands (rate/growth limit not applied to race rows).
-
-Status: candidate; not independently checked. Report 7 items 1–11 are all implemented candidates; the next iteration returns to the F25-B/F25-C remainders in the plan.
+Status: candidate; not independently checked. Next iteration: the F25-B/F25-C remainders in the plan (breakdown two-process leg once a retail event-level harness exists; collision under impairment).

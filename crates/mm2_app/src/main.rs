@@ -1370,6 +1370,21 @@ fn main() {
         } else if let Some(link) = host_link.take() {
             smoke::headless_host(link, vfs, car, &vehicle, budget, driver, active_profile)
         } else {
+            // The stop conditions watch the wire; a lone process has none,
+            // and `headless_smoke` runs exactly `--frames` updates.
+            if budget.stop.is_armed() {
+                println!(
+                    "{}",
+                    record(
+                        smoke::SmokeStatus::Fail,
+                        "--until-impacts/--until-peer-left/--deadline need --join or --host: \
+                         a single-process run only counts --frames"
+                            .into(),
+                    )
+                    .line()
+                );
+                std::process::exit(smoke::SmokeStatus::Fail.exit_code());
+            }
             smoke::headless_smoke(
                 &session_config,
                 vfs,

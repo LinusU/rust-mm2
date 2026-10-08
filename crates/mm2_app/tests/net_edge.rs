@@ -154,6 +154,32 @@ fn an_unreachable_address_fails_the_join() {
     assert_eq!(join.wait_timeout(WAIT).code(), Some(1));
 }
 
+/// The `--until-*` stop conditions watch the wire. A lone headless run
+/// has none, so it refuses them with a failed record instead of
+/// silently running its `--frames` and reporting a pass.
+#[test]
+fn a_lone_headless_run_refuses_wire_stop_conditions() {
+    let install = tempfile::tempdir().unwrap();
+    for flag in [["--until-impacts", "1"], ["--deadline", "5"]] {
+        let out = std::process::Command::new(MM2_EXE)
+            .args(["--mm2-path", install.path().to_str().unwrap()])
+            .args(["--dev-world", "--headless", "--frames", "5"])
+            .args(flag)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("status=fail") && stdout.contains("need --join or --host"),
+            "{flag:?}: {stdout}"
+        );
+        assert_eq!(out.status.code(), Some(smoke_fail_code()), "{flag:?}");
+    }
+}
+
+fn smoke_fail_code() -> i32 {
+    mm2_app::smoke::SmokeStatus::Fail.exit_code()
+}
+
 /// Three kinds of bad first contact against a real `mm2-host`, each
 /// bounded at the door:
 ///
