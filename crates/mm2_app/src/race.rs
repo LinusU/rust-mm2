@@ -233,6 +233,13 @@ pub enum LessonSetupError {
     /// so this only ever names a mod's file.
     #[error("lesson aimap failed: {0}")]
     Aimap(mm2_content::RosterBuildError),
+    /// A lead car's `.opp` route exists but is malformed or has no
+    /// drivable line. Refused rather than fielding a lead car that
+    /// stands still for the whole lesson (F29-AC04). Every retail lead
+    /// car has a drivable route, so this only ever names a mod's file; a
+    /// route that is merely absent stays a reported issue.
+    #[error("lesson lead-car route is unusable: {0}")]
+    LeadRoute(mm2_game::OpponentIssue),
 }
 
 /// A Crash Course lesson's runnable setup (F21-B): the stable save
@@ -315,6 +322,15 @@ pub fn lesson_race_setup(
                         warn!(error = %e, "lesson lead-car roster failed to build — no lead cars");
                         mm2_game::OpponentRoster::default()
                     });
+            if let Some(bad) = lead_cars.issues.iter().find(|i| {
+                matches!(
+                    i,
+                    mm2_game::OpponentIssue::RouteFailed { .. }
+                        | mm2_game::OpponentIssue::DegenerateRoute { .. }
+                )
+            }) {
+                return Err(LessonSetupError::LeadRoute(bad.clone()));
+            }
             (Some(aimap), police, lead_cars)
         }
         Err(mm2_content::RosterBuildError::NoAimapRecord) => (

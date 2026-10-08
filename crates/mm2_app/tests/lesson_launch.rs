@@ -321,6 +321,56 @@ fn a_lesson_with_a_malformed_aimap_fails_the_session_not_a_bare_launch() {
     assert!(app.world().get_resource::<RaceState>().is_none());
 }
 
+/// The route twin of the aimap refusal: a lead car whose `.opp` exists but
+/// cannot be parsed fails the session, not a lesson whose lead car stands
+/// still. (A route the catalog itself claims, one named for a leg, is
+/// already refused as an incomplete event; this is the unclaimed name
+/// resolved through the VFS.) A route that is merely absent stays a
+/// reported issue — the slot keeps no line — so the same wiring with the
+/// file missing still launches.
+#[test]
+fn a_lesson_whose_lead_route_is_malformed_fails_the_session_but_a_missing_one_launches() {
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Opponent]\n1\nvpcab pursuit-0.opp 0.9 0 50.0 0.7 1 1 1 1 0 1.0\n",
+    );
+    write(
+        tmp.path(),
+        "race/london/pursuit-0.opp",
+        "x,y\n1,2,not-a-number\n",
+    );
+    crate::support::tuned_car(tmp.path(), "vpcab", 1500.0);
+    let mut app = event_app(lesson_config(0), vfs_of(tmp.path()));
+    app.update();
+    // The reason names the route, so the failure is this refusal and not
+    // a missing car or world.
+    assert!(
+        matches!(phase(&app), SessionPhase::Failed(ref r) if r.contains("lead-car route")),
+        "got {:?}",
+        phase(&app)
+    );
+    assert!(app.world().get_resource::<LessonDriver>().is_none());
+    assert!(app.world().get_resource::<RaceState>().is_none());
+
+    // Remove the file: the reference dangles, which is reported, not refused.
+    std::fs::remove_file(tmp.path().join("race/london/pursuit-0.opp")).unwrap();
+    let (setup, _) = race::lesson_launch(
+        &vfs_of(tmp.path()),
+        &EventRef {
+            city: "london".into(),
+            table: EventTableKind::CrashCourse,
+            index: 0,
+        },
+        mm2_game::Difficulty::Amateur,
+    )
+    .unwrap();
+    assert_eq!(setup.lead_cars.entries.len(), 1);
+    assert!(setup.lead_cars.entries[0].route.is_none());
+    assert!(!setup.lead_cars.issues.is_empty());
+}
+
 #[test]
 fn a_non_crash_row_never_installs_a_lesson_driver() {
     let tmp = lesson_install();

@@ -18,10 +18,15 @@
 //! backfilled from the stock file, and a malformed aimap is refused
 //! instead of racing the event without opponents.
 //!
+//! F29-C.5 (the final section) covers a Crash Course lesson through
+//! `lesson_race_setup`: a mod's sub-event table, `.aimap` lead car and
+//! `.opp` route each reach the built lesson, a dead route is reported, and
+//! a present-but-unusable route is refused.
+//!
 //! Self-authored synthetic data; no original install is read. This is
 //! synthetic evidence for the Checkpoint, Blitz and Circuit tables, their
-//! waypoint/grid files and the checkpoint event's `.aimap`/`.opp` roster
-//! only — Crash Course sequences are not exercised here.
+//! waypoint/grid files, the checkpoint event's `.aimap`/`.opp` roster and
+//! one Crash Course lesson's table/aimap/route only.
 
 use std::path::Path;
 
@@ -767,4 +772,285 @@ fn a_malformed_roster_override_is_refused_not_raced_without_opponents() {
     // The bystander event still loads, and dropping the mod restores event 0.
     assert_eq!(lineup(&v, 1).entries, []);
     assert_eq!(lineup(&mounted(&r.base, &[]), 0), stock_lineup());
+}
+
+// ---- F29-C.5: a Crash Course lesson's sequence table, aimap and `.opp` ---
+//
+// `lesson_race_setup` is the lesson consumer: it reads the lesson's
+// `crash<N>data{,_p}.csv` sub-event table for the legs, its `.aimap`
+// `[Opponent]` rows for the lead cars and the `.opp` routes those name.
+// A mod can replace each independently; none falls back to the stock
+// record once the mod's file is the one the VFS serves.
+
+const CRASHDATA: &str =
+    "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
+const LEAD_ROUTE: [f32; 3] = [30.0, 70.0, 110.0];
+
+fn lesson_event() -> EventRef {
+    kind_event(EventTableKind::CrashCourse, 0)
+}
+
+/// One lesson (`crash0`) with one slalom leg and a lead car on
+/// `lead-0.opp`.
+fn lesson_base(d: &Path) {
+    write(
+        d,
+        "race/testcity/mmcrashdata.csv",
+        format!("{HEADER}\nlesson1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n"),
+    );
+    write(
+        d,
+        "race/testcity/crash0.aimap",
+        opponent_aimap("vpstock", "lead-0.opp"),
+    );
+    for suffix in ["data", "data_p"] {
+        write(
+            d,
+            &format!("race/testcity/crash0{suffix}.csv"),
+            format!("{CRASHDATA}slalom,7,1,12,0.05,0,0,0,0,0,0\n"),
+        );
+    }
+    write(
+        d,
+        "race/testcity/slalom.csv",
+        format!("{WAYPOINTS}10,1,20,90,15,0,0,0,\n10,1,60,-30,16,0,0,0,\n"),
+    );
+    write(d, "race/testcity/lead-0.opp", opp(&LEAD_ROUTE));
+}
+
+struct Lessons {
+    tmp: tempfile::TempDir,
+    base: std::path::PathBuf,
+}
+
+fn lessons() -> Lessons {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    lesson_base(&base);
+    Lessons { tmp, base }
+}
+
+/// The lesson as the consumer built it: leg time limits and gate counts,
+/// and the lead-car lineup reduced like [`Lineup`].
+#[derive(Debug, PartialEq)]
+struct Lesson {
+    legs: Vec<(String, Option<u32>, usize)>,
+    lead: Lineup,
+}
+
+fn lesson_of(vfs: &Vfs) -> Lesson {
+    let setup =
+        mm2_app::race::lesson_race_setup(vfs, &lesson_event(), Difficulty::Amateur).unwrap();
+    Lesson {
+        legs: setup
+            .legs
+            .iter()
+            .map(|l| {
+                (
+                    l.filename.clone(),
+                    l.definition.time_limit_ticks,
+                    l.definition.checkpoints.len(),
+                )
+            })
+            .collect(),
+        lead: Lineup {
+            entries: setup
+                .lead_cars
+                .entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.vehicle.clone(),
+                        e.route
+                            .as_ref()
+                            .map(|r| r.points.iter().map(|p| p.position.x).collect()),
+                    )
+                })
+                .collect(),
+            issues: setup.lead_cars.issues.len(),
+        },
+    }
+}
+
+fn stock_lesson() -> Lesson {
+    let stock = lesson_of(&mounted(&lessons().base, &[]));
+    assert_eq!(stock.legs.len(), 1);
+    assert_eq!(
+        stock.lead,
+        Lineup {
+            entries: vec![("vpstock".into(), Some(LEAD_ROUTE.to_vec()))],
+            issues: 0
+        }
+    );
+    stock
+}
+
+#[test]
+fn a_mod_replaces_a_lessons_legs_lead_car_and_route_through_the_lesson_consumer() {
+    let l = lessons();
+    let stock = lesson_of(&mounted(&l.base, &[]));
+    assert_eq!(stock, stock_lesson());
+
+    // The sequence table swaps the leg (name and budget); the lead car is
+    // the stock one.
+    let legs = kinds_mod(
+        l.tmp.path(),
+        "lesson-legs",
+        &[
+            (
+                "race/testcity/crash0data.csv",
+                format!("{CRASHDATA}slalom,7,1,30,0.05,0,0,0,0,0,0\n"),
+            ),
+            (
+                "race/testcity/crash0data_p.csv",
+                format!("{CRASHDATA}slalom,7,1,30,0.05,0,0,0,0,0,0\n"),
+            ),
+        ],
+    );
+    let v = mounted(&l.base, &[&legs]);
+    let got = lesson_of(&v);
+    assert_ne!(got.legs, stock.legs, "the mod's table drives the leg");
+    assert_eq!(got.lead, stock.lead);
+
+    // The aimap swaps who leads; the stock `.opp` still serves the line.
+    let who = kinds_mod(
+        l.tmp.path(),
+        "lesson-who",
+        &[(
+            "race/testcity/crash0.aimap",
+            opponent_aimap("vpmod", "lead-0.opp"),
+        )],
+    );
+    let got = lesson_of(&mounted(&l.base, &[&who]));
+    assert_eq!(got.legs, stock.legs);
+    assert_eq!(
+        got.lead.entries,
+        [("vpmod".to_string(), Some(LEAD_ROUTE.to_vec()))]
+    );
+
+    // The `.opp` swaps the line; the stock aimap still names the car.
+    let wher = kinds_mod(
+        l.tmp.path(),
+        "lesson-where",
+        &[("race/testcity/lead-0.opp", opp(&[40.0, 90.0, 140.0, 190.0]))],
+    );
+    let got = lesson_of(&mounted(&l.base, &[&wher]));
+    assert_eq!(got.legs, stock.legs);
+    assert_eq!(
+        got.lead,
+        Lineup {
+            entries: vec![("vpstock".into(), Some(vec![40.0, 90.0, 140.0, 190.0]))],
+            issues: 0
+        }
+    );
+
+    // All three compose; unmounting them restores the stock lesson.
+    let all = lesson_of(&mounted(&l.base, &[&legs, &who, &wher]));
+    assert_eq!(all.legs, lesson_of(&v).legs);
+    assert_eq!(
+        all.lead.entries,
+        [("vpmod".to_string(), Some(vec![40.0, 90.0, 140.0, 190.0]))]
+    );
+    assert_eq!(lesson_of(&mounted(&l.base, &[])), stock);
+}
+
+#[test]
+fn lesson_mods_are_gameplay_and_move_the_fingerprint() {
+    let l = lessons();
+    let base = fingerprint::gameplay(&mounted(&l.base, &[])).unwrap().hash;
+    let mods = [
+        kinds_mod(
+            l.tmp.path(),
+            "lesson-legs",
+            &[(
+                "race/testcity/crash0data.csv",
+                format!("{CRASHDATA}slalom,7,1,30,0.05,0,0,0,0,0,0\n"),
+            )],
+        ),
+        kinds_mod(
+            l.tmp.path(),
+            "lesson-who",
+            &[(
+                "race/testcity/crash0.aimap",
+                opponent_aimap("vpmod", "lead-0.opp"),
+            )],
+        ),
+        kinds_mod(
+            l.tmp.path(),
+            "lesson-where",
+            &[("race/testcity/lead-0.opp", opp(&[40.0, 90.0, 140.0]))],
+        ),
+    ];
+    for m in &mods {
+        let vfs = mounted(&l.base, &[m]);
+        let reports = fingerprint::mod_reports(&vfs);
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].is_cosmetic_only(), "{reports:?}");
+        assert!(reports[0].contradiction().is_none(), "{reports:?}");
+        assert_ne!(fingerprint::gameplay(&vfs).unwrap().hash, base, "{m:?}");
+    }
+}
+
+#[test]
+fn a_lesson_override_naming_a_dead_route_is_reported_not_backfilled_from_the_stock_line() {
+    let l = lessons();
+    let dead = kinds_mod(
+        l.tmp.path(),
+        "lesson-dead",
+        &[(
+            "race/testcity/crash0.aimap",
+            opponent_aimap("vpmod", "nowhere-0.opp"),
+        )],
+    );
+    let setup = mm2_app::race::lesson_race_setup(
+        &mounted(&l.base, &[&dead]),
+        &lesson_event(),
+        Difficulty::Amateur,
+    )
+    .unwrap();
+    assert_eq!(setup.lead_cars.entries.len(), 1);
+    assert!(
+        setup.lead_cars.entries[0].route.is_none(),
+        "the slot keeps no line rather than the stock one"
+    );
+    assert!(
+        setup.lead_cars.issues.iter().any(|i| matches!(
+            i,
+            mm2_game::OpponentIssue::UnresolvedRoute { name } if name == "nowhere-0.opp"
+        )),
+        "{:?}",
+        setup.lead_cars.issues
+    );
+}
+
+#[test]
+fn a_malformed_or_degenerate_lesson_route_is_refused_not_fielded_as_a_lead_car_that_never_moves() {
+    use mm2_app::race::LessonSetupError;
+    let l = lessons();
+    let stock = lesson_of(&mounted(&l.base, &[]));
+    // A header from the wrong table, and a line that never leaves its
+    // first point: both exist, neither can be driven.
+    for (id, body) in [
+        ("lesson-broken-opp", "x,y\n1,2,not-a-number\n".to_string()),
+        ("lesson-still-opp", opp(&[40.0, 40.0, 40.0])),
+    ] {
+        let m = kinds_mod(l.tmp.path(), id, &[("race/testcity/lead-0.opp", body)]);
+        let v = mounted(&l.base, &[&m]);
+        let err = mm2_app::race::lesson_race_setup(&v, &lesson_event(), Difficulty::Amateur)
+            .err()
+            .unwrap_or_else(|| panic!("{id}: must be refused, not launched"));
+        assert!(
+            matches!(
+                err,
+                LessonSetupError::LeadRoute(
+                    mm2_game::OpponentIssue::RouteFailed { ref name, .. }
+                    | mm2_game::OpponentIssue::DegenerateRoute { ref name }
+                ) if name == "lead-0.opp"
+            ),
+            "{id}: {err:?}"
+        );
+        // Dropping the mod restores the stock lesson.
+        assert_eq!(lesson_of(&mounted(&l.base, &[])), stock);
+    }
 }
