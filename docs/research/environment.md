@@ -262,9 +262,13 @@ refuted either way.
 The implemented consumer: `mm2_app::water`'s `CityWater` collects both
 sources (refs → bound `max(level, room-top)` per DSN-34; SDL rooms →
 the level verbatim) and treats a point as exposed inside a marked
-room's authored XZ perimeter at/below its bound — the original tests
-room occupancy; point-in-perimeter is the same set for a contained
-point. Exposure feeds `track_recovery`'s contact classification
+room's authored XZ perimeter at/below its bound and no more than
+`WATER_DEPTH` (5 m) under it — the original tests room occupancy, which
+point-in-perimeter matches except under a river: London's Thames tunnel
+(rooms 670–672, floors y ≈ −13…−11) lies below water rooms 347–349 and
+an authored Blitz gate stands in it, so the column is depth-capped (the
+retail audit in `tests/recovery.rs` found it; no other retail room
+overlaps one). Exposure feeds `track_recovery`'s contact classification
 (designed overlay shape, verified marking — DSN-34).
 
 Parser: `mm2_formats::water::WaterDef`.

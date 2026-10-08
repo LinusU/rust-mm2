@@ -36,7 +36,10 @@
 //!   water at any height" for a mod room whose water plane sits above
 //!   the global level. SDL-marked rooms bound at the authored `level`
 //!   verbatim, matching `GetWaterLevel`'s single global value.
-//!   [`SURFACE_SLACK`] covers contact-vs-plane float noise;
+//!   [`SURFACE_SLACK`] covers contact-vs-plane float noise, and the
+//!   column stops [`WATER_DEPTH`] below the bound so a tunnel under a
+//!   river (London's Thames tunnel, found by the retail route audit
+//!   in `tests/recovery.rs`) is not drowned;
 //! - the level never applies outside the listed rooms: London carries
 //!   real BAI lanes down to y ≈ −22 under the −3.8 level (below-grade
 //!   roads), so a global below-level kill is refuted by the data;
@@ -74,6 +77,16 @@ use crate::city::{authored_z, point_in_poly, room_poly};
 /// slack exists for a mod room whose bound is its own surface, where a
 /// resting wheel's raycast contact can report a hair above it.
 const SURFACE_SLACK: f32 = 0.1;
+
+/// How far below a deadly room's bound its water column reaches,
+/// metres. The original tests room occupancy; a point-in-perimeter test
+/// also catches whatever lies *under* the room's footprint, and London's
+/// Thames tunnel (rooms 670-672, floors at y ≈ −13..−11) runs 7+ m
+/// under rooms 347-349 (surface y ≈ −4.0) — an authored Blitz gate and
+/// every car driving it would otherwise drown. Sunk deeper than this a
+/// car is no longer in the water room: it reads as airborne and the
+/// out-of-bounds legs own it.
+const WATER_DEPTH: f32 = 5.0;
 
 /// Which of the exe's two deadly-water sources marked a room — the
 /// authored `.water` refs or the SDL water-surface pass.
@@ -224,7 +237,9 @@ impl CityWater {
     pub fn is_deadly(&self, p: Vec3) -> bool {
         let pt = (p.x, authored_z(p.z));
         self.rooms.iter().any(|r| {
-            p.y <= r.bound + SURFACE_SLACK && r.poly.len() >= 3 && point_in_poly(pt, &r.poly)
+            (r.bound - WATER_DEPTH..=r.bound + SURFACE_SLACK).contains(&p.y)
+                && r.poly.len() >= 3
+                && point_in_poly(pt, &r.poly)
         })
     }
 }
@@ -343,7 +358,7 @@ mod tests {
         let water = CityWater::build(&def, &psdl, None);
         // Inside room 1's tile, below the level: deadly.
         assert!(water.is_deadly(world(4.0, -4.0, 4.0)));
-        assert!(water.is_deadly(world(4.0, -10.0, 4.0)));
+        assert!(water.is_deadly(world(4.0, -8.0, 4.0)));
         // Inside room 1's tile but above the level — a bridge deck
         // over the water stays dry.
         assert!(!water.is_deadly(world(4.0, 5.0, 4.0)));
@@ -351,6 +366,21 @@ mod tests {
         // below-grade roads (room 2 sits at −20) never drown.
         assert!(!water.is_deadly(world(14.0, -20.0, 4.0)));
         assert!(!water.is_deadly(world(40.0, -50.0, 4.0)));
+    }
+
+    /// London's Thames tunnel runs under the river's footprint with its
+    /// floor ~9 m below the surface (rooms 670-672 under 347-349): the
+    /// column stops `WATER_DEPTH` under the bound, so the tunnel is dry
+    /// while a car sunk a few metres is still in the water.
+    #[test]
+    fn a_tunnel_under_the_footprint_is_not_water() {
+        let psdl = psdl_with_water(-4.0, -20.0);
+        let def = WaterDef::parse("-3.8\n1").unwrap();
+        let water = CityWater::build(&def, &psdl, None);
+        let bound = -3.8;
+        assert!(water.is_deadly(world(4.0, bound - WATER_DEPTH + 0.1, 4.0)));
+        assert!(!water.is_deadly(world(4.0, bound - WATER_DEPTH - 0.1, 4.0)));
+        assert!(!water.is_deadly(world(4.0, -13.8, 4.0)));
     }
 
     #[test]

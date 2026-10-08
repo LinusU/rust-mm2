@@ -1256,3 +1256,84 @@ fn a_rescue_keeps_the_gates_already_earned() {
         "the earned gate stays, the unvisited one is not credited"
     );
 }
+
+/// Every retail city's authored race points (start slots and checkpoint
+/// gates, both difficulties of every ready event) against the city's
+/// real `CityWater` built through the production path (F28-AC04).
+/// Deadly water is scoped to the listed rooms, so a start slot or gate
+/// inside one would drown a car on the authored route; the audit
+/// reports its denominators and fails when a city has no usable water
+/// or a point sits in it. A positive control samples a grid so the
+/// check cannot pass over empty water. Skipped without the operator's
+/// install (`MM2_RETAIL=<dir>`).
+#[test]
+fn retail_no_authored_race_point_stands_in_deadly_water() {
+    use mm2_content::{EventCatalog, race_definition};
+    use mm2_formats::{psdl::Psdl, water::WaterDef};
+    use mm2_game::Difficulty;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    let surfaces = mm2_content::load_surface_tables(&vfs).unwrap();
+
+    for city in ["sf", "london"] {
+        let (psdl_bytes, _) = vfs.read_path(&format!("city/{city}.psdl")).unwrap();
+        let psdl = Psdl::parse(&psdl_bytes).unwrap();
+        let (water_bytes, _) = vfs.read_path(&format!("city/{city}.water")).unwrap();
+        let def = WaterDef::parse(std::str::from_utf8(&water_bytes).unwrap()).unwrap();
+        let water = mm2_app::water::CityWater::build(&def, &psdl, surfaces.as_ref());
+        assert!(water.room_count() > 0, "{city}: no deadly rooms resolved");
+        assert_eq!(water.skipped(), 0, "{city}: a water ref did not resolve");
+
+        // Positive control: the water really covers ground somewhere,
+        // sampled a metre under the level on a 10 m grid.
+        let (lo, hi) = (psdl.bounds_min, psdl.bounds_max);
+        let mut wet = 0usize;
+        let mut z = lo[2];
+        while z <= hi[2] {
+            let mut x = lo[0];
+            while x <= hi[0] {
+                wet += usize::from(water.is_deadly(Vec3::new(x, water.level() - 1.0, z)));
+                x += 10.0;
+            }
+            z += 10.0;
+        }
+        assert!(wet > 0, "{city}: the control grid found no deadly water");
+
+        let catalog = EventCatalog::scan(&vfs, city);
+        assert!(!catalog.events.is_empty(), "{city}: no events");
+        let (mut events, mut points, mut wading) = (0usize, 0usize, Vec::new());
+        for event in catalog.events.iter().filter(|e| e.status.is_ready()) {
+            for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+                let Ok(race) = race_definition(event, difficulty) else {
+                    continue; // Crash Courses are lessons, not race definitions
+                };
+                events += 1;
+                let gates = race.checkpoints.iter().chain(race.finish.iter());
+                let spots = race
+                    .start_slots
+                    .iter()
+                    .map(|s| ("start", s.position))
+                    .chain(gates.map(|g| ("gate", g.center)));
+                for (what, p) in spots {
+                    points += 1;
+                    if water.is_deadly(p) {
+                        wading.push(format!("{:?} {what} at {p}", event.event_ref));
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{city}: {} water rooms, {wet} wet grid cells, {events} race definitions, \
+             {points} start/gate points, {} in deadly water",
+            water.room_count(),
+            wading.len()
+        );
+        assert!(events > 0 && points > 0, "{city}: nothing audited");
+        assert!(wading.is_empty(), "{city}: {wading:?}");
+    }
+}
