@@ -330,8 +330,12 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
 
 /// [`menu_app`] over a caller-built [`MenuData`] (mods, settings …).
 fn menu_app_with(dir: &Path, data: MenuData) -> App {
-    let vfs = vfs_of(dir);
+    menu_app_vfs(vfs_of(dir), data)
+}
 
+/// [`menu_app_with`] over a caller-built VFS — an install with mods
+/// mounted over it.
+fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -1252,6 +1256,85 @@ fn event_rows_show_authored_race_names() {
             "Checkpoint #3 (race3)"
         ]
     );
+}
+
+/// F29 (localization consumer): a mod's `tune/<city>.cinfo` renames the
+/// races the menu lists and Quick Race names, the install's own names
+/// return when the mod is not mounted, and the replacement is
+/// cosmetic-only — it neither moves the gameplay fingerprint nor makes the
+/// mod record-ineligible, so a translated install can still join and
+/// record.
+#[test]
+fn a_mods_cinfo_renames_the_races_and_is_cosmetic() {
+    let tmp = install();
+    write(
+        tmp.path(),
+        "tune/testcity.cinfo",
+        "LocalizedName=Test City\r\nCheckpointNames=Racing 101|Deck The Hall\r\n",
+    );
+    let mod_dir = tempfile::tempdir().unwrap();
+    write(mod_dir.path(), "mod.toml", "[mod]\nid = \"fr\"\n");
+    write(
+        mod_dir.path(),
+        "tune/testcity.cinfo",
+        "LocalizedName=Ville d'essai\nCheckpointNames=Course 101|Joyeux Noel\n",
+    );
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let mut loaded = store.load(&alice.id).unwrap().profile;
+    loaded.selections.last_event = Some(EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        stem: "race1".into(),
+    });
+    store.save(&mut loaded).unwrap();
+
+    // The menu's view of one mount set: Quick Race's label and the
+    // Checkpoint list.
+    let observe = |mods: &[&Path]| {
+        let mut vfs = vfs_of(tmp.path());
+        for (i, m) in mods.iter().enumerate() {
+            vfs.mount_mod(m, 300 + i as i32).unwrap();
+        }
+        let hash = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+        let cosmetic = mm2_content::fingerprint::mods_cosmetic_only(&vfs);
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        let mut app = menu_app_vfs(vfs, MenuData::new(Some(store), false, None));
+        app.update();
+        activate_row(&mut app, "Driver:");
+        activate_row(&mut app, "Alice");
+        press(&mut app, KeyCode::Escape);
+        let quick = quick_race(&app).0;
+        activate_row(&mut app, "Events");
+        activate_row(&mut app, "testcity");
+        activate_row(&mut app, "Checkpoint");
+        let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+        (quick, rows, hash, cosmetic)
+    };
+
+    let (quick, rows, base_hash, _) = observe(&[]);
+    assert_eq!(quick, "Quick Race: Deck The Hall");
+    assert_eq!(rows[..2], ["Racing 101", "Deck The Hall"]);
+
+    let (quick, rows, hash, cosmetic) = observe(&[mod_dir.path()]);
+    assert_eq!(quick, "Quick Race: Joyeux Noel");
+    assert_eq!(
+        rows,
+        [
+            "Course 101",
+            "Joyeux Noel",
+            "Checkpoint #2 (race2)",
+            "Checkpoint #3 (race3)"
+        ]
+    );
+    assert_eq!(hash, base_hash, "display names are not gameplay content");
+    assert!(cosmetic, "a translation mod keeps records and joining");
+
+    // Unmounted again: the install's own names.
+    assert_eq!(observe(&[]).0, "Quick Race: Deck The Hall");
 }
 
 /// Won races carry a badge in the event list: a beaten record marks

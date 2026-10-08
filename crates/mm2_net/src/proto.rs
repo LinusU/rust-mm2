@@ -64,8 +64,11 @@
 /// v21: `Message::Cnr` — the authority's Cops & Robbers gold state (one
 /// ownership state, the round's sites, the standings, the outcome) as
 /// its own host→client frame, so a client's HUD and markers show the
-/// host's match rather than deciding one (F27-B).
-pub const PROTOCOL_VERSION: u16 = 21;
+/// host's match rather than deciding one (F27-B). v22: the gameplay
+/// fingerprint's classifier moved `tune/*.cinfo` (display names) out of
+/// the hashed set, so a v21 peer would compute a different hash for the
+/// same install and mods (F29).
+pub const PROTOCOL_VERSION: u16 = 22;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;

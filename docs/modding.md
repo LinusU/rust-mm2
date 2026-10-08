@@ -128,8 +128,11 @@ the VFS — the limitation is on the import side, not resolution.
 What a mod changes decides what it costs (F29 req 5). `mm2_content::
 fingerprint::is_gameplay_path` is the one classifier: `tune/`, `bound/`,
 `geometry/`, `race/`, `anim/`, `players/` and every `city/` file except
-skies, lighting and visibility sets feed the simulation or its rules;
-`texture/`, `aud/`, `jpg/`, `city/*.sky|ldef|lmap|ltNN|cpvs|pvs|pvshist` and
+skies, lighting and visibility sets feed the simulation or its rules (the
+one exception under `tune/` is `tune/<city>.cinfo`, the localized city and
+race names, which only the menu reads);
+`texture/`, `aud/`, `jpg/`, `tune/*.cinfo`,
+`city/*.sky|ldef|lmap|ltNN|cpvs|pvs|pvshist` and
 unprefixed loose files are cosmetic. A mod is judged by the files it
 **wins** — a gameplay file a later mod replaces is credited to that later
 mod, and a mod that wins nothing changes nothing.

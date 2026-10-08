@@ -5,8 +5,9 @@
 //! geometry (collision hulls, wheel origins), city data the world is
 //! built from and every event record — so two peers fingerprint
 //! identically only when their effective gameplay content is byte-equal.
-//! Cosmetic families (`texture/`, `aud/`, menu art under `jpg/`, plus the
-//! visual-only city records: skies, lighting and visibility sets) are
+//! Cosmetic families (`texture/`, `aud/`, menu art under `jpg/`, the
+//! display-name records `tune/*.cinfo`, plus the visual-only city
+//! records: skies, lighting and visibility sets) are
 //! deliberately excluded: a paint or soundtrack mod must not block
 //! joining (F24-AC02).
 //!
@@ -64,9 +65,21 @@ pub fn is_gameplay_path(logical: &str) -> bool {
         let ext = rest.rsplit('.').next().unwrap_or(rest);
         return !city_ext_is_visual(ext);
     }
+    if is_city_info(logical) {
+        return false;
+    }
     GAMEPLAY_PREFIXES
         .iter()
         .any(|prefix| logical.starts_with(prefix))
+}
+
+/// `tune/<city>.cinfo`: the localized city name and race names. The only
+/// consumer is the menu's labels (`CityInfo`), so a translation mod must
+/// not cost multiplayer compatibility or records. The file also carries
+/// keys no consumer reads yet (`MustPlace`, `UnlockGroup`, …); the day
+/// one is consumed, that key's family moves into the gameplay set.
+fn is_city_info(logical: &str) -> bool {
+    logical.starts_with("tune/") && logical.ends_with(".cinfo")
 }
 
 /// The computed fingerprint plus the denominator it covered, so a
@@ -256,6 +269,8 @@ mod tests {
             "city/sf.bai",
             "city/props.csv",
             "city/sf.water",
+            // A backup copy is not the display-name record.
+            "tune/sf.cinfo.bak",
         ] {
             assert!(is_gameplay_path(p), "{p} should be gameplay");
         }
@@ -269,6 +284,7 @@ mod tests {
             "city/sf.lmap",
             "city/day.sky",
             "city/sf.lt07",
+            "tune/sf.cinfo",
             "midtown2.exe",
             "readme.rtf",
         ] {
