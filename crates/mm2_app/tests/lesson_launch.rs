@@ -20,8 +20,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     EventRef, EventTableKind, ImpactEvent, LessonPhase, Mm2Vfs, ParticipantState, PlayerId,
     PlayerVehicle, RaceProgress, RaceStarted, RaceState, ResultId, ResultLedger, Session,
-    SessionConfig, SessionEntity, SessionMode, SessionPhase, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    SessionConfig, SessionEntity, SessionMode, SessionPhase, VehicleBreaks, WorldMode,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -107,6 +107,23 @@ fn lesson_config(index: usize) -> SessionConfig {
 /// The same system set `headless_smoke` runs — the real session driver,
 /// race driver and marker updater on a minimal headless app.
 fn event_app(config: SessionConfig, vfs: Vfs) -> App {
+    event_app_with_car(
+        config,
+        vfs,
+        session::SelectedCar {
+            def: None,
+            paint: 0,
+        },
+    )
+}
+
+/// [`event_app`] with the player's vehicle chosen — a loaded stock
+/// `VehicleDef` brings its authored damage/breakaway rigs with it.
+fn event_app_with_car(config: SessionConfig, vfs: Vfs, selected: session::SelectedCar) -> App {
+    let tuned = selected
+        .def
+        .as_ref()
+        .map_or_else(VehicleConfig::default, |d| d.config.clone());
     let mut session = Session::new();
     session.begin(config).unwrap();
 
@@ -143,11 +160,8 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .insert_resource(camera::CameraMode::Chase)
         .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
-        .insert_resource(session::TunedVehicle(VehicleConfig::default()))
-        .insert_resource(session::SelectedCar {
-            def: None,
-            paint: 0,
-        })
+        .insert_resource(session::TunedVehicle(tuned))
+        .insert_resource(selected)
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -618,4 +632,129 @@ fn a_retried_retail_lesson_rebuilds_the_same_world() {
     );
     assert!(failures.is_empty(), "{failures:#?}");
     assert_eq!(expected, checked);
+}
+
+/// F21-AC05, vehicle half, on original data: the lesson's required
+/// stock vehicle (`vpcab` / `vpbullet`, loaded through the production
+/// `load_vehicle`) comes back from a retry with its authored damage
+/// accumulator empty and every breakaway part attached — a wrecked,
+/// part-shedding first attempt carries nothing over. Opt-in
+/// (`MM2_RETAIL`); reports "not run" otherwise.
+#[test]
+fn a_retried_retail_lesson_hands_back_a_repaired_stock_vehicle() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::{DamageTier, ImpactId, VehicleDamage};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail lesson vehicle-repair retry NOT run");
+        return;
+    };
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    let mut parts_shed = 0;
+    for city in ["london", "sf"] {
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+        let id = mm2_content::required_vehicle(city).expect("both schools name a vehicle");
+        let def = mm2_content::load_vehicle(&vfs, id, 0).unwrap();
+        let label = format!("{city} ({id})");
+        if def.damage.is_none() {
+            failures.push(format!("{label}: no authored vehcardamage to reset"));
+            continue;
+        }
+        let config = SessionConfig {
+            world: WorldMode::City {
+                psdl: format!("city/{city}.psdl"),
+            },
+            mode: SessionMode::Event(EventRef {
+                city: city.into(),
+                table: EventTableKind::CrashCourse,
+                index: 0,
+            }),
+            ..SessionConfig::default()
+        };
+        let selected = session::SelectedCar {
+            def: Some(def),
+            paint: 0,
+        };
+        let mut app = event_app_with_car(config, vfs, selected);
+        app.update();
+        if phase(&app) != SessionPhase::Countdown {
+            failures.push(format!("{label}: first launch phase {:?}", phase(&app)));
+            continue;
+        }
+        let first_car = car(&mut app);
+
+        // Wreck it: drive the real accumulator past its destruction
+        // bound and shed every breakaway part the vehicle authors.
+        {
+            let mut entity = app.world_mut().entity_mut(first_car);
+            let Some(mut damage) = entity.get_mut::<VehicleDamage>() else {
+                failures.push(format!("{label}: spawned without a VehicleDamage"));
+                continue;
+            };
+            let max = damage.spec.max_damage;
+            damage.apply(ImpactId(1), max * 2.0);
+            if damage.condition() != DamageTier::Disabled || damage.total() <= 0.0 {
+                failures.push(format!("{label}: wrecking did not disable the car"));
+                continue;
+            }
+            if let Some(mut breaks) = entity.get_mut::<VehicleBreaks>() {
+                for index in 0..breaks.parts.len() {
+                    breaks.detach(index, None);
+                }
+                parts_shed += breaks.detached_count();
+            }
+        }
+
+        app.world_mut().resource_mut::<SessionControl>().restart = true;
+        let mut reached = false;
+        for _ in 0..40 {
+            app.update();
+            if phase(&app) == SessionPhase::Countdown
+                && app.world().resource::<Session>().generation() == 2
+            {
+                reached = true;
+                break;
+            }
+        }
+        if !reached {
+            failures.push(format!("{label}: restart never returned to Countdown"));
+            continue;
+        }
+        let second_car = car(&mut app);
+        if second_car == first_car {
+            failures.push(format!("{label}: the wrecked body survived the retry"));
+        }
+        let world = app.world();
+        match world.get::<VehicleDamage>(second_car) {
+            Some(d) => {
+                if d.total() != 0.0
+                    || d.condition() != DamageTier::Intact
+                    || d.health_fraction() != 1.0
+                {
+                    failures.push(format!(
+                        "{label}: damage carried over (total {}, {:?})",
+                        d.total(),
+                        d.condition()
+                    ));
+                }
+            }
+            None => failures.push(format!("{label}: retry car has no VehicleDamage")),
+        }
+        if let Some(breaks) = world.get::<VehicleBreaks>(second_car)
+            && breaks.detached_count() != 0
+        {
+            failures.push(format!(
+                "{label}: {} parts still detached",
+                breaks.detached_count()
+            ));
+        }
+        checked += 1;
+    }
+    eprintln!(
+        "retail lesson vehicle repair: checked {checked}/2, {parts_shed} parts shed on first attempts"
+    );
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(checked, 2);
 }
