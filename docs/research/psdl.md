@@ -68,9 +68,12 @@ Notes:
   Relative texture slots: `n` = road surface, `n+1` = sidewalks.
 - **Ground UVs** are not stored; they follow from how the textures are
   authored (verified by dumping retail TEX files). Road textures hold *half*
-  a road: `u` runs along the road, `v = 0` is the centre line and `v = 1`
+  a road: `u` runs along the road, `v = 1` is the centre line and `v = 0`
   the kerb (clamped in `v`), so roads and each carriageway of a divided road
-  mirror the texture about their midline. Walkway (`0x02`) textures span the
+  mirror the texture about their midline (a divided carriageway runs kerb
+  → median, `v` 0 → 1). Measured 2026-10-08 from the baked tram rails in
+  `r4_track_f` against the `r4i_rails_f` decals (ledger WLD-32); the
+  earlier centre-at-`v = 0` reading put the rails in the outer lanes. Walkway (`0x02`) textures span the
   full width (e.g. `r_sub_l` rails). Sidewalk textures have the kerb stones
   at `v = 0`. Fans are planar-mapped.
 - **Intersection texture slots**: `n` = road fans, `n+1` = sidewalk strips

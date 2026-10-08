@@ -3210,7 +3210,7 @@ for item 1, a measured run) shows it fixed.
      height datum (BAI tram curve height versus road surface). Set the car
      on the rails. Operator report 1 hit the same class of defect for
      props, which was a content offset, so do not fudge a constant.
-4. **Tram track drawn on the outer lane, flipping back at junctions**
+4. **[implemented, candidate — iteration 4 of the new run; see LAST_ITERATION and ledger WLD-32]** **Tram track drawn on the outer lane, flipping back at junctions**
    (`3-tram-track-lane-sf.webp`, sf, `--cam=-1027.6,91.0,165.5,-90,-27`).
    - Some road sections show the tram rails in the outer lanes. At an
      intersection they abruptly flip back to the inner lanes.

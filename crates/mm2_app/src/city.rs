@@ -1432,8 +1432,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             }
             // Two road surfaces: outer→inner on each side (texture n).
             let us = chain_u(&rl_out, &rr_out, ROAD_TILE_LENGTH);
-            ctx.builder(0).strip_uv(&rl_out, &rl_in, &us, 1.0, 0.0);
-            ctx.builder(0).strip_uv(&rr_in, &rr_out, &us, 0.0, 1.0);
+            carriageway_uv(ctx.builder(0), &rl_out, &rl_in, &us);
+            carriageway_uv(ctx.builder(0), &rr_out, &rr_in, &us);
             ctx.collider_rel(0).strip(&rl_out, &rl_in);
             ctx.collider_rel(0).strip(&rr_in, &rr_out);
             ctx.note_road(&rl_out);
@@ -1607,13 +1607,25 @@ fn chain_u(a: &[Vec3], b: &[Vec3], tile: f32) -> Vec<f32> {
 }
 
 /// Two-way road surface between edge chains `l` and `r`. Road textures
-/// hold half a road — centre line at v = 0, kerb at v = 1, clamped in v —
-/// so the surface is split along its midline and the texture mirrored.
+/// hold half a road with the kerb at v = 0 and the centre line at v = 1
+/// (clamped in v), so the surface is split along its midline and the
+/// texture mirrored. Measured on retail `r4_track_f` (rails at v ~0.26,
+/// 20 m road) against the authored `r4i_rails_f` decals: the rails land
+/// 2.6 m either side of the centre line, as the decals put them, only
+/// with the centre at v = 1.
 fn emit_road_surface(ctx: &mut EmitCtx<'_>, l: &[Vec3], r: &[Vec3]) {
     let mid: Vec<Vec3> = l.iter().zip(r).map(|(a, b)| (*a + *b) * 0.5).collect();
     let us = chain_u(l, r, ROAD_TILE_LENGTH);
-    ctx.builder(0).strip_uv(l, &mid, &us, 1.0, 0.0);
-    ctx.builder(0).strip_uv(&mid, r, &us, 0.0, 1.0);
+    carriageway_uv(ctx.builder(0), l, &mid, &us);
+    carriageway_uv(ctx.builder(0), r, &mid, &us);
+}
+
+/// One carriageway's surface from its kerb chain to its centre (or
+/// median) chain: v runs 0 → 1 across it, the way the road textures are
+/// authored (white edge line at the kerb, yellow centre line at the
+/// centre/median edge).
+fn carriageway_uv(b: &mut MeshBuilder, kerb: &[Vec3], centre: &[Vec3], us: &[f32]) {
+    b.strip_uv(kerb, centre, us, 0.0, 1.0);
 }
 
 /// Sidewalk top + vertical curb face on one side of a road. `outer` is the
@@ -5189,12 +5201,26 @@ mod tests {
         let mut b = MeshBuilder::default();
         let mid: Vec<Vec3> = l.iter().zip(&r).map(|(a, b)| (*a + *b) * 0.5).collect();
         let us = chain_u(&l, &r, ROAD_TILE_LENGTH);
-        b.strip_uv(&l, &mid, &us, 1.0, 0.0);
-        b.strip_uv(&mid, &r, &us, 0.0, 1.0);
+        carriageway_uv(&mut b, &l, &mid, &us);
+        carriageway_uv(&mut b, &r, &mid, &us);
         assert_eq!(us, vec![0.0, 2.0]);
         for (p, uv) in b.positions.iter().zip(&b.uvs) {
-            // v = 1 on both kerbs, 0 on the centre line.
-            assert!((uv[1] - (p[0] - 4.0).abs() / 4.0).abs() < 1e-6);
+            // v = 0 on both kerbs, 1 on the centre line: the rails of
+            // `r4_track_f` (v ~0.26) sit beside the centre, not the kerb.
+            assert!((uv[1] - (1.0 - (p[0] - 4.0).abs() / 4.0)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_divided_carriageway_runs_kerb_to_median() {
+        // Left carriageway: kerb at x = -10, median edge at x = -2.
+        let kerb = [Vec3::new(-10.0, 0.0, 0.0), Vec3::new(-10.0, 0.0, -8.0)];
+        let median = [Vec3::new(-2.0, 0.0, 0.0), Vec3::new(-2.0, 0.0, -8.0)];
+        let us = chain_u(&kerb, &median, ROAD_TILE_LENGTH);
+        let mut b = MeshBuilder::default();
+        carriageway_uv(&mut b, &kerb, &median, &us);
+        for (p, uv) in b.positions.iter().zip(&b.uvs) {
+            assert!((uv[1] - (p[0] + 10.0) / 8.0).abs() < 1e-6);
         }
     }
 
