@@ -32,9 +32,7 @@ use crate::city::{MIRROR_Z, MovableModels, v3};
 use crate::layers::GameLayer;
 use crate::object_sound::ObjectSound;
 
-/// The leaf model the original substitutes when a path's name names
-/// no geometry (`gizBridgeMgr`'s default argument).
-const DEFAULT_LEAF_MODEL: &str = "giz_bridge01_l";
+use mm2_game::movers::DRAWBRIDGE_LEAF_MODEL as DEFAULT_LEAF_MODEL;
 
 /// One drawbridge leaf: a kinematic body whose origin is the hinge.
 #[derive(Component, Debug, Clone)]

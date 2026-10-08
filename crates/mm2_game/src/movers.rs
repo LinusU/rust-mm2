@@ -260,7 +260,23 @@ impl MoverFamily {
             Self::Train => "va_ug_l",
         }
     }
+
+    /// The model a path shows: its lower-cased name when `exists` says
+    /// that geometry resolves, else the family default (the managers'
+    /// check). The one rule the runtime and the coverage report share.
+    pub fn model_for(self, path_name: &str, exists: impl Fn(&str) -> bool) -> String {
+        let name = path_name.to_ascii_lowercase();
+        if exists(&name) {
+            name
+        } else {
+            self.default_model().to_string()
+        }
+    }
 }
+
+/// The leaf model the original substitutes when a drawbridge path's
+/// name names no geometry (`gizBridgeMgr`'s default argument).
+pub const DRAWBRIDGE_LEAF_MODEL: &str = "giz_bridge01_l";
 
 /// A sailboat's speed from its path spacing and a uniform draw in
 /// `0..1` (the original's `rand` float).
@@ -392,6 +408,21 @@ impl TrainMotion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_shows_its_own_model_else_the_family_default() {
+        let has = |n: &str| n == "giz_tug01_l";
+        let f = MoverFamily::Sailboat;
+        assert_eq!(f.model_for("GIZ_Tug01_L", has), "giz_tug01_l");
+        assert_eq!(f.model_for("PATH07", has), f.default_model());
+        assert_eq!(f.model_for("", has), f.default_model());
+        for family in [MoverFamily::Ferry, MoverFamily::Train] {
+            assert_eq!(
+                family.model_for("giz_tug01_l", |_| false),
+                family.default_model()
+            );
+        }
+    }
 
     fn square() -> Vec<Vec3> {
         vec![

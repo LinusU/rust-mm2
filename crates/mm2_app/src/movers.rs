@@ -101,12 +101,9 @@ fn load_pathset(
 /// The model a path names: its name when `geometry/<name>.pkg`
 /// resolves, else the family default (the managers' check).
 fn model_name(vfs: &Vfs, family: MoverFamily, path_name: &str) -> String {
-    let name = path_name.to_ascii_lowercase();
-    if vfs.resolve(&format!("geometry/{name}.pkg")).is_some() {
-        name
-    } else {
-        family.default_model().to_string()
-    }
+    family.model_for(path_name, |name| {
+        vfs.resolve(&format!("geometry/{name}.pkg")).is_some()
+    })
 }
 
 /// Spawn one kinematic body for `model` at `transform`; its origin is

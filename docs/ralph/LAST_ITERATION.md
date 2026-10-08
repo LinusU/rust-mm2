@@ -1,3 +1,13 @@
+# Last iteration — F28-A.3: one model-resolution rule for the movers and the coverage report (iteration 23 of the recovery run)
+
+Selection: the F28-A.2 review passed with no blockers; its verification gap was that `mm2-inspect specials` re-implemented the managers' model-resolution rule, so the report and the runtime could drift. Closing that is the cheapest honest improvement to the AC01/AC06 evidence before the larger cable-car work (UNK-44) that needs the `0x54a200` rail-curve walk and a play observation.
+Change (behaviour-neutral refactor): `MoverFamily::model_for(path_name, exists)` and `DRAWBRIDGE_LEAF_MODEL` now live in `mm2_game::movers`. `mm2_app::movers::model_name` calls `model_for`; `mm2_app::drawbridge` imports the shared leaf-default constant; the inspector's sailboat/ferry/train audit calls `model_for` instead of its own copy (drawbridge keeps its `asset_name` rule, now with the shared default). Fixes a latent inspector edge: a path whose name equals the family default but does not resolve is `unresolved`, not `named`. Test (+1): `a_path_shows_its_own_model_else_the_family_default` (case-folding, `PATHnn`/empty names, absent geometry).
+Retail `specials --strict` unchanged: exit 0, 9/9 expected defaults, 20/21 files, 0 failures, 1 unresolved actor (cable car).
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 56 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Drawbridge's `asset_name` step is still the inspector's own call (the manager's `path.asset_name()` and the inspector's use the same `Path` method). Open on F28 unchanged: AC01 cable car, other AIMAP actors ("Subway"/"Hookman"), AC04 retail rooms, AC05 restart phase test.
+
+---
+
 # Last iteration — F28-A.2: the city special-content coverage report (iteration 22 of the recovery run)
 
 Selection: the F28-C.2 review passed with no blockers. F28's AC01 (every expected special actor inventoried, implemented or explicitly unresolved with a source) and AC06 (both cities' coverage reported, nothing invented) had no evidence at all; the movers/drawbridge/water code exists but nothing enumerated what the installation actually carries or what has no runtime.

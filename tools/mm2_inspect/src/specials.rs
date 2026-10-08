@@ -33,7 +33,7 @@ use mm2_content::{EXPECTED_SPECIAL_PATHSETS, EventCatalog, race_cities};
 use mm2_formats::bai::Bai;
 use mm2_formats::pathset::Pathset;
 use mm2_formats::water::WaterDef;
-use mm2_game::movers::MoverFamily;
+use mm2_game::movers::{DRAWBRIDGE_LEAF_MODEL, MoverFamily};
 
 use crate::build_vfs;
 
@@ -58,6 +58,8 @@ struct Family {
     /// What it is.
     label: &'static str,
     default_model: Option<&'static str>,
+    /// The mover manager whose shared rule names the model, if any.
+    mover: Option<MoverFamily>,
     rule: ModelRule,
     /// The runtime consumer, or why none is wired.
     consumer: &'static str,
@@ -70,6 +72,7 @@ fn families() -> [Family; 5] {
         object: m.object(),
         label,
         default_model: Some(m.default_model()),
+        mover: Some(m),
         rule: ModelRule::PathName,
         consumer,
         evidence: "docs/research/movers.md",
@@ -78,7 +81,8 @@ fn families() -> [Family; 5] {
         Family {
             object: "bridge",
             label: "drawbridge leaves",
-            default_model: Some("giz_bridge01_l"),
+            default_model: Some(DRAWBRIDGE_LEAF_MODEL),
+            mover: None,
             rule: ModelRule::AssetName,
             consumer: "mm2_app::drawbridge",
             evidence: "docs/research/drawbridge.md (0x415410)",
@@ -98,6 +102,7 @@ fn families() -> [Family; 5] {
             object: "parkedcar",
             label: "parked-car strips",
             default_model: None,
+            mover: None,
             rule: ModelRule::None,
             consumer: "mm2_app::city::spawn_parked_cars",
             evidence: "docs/research/parked.md",
@@ -214,17 +219,30 @@ fn load_file(vfs: &Vfs, family: &Family, logical: &str) -> Result<Loaded, String
     };
     let resolves = |name: &str| vfs.resolve(&format!("geometry/{name}.pkg")).is_some();
     for path in &ps.paths {
-        let own = match family.rule {
-            ModelRule::PathName => Some(path.name.to_ascii_lowercase()),
-            ModelRule::AssetName => path.asset_name().map(str::to_ascii_lowercase),
-            ModelRule::None => continue,
-        };
-        if own.as_deref().is_some_and(resolves) {
-            out.named += 1;
-        } else if family.default_model.is_some_and(resolves) {
-            out.default += 1;
-        } else {
-            out.unresolved += 1;
+        match (family.rule, family.mover) {
+            (ModelRule::PathName, Some(mover)) => {
+                // The managers' own rule: a path that names no geometry
+                // gets the family default.
+                let model = mover.model_for(&path.name, resolves);
+                if !resolves(&model) {
+                    out.unresolved += 1;
+                } else if model == path.name.to_ascii_lowercase() {
+                    out.named += 1;
+                } else {
+                    out.default += 1;
+                }
+            }
+            (ModelRule::AssetName, _) => {
+                let own = path.asset_name().map(str::to_ascii_lowercase);
+                if own.as_deref().is_some_and(resolves) {
+                    out.named += 1;
+                } else if family.default_model.is_some_and(resolves) {
+                    out.default += 1;
+                } else {
+                    out.unresolved += 1;
+                }
+            }
+            _ => {}
         }
     }
     Ok(out)
