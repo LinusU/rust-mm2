@@ -16,6 +16,11 @@
 //!   result yet as still racing. They are: the field races on behind
 //!   the screen (DSN-11), and the list redraws as each late result
 //!   lands, so an unfinished field is reported, never invented.
+//! - A Crash Course lesson (a `LessonDriver` in the world) swaps the
+//!   headline and field for the sequencer's verdict: "Lesson passed"
+//!   with the summed clear time, or "Lesson failed" naming the leg and
+//!   why, with each leg's time (the failed one marked). There is no
+//!   placing; the restart row reads "Retry lesson" (the same intent).
 //! - The rewards block reads [`SessionReport`], which
 //!   `record_session_results` maintains — granted unlocks, "recorded",
 //!   or the honest reason nothing was kept. Nothing here decides
@@ -37,15 +42,16 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
-    CheckpointRule, ParticipantState, Player, PlayerControl, RACE_TICK_HZ, RaceDefinition,
-    RaceProgress, RaceState, ResultLedger, Session, SessionAuthority, SessionEntity,
-    SessionOutcome, SessionPhase, navigation_target, ordinal,
+    CheckpointRule, LegFailure, LessonPhase, ParticipantState, Player, PlayerControl, RACE_TICK_HZ,
+    RaceDefinition, RaceProgress, RaceState, ResultLedger, Session, SessionAuthority,
+    SessionEntity, SessionOutcome, SessionPhase, navigation_target, ordinal,
 };
 
 use crate::cnr::{CnrHost, participant_id};
 use crate::cnrhud::{match_view, result_lines};
 use crate::cnrnet::CnrReplica;
 use crate::input::pad_nav;
+use crate::lesson::LessonDriver;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::netdrive::NetPlayer;
 use crate::opponents::OpponentDriver;
@@ -77,9 +83,22 @@ enum ResultsKind {
     /// A hosted or joined match: the lobby's `Cancel`/`Start` mint the
     /// next generation, so the only way on is back to the lobby.
     CnrNetworked,
+    /// A Crash Course lesson (F21-B): a pass or fail over its legs, not
+    /// a placing in a field. The restart is the lesson's own retry.
+    Lesson,
 }
 
 impl ResultsKind {
+    /// A race screen is a lesson screen while a `LessonDriver` runs;
+    /// a match screen stays one.
+    fn or_lesson(self, lesson: bool) -> Self {
+        if lesson && self == Self::Race {
+            Self::Lesson
+        } else {
+            self
+        }
+    }
+
     fn of(session: &Session, host: Option<&CnrHost>, replica: Option<&CnrReplica>) -> Self {
         if host.is_none() && replica.is_none() {
             return Self::Race;
@@ -111,10 +130,10 @@ fn results_rows(has_menu: bool, kind: ResultsKind) -> Vec<ResultsRow> {
             action: ResultsAction::Continue,
         },
         ResultsRow {
-            text: if kind == ResultsKind::CnrLocal {
-                "Play again"
-            } else {
-                "Restart race"
+            text: match kind {
+                ResultsKind::CnrLocal => "Play again",
+                ResultsKind::Lesson => "Retry lesson",
+                _ => "Restart race",
             }
             .into(),
             action: ResultsAction::Restart,
@@ -167,11 +186,13 @@ pub fn results_input(
     menu_shell: Option<Res<MenuShell>>,
     cnr: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
+    lesson: Option<Res<LessonDriver>>,
 ) {
     if !matches!(session.phase(), SessionPhase::Results) {
         return;
     }
-    let kind = ResultsKind::of(&session, cnr.as_deref(), replica.as_deref());
+    let kind =
+        ResultsKind::of(&session, cnr.as_deref(), replica.as_deref()).or_lesson(lesson.is_some());
     let rows = results_rows(menu_shell.is_some(), kind);
     let mut cmds = Vec::new();
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
@@ -301,6 +322,101 @@ fn participant_name(player: &Player, opponent: Option<&OpponentDriver>) -> Strin
     }
 }
 
+/// The rewards block — the real disposition, not a guess: grants,
+/// "recorded", or the reason nothing was kept. Only the report of this
+/// session's generation counts.
+fn reward_lines(
+    report: Option<&SessionReport>,
+    generation: u64,
+    lines: &mut Vec<(String, f32, Color)>,
+) {
+    let Some(report) = report.filter(|r| r.generation == generation) else {
+        return;
+    };
+    if !report.granted.is_empty() || report.recorded || report.note.is_some() {
+        lines.push((String::new(), 8.0, Color::NONE));
+    }
+    for grant in &report.granted {
+        lines.push((
+            format!("Unlocked: {grant}"),
+            20.0,
+            Color::srgb(0.55, 0.9, 0.5),
+        ));
+    }
+    if report.recorded {
+        lines.push((
+            "Result saved to the driver profile".to_string(),
+            18.0,
+            Color::srgb(0.55, 0.8, 0.9),
+        ));
+    }
+    if let Some(note) = &report.note {
+        lines.push((note.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
+    }
+}
+
+/// A lesson's verdict and its legs (F21-B): passed with the summed
+/// clear time, or failed naming the leg and why; each cleared leg with
+/// its time and the failed one marked. Read from the sequencer, which
+/// is the only thing that decides a lesson — there is no placing, no
+/// field and no "race" here.
+fn lesson_lines(driver: &LessonDriver, lines: &mut Vec<(String, f32, Color)>) {
+    let run = driver.run();
+    let secs = |ticks: u64| ticks as f32 / RACE_TICK_HZ as f32;
+    let legs = run.leg_count();
+    lines.push((
+        "Crash Course".to_string(),
+        34.0,
+        Color::srgb(0.95, 0.9, 0.6),
+    ));
+    let (headline, color) = match run.phase() {
+        LessonPhase::Passed => {
+            let total = driver
+                .pass()
+                .map_or_else(|| run.cleared().iter().sum(), |pass| pass.total_ticks());
+            (
+                format!("Lesson passed - {:.1}s", secs(total)),
+                Color::srgb(0.55, 0.9, 0.5),
+            )
+        }
+        LessonPhase::Failed { leg, failure } => {
+            let why = match failure {
+                LegFailure::TimedOut => "out of time",
+                LegFailure::Disabled => "car disabled",
+                LegFailure::Objective => "objective missed",
+            };
+            (
+                format!("Lesson failed - {why} on leg {} of {legs}", leg + 1),
+                Color::srgb(1.0, 0.75, 0.35),
+            )
+        }
+        LessonPhase::Running { .. } | LessonPhase::Abandoned => {
+            ("Lesson over".to_string(), Color::srgb(1.0, 1.0, 1.0))
+        }
+    };
+    lines.push((headline, 24.0, color));
+    lines.push((String::new(), 8.0, Color::NONE));
+    let name_of = |leg: usize| {
+        driver
+            .leg(leg)
+            .map_or_else(|| format!("leg {}", leg + 1), |l| l.filename.clone())
+    };
+    for (i, ticks) in run.cleared().iter().enumerate() {
+        lines.push((
+            format!("{}. {} - {:.1}s", i + 1, name_of(i), secs(*ticks)),
+            20.0,
+            Color::srgb(0.85, 0.85, 0.9),
+        ));
+    }
+    if let LessonPhase::Failed { leg, .. } = run.phase() {
+        lines.push((
+            format!("{}. {} - failed", leg + 1, name_of(leg as usize)),
+            20.0,
+            Color::srgb(1.0, 0.75, 0.35),
+        ));
+    }
+}
+
 /// (Re)draw the results overlay while `Results` and despawn it
 /// otherwise. The root is `SessionEntity`-stamped so teardown removes
 /// it with the session, and the whole tree carries [`ResultsUi`] so
@@ -316,6 +432,7 @@ pub fn results_present(
     report: Option<Res<SessionReport>>,
     cnr: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
+    lesson: Option<Res<LessonDriver>>,
     cars: Query<(&Player, Option<&NetPlayer>)>,
     participants: Query<(&Player, &RaceProgress, Option<&OpponentDriver>)>,
     roots: Query<Entity, (With<ResultsUi>, Without<ChildOf>)>,
@@ -342,9 +459,13 @@ pub fn results_present(
         commands.entity(root).despawn();
     }
 
-    let kind = ResultsKind::of(&session, cnr.as_deref(), replica.as_deref());
+    let kind =
+        ResultsKind::of(&session, cnr.as_deref(), replica.as_deref()).or_lesson(lesson.is_some());
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
-    if kind != ResultsKind::Race {
+    if let (ResultsKind::Lesson, Some(driver)) = (kind, lesson.as_deref()) {
+        lesson_lines(driver, &mut lines);
+        reward_lines(report.as_deref(), session.generation(), &mut lines);
+    } else if matches!(kind, ResultsKind::CnrLocal | ResultsKind::CnrNetworked) {
         // A Cops & Robbers match: its own verdict and standings, read
         // from the decided match (the authority's, or a client's
         // replica of it). No rewards block — nothing
@@ -451,30 +572,7 @@ pub fn results_present(
             }
         }
 
-        // Rewards — the real disposition, not a guess: grants, "recorded",
-        // or the reason nothing was kept.
-        if let Some(report) = report.as_ref().filter(|r| r.generation == generation) {
-            if !report.granted.is_empty() || report.recorded || report.note.is_some() {
-                lines.push((String::new(), 8.0, Color::NONE));
-            }
-            for grant in &report.granted {
-                lines.push((
-                    format!("Unlocked: {grant}"),
-                    20.0,
-                    Color::srgb(0.55, 0.9, 0.5),
-                ));
-            }
-            if report.recorded {
-                lines.push((
-                    "Result saved to the driver profile".to_string(),
-                    18.0,
-                    Color::srgb(0.55, 0.8, 0.9),
-                ));
-            }
-            if let Some(note) = &report.note {
-                lines.push((note.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
-            }
-        }
+        reward_lines(report.as_deref(), generation, &mut lines);
     }
     lines.push((String::new(), 8.0, Color::NONE));
     for (i, row) in results_rows(menu_shell.is_some(), kind).iter().enumerate() {
@@ -604,6 +702,11 @@ mod cnr_tests {
         assert_eq!(
             labels(ResultsKind::CnrLocal),
             ["Continue to menu", "Play again"]
+        );
+        // A lesson retries; it does not "restart a race".
+        assert_eq!(
+            labels(ResultsKind::Lesson),
+            ["Continue to menu", "Retry lesson"]
         );
         // The lobby mints the next generation: one way on, no fake
         // "play again" that the lifecycle would swallow.

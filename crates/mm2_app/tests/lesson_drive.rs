@@ -15,6 +15,7 @@ use mm2_app::race::{
     CheckpointMarker, LessonSetup, advance_race, reanchor_teleported_participants,
     spawn_checkpoint_markers,
 };
+use mm2_app::results::{ResultsMenu, ResultsUi, results_present};
 use mm2_content::{LessonLeg, LessonObjective};
 use mm2_game::{
     Checkpoint, CheckpointRule, EventKey, EventTableKind, LegFailure, LessonPhase, LessonRun,
@@ -119,6 +120,7 @@ fn lesson_app_with(setup: LessonSetup, config: SessionConfig) -> (App, Entity) {
         .insert_resource(driver)
         .insert_resource(mm2_app::session::SpawnPoint::new(Vec3::ZERO, 0.0))
         .init_resource::<ResultLedger>()
+        .init_resource::<ResultsMenu>()
         .add_message::<RaceStarted>()
         .add_message::<ResetVehicle>()
         .add_systems(FixedUpdate, advance_session_tick)
@@ -126,7 +128,10 @@ fn lesson_app_with(setup: LessonSetup, config: SessionConfig) -> (App, Entity) {
             FixedLast,
             (reanchor_teleported_participants, advance_race, drive_lesson).chain(),
         )
-        .add_systems(Update, mm2_vehicle::systems::vehicle_reset);
+        .add_systems(
+            Update,
+            (mm2_vehicle::systems::vehicle_reset, results_present),
+        );
     app.finish();
     app.cleanup();
 
@@ -453,4 +458,98 @@ fn clearing_every_leg_credits_the_profile_once_through_the_production_systems() 
     let report = app.world().resource::<SessionReport>();
     assert!(report.recorded);
     assert_eq!(report.granted, vec!["lesson reward".to_string()]);
+}
+
+/// Every line the results overlay drew.
+fn overlay_texts(app: &mut App) -> Vec<String> {
+    let world = app.world_mut();
+    world
+        .query_filtered::<&Text, With<ResultsUi>>()
+        .iter(world)
+        .map(|t| t.0.clone())
+        .collect()
+}
+
+/// A passed lesson is not a race: the results screen says so, lists
+/// each leg's clear time and offers the lesson's own retry.
+#[test]
+fn a_passed_lesson_reports_a_pass_and_its_legs() {
+    let (mut app, car) = lesson_app(two_leg_setup(None));
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(-50.0, 0.0, 0.0),
+        Vec3::new(50.0, 0.0, 0.0),
+    );
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(250.0, 0.0, 0.0),
+        Vec3::new(350.0, 0.0, 0.0),
+    );
+    run(&mut app, 2);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    let texts = overlay_texts(&mut app);
+    let total = driver(&app).pass().unwrap().total_ticks() as f32 / mm2_game::RACE_TICK_HZ as f32;
+    assert!(texts.iter().any(|t| t == "Crash Course"), "{texts:?}");
+    assert!(
+        texts.contains(&format!("Lesson passed - {total:.1}s")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("1. first - ")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("2. second - ")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("Retry lesson")),
+        "{texts:?}"
+    );
+    // None of the race screen's vocabulary: no field, no placing.
+    assert!(
+        !texts.iter().any(|t| t.contains("Race results")
+            || t.contains("Restart race")
+            || t.contains(" of ")),
+        "{texts:?}"
+    );
+}
+
+/// A failed lesson names the leg and the reason, keeps the legs it did
+/// clear, and marks the failed one — it never reads as a finish.
+#[test]
+fn a_failed_lesson_names_the_leg_and_the_reason() {
+    let (mut app, car) = lesson_app(two_leg_setup(None));
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(-50.0, 0.0, 0.0),
+        Vec3::new(50.0, 0.0, 0.0),
+    );
+    // Leg 1 (limit 600 ticks) is left to expire.
+    run(&mut app, 1500);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert!(matches!(
+        driver(&app).run().phase(),
+        LessonPhase::Failed { leg: 1, .. }
+    ));
+    let texts = overlay_texts(&mut app);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "Lesson failed - out of time on leg 2 of 2"),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("1. first - ")),
+        "{texts:?}"
+    );
+    assert!(texts.iter().any(|t| t == "2. second - failed"), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("Retry lesson")),
+        "{texts:?}"
+    );
+    assert!(!texts.iter().any(|t| t.contains("passed")), "{texts:?}");
 }

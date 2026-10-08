@@ -111,6 +111,11 @@ impl LessonDriver {
             .and_then(|i| self.legs.get(i as usize))
     }
 
+    /// Leg `index` of the lesson, in authored order.
+    pub fn leg(&self, index: usize) -> Option<&mm2_content::LessonLeg> {
+        self.legs.get(index)
+    }
+
     /// The lesson's pass, once the last leg has cleared. Claimed from
     /// the sequencer exactly once; this keeps it for the results flow.
     pub fn pass(&self) -> Option<&LessonPass> {
