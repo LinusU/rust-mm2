@@ -12,6 +12,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{CameraMode, ChaseCamera};
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::controls::{ControlSettings, ControlsSave, DriveAction, controls_path};
+use mm2_app::display_trial;
 use mm2_app::hudmap;
 use mm2_app::pause::{self, PauseMenu, PausePage, PauseUi};
 use mm2_app::results::{self, ResultsMenu};
@@ -124,7 +125,10 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                 // ignores `Paused`) and the driver.
                 pause::pause_input
                     .after(session::session_control_input)
-                    .before(session::drive_session),
+                    .before(session::drive_session)
+                    // Shut while a display trial is pending, as in the
+                    // binary (no trial resource = open).
+                    .run_if(not(display_trial::display_trial_pending)),
                 // `Results` input has the same ownership contract.
                 results::results_input
                     .after(session::session_control_input)
@@ -1895,6 +1899,98 @@ fn a_dev_world_mounts_the_authored_surface_tables() {
             .is_none(),
         "a half pair is a broken table, not an absent one — never substituted"
     );
+}
+
+/// A display change made on the pause overlay's graphics page is a
+/// trial the pause overlay cannot answer: the game stays paused, the
+/// overlay ignores the keyboard, Enter keeps without also activating
+/// the focused row, Esc reverts without also leaving the page or
+/// resuming, and the clock reverts an unanswered trial.
+#[test]
+fn a_display_change_from_the_pause_page_is_a_trial_the_overlay_cannot_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(SettingsFile::new(Some(path.clone())))
+        .init_resource::<display_trial::DisplayTrial>()
+        .add_systems(
+            Update,
+            display_trial::drive_display_trial
+                .after(pause::pause_input)
+                .before(session::drive_session),
+        );
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+    pause_focus_row(&mut app, 4);
+
+    let display = |app: &App| app.world().resource::<GraphicsSettings>().display;
+    let pending = |app: &App| {
+        app.world()
+            .resource::<display_trial::DisplayTrial>()
+            .is_pending()
+    };
+
+    press_key(&mut app, KeyCode::ArrowRight);
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert!(pending(&app), "the change opened a trial");
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Windowed,
+        "the file keeps the confirmed display while the trial runs"
+    );
+
+    // The overlay is deaf while the trial runs: no focus move, no edit.
+    let focus = app.world().resource::<PauseMenu>().focus;
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(app.world().resource::<PauseMenu>().focus, focus);
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+
+    // Enter keeps — and does not also flip the focused Display row.
+    press_key(&mut app, KeyCode::Enter);
+    assert!(!pending(&app));
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Fullscreen
+    );
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+
+    // Esc reverts — and neither backs out of the page nor resumes.
+    press_key(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(display(&app), DisplayMode::Windowed);
+    assert!(pending(&app));
+    press_key(&mut app, KeyCode::Escape);
+    assert!(!pending(&app));
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Fullscreen
+    );
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+
+    // An unanswered trial reverts when its clock runs out (15 s of
+    // 60 Hz frames), still paused on the same page.
+    press_key(&mut app, KeyCode::ArrowLeft);
+    assert!(pending(&app));
+    for _ in 0..(16 * 60) {
+        app.update();
+    }
+    assert!(!pending(&app));
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+
+    // The overlay answers again: Esc now backs out to the pause rows.
+    press_key(&mut app, KeyCode::Escape);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Pause);
 }
 
 /// The pause overlay's Options row opens the graphics page: Left/Right
