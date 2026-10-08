@@ -840,8 +840,11 @@ struct Lesson {
 }
 
 fn lesson_of(vfs: &Vfs) -> Lesson {
-    let setup =
-        mm2_app::race::lesson_race_setup(vfs, &lesson_event(), Difficulty::Amateur).unwrap();
+    lesson_at(vfs, Difficulty::Amateur)
+}
+
+fn lesson_at(vfs: &Vfs, difficulty: Difficulty) -> Lesson {
+    let setup = mm2_app::race::lesson_race_setup(vfs, &lesson_event(), difficulty).unwrap();
     Lesson {
         legs: setup
             .legs
@@ -1053,4 +1056,147 @@ fn a_malformed_or_degenerate_lesson_route_is_refused_not_fielded_as_a_lead_car_t
         // Dropping the mod restores the stock lesson.
         assert_eq!(lesson_of(&mounted(&l.base, &[])), stock);
     }
+}
+
+// ---- F29-C.6: the Professional side of a lesson --------------------------
+//
+// A lesson authors `crash<N>data.csv` (Amateur) beside `crash<N>data_p.csv`
+// (Professional) and `<stem>.aimap` beside `<stem>.aimap_p`. A mod for one
+// difficulty must not leak into the other; and when a lesson ships no
+// `.aimap_p`, Professional falls back to the `.aimap` (RACE-11) — so a mod
+// replacing only that `.aimap` reaches both difficulties until a mod (or the
+// install) supplies the `_p`.
+
+#[test]
+fn a_mod_for_one_lesson_difficulty_moves_only_that_difficulty() {
+    let l = lessons();
+    let amateur = lesson_at(&mounted(&l.base, &[]), Difficulty::Amateur);
+    let pro = lesson_at(&mounted(&l.base, &[]), Difficulty::Professional);
+    assert_eq!(amateur.legs, pro.legs, "the fixture authors the same legs");
+
+    // `crash0data_p.csv` alone: Professional's leg budget moves, Amateur's
+    // does not.
+    let table_p = kinds_mod(
+        l.tmp.path(),
+        "lesson-table-p",
+        &[(
+            "race/testcity/crash0data_p.csv",
+            format!("{CRASHDATA}slalom,7,1,25,0.05,0,0,0,0,0,0\n"),
+        )],
+    );
+    let v = mounted(&l.base, &[&table_p]);
+    assert_eq!(lesson_at(&v, Difficulty::Amateur), amateur);
+    let got = lesson_at(&v, Difficulty::Professional);
+    assert_ne!(
+        got.legs, pro.legs,
+        "the _p table drives the Professional leg"
+    );
+    assert_eq!(got.lead, pro.lead);
+
+    // A mod's `.aimap_p` is read at Professional only; Amateur keeps the
+    // stock `.aimap`'s car.
+    let who_p = kinds_mod(
+        l.tmp.path(),
+        "lesson-who-p",
+        &[(
+            "race/testcity/crash0.aimap_p",
+            opponent_aimap("vpproonly", "lead-0.opp"),
+        )],
+    );
+    let v = mounted(&l.base, &[&who_p]);
+    assert_eq!(lesson_at(&v, Difficulty::Amateur), amateur);
+    let got = lesson_at(&v, Difficulty::Professional);
+    assert_eq!(got.legs, pro.legs);
+    assert_eq!(
+        got.lead.entries,
+        [("vpproonly".to_string(), Some(LEAD_ROUTE.to_vec()))]
+    );
+
+    // A mod's `.aimap` alone reaches Professional through the fallback...
+    let who = kinds_mod(
+        l.tmp.path(),
+        "lesson-who",
+        &[(
+            "race/testcity/crash0.aimap",
+            opponent_aimap("vpmod", "lead-0.opp"),
+        )],
+    );
+    let v = mounted(&l.base, &[&who]);
+    for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+        assert_eq!(
+            lesson_at(&v, difficulty).lead.entries,
+            [("vpmod".to_string(), Some(LEAD_ROUTE.to_vec()))],
+            "{difficulty:?}"
+        );
+    }
+    // ...until a `.aimap_p` exists, which Professional prefers; unmounting
+    // everything restores the stock lesson at both difficulties.
+    let v = mounted(&l.base, &[&who, &who_p]);
+    assert_eq!(
+        lesson_at(&v, Difficulty::Amateur).lead.entries,
+        [("vpmod".to_string(), Some(LEAD_ROUTE.to_vec()))]
+    );
+    assert_eq!(
+        lesson_at(&v, Difficulty::Professional).lead.entries,
+        [("vpproonly".to_string(), Some(LEAD_ROUTE.to_vec()))]
+    );
+    let v = mounted(&l.base, &[]);
+    assert_eq!(lesson_at(&v, Difficulty::Amateur), amateur);
+    assert_eq!(lesson_at(&v, Difficulty::Professional), pro);
+}
+
+#[test]
+fn professional_lesson_mods_are_gameplay_and_move_the_fingerprint() {
+    let l = lessons();
+    let base = fingerprint::gameplay(&mounted(&l.base, &[])).unwrap().hash;
+    let mods = [
+        kinds_mod(
+            l.tmp.path(),
+            "lesson-table-p",
+            &[(
+                "race/testcity/crash0data_p.csv",
+                format!("{CRASHDATA}slalom,7,1,25,0.05,0,0,0,0,0,0\n"),
+            )],
+        ),
+        kinds_mod(
+            l.tmp.path(),
+            "lesson-who-p",
+            &[(
+                "race/testcity/crash0.aimap_p",
+                opponent_aimap("vpproonly", "lead-0.opp"),
+            )],
+        ),
+    ];
+    for m in &mods {
+        let vfs = mounted(&l.base, &[m]);
+        let reports = fingerprint::mod_reports(&vfs);
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].is_cosmetic_only(), "{reports:?}");
+        assert!(reports[0].contradiction().is_none(), "{reports:?}");
+        assert_ne!(fingerprint::gameplay(&vfs).unwrap().hash, base, "{m:?}");
+    }
+}
+
+#[test]
+fn a_malformed_professional_lesson_aimap_is_refused_while_amateur_still_launches() {
+    use mm2_app::race::LessonSetupError;
+    let l = lessons();
+    let bad = kinds_mod(
+        l.tmp.path(),
+        "lesson-bad-p",
+        &[(
+            "race/testcity/crash0.aimap_p",
+            "[Opponent]\n2\nvpmod\n".into(),
+        )],
+    );
+    let v = mounted(&l.base, &[&bad]);
+    assert!(
+        mm2_app::race::lesson_race_setup(&v, &lesson_event(), Difficulty::Amateur).is_ok(),
+        "the Amateur lesson does not read the _p record"
+    );
+    let Err(err) = mm2_app::race::lesson_race_setup(&v, &lesson_event(), Difficulty::Professional)
+    else {
+        panic!("a malformed .aimap_p must not fall back to the stock .aimap");
+    };
+    assert!(matches!(err, LessonSetupError::Aimap(_)), "{err:?}");
 }
