@@ -1,3 +1,13 @@
+# Last iteration — F26-C.5: a rematch does not carry the last round's broken props to the client (iteration 19 of the recovery run)
+
+Selection: the F26-C.4 review passed with no blockers; its open list named "restart consistency". The prop leg had late-join evidence but nothing across a *rematch*, where the host's `PropLedger`, the client's `PropStage` and both stamp ordinals all have to start over under a fresh generation.
+Change: tests only, `mm2_app/tests/net_app.rs` (+1 test, +1 helper; no production change). `a_rematch_does_not_carry_the_last_rounds_broken_props_to_the_client`: host + keep-ready client over loopback, round 1 breaks site 1 and the client follows; the host quits, both return to the lobby and the round-1 placement is torn down; the host starts round 2 (generation 2), both re-stamp four dormant placements, 120 frames pass and every client prop must still be `Dormant`; then the host breaks site 2 and only that one follows. `unresolved == 0`, `mismatched == 0`, table count 4.
+Mutation: honest negative — it is a regression pin, not a mutation-sensitive test. Removing the host ledger's generation reset, not restarting `next_banger_site`, and removing both the ledger reset and the stage's foreign-generation drop together all still pass: the leak is closed by several independent layers (despawned live entities, netdrive's generation gate, per-generation tables), so no single or double fault in `worldprops` surfaces here. All mutations restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 2672 passed, 0 failed (the harness moved the long test run to the background; I polled it to completion).
+Status: implemented candidate, not independently checked. In-process apps over loopback, synthetic placements, not a retail city and not separate processes. Advances F26-AC02/AC05 (props leg across a rematch). Open on F26-C: the same at process level on a retail city, AC03 on a real impaired race run.
+
+---
+
 # Last iteration — F26-C.4: a late joiner converges on props the host already broke (iteration 18 of the recovery run)
 
 Selection: the F26-C.3 review passed with no blockers and listed "broken-prop state for a late joiner" as open on F26-AC02. The existing app-level leg (`a_hosts_prop_state_converges_on_a_joined_clients_world`) joins *before* any prop changes, so every row rides as a fresh mark; it cannot show that a joiner arriving afterwards is brought current, which `worldprops` claims only for its rolling resend window.

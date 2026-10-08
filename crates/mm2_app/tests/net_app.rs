@@ -8788,6 +8788,206 @@ fn a_late_joiner_converges_on_props_the_host_broke_before_it_arrived() {
     assert_eq!(props.local_table().count as usize, host_props.len());
 }
 
+/// F26-AC02's restart leg for props: a rematch starts the world over.
+/// Round one breaks props on the host and the client converges; the
+/// round ends and the host starts round two, whose placements stamp
+/// dormant again on both processes under a fresh generation. The
+/// round-one marks and resend window must not carry over — the client's
+/// round-two world stays dormant until the host breaks something in it,
+/// and then only that prop follows.
+#[test]
+fn a_rematch_does_not_carry_the_last_rounds_broken_props_to_the_client() {
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host_app = host_app(host_vfs, link);
+    let client_link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed")
+    .keep_ready(true);
+    let mut client = bridge_app(mount(install.path()), client_link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    let step = |host_app: &mut App, client: &mut App| {
+        host_app.update();
+        client.update();
+        thread::sleep(Duration::from_millis(5));
+    };
+    let client_ready = |host_app: &App, client: &App| {
+        let our_id = client.world().resource::<LobbyLink>().player_id();
+        host_app
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.player_id == our_id && e.ready && e.pick.is_some())
+    };
+    // One round: wait for the roster to show the client ready, start,
+    // stand both sessions up, stamp four placements on each side (the
+    // host's `broken` one already past dormant) and return the handles.
+    let round = |host_app: &mut App, client: &mut App, broken: usize, expect_gen: u64| {
+        let mut ready = false;
+        for _ in 0..400 {
+            step(host_app, client);
+            if client_ready(host_app, client) {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "the client never readied for round {expect_gen}");
+        host_app
+            .world()
+            .resource::<HostLink>()
+            .command_sender()
+            .send(HostCommand::Start)
+            .unwrap();
+        // The previous round's config lingers at `Menu`, so wait on the
+        // phase, not on the config.
+        let mut loading = false;
+        for _ in 0..400 {
+            step(host_app, client);
+            if session_phase(host_app) == SessionPhase::Loading {
+                loading = true;
+                break;
+            }
+        }
+        assert!(loading, "round {expect_gen} never began on the host");
+        {
+            let mut session = host_app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+        }
+        let generation = host_app.world().resource::<Session>().wire_generation();
+        assert_eq!(generation, expect_gen);
+        until_begun_with_host(host_app, client);
+        {
+            let mut session = client.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+        }
+        assert_eq!(
+            client.world().resource::<Session>().wire_generation(),
+            generation
+        );
+        let homes: Vec<Vec3> = (0..4)
+            .map(|i| Vec3::new(10.0 * i as f32, 0.0, 0.0))
+            .collect();
+        let host_props: Vec<Entity> = homes
+            .iter()
+            .enumerate()
+            .map(|(i, &home)| {
+                let phase = if i == broken {
+                    BangerPhase::Settled
+                } else {
+                    BangerPhase::Dormant
+                };
+                stamp_prop(host_app, phase, home, 0)
+            })
+            .collect();
+        let client_props: Vec<Entity> = homes
+            .iter()
+            .map(|&home| stamp_prop(client, BangerPhase::Dormant, home, 0))
+            .collect();
+        (host_props, client_props)
+    };
+
+    // Round one: site 1 is broken and the client follows it.
+    let (_, first) = round(&mut host_app, &mut client, 1, 1);
+    let mut converged = false;
+    for _ in 0..400 {
+        step(&mut host_app, &mut client);
+        if prop_state(&client, first[1]).0 == BangerPhase::Settled {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "round one never converged");
+
+    // The round ends: the host quits to its lobby, the cancel returns
+    // the client to its own, and the round-one placements go with the
+    // session.
+    host_app.world_mut().resource_mut::<SessionControl>().quit = true;
+    let mut back = false;
+    for _ in 0..400 {
+        step(&mut host_app, &mut client);
+        if session_phase(&host_app) == SessionPhase::Menu
+            && session_phase(&client) == SessionPhase::Menu
+            && host_app
+                .world()
+                .resource::<LobbyState>()
+                .generation
+                .is_none()
+        {
+            back = true;
+            break;
+        }
+    }
+    assert!(back, "both sides never returned to the lobby");
+    assert!(
+        client.world().get_entity(first[1]).is_err(),
+        "the ended round's placement is torn down with its session"
+    );
+
+    // Round two: nothing is broken yet. Give the stream far more than a
+    // resend window of frames to leak round one's site 1.
+    let (second_host, second) = round(&mut host_app, &mut client, usize::MAX, 2);
+    for _ in 0..120 {
+        step(&mut host_app, &mut client);
+    }
+    for (i, &prop) in second.iter().enumerate() {
+        assert_eq!(
+            prop_state(&client, prop).0,
+            BangerPhase::Dormant,
+            "site {i} inherited the last round's state"
+        );
+    }
+    // A break in the new world replicates, and only that one.
+    host_app
+        .world_mut()
+        .get_mut::<mm2_game::Banger>(second_host[2])
+        .unwrap()
+        .phase = BangerPhase::Settled;
+    let mut followed = false;
+    for _ in 0..400 {
+        step(&mut host_app, &mut client);
+        if prop_state(&client, second[2]).0 == BangerPhase::Settled {
+            followed = true;
+            break;
+        }
+    }
+    assert!(followed, "round two's break never reached the client");
+    for i in [0, 1, 3] {
+        assert_eq!(prop_state(&client, second[i]).0, BangerPhase::Dormant);
+    }
+    let props = client.world().resource::<netdrive::RemoteSnaps>().props();
+    assert_eq!(props.unresolved(), 0, "every row named a real prop");
+    assert_eq!(props.mismatched(), 0, "both rounds stamped the same world");
+    assert_eq!(props.local_table().count, 4);
+}
+
+/// `until_begun` for a client whose host must keep stepping to deliver
+/// the `Start`.
+fn until_begun_with_host(host_app: &mut App, client: &mut App) {
+    for _ in 0..400 {
+        host_app.update();
+        client.update();
+        if session_phase(client) != SessionPhase::Menu {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the Start never began the client's session");
+}
+
 /// A three-player free-for-all over a synthetic pool, minted in
 /// `generation` — the host's match the F27-B.3 legs publish.
 fn cnr_match(generation: u64) -> mm2_game::gold::GoldMatch {
