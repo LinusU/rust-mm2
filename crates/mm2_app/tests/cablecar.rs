@@ -657,3 +657,44 @@ fn retail_the_production_spawn_fields_four_cars_in_san_francisco_and_none_in_lon
     let (_, cars, _) = spawn_into_world(&vfs, "sf", false);
     assert_eq!(cars, 0);
 }
+
+/// Who runs the cable cars: the process that runs the rules. A local
+/// session does; a host does in free-roam Cruise (the sessions that
+/// replicate its traffic) and not in a networked race; a client never
+/// does — it holds copies (`worldtraffic`).
+#[test]
+fn only_the_authority_runs_the_cable_cars() {
+    use mm2_app::cablecar::fields_cable_cars;
+    use mm2_game::{EventRef, EventTableKind, SessionAuthority, SessionConfig, SessionMode};
+    let with = |authority, mode| SessionConfig {
+        authority,
+        mode,
+        ..SessionConfig::default()
+    };
+    let event = SessionMode::Event(EventRef {
+        city: "sf".into(),
+        table: EventTableKind::Checkpoint,
+        index: 0,
+    });
+    assert!(fields_cable_cars(&with(
+        SessionAuthority::Local,
+        SessionMode::Cruise
+    )));
+    assert!(fields_cable_cars(&with(
+        SessionAuthority::Local,
+        event.clone()
+    )));
+    assert!(fields_cable_cars(&with(
+        SessionAuthority::Host,
+        SessionMode::Cruise
+    )));
+    assert!(!fields_cable_cars(&with(
+        SessionAuthority::Host,
+        event.clone()
+    )));
+    assert!(!fields_cable_cars(&with(
+        SessionAuthority::Remote,
+        SessionMode::Cruise
+    )));
+    assert!(!fields_cable_cars(&with(SessionAuthority::Remote, event)));
+}

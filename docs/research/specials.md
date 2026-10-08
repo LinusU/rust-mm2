@@ -18,7 +18,7 @@ mm2-inspect specials <install> [--city london|sf] [--strict]
 | parked-car strips | `…_parkedcar[_<stem>].pathset` | `mm2_app::city::spawn_parked_cars` |
 | water / recovery rooms | `city/<city>.water` | `mm2_app::water`, `mm2_app::recovery` |
 | rail curves | `city/<city>.bai` tram/train curve counts | measured only |
-| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; audio, networking and the init gate not reproduced; cable cars, ambient cars and participants are obstacles to each other (UNK-44) |
+| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; hosted Cruise replicates them to clients (enhanced policy); audio and the init gate not reproduced; cable cars, ambient cars and participants are obstacles to each other (UNK-44) |
 
 Every family file is found by name (default, `_<event stem>` overlays and
 backup variants), parsed by the production `Pathset` parser, and each
@@ -144,8 +144,9 @@ the session clock.
 
 ### What the port does (`mm2_app::cablecar`, `mm2_game::cablecar`)
 
-- One kinematic body per terminus (`va_cablecar_f`, local-authority city
-  sessions only), on the circuit its terminus' walk gives it; the two
+- One kinematic body per terminus (`va_cablecar_f`; run by the process
+  that runs the rules — a local session, or a host in free-roam Cruise;
+  a joined client holds copies, see below), on the circuit its terminus' walk gives it; the two
   cars of a line share one route and start at their own ends.
 - The route is each leg's tram curve, oriented to the leg's direction by
   the road's geometry, joined by smooth hops, sampled at 1 m
@@ -204,6 +205,18 @@ measure 4.3602 m and 4.3602 m — symmetric, so the earlier assumption
 held. A tram in the junction box also counts as an occupant of
 it for the box yield. Synthetic lane only (no windowed run with retail
 traffic).
+
+Networked sessions (F28-B.5, *enhanced policy* — whether the original
+runs the cars in multiplayer is unrecovered): the stops follow the
+host's signal clock and the cars on its rails, so a client cannot
+simulate them. `cablecar::fields_cable_cars` runs them on a `Host` in
+the same free-roam Cruise that replicates its ambient traffic, and the
+host's cars ride the traffic frame as `worldtraffic::CAR_CABLE` rows
+(`docs/research/net.md`); a `Remote` client spawns a kinematic copy of
+the retail model with its collider and never drives one. Limits: a
+city whose aimap authors no ambient roster publishes no frame, so a
+host there would run cars no client sees (retail sf and london both
+author one); networked races run no cable cars (as no ambient traffic).
 
 Still unrecovered or unreproduced: audio triggers (`cablecar`,
 `cablecarstart/stop`, `cablecarbell*`, `streetcable`), the `+0x40` gate,

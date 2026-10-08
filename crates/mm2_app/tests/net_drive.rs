@@ -1126,6 +1126,23 @@ fn cars_field(line: &str) -> (u64, u64, u64, u64, u64) {
     )
 }
 
+/// The `cable=sent<n>,live<n>` cells that follow `cars=` when cable cars
+/// crossed the wire (F28-B.5): the host's published cable rows and a
+/// client's cable copies. `None` when the record carries no such cell.
+fn cable_field(line: &str) -> Option<(u64, u64)> {
+    let cells = line
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("cable="))?;
+    let cell = |prefix: &str| {
+        cells
+            .split(',')
+            .find_map(|c| c.strip_prefix(prefix))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {prefix} cell in {line}"))
+    };
+    Some((cell("sent"), cell("live")))
+}
+
 /// The `wclk=sent<n>,landed<n>,seek<n>,ref<n>` record field — the
 /// host's published world-clock frames and, on a client, the frames it
 /// folded into its scenery clock, the re-seeks those queued and the
@@ -1188,6 +1205,14 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
         world_sent > 0,
         "the host published no world clock: {host_rec}"
     );
+    // F28-B.5: sf's four cable cars run on the host and ride the same
+    // frames; the client holds a copy of each and never ran one.
+    let (cable_sent, _) = cable_field(&host_rec)
+        .unwrap_or_else(|| panic!("the host published no cable car: {host_rec}"));
+    assert!(cable_sent >= 4, "{host_rec}");
+    let (_, cable_live) =
+        cable_field(&rec).unwrap_or_else(|| panic!("the client holds no cable car copy: {rec}"));
+    assert_eq!(cable_live, 4, "{rec}");
     // The operator's evidence: both records, as the run printed them.
     eprintln!("host   {host_rec}\nclient {rec}");
 }

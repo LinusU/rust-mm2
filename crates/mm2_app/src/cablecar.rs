@@ -21,10 +21,17 @@
 //! (the original's controller does not either). Ambient cars queue
 //! behind a cable car the same way ([`RoadObstacle`]).
 //!
+//! Networked sessions ([`fields_cable_cars`]): the cars' stops follow the
+//! host's signal clock and the cars on its rails, so only the host runs
+//! them, and only in free-roam Cruise — the sessions that replicate the
+//! host's ambient traffic. A client holds kinematic copies posed from the
+//! traffic frame (`worldtraffic`, [`CAR_CABLE`](crate::worldtraffic::CAR_CABLE)
+//! rows); it never drives one. Whether the original runs them in
+//! multiplayer is unrecovered (UNK-44), so this is an enhanced policy.
+//!
 //! Not yet reproduced (stated, not hidden): the object audio, and the
-//! original's init gate, which is unrecovered — local sessions always
-//! spawn the cars; networked ones never do, because a car whose stops
-//! follow this process's signal clock would disagree between peers.
+//! original's init gate, which is unrecovered — eligible sessions always
+//! spawn the cars.
 
 use avian3d::prelude::{Position, SimpleCollider};
 use bevy::prelude::*;
@@ -36,12 +43,26 @@ use mm2_game::cablecar::{
 };
 use mm2_game::movers::mover_rotation;
 use mm2_game::parked::ParkedRng;
-use mm2_game::{JunctionGate, Player, SessionEntity, SessionPhase};
+use mm2_game::{
+    JunctionGate, Player, SessionAuthority, SessionConfig, SessionEntity, SessionPhase,
+};
 
 use crate::banger::BangerDefs;
 use crate::city::{MovableModels, v3};
 use crate::movers::{BodyQuery, pose_body, spawn_body};
-use crate::traffic::{AmbientCar, AmbientTraffic, RoadObstacle};
+use crate::traffic::{AmbientCar, AmbientTraffic, RoadObstacle, fields_ambient_traffic};
+
+/// Whether this process runs the session's cable cars: a local session
+/// does; a `Host` does in the free-roam Cruise that replicates its
+/// ambient traffic ([`fields_ambient_traffic`]); a `Remote` client never
+/// does — its cars are copies of the host's.
+pub fn fields_cable_cars(config: &SessionConfig) -> bool {
+    match config.authority {
+        SessionAuthority::Local => true,
+        SessionAuthority::Host => fields_ambient_traffic(config),
+        SessionAuthority::Remote => false,
+    }
+}
 
 /// The junction a leg's road ends at, as the ambient-traffic controller
 /// names it.
@@ -174,8 +195,8 @@ pub fn plan_cable_cars(
     (circuits, starts)
 }
 
-/// Spawn the city's cable cars, session-owned. `eligible` is false for
-/// networked sessions (see the module notes).
+/// Spawn the city's cable cars, session-owned. `eligible` is
+/// [`fields_cable_cars`] (see the module notes).
 #[allow(clippy::too_many_arguments)] // Bevy asset stores have to be threaded separately
 pub fn spawn_cable_cars(
     commands: &mut Commands,

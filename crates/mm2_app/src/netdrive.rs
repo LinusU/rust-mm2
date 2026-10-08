@@ -947,6 +947,12 @@ pub struct NetDriveReport {
     pub cars_mismatched: u64,
     /// Traffic copies a client currently holds (F26-A).
     pub cars_live: usize,
+    /// Cable-car rows the host published (a subset of `cars_sent`;
+    /// F28-B.5).
+    pub cable_sent: u64,
+    /// Cable-car copies a client currently holds (a subset of
+    /// `cars_live`; F28-B.5).
+    pub cable_live: usize,
     /// World-clock frames the host published (F26-A, protocol v20).
     pub world_sent: u64,
     /// World-clock frames a client folded into its clock (F26-A).

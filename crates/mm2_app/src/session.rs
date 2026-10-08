@@ -1000,13 +1000,14 @@ pub fn load_session_world(
             owner,
         );
         commands.insert_resource(movers);
-        // The AI map's cable cars: one per tram-line terminus, local
-        // sessions only (their stops follow this process's signal clock).
+        // The AI map's cable cars: one per tram-line terminus, run by
+        // the process that runs the rules (their stops follow its signal
+        // clock); a networked client gets copies from the host's frames.
         let cable = crate::cablecar::spawn_cable_cars(
             &mut commands,
             &vfs.0,
             &city_stem,
-            config.authority == mm2_game::SessionAuthority::Local,
+            crate::cablecar::fields_cable_cars(&config),
             config.seed,
             &mut assets.meshes,
             &mut assets.images,

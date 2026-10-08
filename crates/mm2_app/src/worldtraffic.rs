@@ -33,6 +33,13 @@
 //!   leaves on its own. A late joiner needs no snapshot message — the
 //!   next frame is already complete.
 //!
+//! - **Cable cars.** The host's San Francisco cable cars
+//!   (`cablecar`; their stops follow the host's signal clock and the
+//!   cars on their rails, so a client cannot simulate them) ride the
+//!   same frame as [`CAR_CABLE`] rows — id, pose, velocity — and a
+//!   client spawns the retail model with its collider on a kinematic
+//!   copy. A late joiner sees them wherever the next frame says.
+//!
 //! Not replicated, by decision: traffic signals (aspect is a pure
 //! function of the host's clock that nothing client-side reads), the
 //! stuck/queue accounting, and per-client relevancy — the host's own
@@ -47,6 +54,7 @@ use std::sync::Arc;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
+use mm2_game::cablecar::CABLE_CAR_MODEL;
 use mm2_game::{
     AmbientAudio, AmbientRoster, Mm2Vfs, ObjectIdentity, Session, SessionAuthority, SessionConfig,
     SessionEntity, SessionPhase, WorldMode,
@@ -54,7 +62,10 @@ use mm2_game::{
 use mm2_net::{MAX_SNAP_CARS, Message, SnapCar};
 use tracing::warn;
 
+use crate::cablecar::CableCar;
 use crate::car_visual::spawn_vehicle_model;
+use crate::city::{MovableModel, MovableModels};
+use crate::movers::spawn_body;
 use crate::net::HostLink;
 use crate::netdrive::{NetDriveReport, RemoteSnaps, wire_quat};
 use crate::traffic::fields_ambient_traffic;
@@ -65,6 +76,11 @@ use crate::worldprops::fnv;
 pub const CAR_LANE: u8 = 0;
 /// [`SnapCar::state`]: a wreck the host's solver owns.
 pub const CAR_KNOCKED: u8 = 1;
+
+/// [`SnapCar::state`]: one of the host's cable cars. `class` is the
+/// car's circuit index (informational — the client needs only the
+/// pose), and the car rides the same id ledger as the ambient cars.
+pub const CAR_CABLE: u8 = 2;
 
 /// Publish every this-many frames: lane followers move smoothly under
 /// the velocity carry, so a third of the frame rate holds them.
@@ -110,7 +126,8 @@ pub fn roster_digest(roster: &AmbientRoster) -> u64 {
     hash
 }
 
-fn encode_drive(drive: AmbientDrive) -> u8 {
+/// The wire state of an ambient car's drive.
+pub fn drive_state(drive: AmbientDrive) -> u8 {
     match drive {
         AmbientDrive::Lane => CAR_LANE,
         AmbientDrive::Knocked => CAR_KNOCKED,
@@ -252,6 +269,9 @@ pub struct TrafficReplica {
     roster: AmbientRoster,
     digest: u64,
     classes: HashMap<usize, Option<Arc<AmbientClass>>>,
+    /// The cable car's model, loaded on the first cable row: `None`
+    /// until tried, `Some(None)` when the install cannot supply it.
+    cable: Option<Option<MovableModel>>,
     copies: HashMap<u32, Entity>,
 }
 
@@ -301,6 +321,7 @@ pub fn load_traffic_replica(vfs: &Vfs, config: &SessionConfig) -> Option<Traffic
         digest: roster_digest(&setup.roster),
         roster: setup.roster,
         classes: HashMap::new(),
+        cable: None,
         copies: HashMap::new(),
     })
 }
@@ -322,7 +343,7 @@ impl TrafficLedger {
     pub fn collect(
         &mut self,
         generation: u64,
-        cars: impl Iterator<Item = (Entity, usize, AmbientDrive, Vec3, Quat, Vec3)>,
+        cars: impl Iterator<Item = (Entity, usize, u8, Vec3, Quat, Vec3)>,
     ) -> (Vec<SnapCar>, usize) {
         if self.generation != generation {
             *self = Self {
@@ -332,7 +353,7 @@ impl TrafficLedger {
         }
         let mut live: Vec<SnapCar> = Vec::new();
         let mut alive: Vec<Entity> = Vec::new();
-        for (entity, class, drive, pos, rot, vel) in cars {
+        for (entity, class, state, pos, rot, vel) in cars {
             alive.push(entity);
             if !pos.is_finite() || !rot.is_finite() || !vel.is_finite() {
                 continue;
@@ -352,7 +373,7 @@ impl TrafficLedger {
             live.push(SnapCar {
                 id,
                 class,
-                state: encode_drive(drive),
+                state,
                 pos: pos.to_array(),
                 rot: rot.to_array(),
                 vel: vel.to_array(),
@@ -379,6 +400,14 @@ pub fn publish_traffic(
     cars: Query<(
         Entity,
         &AmbientCar,
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &SessionEntity,
+    )>,
+    cable: Query<(
+        Entity,
+        &CableCar,
         &Position,
         &Rotation,
         &LinearVelocity,
@@ -413,16 +442,34 @@ pub fn publish_traffic(
 
     let (rows, omitted) = ledger.collect(
         session.generation(),
-        cars.iter()
+        // The cable cars first: they are few, so they take the lowest
+        // ids and the frame's bound can never be what drops one.
+        cable
+            .iter()
             .filter(|(.., owner)| owner.0 == session.generation())
             .map(|(entity, car, pos, rot, vel, _)| {
-                (entity, car.class, car.drive, pos.0, rot.0, vel.0)
-            }),
+                (entity, car.circuit, CAR_CABLE, pos.0, rot.0, vel.0)
+            })
+            .chain(
+                cars.iter()
+                    .filter(|(.., owner)| owner.0 == session.generation())
+                    .map(|(entity, car, pos, rot, vel, _)| {
+                        (
+                            entity,
+                            car.class,
+                            drive_state(car.drive),
+                            pos.0,
+                            rot.0,
+                            vel.0,
+                        )
+                    }),
+            ),
     );
     if rows.is_empty() {
         return;
     }
     let sent = rows.len() as u64;
+    let cable = rows.iter().filter(|r| r.state == CAR_CABLE).count() as u64;
     let frame = Message::Traffic {
         generation: session.wire_generation(),
         tick: session.tick(),
@@ -434,6 +481,7 @@ pub fn publish_traffic(
     {
         report.cars_sent += sent;
         report.cars_omitted += omitted as u64;
+        report.cable_sent += cable;
     }
 }
 
@@ -464,16 +512,17 @@ pub fn apply_traffic(
     report: Option<ResMut<NetDriveReport>>,
 ) {
     let mut report = report;
-    let mut publish = |snaps: &RemoteSnaps, live: usize| {
+    let mut publish = |snaps: &RemoteSnaps, live: usize, cable: usize| {
         if let Some(report) = report.as_mut() {
             report.cars_landed = snaps.traffic.landed();
             report.cars_mismatched = snaps.traffic.mismatched();
             report.cars_live = live;
+            report.cable_live = cable;
         }
     };
     let live = replica.as_ref().map_or(0, |r| r.live());
     if session.authority_role().is_authority() {
-        publish(&snaps, live);
+        publish(&snaps, live, 0);
         return;
     }
     match session.phase() {
@@ -488,7 +537,7 @@ pub fn apply_traffic(
             if let Some(mut replica) = replica {
                 replica.copies.clear();
             }
-            publish(&snaps, 0);
+            publish(&snaps, 0, 0);
             return;
         }
     }
@@ -498,7 +547,7 @@ pub fn apply_traffic(
     // roster) has nothing for the rows to land on.
     let (Some(mut replica), Some(vfs)) = (replica, vfs) else {
         snaps.traffic.unresolved += rows.len() as u64;
-        publish(&snaps, 0);
+        publish(&snaps, 0, 0);
         return;
     };
     let owner = SessionEntity(session.generation());
@@ -543,7 +592,12 @@ pub fn apply_traffic(
             Err(_) => !known.contains(id),
         });
     let live = replica.live();
-    publish(&snaps, live);
+    let cable = replica
+        .copies
+        .values()
+        .filter(|e| bodies.get(**e).is_ok_and(|b| b.0.state == CAR_CABLE))
+        .count();
+    publish(&snaps, live, cable);
 }
 
 /// Apply one row; `false` when it names nothing this process can spawn
@@ -564,7 +618,10 @@ fn apply_row(
 ) -> bool {
     let pos = Vec3::from_array(row.pos);
     let vel = Vec3::from_array(row.vel);
-    if !pos.is_finite() || !vel.is_finite() || !matches!(row.state, CAR_LANE | CAR_KNOCKED) {
+    if !pos.is_finite()
+        || !vel.is_finite()
+        || !matches!(row.state, CAR_LANE | CAR_KNOCKED | CAR_CABLE)
+    {
         return false;
     }
     let rot = wire_quat(row.rot);
@@ -588,6 +645,19 @@ fn apply_row(
     // A new car (or one whose copy was swept): spawn it.
     if replica.copies.len() >= MAX_COPIES {
         return false;
+    }
+    if row.state == CAR_CABLE {
+        return spawn_cable_copy(
+            row,
+            (pos, rot, vel),
+            now,
+            commands,
+            vfs,
+            replica,
+            owner,
+            session,
+            (meshes, images, materials),
+        );
     }
     let class = usize::from(row.class);
     let Some(spec) = replica.roster.entries.get(class) else {
@@ -645,6 +715,73 @@ fn apply_row(
     if !missing.is_empty() {
         warn!(class = %spec.id, "ambient replica: missing textures: {}", missing.join(", "));
     }
+    replica.copies.insert(row.id, entity);
+    true
+}
+
+/// Spawn a client's copy of one host cable car: the retail model and
+/// its collider on a kinematic body, posed from the row. The copy is a
+/// [`TrafficCopy`] like any other, so it rides the same retirement and
+/// pose application; it carries no [`CableCar`] — the client never
+/// drives one.
+#[allow(clippy::too_many_arguments)] // threads the same stores the session load does
+fn spawn_cable_copy(
+    row: &SnapCar,
+    (pos, rot, vel): (Vec3, Quat, Vec3),
+    now: u64,
+    commands: &mut Commands,
+    vfs: &Vfs,
+    replica: &mut TrafficReplica,
+    owner: SessionEntity,
+    session: &mut Session,
+    (meshes, images, materials): (
+        &mut Assets<Mesh>,
+        &mut Assets<Image>,
+        &mut Assets<StandardMaterial>,
+    ),
+) -> bool {
+    if replica.cable.is_none() {
+        let mut models = MovableModels::new(vfs, meshes, images, materials);
+        let model = models.load(CABLE_CAR_MODEL, Vec3::ZERO);
+        let missing = models.finish(commands, owner);
+        if model.is_none() {
+            warn!(
+                model = CABLE_CAR_MODEL,
+                "cable car replica: model unresolved — no copies"
+            );
+        } else if !missing.is_empty() {
+            warn!(
+                "cable car replica: missing textures: {}",
+                missing.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+        replica.cable = Some(model);
+    }
+    let Some(Some(model)) = &replica.cable else {
+        return false;
+    };
+    let entity = spawn_body(
+        commands,
+        model,
+        Transform::from_translation(pos).with_rotation(rot),
+        owner,
+        format!("cablecar-copy-{}", row.id),
+    );
+    commands.entity(entity).insert((
+        ObjectIdentity(session.mint_object_id()),
+        session.authority_role(),
+        TrafficCopy {
+            id: row.id,
+            class: row.class,
+            state: row.state,
+            seen: now,
+        },
+        Position(pos),
+        Rotation(rot),
+        LinearVelocity(vel),
+        AngularVelocity::ZERO,
+        TransformInterpolation,
+    ));
     replica.copies.insert(row.id, entity);
     true
 }

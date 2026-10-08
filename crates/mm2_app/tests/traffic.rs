@@ -14,12 +14,15 @@ use avian3d::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::cablecar::CableCar;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic, RoadObstacle, TrafficSignal};
+use mm2_app::worldtraffic::CAR_CABLE;
 use mm2_assets::Vfs;
 use mm2_formats::bai::{Side, VehicleRule};
+use mm2_game::cablecar::{CableMotion, CableRoute};
 use mm2_game::{
     DamageEvent, DamageSpec, DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor,
     LaneId, LaneKind, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerId, PlayerVehicle,
@@ -880,11 +883,34 @@ fn host_frame(
         &LinearVelocity,
         &mm2_game::SessionEntity,
     )>();
+    let mut cq = app.world_mut().query::<(
+        Entity,
+        &CableCar,
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &mm2_game::SessionEntity,
+    )>();
+    // The production order (`publish_traffic`): cable cars first.
     let (rows, omitted) = ledger.collect(
         generation,
-        q.iter(app.world())
+        cq.iter(app.world())
             .filter(|(.., owner)| owner.0 == generation)
-            .map(|(e, c, p, r, v, _)| (e, c.class, c.drive, p.0, r.0, v.0)),
+            .map(|(e, c, p, r, v, _)| (e, c.circuit, CAR_CABLE, p.0, r.0, v.0))
+            .chain(
+                q.iter(app.world())
+                    .filter(|(.., owner)| owner.0 == generation)
+                    .map(|(e, c, p, r, v, _)| {
+                        (
+                            e,
+                            c.class,
+                            mm2_app::worldtraffic::drive_state(c.drive),
+                            p.0,
+                            r.0,
+                            v.0,
+                        )
+                    }),
+            ),
     );
     assert_eq!(omitted, 0);
     let frame = Message::Traffic {
@@ -1081,6 +1107,182 @@ fn a_client_copies_the_hosts_traffic_and_retires_it_when_frames_stop() {
             .live(),
         0
     );
+}
+
+/// Put one host cable car on a straight 100 m line, moving at cruise
+/// speed, owned by the host's current generation.
+fn spawn_host_cable_car(host: &mut App) -> Entity {
+    let generation = host.world().resource::<Session>().generation();
+    let route = CableRoute::new(&[vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 0.0)]])
+        .expect("a straight line is a route");
+    host.world_mut()
+        .spawn((
+            CableCar {
+                circuit: 0,
+                motion: CableMotion::new(&route, 0, 0.5),
+                lift: 0.0,
+                nose: 4.0,
+                tail: 4.0,
+                half_width: 1.25,
+            },
+            RigidBody::Kinematic,
+            Position(Vec3::new(10.0, 1.0, 40.0)),
+            Rotation(Quat::from_rotation_y(0.5)),
+            LinearVelocity(Vec3::new(15.0, 0.0, 0.0)),
+            mm2_game::SessionEntity(generation),
+        ))
+        .id()
+}
+
+fn cable_copies(app: &mut App) -> Vec<(u32, Vec3, Entity)> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query::<(Entity, &mm2_app::worldtraffic::TrafficCopy, &Position)>()
+        .iter(app.world())
+        .filter(|(_, c, _)| c.state == CAR_CABLE)
+        .map(|(e, c, p)| (c.id, p.0, e))
+        .collect();
+    v.sort_by_key(|(id, ..)| *id);
+    v
+}
+
+/// F28-B.5 end to end through the production code on both sides: a
+/// host's cable car, published through the real row collector and frame
+/// codec, appears on a `Remote` client as one kinematic copy with the
+/// retail model's collider and render parts — never a `CableCar` — and
+/// follows the host's car as it moves. A client that joins later finds
+/// the car wherever the host has it (AC05's late-join leg).
+#[test]
+fn a_client_copies_the_hosts_cable_car_and_a_late_joiner_finds_it_in_place() {
+    let install = city_install();
+    ambient_assets(install.path(), "va_cablecar_f");
+    let mut config = city_config();
+    config.authority = SessionAuthority::Host;
+    config.dev = DevOverrides::default();
+    let mut host = test_app(config, vfs_of(install.path()));
+    let mut client = client_app(install.path());
+    assert!(run_until(&mut host, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(run_until(&mut client, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = spawn_host_cable_car(&mut host);
+
+    let mut ledger = mm2_app::worldtraffic::TrafficLedger::default();
+    let frame = host_frame(&mut host, &mut ledger, None);
+    let Message::Traffic { rows, .. } = &frame else {
+        unreachable!()
+    };
+    let cable_row = *rows
+        .iter()
+        .find(|r| r.state == CAR_CABLE)
+        .expect("the cable car rides the frame");
+    assert_eq!(cable_row.id, 0, "the cable cars take the lowest ids");
+    deliver(&mut client, frame);
+    run(&mut client, 2);
+
+    let made = cable_copies(&mut client);
+    assert_eq!(made.len(), 1, "one copy for the one host car");
+    let (id, pos, copy) = made[0];
+    assert_eq!(id, cable_row.id);
+    assert!(pos.distance(Vec3::new(10.0, 1.0, 40.0)) < 0.5, "{pos:?}");
+    let world = client.world_mut();
+    assert_eq!(world.get::<RigidBody>(copy), Some(&RigidBody::Kinematic));
+    assert!(
+        world.get::<CableCar>(copy).is_none(),
+        "a client never drives a cable car"
+    );
+    assert!(world.get::<Collider>(copy).is_some(), "the car collides");
+    assert!(
+        world.get::<Children>(copy).is_some_and(|c| !c.is_empty()),
+        "the model is attached"
+    );
+    assert!(world.get::<mm2_app::traffic::RoadObstacle>(copy).is_none());
+
+    // The host's car moves on; the same copy follows it.
+    let moved_to = Vec3::new(40.0, 1.0, 40.0);
+    host.world_mut().get_mut::<Position>(car).unwrap().0 = moved_to;
+    host.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = moved_to;
+    let frame = host_frame(&mut host, &mut ledger, None);
+    run(&mut host, 1);
+    deliver(&mut client, frame);
+    run(&mut client, 2);
+    let followed = cable_copies(&mut client);
+    assert_eq!(followed.len(), 1);
+    assert_eq!(followed[0].2, copy, "the same entity follows the car");
+    assert!(followed[0].1.distance(Vec3::new(40.0, 1.0, 40.0)) < 1.0);
+
+    // A late joiner: a fresh client sees the car where the host has it
+    // now, from one frame and no history.
+    let mut late = client_app(install.path());
+    assert!(run_until(&mut late, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(cable_copies(&mut late).is_empty());
+    let now = host.world().get::<Position>(car).unwrap().0;
+    assert!(now.x >= 40.0, "the host's car has driven on: {now:?}");
+    let frame = host_frame(&mut host, &mut ledger, None);
+    deliver(&mut late, frame);
+    run(&mut late, 2);
+    let joined = cable_copies(&mut late);
+    assert_eq!(joined.len(), 1);
+    assert!(
+        joined[0].1.distance(now) < 1.0,
+        "joined at {:?}, host at {now:?}",
+        joined[0].1
+    );
+
+    // Frames stop (the host's car is gone): the copy retires like any
+    // other.
+    host.world_mut().despawn(car);
+    run(
+        &mut client,
+        mm2_app::worldtraffic::COPY_TTL_TICKS as usize + 20,
+    );
+    assert!(cable_copies(&mut client).is_empty());
+}
+
+/// An install that cannot supply the cable car's model: the client
+/// counts the rows unresolved and spawns nothing — no stand-in box —
+/// and the ambient copies beside it are unaffected.
+#[test]
+fn a_client_without_the_cable_model_counts_the_rows_and_spawns_nothing() {
+    let install = city_install();
+    let mut config = city_config();
+    config.authority = SessionAuthority::Host;
+    config.dev = DevOverrides::default();
+    let mut host = test_app(config, vfs_of(install.path()));
+    let mut client = client_app(install.path());
+    assert!(run_until(&mut host, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(run_until(&mut client, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let ambient = ambient_cars(&mut host).len();
+    assert!(ambient >= 2);
+    spawn_host_cable_car(&mut host);
+    let mut ledger = mm2_app::worldtraffic::TrafficLedger::default();
+    let frame = host_frame(&mut host, &mut ledger, None);
+    deliver(&mut client, frame);
+    run(&mut client, 2);
+    assert!(cable_copies(&mut client).is_empty());
+    assert_eq!(copies(&mut client).len(), ambient, "the traffic landed");
+    let stage = client
+        .world()
+        .resource::<mm2_app::netdrive::RemoteSnaps>()
+        .traffic();
+    assert_eq!(stage.unresolved(), 1, "the cable row is counted");
+    assert_eq!(stage.landed(), ambient as u64);
 }
 
 /// `drive_ambient` walks every car forward along its lane in the

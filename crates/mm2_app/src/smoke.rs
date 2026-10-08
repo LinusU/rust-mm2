@@ -1212,6 +1212,15 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F28-B.5 cable-car evidence: the cable rows the host put in its
+    // traffic frames and the copies a client holds. Absent while there
+    // were none, so every record without cable cars stays bit-identical.
+    let cable_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .filter(|r| r.cable_sent > 0 || r.cable_live > 0)
+        .map(|r| format!(" cable=sent{},live{}", r.cable_sent, r.cable_live))
+        .unwrap_or_default();
+    let cars_detail = format!("{cars_detail}{cable_detail}");
     // F26-A world-clock evidence: the frames the host published and the
     // client folded in (`seek` = those that moved its scenery). Absent
     // while the wire carried none.

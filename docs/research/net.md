@@ -1054,6 +1054,19 @@ claim.* v19 adds `Message::Traffic { generation, tick, roster, rows }`
   ticks (2 s at 120 Hz) is despawned: absence from a frame is not a
   despawn order, so a lost frame cannot erase the population. Late
   joiners need no snapshot message — the next frame is complete.
+- **Cable cars (F28-B.5, no version bump).** `state = 2`
+  (`CAR_CABLE`) rows carry the host's San Francisco cable cars in the
+  same frame, ledger and id space (`class` = the car's circuit index,
+  informational). They are collected first, so they take the lowest ids
+  and the 64-row bound can never drop one. A client spawns the retail
+  `va_cablecar_f` model and collider on a kinematic `TrafficCopy` (no
+  `CableCar`: the client never drives one), so the TTL retirement, the
+  snap-past-3 m rule and the per-car latest-wins apply unchanged. A
+  client that cannot load the model counts the rows `unresolved` and
+  spawns nothing; a peer older than this build refuses state 2 the same
+  way. Smoke field `cable=sent<n>,live<n>` (host rows published,
+  client copies held) follows `cars=` when non-zero. Policy and limits:
+  `docs/research/specials.md` § The cable car.
 - **Budget.** 26 B header (tag 1, generation 8, tick 8, roster 8, count
   1) + 47 B per row (id 4, class 2, state 1, pos 12, rot 16, vel 12);
   64 rows = 3,034 B worst case. At the default density (0.5 → ~16 cars)

@@ -1,16 +1,17 @@
-# Last iteration — F28-A.7: cross-check the other AI-map creations (iteration 24 of the new run)
+# Last iteration — F28-B.5: cable cars in networked Cruise (iteration 1 of the next run)
 
-Selection: F28-B.4 (`dc0f7ba`) passed gates and review with no blocking findings, so no repair was owed. The open F28 item that retail data can close is the "cross-check of the other AIMAP-created objects" (UNK-44 tail): `AIMAP.Init` also logs "Create the subways." and the exe has `Hookman` strings.
-
-Findings (disassembly of `Midtown2.exe`, `docs/research/specials.md` § The other AI-map creations): the subway step needs the init's `+0x44` flag and a parsed `[Subway]` line (`%s %d`, reader `0x555b38`); it builds one train of N cars per BAI train-rail terminus. Retail has no uncommented `[Subway]` (`city/london.aimap` has `#[Subway]` / `#va_ug_l 3`), so nothing is created; London trains are the pathset family already run by `mm2_app::movers` (3 cars/path — the same `va_ug_l 3`). `[Hookmen]` row = `name model x y z w flag` (writer `0x5558c1`); retail has 0 rows.
+Selection: the previous checkpoint (`482ef96`) passed gates and review, so no repair was owed. F28's spec req 5 / AC05 (authoritative state, late join) was the largest hole left in the plan's F28 open list: networked sessions spawned no cable cars at all, because their stops follow one process's signal clock and the cars on its rails.
 
 Production change:
-- `mm2_formats::aimap`: `[Subway]` section parsed into `Aimap::subway: Option<SubwayRecord { model, cars, line }>` (was an unknown section); 3 parser tests (real shape, commented line, malformed/missing).
-- `mm2-inspect specials`: new per-city `aimaps` audit over `city/<city>.aimap` + `race/<city>/*.aimap{,_p}` counting `[Subway]` trains and `[Hookmen]` rows; any is an unresolved actor; an unparseable aimap is a `--strict` failure. 2 new tests (quiet retail shape vs loud mod shape, `.bak` ignored; unparseable aimap fails).
-- Docs: specials.md, aimap.md, original-rules WLD-31 (verified_original) + UNK-45 (hookman semantics), PLAN F28-A.7.
+- `mm2_app::cablecar::fields_cable_cars`: local → run; `Host` → run in the free-roam Cruise that replicates ambient traffic (`fields_ambient_traffic`); `Remote` → never. `session.rs` passes it as `eligible`.
+- `mm2_app::worldtraffic`: `CAR_CABLE` (`SnapCar.state = 2`). `publish_traffic` chains the host's `CableCar` rows first (lowest ids, never trimmed by the 64-row bound); `TrafficLedger::collect` takes a wire `state` (`drive_state()` for ambient cars). `apply_row` accepts state 2 and `spawn_cable_copy` loads `va_cablecar_f` once per replica (`MovableModels`) and spawns a kinematic `TrafficCopy` (model + collider, no `CableCar`); a missing model is cached, warned once and counted `unresolved`. No protocol version bump (old peers refuse state 2 counted).
+- Evidence plumbing: `NetDriveReport::{cable_sent, cable_live}` and a smoke ` cable=sent<n>,live<n>` cell after `cars=` (absent when zero).
+- Docs: `docs/research/specials.md` (policy + limits), `docs/research/net.md` (cable rows), PLAN F28-A/F28-B.
 
-Evidence: `mm2-inspect specials <retail> --strict` → aimaps SF 107 + London 102 = 209 files read, 0 `[Subway]`, 0 `[Hookmen]` rows, 0 unreadable, 0 failures, 0 unresolved.
+Tests: `tests/traffic.rs` `a_client_copies_the_hosts_cable_car_and_a_late_joiner_finds_it_in_place` (collector → codec → client; copy has Kinematic/Collider/model, no `CableCar`; same entity follows; a fresh client joins in place; copy retires after the TTL) and `a_client_without_the_cable_model_counts_the_rows_and_spawns_nothing`; `tests/cablecar.rs` `only_the_authority_runs_the_cable_cars`. The test's host collector mirrors `publish_traffic`'s chain (the system itself needs a `HostLink`); the real system is exercised by the two-process leg.
 
-Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed.
+Original-data evidence: `MM2_RETAIL=<retail> cargo test -p mm2_app --test network two_retail_processes_replicate_the_hosts_traffic` — host `cable=sent1176,live0`, client `cable=sent0,live4` (4 retail sf cars, real loopback, headless; extended the test to assert `>=4` sent / `4` live).
 
-Not covered / open: no runtime for a modded `[Subway]`/`[Hookmen]` (none in retail; listed unresolved); the `+0x44`/`+0x40` init gates; hookman semantics (UNK-45); cable-car audio, networking, head-on deadlock, rail side. Status: implemented candidate; not independently checked.
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass (one `clone_on_copy` in the new test fixed first); `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed.
+
+Not covered / open: cable-car audio, the `+0x40` init gate, rail side, head-on deadlock; a city with no ambient roster publishes no frame (retail has one); no impairment cell for cable rows; no windowed capture of a copy. Status: implemented candidate; not independently checked.
