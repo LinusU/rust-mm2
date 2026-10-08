@@ -1,3 +1,13 @@
+# Last iteration — F26-C.4: a late joiner converges on props the host already broke (iteration 18 of the recovery run)
+
+Selection: the F26-C.3 review passed with no blockers and listed "broken-prop state for a late joiner" as open on F26-AC02. The existing app-level leg (`a_hosts_prop_state_converges_on_a_joined_clients_world`) joins *before* any prop changes, so every row rides as a fresh mark; it cannot show that a joiner arriving afterwards is brought current, which `worldprops` claims only for its rolling resend window.
+Change: tests only, `mm2_app/tests/net_app.rs` (+1; no production change). `a_late_joiner_converges_on_props_the_host_broke_before_it_arrived`: the host starts alone, stamps 1 dormant + 1 flying + 1 shattered (2 pieces, one airborne fragment) + 19 settled props (more than two resend windows), runs 40 frames to nobody so every fresh mark is spent, then a client joins and stamps the same world dormant. Asserts the joiner reaches flying/broken/all-settled, the settled pose (not the stamped home) wins, the dormant prop stays dormant, the airborne fragment spawns, `unresolved == 0`, `mismatched == 0`, and the site table count agrees. Production `publish_props`/`apply_props` over a real loopback socket.
+Mutation: freezing the resend cursor (`ledger.cursor = start`) fails the test (the joiner never converges); restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 2671 passed, 0 failed.
+Status: implemented candidate, not independently checked. In-process apps over loopback with synthetic placements, not a retail city and not separate processes. Advances F26-AC02 (props leg) and AC01 (props converge). Open on F26-C/AC02: the same on a retail city at process level, restart consistency, AC03 on a real impaired run.
+
+---
+
 # Last iteration — F26-C.3: a late joiner inherits the host's weather and time of day (iteration 17 of the recovery run)
 
 Selection: the F26-C.2 review passed with no blockers. F26-AC02 ("a late joiner receives current world/session state rather than default noon") had process-level evidence for the *roster/generation* handoff (`a_client_that_joins_a_running_session_is_handed_the_live_one`) but none that the joiner's *conditions* were the host's: the only weather-over-the-wire leg (`a_session_edit_typed_on_the_host_reaches_the_next_round`) is a rematch, not a late join. Conditions are fixed per session (no in-session clock), so the `Start` advertisement is the carrier; this pins it end to end.
