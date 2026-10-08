@@ -12,10 +12,16 @@
 //! `_strtpnts` grid each move only their own field, and out-of-range
 //! values are refused rather than papered over by the stock row.
 //!
+//! F29-C.3 (the last section) covers the `.aimap` `[Opponent]` roster and
+//! the `.opp` routes it names: a mod's vehicle id or driving line reaches
+//! the fielded lineup, a dead route reference is reported rather than
+//! backfilled from the stock file, and a malformed aimap is refused
+//! instead of racing the event without opponents.
+//!
 //! Self-authored synthetic data; no original install is read. This is
-//! synthetic evidence for the Checkpoint, Blitz and Circuit tables and
-//! their waypoint/grid files only — `.aimap` rosters and Crash Course
-//! sequences are not exercised here.
+//! synthetic evidence for the Checkpoint, Blitz and Circuit tables, their
+//! waypoint/grid files and the checkpoint event's `.aimap`/`.opp` roster
+//! only — Crash Course sequences are not exercised here.
 
 use std::path::Path;
 
@@ -522,4 +528,243 @@ fn an_out_of_range_blitz_or_circuit_value_is_refused_not_replaced_by_the_stock_r
         "a three-row closed course"
     );
     assert_eq!(observe_kind(&v, Circuit, 1).gates, 5);
+}
+
+// ---- F29-C.3: the `.aimap` roster and its `.opp` routes -----------------
+//
+// `event_race_setup` reads the difficulty-selected aimap through the VFS
+// and distils its `[Opponent]` rows into the fielded lineup, resolving
+// each named `.opp` route through the same catalog. A mod can therefore
+// retarget a lineup by replacing the aimap (who drives) or one `.opp`
+// (where they drive) independently.
+
+const OPP_HEADER: &str =
+    "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n";
+const TAIL: &str = "0.9 0 50.0 0.7 1 1 1 1 0 1.0";
+const STOCK_ROUTE: [f32; 3] = [60.0, 110.0, 180.0];
+
+fn opp(xs: &[f32]) -> String {
+    let mut s = OPP_HEADER.to_string();
+    for x in xs {
+        s.push_str(&format!("{x},0,140,0,0,0,0,0,0\n"));
+    }
+    s
+}
+
+fn opponent_aimap(vehicle: &str, route: &str) -> String {
+    format!("[Opponent]\n1\n{vehicle} {route} {TAIL}\n")
+}
+
+/// Event 0 authors one opponent (`vpstock` on `race0-a-0.opp`); event 1
+/// authors none.
+fn roster_base(d: &Path) {
+    write(
+        d,
+        "race/testcity/mmracedata.csv",
+        format!("{HEADER}\n{}{}", row(1, 0.1), row(0, 0.1)),
+    );
+    for i in 0..2 {
+        write(
+            d,
+            &format!("race/testcity/race{i}waypoints.csv"),
+            course(&[60.0, 110.0, 140.0, 165.0, 180.0]),
+        );
+    }
+    write(
+        d,
+        "race/testcity/race0.aimap",
+        opponent_aimap("vpstock", "race0-a-0.opp"),
+    );
+    write(d, "race/testcity/race1.aimap", "#\n");
+    write(d, "race/testcity/race0-a-0.opp", opp(&STOCK_ROUTE));
+}
+
+/// The fielded lineup reduced to what the mods move: vehicle id, the
+/// route's x anchors (`None` for a dead reference) and how many issues
+/// the build reported.
+#[derive(Debug, PartialEq)]
+struct Lineup {
+    entries: Vec<(String, Option<Vec<f32>>)>,
+    issues: usize,
+}
+
+fn lineup(vfs: &Vfs, index: usize) -> Lineup {
+    let setup = event_race_setup(vfs, &event(index), Difficulty::Amateur).unwrap();
+    Lineup {
+        entries: setup
+            .roster
+            .entries
+            .iter()
+            .map(|e| {
+                (
+                    e.vehicle.clone(),
+                    e.route
+                        .as_ref()
+                        .map(|r| r.points.iter().map(|p| p.position.x).collect()),
+                )
+            })
+            .collect(),
+        issues: setup.roster.issues.len(),
+    }
+}
+
+fn stock_lineup() -> Lineup {
+    Lineup {
+        entries: vec![("vpstock".into(), Some(STOCK_ROUTE.to_vec()))],
+        issues: 0,
+    }
+}
+
+struct Rosters {
+    tmp: tempfile::TempDir,
+    base: std::path::PathBuf,
+}
+
+fn rosters() -> Rosters {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    roster_base(&base);
+    Rosters { tmp, base }
+}
+
+#[test]
+fn a_mod_replaces_who_drives_and_where_through_the_roster_consumer() {
+    let r = rosters();
+    let stock = mounted(&r.base, &[]);
+    assert_eq!(lineup(&stock, 0), stock_lineup());
+    assert_eq!(lineup(&stock, 1).entries, []);
+
+    // The aimap swaps the car; the stock `.opp` still serves the route.
+    let who = kinds_mod(
+        r.tmp.path(),
+        "roster-who",
+        &[(
+            "race/testcity/race0.aimap",
+            opponent_aimap("vpmod", "race0-a-0.opp"),
+        )],
+    );
+    let v = mounted(&r.base, &[&who]);
+    assert_eq!(
+        lineup(&v, 0),
+        Lineup {
+            entries: vec![("vpmod".into(), Some(STOCK_ROUTE.to_vec()))],
+            issues: 0
+        }
+    );
+    assert_eq!(lineup(&v, 1).entries, []);
+
+    // The `.opp` swaps the line; the stock aimap still names the car.
+    let wher = kinds_mod(
+        r.tmp.path(),
+        "roster-where",
+        &[(
+            "race/testcity/race0-a-0.opp",
+            opp(&[70.0, 120.0, 175.0, 185.0]),
+        )],
+    );
+    let v = mounted(&r.base, &[&wher]);
+    assert_eq!(
+        lineup(&v, 0),
+        Lineup {
+            entries: vec![("vpstock".into(), Some(vec![70.0, 120.0, 175.0, 185.0]))],
+            issues: 0
+        }
+    );
+
+    // Both together compose, and unmounting restores the stock lineup.
+    let v = mounted(&r.base, &[&who, &wher]);
+    assert_eq!(
+        lineup(&v, 0).entries,
+        [("vpmod".to_string(), Some(vec![70.0, 120.0, 175.0, 185.0]))]
+    );
+    assert_eq!(lineup(&mounted(&r.base, &[]), 0), stock_lineup());
+}
+
+#[test]
+fn roster_mods_are_gameplay_and_move_the_fingerprint() {
+    let r = rosters();
+    let base = fingerprint::gameplay(&mounted(&r.base, &[])).unwrap().hash;
+    let mods = [
+        kinds_mod(
+            r.tmp.path(),
+            "roster-who",
+            &[(
+                "race/testcity/race0.aimap",
+                opponent_aimap("vpmod", "race0-a-0.opp"),
+            )],
+        ),
+        kinds_mod(
+            r.tmp.path(),
+            "roster-where",
+            &[("race/testcity/race0-a-0.opp", opp(&[70.0, 120.0, 175.0]))],
+        ),
+    ];
+    for m in &mods {
+        let vfs = mounted(&r.base, &[m]);
+        let reports = fingerprint::mod_reports(&vfs);
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].is_cosmetic_only(), "{reports:?}");
+        assert!(reports[0].contradiction().is_none(), "{reports:?}");
+        assert_ne!(fingerprint::gameplay(&vfs).unwrap().hash, base, "{m:?}");
+    }
+}
+
+#[test]
+fn a_roster_override_naming_a_dead_route_is_reported_not_backfilled_from_the_stock_line() {
+    let r = rosters();
+    let dead = kinds_mod(
+        r.tmp.path(),
+        "roster-dead",
+        &[(
+            "race/testcity/race0.aimap",
+            opponent_aimap("vpmod", "nowhere-a-0.opp"),
+        )],
+    );
+    let got = lineup(&mounted(&r.base, &[&dead]), 0);
+    // The slot is kept with no line (never the stock one), and the
+    // dangling reference and the orphaned stock `.opp` are both reported.
+    assert_eq!(got.entries, [("vpmod".to_string(), None)]);
+    assert!(got.issues >= 1, "{got:?}");
+    let setup =
+        event_race_setup(&mounted(&r.base, &[&dead]), &event(0), Difficulty::Amateur).unwrap();
+    assert!(
+        setup.roster.issues.iter().any(|i| matches!(
+            i,
+            mm2_game::OpponentIssue::UnresolvedRoute { name } if name == "nowhere-a-0.opp"
+        )),
+        "{:?}",
+        setup.roster.issues
+    );
+}
+
+#[test]
+fn a_malformed_roster_override_is_refused_not_raced_without_opponents() {
+    let r = rosters();
+    // Declares two `[Opponent]` rows and authors one.
+    let broken = kinds_mod(
+        r.tmp.path(),
+        "roster-broken",
+        &[(
+            "race/testcity/race0.aimap",
+            format!("[Opponent]\n2\nvpmod race0-a-0.opp {TAIL}\n"),
+        )],
+    );
+    let v = mounted(&r.base, &[&broken]);
+    let err = event_race_setup(&v, &event(0), Difficulty::Amateur)
+        .err()
+        .expect("the malformed aimap must be refused, not raced as an empty lineup");
+    assert!(
+        matches!(
+            err,
+            mm2_app::race::EventSetupError::Aimap(mm2_content::RosterBuildError::AimapParse {
+                ref logical,
+                ..
+            }) if logical == "race/testcity/race0.aimap"
+        ),
+        "{err:?}"
+    );
+    // The bystander event still loads, and dropping the mod restores event 0.
+    assert_eq!(lineup(&v, 1).entries, []);
+    assert_eq!(lineup(&mounted(&r.base, &[]), 0), stock_lineup());
 }

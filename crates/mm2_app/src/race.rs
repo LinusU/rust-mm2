@@ -73,6 +73,12 @@ pub enum EventSetupError {
     /// The resolved event's records could not produce a runnable race.
     #[error("race definition failed: {0}")]
     Build(#[from] mm2_content::RaceBuildError),
+    /// The event's selected `.aimap` record resolved but is unreadable
+    /// or malformed. Refused rather than raced without opponents: a
+    /// mod's broken lineup must not pass for a working one (F29-AC04).
+    /// Every retail aimap parses, so this only ever names a mod's file.
+    #[error("event aimap failed: {0}")]
+    Aimap(mm2_content::RosterBuildError),
 }
 
 /// An event session's authored content beyond the race definition —
@@ -93,8 +99,8 @@ pub struct EventSetup {
     pub pathsets: Vec<String>,
     /// The event's authored opponent lineup at the session difficulty.
     /// A roster that fails to build degrades to empty — the race still
-    /// runs, with the failure logged — since a missing `.aimap` never
-    /// blocks an otherwise runnable event.
+    /// runs, with the failure logged. A present-but-malformed `.aimap`
+    /// is not such a case: it is refused ([`EventSetupError::Aimap`]).
     pub roster: mm2_game::OpponentRoster,
     /// The event's authored `[Police]` lineup at the session difficulty
     /// (F20-A.1), read from the same aimap record as `roster`. Degrades
@@ -143,7 +149,8 @@ pub fn event_race_setup(
         .collect();
     // One aimap resolution+parse feeds both consumers: the roster
     // reads its `[Opponent]` rows, the ambient setup its traffic
-    // overrides. A record that fails degrades both to empty/None —
+    // overrides. A record that is present but unreadable or malformed
+    // is refused; only an absent record degrades both to empty/None —
     // the race still runs, with the failure logged.
     let (roster, police, aimap) = match mm2_content::event_aimap(vfs, event, difficulty) {
         Ok((aimap, picked)) => {
@@ -166,14 +173,17 @@ pub fn event_race_setup(
             };
             (roster, police, Some(aimap))
         }
-        Err(e) => {
-            warn!(error = %e, "event aimap unreadable — racing without opponents; city ambient defaults apply");
+        Err(mm2_content::RosterBuildError::NoAimapRecord) => {
+            warn!(
+                "event has no aimap record — racing without opponents; city ambient defaults apply"
+            );
             (
                 mm2_game::OpponentRoster::default(),
                 mm2_game::PoliceRoster::default(),
                 None,
             )
         }
+        Err(e) => return Err(EventSetupError::Aimap(e)),
     };
     let rewards = mm2_content::reward_table(&catalog);
     for d in &rewards.diagnostics {
