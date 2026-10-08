@@ -2800,6 +2800,23 @@ pub fn commentary_voices(
     }
 }
 
+/// The commentary voice chain — the lesson verdict ask, the environmental
+/// and race queue, the Cops & Robbers announcer — ordered after the
+/// session driver. One definition for the windowed app and the headless
+/// smoke run, so a launched lesson's verdict line cannot be scheduled in
+/// one and forgotten in the other.
+pub fn commentary_systems()
+-> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (
+        // F21-B.16: a Crash Course lesson's verdict line is asked for
+        // just before the queue drains.
+        crate::lesson::lesson_verdict_cue.before(commentary_voices),
+        commentary_voices,
+        crate::cnrvoice::cnr_commentary_voices,
+    )
+        .after(crate::session::drive_session)
+}
+
 /// Queue a lesson's `PRERACE` intro from its own cue table — a no-op
 /// outside a lesson. The table's prefixes are speaker-complete
 /// (`CCL01INTRO` → `ccl01intro02`), so no registry or speaker draw is

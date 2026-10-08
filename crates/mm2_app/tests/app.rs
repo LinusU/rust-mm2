@@ -29,6 +29,7 @@ mod layers;
 mod lesson_drive;
 mod lesson_launch;
 mod lesson_setup;
+mod lesson_voice;
 mod light_bar;
 mod menu;
 mod mirror;

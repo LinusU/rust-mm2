@@ -677,11 +677,7 @@ fn run_headless(
                     crate::audio::weather_voices.after(session::drive_session),
                     // F18-B.5: the environmental commentary queue —
                     // the record's `aud=` q field reads its count.
-                    (
-                        crate::audio::commentary_voices,
-                        crate::cnrvoice::cnr_commentary_voices,
-                    )
-                        .after(session::drive_session),
+                    crate::audio::commentary_systems(),
                     // Object sounds — the record's `aud=` o field
                     // counts the voices spawned.
                     crate::object_sound::object_sound_voices

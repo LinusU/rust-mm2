@@ -20,11 +20,11 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, controls, crowd,
-    damage, damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow,
-    net, netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip,
-    profile, progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence,
-    session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    audio, banger, breakaway, camera, car_visual, city, cnr, contracts, controls, crowd, damage,
+    damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
+    netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip, profile,
+    progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence, session,
+    settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -2006,14 +2006,8 @@ fn main() {
             // F27-B.4c: the Cops & Robbers announcer beside it — it
             // reads the match's events (authority) or the replica's
             // changes (client).
-            // F21-B.16: a Crash Course lesson's verdict line is asked
-            // for just before the queue drains.
-            (
-                mm2_app::lesson::lesson_verdict_cue.before(audio::commentary_voices),
-                audio::commentary_voices,
-                cnrvoice::cnr_commentary_voices,
-            )
-                .after(session::drive_session),
+            // The lesson verdict ask rides the same chain.
+            audio::commentary_systems(),
             // Drawbridge, ferry and Underground sounds — the same
             // despawn ordering as the other rigs.
             mm2_app::object_sound::object_sound_voices
