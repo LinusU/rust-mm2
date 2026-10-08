@@ -26,6 +26,13 @@
 //! voices (the `AudioVoice` entities, counted whether or not an output
 //! device attached a sink) are sampled and reported the same way.
 //!
+//! The report also judges the run against declared soak budgets
+//! (F30-AC02, `timings.soak`): the measured frames are split in thirds
+//! and the last third's entity and voice peaks must not exceed the
+//! middle third's by more than a stated slack, and the virtual clock may
+//! not have discarded any game time. A run too short to fill three
+//! windows with samples says `inconclusive`, never `pass`.
+//!
 //! A frame longer than the virtual clock's `max_delta` is *clamped* by
 //! Bevy: the simulation advances by the cap and the rest of the wall
 //! time is discarded, which is the engine's silent way of dropping
@@ -117,6 +124,152 @@ const WARMUP_FRAMES: usize = 120;
 /// rather than adding a per-frame cost to the thing being measured.
 const ENTITY_SAMPLE_EVERY: u64 = 30;
 
+/// Soak budgets (F30-AC02) — implementation choices, declared here so the
+/// report states the limits it judged against instead of a reader
+/// guessing them. The measured frames are split into thirds; the first
+/// third is the population filling up (traffic, crowd, ambient voices
+/// spawning in), so the growth check compares the *peak of the last
+/// third* with the *peak of the middle third*. A steady state recycles
+/// and the two peaks sit together; a leak is still climbing and the tail
+/// peak lands above the middle's by more than the slack. The slack
+/// absorbs ordinary spawn/recycle jitter between two windows.
+const SOAK_ENTITY_SLACK: u32 = 32;
+const SOAK_VOICE_SLACK: u32 = 8;
+
+/// A window needs at least this many samples before its peak says
+/// anything; a shorter run is `inconclusive`, never `pass`.
+const SOAK_MIN_SAMPLES_PER_WINDOW: usize = 3;
+
+/// One soak check's outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Pass,
+    Fail,
+    /// Too short a run to judge. Not a pass.
+    Inconclusive,
+}
+
+impl Verdict {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+/// Growth of one counter between the middle and the last third of the
+/// measured frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Growth {
+    middle_peak: u32,
+    tail_peak: u32,
+    slack: u32,
+    verdict: Verdict,
+}
+
+impl Growth {
+    fn of(readings: &[u32], slack: u32) -> Self {
+        let third = readings.len() / 3;
+        let enough = third >= SOAK_MIN_SAMPLES_PER_WINDOW * ENTITY_SAMPLE_EVERY as usize;
+        let peak = |w: &[u32]| w.iter().copied().max().unwrap_or(0);
+        let middle_peak = peak(&readings[third..2 * third]);
+        let tail_peak = peak(&readings[2 * third..]);
+        let verdict = if !enough {
+            Verdict::Inconclusive
+        } else if tail_peak > middle_peak.saturating_add(slack) {
+            Verdict::Fail
+        } else {
+            Verdict::Pass
+        };
+        Self {
+            middle_peak,
+            tail_peak,
+            slack,
+            verdict,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "middle_third_peak": self.middle_peak,
+            "last_third_peak": self.tail_peak,
+            "slack": self.slack,
+            "verdict": self.verdict.name(),
+        })
+    }
+}
+
+/// The soak verdict over the measured frames: no unbounded entity or
+/// voice growth, and no game time discarded by the virtual clock's cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Soak {
+    entities: Growth,
+    voices: Growth,
+    overload: Verdict,
+    overall: Verdict,
+}
+
+impl Soak {
+    fn judge(rows: &[Row]) -> Self {
+        let entities = Growth::of(
+            &rows.iter().map(|r| r.entities).collect::<Vec<_>>(),
+            SOAK_ENTITY_SLACK,
+        );
+        let voices = Growth::of(
+            &rows.iter().map(|r| r.voices).collect::<Vec<_>>(),
+            SOAK_VOICE_SLACK,
+        );
+        let overload = if rows.iter().any(|r| !r.clamped.is_zero()) {
+            Verdict::Fail
+        } else {
+            Verdict::Pass
+        };
+        let all = [entities.verdict, voices.verdict, overload];
+        let overall = if all.contains(&Verdict::Fail) {
+            Verdict::Fail
+        } else if all.contains(&Verdict::Inconclusive) {
+            Verdict::Inconclusive
+        } else {
+            Verdict::Pass
+        };
+        Self {
+            entities,
+            voices,
+            overload,
+            overall,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "verdict": self.overall.name(),
+            "entities": self.entities.json(),
+            "voices": self.voices.json(),
+            "overload": { "verdict": self.overload.name() },
+            "min_samples_per_window": SOAK_MIN_SAMPLES_PER_WINDOW,
+        })
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "perf: soak {} | entities: middle-third peak {} last-third peak {} (slack {}) {} \
+             | voices: {} -> {} (slack {}) {} | overload {}",
+            self.overall.name(),
+            self.entities.middle_peak,
+            self.entities.tail_peak,
+            self.entities.slack,
+            self.entities.verdict.name(),
+            self.voices.middle_peak,
+            self.voices.tail_peak,
+            self.voices.slack,
+            self.voices.verdict.name(),
+            self.overload.name(),
+        )
+    }
+}
+
 /// One finished frame.
 #[derive(Clone, Copy, Debug)]
 struct Row {
@@ -190,6 +343,8 @@ struct Stats {
     clamped_total: f64,
     clamped_worst: f64,
     max_steps: u32,
+    /// The soak budgets' verdict (F30-AC02).
+    soak: Soak,
 }
 
 /// The recorder's state — present only when `--perf-log` was given.
@@ -336,6 +491,7 @@ impl PerfLog {
             clamped_total: rows.iter().map(|r| ms(r.clamped)).sum(),
             clamped_worst: stage_max(|r| r.clamped),
             max_steps: rows.iter().map(|r| r.steps).max().unwrap_or(0),
+            soak: Soak::judge(rows),
         })
     }
 
@@ -362,7 +518,7 @@ impl PerfLog {
              | live entities first {ef} last {el} max {em} \
              | live voices first {vf} last {vl} max {vm}\n\
              perf: overload: {cf} frames over the {cap} virtual cap discarded {ct:.1} ms of \
-             game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}",
+             game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}\n{soak}",
             n = st.frames,
             median = st.median,
             p95 = st.p95,
@@ -401,6 +557,7 @@ impl PerfLog {
             ct = st.clamped_total,
             cw = st.clamped_worst,
             msx = st.max_steps,
+            soak = st.soak.line(),
         )
     }
 
@@ -479,6 +636,7 @@ impl PerfLog {
                     "worst_frame_discarded_ms": st.clamped_worst,
                     "max_fixed_steps_in_a_frame": st.max_steps,
                 },
+                "soak": st.soak.json(),
                 "worst_frame": {
                     "frame": st.worst.frame,
                     "total_ms": ms(st.worst.total),
@@ -950,6 +1108,116 @@ mod tests {
             s.contains("live entities first 1000 last 1200 max 1500"),
             "{s}"
         );
+    }
+
+    /// A log with `measured` post-warm-up frames whose entity and voice
+    /// readings come from `f(measured_index)`.
+    fn soak_log(measured: usize, f: impl Fn(usize) -> (u32, u32)) -> PerfLog {
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_soak_test.csv"),
+            RunContext::default(),
+        );
+        for i in 0..WARMUP_FRAMES + measured {
+            let mut r = row(i as u64, 16, 1);
+            // Warm-up churn must never count toward a window.
+            (r.entities, r.voices) = if i < WARMUP_FRAMES {
+                (50_000, 500)
+            } else {
+                f(i - WARMUP_FRAMES)
+            };
+            log.rows.push(r);
+        }
+        log
+    }
+
+    #[test]
+    fn a_population_that_fills_then_recycles_passes_the_soak() {
+        // Fills during the first third, then jitters inside the slack.
+        let log = soak_log(900, |i| {
+            let fill = (i as u32).min(300);
+            (1_000 + fill + (i as u32 % 7), 10 + fill / 50)
+        });
+        let soak = log.stats().unwrap().soak;
+        assert_eq!(soak.overall, Verdict::Pass, "{}", soak.line());
+        let report = log.report();
+        let j = &report["timings"]["soak"];
+        assert_eq!(j["verdict"], "pass");
+        assert_eq!(j["entities"]["slack"], SOAK_ENTITY_SLACK);
+        assert!(log.summary().contains("perf: soak pass"));
+    }
+
+    #[test]
+    fn a_leak_that_keeps_climbing_fails_the_soak_and_says_which_counter() {
+        let log = soak_log(900, |i| (1_000 + i as u32, 10));
+        let soak = log.stats().unwrap().soak;
+        assert_eq!(soak.entities.verdict, Verdict::Fail);
+        assert_eq!(soak.voices.verdict, Verdict::Pass);
+        assert_eq!(soak.overall, Verdict::Fail);
+        assert!(soak.entities.tail_peak > soak.entities.middle_peak + SOAK_ENTITY_SLACK);
+        let leaky_voices = soak_log(900, |i| (1_000, 10 + i as u32 / 20));
+        let v = leaky_voices.stats().unwrap().soak;
+        assert_eq!(
+            (v.entities.verdict, v.voices.verdict, v.overall),
+            (Verdict::Pass, Verdict::Fail, Verdict::Fail)
+        );
+        assert_eq!(
+            leaky_voices.report()["timings"]["soak"]["voices"]["verdict"],
+            "fail"
+        );
+    }
+
+    #[test]
+    fn a_climb_inside_the_slack_is_jitter_not_a_leak() {
+        let log = soak_log(900, |i| {
+            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK / 2), 10)
+        });
+        assert_eq!(log.stats().unwrap().soak.entities.verdict, Verdict::Pass);
+        let over = soak_log(900, |i| {
+            (1_000 + (i as u32 / 300) * (SOAK_ENTITY_SLACK + 1), 10)
+        });
+        assert_eq!(over.stats().unwrap().soak.entities.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_run_too_short_for_three_windows_is_inconclusive_not_a_pass() {
+        let enough = 3 * SOAK_MIN_SAMPLES_PER_WINDOW * ENTITY_SAMPLE_EVERY as usize;
+        let steady = |n| soak_log(n, |_| (1_000, 10));
+        assert_eq!(steady(enough).stats().unwrap().soak.overall, Verdict::Pass);
+        let short = steady(enough - 3).stats().unwrap().soak;
+        assert_eq!(short.overall, Verdict::Inconclusive);
+        // A short run that is visibly leaking is still inconclusive, not a
+        // fabricated verdict either way.
+        let short_leak = soak_log(enough - 3, |i| (1_000 + 10 * i as u32, 10));
+        assert_eq!(
+            short_leak.stats().unwrap().soak.entities.verdict,
+            Verdict::Inconclusive
+        );
+        assert!(steady(100).summary().contains("perf: soak inconclusive"));
+    }
+
+    #[test]
+    fn discarded_game_time_fails_the_soak_but_warmup_discards_do_not() {
+        let mut log = soak_log(900, |_| (1_000, 10));
+        log.rows[5].clamped = Duration::from_millis(900);
+        assert_eq!(log.stats().unwrap().soak.overall, Verdict::Pass);
+        log.rows[WARMUP_FRAMES + 400].clamped = Duration::from_millis(900);
+        let soak = log.stats().unwrap().soak;
+        assert_eq!(soak.overload, Verdict::Fail);
+        assert_eq!(soak.overall, Verdict::Fail);
+        assert_eq!(
+            log.report()["timings"]["soak"]["overload"]["verdict"],
+            "fail"
+        );
+    }
+
+    #[test]
+    fn a_failure_outranks_an_inconclusive_check() {
+        // Overload fails while the windows are far too short to judge.
+        let mut log = soak_log(100, |_| (1_000, 10));
+        log.rows[WARMUP_FRAMES + 50].clamped = Duration::from_millis(900);
+        let soak = log.stats().unwrap().soak;
+        assert_eq!(soak.entities.verdict, Verdict::Inconclusive);
+        assert_eq!(soak.overall, Verdict::Fail);
     }
 
     #[test]
