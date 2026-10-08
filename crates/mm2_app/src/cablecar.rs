@@ -11,28 +11,37 @@
 //! road end through the ambient-traffic junction controller when the
 //! session has one. Rules and constants: `docs/research/specials.md`.
 //!
-//! Not yet reproduced (stated, not hidden): ambient cars and the player
-//! are not obstacles to the controller (a body in the way is shoved by
-//! the kinematic car, not braked for), the object audio, and the
+//! Obstacles: other cable cars on the circuit, and every participant
+//! ([`Player`]: the driver and AI opponents) and ambient car standing in
+//! the strip of track ahead ([`CableRoute::blocker_gap`]) are the
+//! controller's obstacle, so the car brakes to 2.5 m behind them instead
+//! of shoving them. Which bodies the original's sensor counts is not
+//! recovered (UNK-44): this is the same rule applied to every car body.
+//! A car already inside the junction between two roads does not brake
+//! (the original's controller does not either), and ambient cars do not
+//! yet brake for a cable car.
+//!
+//! Not yet reproduced (stated, not hidden): the object audio, and the
 //! original's init gate, which is unrecovered — local sessions always
 //! spawn the cars; networked ones never do, because a car whose stops
 //! follow this process's signal clock would disagree between peers.
 
-use avian3d::prelude::SimpleCollider;
+use avian3d::prelude::{Position, SimpleCollider};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_formats::bai::{Bai, TramCircuit, TramLeg, VehicleRule};
 use mm2_game::cablecar::{
-    CABLE_CAR_MODEL, CABLE_LOOKAHEAD, CABLE_OBSTACLE_RANGE, CableMotion, CableRoute, CableSense,
+    CABLE_CAR_MODEL, CABLE_LOOKAHEAD, CABLE_OBSTACLE_RANGE, CableCorridor, CableMotion, CableRoute,
+    CableSense,
 };
 use mm2_game::movers::mover_rotation;
 use mm2_game::parked::ParkedRng;
-use mm2_game::{JunctionGate, SessionEntity, SessionPhase};
+use mm2_game::{JunctionGate, Player, SessionEntity, SessionPhase};
 
 use crate::banger::BangerDefs;
 use crate::city::{MovableModels, v3};
 use crate::movers::{BodyQuery, pose_body, spawn_body};
-use crate::traffic::AmbientTraffic;
+use crate::traffic::{AmbientCar, AmbientTraffic};
 
 /// The junction a leg's road ends at, as the ambient-traffic controller
 /// names it.
@@ -73,6 +82,8 @@ pub struct CableCar {
     pub lift: f32,
     /// How far ahead of the model's origin its front is, m.
     pub nose: f32,
+    /// Half the model's width, m — the track strip it blocks.
+    pub half_width: f32,
 }
 
 /// What the session's cable-car init produced.
@@ -219,6 +230,13 @@ pub fn spawn_cable_cars(
         .filter(|z| z.is_finite())
         .unwrap_or(4.0)
         .clamp(1.0, 12.0);
+    let half_width = model
+        .collider
+        .as_ref()
+        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).max.x)
+        .filter(|x| x.is_finite())
+        .unwrap_or(1.5)
+        .clamp(0.5, 4.0);
     let mut rng = ParkedRng::new(seed ^ 0x6361_626c);
     for (i, &(ci, leg)) in starts.iter().enumerate() {
         let route = &circuits[ci].route;
@@ -233,6 +251,7 @@ pub fn spawn_cable_cars(
             motion,
             lift,
             nose,
+            half_width,
         });
         report.cars += 1;
     }
@@ -258,6 +277,8 @@ pub fn drive_cable_cars(
     circuits: Res<CableCircuits>,
     mut traffic: Option<ResMut<AmbientTraffic>>,
     mut cars: Query<(Entity, &mut CableCar, BodyQuery)>,
+    players: Query<&Position, (With<Player>, Without<CableCar>)>,
+    ambient: Query<&Position, (With<AmbientCar>, Without<CableCar>)>,
 ) {
     let running = matches!(
         session.phase(),
@@ -269,6 +290,15 @@ pub fn drive_cable_cars(
         .iter()
         .map(|(e, car, _)| (e, car.circuit, car.motion.s, car.nose))
         .collect();
+    // Cars the tram must not run into: every participant and every
+    // ambient car. Collected once; each tram only looks at the few near it.
+    let blockers: Vec<Vec3> = players
+        .iter()
+        .chain(ambient.iter())
+        .map(|p| p.0)
+        .filter(|p| p.is_finite())
+        .collect();
+    let mut near: Vec<Vec3> = Vec::new();
     for (entity, mut car, (mut pos, mut rot, mut lin, mut ang)) in &mut cars {
         let Some(circuit) = circuits.0.get(car.circuit) else {
             continue;
@@ -300,12 +330,28 @@ pub fn drive_cable_cars(
                 _ => true,
             };
             // The nearest car ahead on this circuit, front to tail.
-            let obstacle = others
+            let ahead_car = others
                 .iter()
                 .filter(|&&(e, c, ..)| e != entity && c == car.circuit)
                 .map(|&(_, _, s, n)| route.gap_ahead(car.motion.s, s) - nose - n)
                 .filter(|g| (0.0..CABLE_OBSTACLE_RANGE).contains(g))
                 .min_by(f32::total_cmp);
+            // The nearest participant or ambient car on the rails ahead.
+            let reach = nose + CABLE_OBSTACLE_RANGE;
+            near.clear();
+            near.extend(
+                blockers
+                    .iter()
+                    .copied()
+                    .filter(|b| b.distance_squared(pos.0) <= (reach + 10.0).powi(2)),
+            );
+            let corridor = CableCorridor::for_car(car.half_width, car.lift);
+            let ahead_body =
+                route.blocker_gap(car.motion.s + nose, CABLE_OBSTACLE_RANGE, &corridor, &near);
+            let obstacle = match (ahead_car, ahead_body) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let leg_before = car.motion.leg();
             car.motion.step(
                 route,

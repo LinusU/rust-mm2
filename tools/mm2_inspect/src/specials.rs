@@ -448,8 +448,8 @@ fn partial(vfs: &Vfs) -> Vec<String> {
         "cable car ({CABLE_CAR_ID}): runs — `mm2_app::cablecar`, one per BAI tram-line terminus \
          (counted above), driving the circuit the executable's next-road rule gives it at \
          its recovered speed controller, gated at each road end through the ambient-traffic \
-         junction controller. Assets: {}. Not reproduced: ambient cars and the player as \
-         obstacles, the object audio (`cablecar*`/`streetcable`), networked sessions, and the \
+         junction controller; ambient cars and participants are obstacles it brakes for. \
+         Assets: {}. Not reproduced: the object audio (`cablecar*`/`streetcable`), networked sessions, and the \
          init gate (+0x40 of AIMAP.Init's parameters) that decides whether a session has them \
          at all. The side of each road a car runs on is a choice (docs/research/specials.md).",
         assets.join(", ")

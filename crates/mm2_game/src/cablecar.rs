@@ -251,6 +251,73 @@ impl CableRoute {
     pub fn gap_ahead(&self, from: f32, to: f32) -> f32 {
         (self.wrap(to) - self.wrap(from)).rem_euclid(self.length())
     }
+
+    /// The nearest body on the track ahead of arc length `from` (the
+    /// car's nose): for each body, the distance along the route to the
+    /// [`SAMPLE_SPACING`] sample nearest its centre, if that sample is
+    /// within the [`CableCorridor`], less the body's own half-length and
+    /// floored at 0. The corridor follows the curve (a body beside the
+    /// track on a bend is not ahead of the car), and a body behind
+    /// `from` is not ahead. `None` when no body stands within `range`.
+    pub fn blocker_gap(
+        &self,
+        from: f32,
+        range: f32,
+        corridor: &CableCorridor,
+        blockers: &[Vec3],
+    ) -> Option<f32> {
+        if blockers.is_empty() || !range.is_finite() || range <= 0.0 {
+            return None;
+        }
+        let steps = (range.min(self.length()) / SAMPLE_SPACING).ceil() as usize;
+        let lift = Vec3::Y * corridor.lift;
+        let track: Vec<Vec3> = (0..=steps)
+            .map(|k| self.position(from + k as f32 * SAMPLE_SPACING) + lift)
+            .collect();
+        blockers
+            .iter()
+            .filter_map(|b| {
+                let (k, dist) = track
+                    .iter()
+                    .enumerate()
+                    .map(|(k, c)| (k, (b.x - c.x).hypot(b.z - c.z)))
+                    .min_by(|a, b| a.1.total_cmp(&b.1))?;
+                let rise = (b.y - track[k].y).abs();
+                (dist <= corridor.clearance && rise <= corridor.max_rise)
+                    .then(|| (k as f32 * SAMPLE_SPACING - corridor.blocker_reach).max(0.0))
+            })
+            .min_by(f32::total_cmp)
+    }
+}
+
+/// The strip of track a body must stand in to count as in the car's way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CableCorridor {
+    /// Horizontal distance from the track at which a body's centre blocks
+    /// the car: the car's half-width plus a body's, m.
+    pub clearance: f32,
+    /// How far above or below the track a body may be and still block it
+    /// (keeps an overpass from stopping the car under it), m.
+    pub max_rise: f32,
+    /// Height of the car's body origin above the track curve, m.
+    pub lift: f32,
+    /// How much of a blocker lies ahead of its centre, m: the distance to
+    /// its centre overstates the room in front of its bumper by this.
+    pub blocker_reach: f32,
+}
+
+impl CableCorridor {
+    /// The corridor for a car `half_width` wide whose origin rides `lift`
+    /// above the curve. Blocker extents are those of an ordinary car:
+    /// 1 m half-width, 2 m half-length; 2.5 m of height.
+    pub fn for_car(half_width: f32, lift: f32) -> Self {
+        Self {
+            clearance: half_width + 1.0,
+            max_rise: 2.5,
+            lift,
+            blocker_reach: 2.0,
+        }
+    }
 }
 
 fn hermite(p0: Vec3, p1: Vec3, t0: Vec3, t1: Vec3, t: f32) -> Vec3 {
@@ -469,6 +536,72 @@ mod tests {
         assert_eq!(r.pose(50.0 + r.length()).0.round(), p.round());
         assert!((r.gap_ahead(10.0, 30.0) - 20.0).abs() < 1e-4);
         assert!((r.gap_ahead(30.0, 10.0) - (r.length() - 20.0)).abs() < 1e-3);
+    }
+
+    fn corridor() -> CableCorridor {
+        CableCorridor::for_car(1.25, 0.0)
+    }
+
+    #[test]
+    fn a_body_on_the_track_ahead_is_the_gap_to_its_front_edge() {
+        let r = straight(200.0);
+        let at_40 = [Vec3::new(40.0, 0.0, 0.0)];
+        // Nose at 10 m: the centre is 30 m on; its own half-length is
+        // room the car does not have.
+        let gap = r.blocker_gap(10.0, 30.0, &corridor(), &at_40).unwrap();
+        assert!((gap - 28.0).abs() <= SAMPLE_SPACING, "gap {gap}");
+        // Out of range, behind, beside, above: not in the way.
+        assert!(r.blocker_gap(10.0, 20.0, &corridor(), &at_40).is_none());
+        assert!(r.blocker_gap(60.0, 30.0, &corridor(), &at_40).is_none());
+        let aside = [Vec3::new(40.0, 0.0, 6.0)];
+        assert!(r.blocker_gap(10.0, 30.0, &corridor(), &aside).is_none());
+        let above = [Vec3::new(40.0, 6.0, 0.0)];
+        assert!(r.blocker_gap(10.0, 30.0, &corridor(), &above).is_none());
+        // Within the strip beside the rails it still blocks.
+        let near = [Vec3::new(40.0, 1.0, 2.0)];
+        assert!(r.blocker_gap(10.0, 30.0, &corridor(), &near).is_some());
+        // The nearest of several wins; a body on the nose is a zero gap.
+        let two = [Vec3::new(40.0, 0.0, 0.0), Vec3::new(25.0, 0.0, 0.0)];
+        let gap = r.blocker_gap(10.0, 30.0, &corridor(), &two).unwrap();
+        assert!((gap - 13.0).abs() <= SAMPLE_SPACING, "gap {gap}");
+        let on_nose = [Vec3::new(10.5, 0.0, 0.0)];
+        assert_eq!(r.blocker_gap(10.0, 30.0, &corridor(), &on_nose), Some(0.0));
+    }
+
+    #[test]
+    fn nothing_or_a_nonsense_range_senses_nothing() {
+        let r = straight(200.0);
+        let body = [Vec3::new(20.0, 0.0, 0.0)];
+        assert!(r.blocker_gap(0.0, 30.0, &corridor(), &[]).is_none());
+        assert!(r.blocker_gap(0.0, 0.0, &corridor(), &body).is_none());
+        assert!(r.blocker_gap(0.0, -3.0, &corridor(), &body).is_none());
+        assert!(r.blocker_gap(0.0, f32::NAN, &corridor(), &body).is_none());
+        assert!(
+            r.blocker_gap(0.0, f32::INFINITY, &corridor(), &body)
+                .is_none()
+        );
+        assert!(
+            r.blocker_gap(f32::NAN, 30.0, &corridor(), &body).is_none(),
+            "a poisoned arc length finds nothing rather than panicking"
+        );
+    }
+
+    #[test]
+    fn a_body_round_a_bend_is_found_along_the_curve_not_the_chord() {
+        // 100 m east then 100 m south (+z): the corner is a hop of a few
+        // metres. A body 20 m down the second road is 'ahead' by the
+        // route even though the straight line to it cuts the corner.
+        let a = vec![Vec3::new(-100.0, 0.0, 0.0), Vec3::ZERO];
+        let b = vec![Vec3::new(4.0, 0.0, 4.0), Vec3::new(4.0, 0.0, 104.0)];
+        let r = CableRoute::new(&[a, b]).unwrap();
+        let down = [Vec3::new(4.0, 0.0, 24.0)];
+        let from = r.legs()[0].line - 5.0;
+        let gap = r.blocker_gap(from, 30.0, &corridor(), &down).unwrap();
+        assert!((20.0..=30.0).contains(&gap), "gap {gap}");
+        // A body on the first road's line extended past the corner (off
+        // the track) is not on the route.
+        let off = [Vec3::new(20.0, 0.0, 0.0)];
+        assert!(r.blocker_gap(from, 30.0, &corridor(), &off).is_none());
     }
 
     #[test]

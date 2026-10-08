@@ -13,11 +13,15 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::cablecar::{
     CableCar, CableCircuits, CableReport, drive_cable_cars, plan_cable_cars, spawn_cable_cars,
 };
+use mm2_app::traffic::{AmbientCar, AmbientDrive};
 use mm2_assets::Vfs;
+use mm2_formats::bai::Side;
 use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide};
 use mm2_game::SessionEntity;
 use mm2_game::cablecar::{CABLE_CRUISE_SPEED, CableMotion, CableSense};
 use mm2_game::movers::mover_rotation;
+use mm2_game::nav::{LaneId, LaneKind};
+use mm2_game::{LaneCursor, Player, PlayerControl, PlayerId, StuckWindow};
 use mm2_game::{Session, SessionPhase};
 
 const FIXED_DT: f32 = 1.0 / 120.0;
@@ -225,6 +229,7 @@ fn spawn_line(app: &mut App, roads: u32, cars: &[(usize, f32)]) -> Vec<Entity> {
                         motion,
                         lift: 0.0,
                         nose,
+                        half_width: 1.25,
                     },
                 ))
                 .id()
@@ -315,6 +320,115 @@ fn two_cars_on_a_line_keep_their_distance_when_the_follower_is_quicker() {
         "the follower closed to {closest} m of the car ahead"
     );
     assert!(tail_top > 5.0, "the follower never got going: {tail_top}");
+}
+
+/// A kinematic body standing `ahead` metres past the car's nose on the
+/// rails (`aside` metres off them), tagged as `who`.
+fn stand_ahead(app: &mut App, car: Entity, ahead: f32, aside: f32, who: impl Bundle) -> Entity {
+    let (s, nose) = {
+        let c = app.world().get::<CableCar>(car).unwrap();
+        (c.motion.s, c.nose)
+    };
+    let (p, d) = app.world().resource::<CableCircuits>().0[0]
+        .route
+        .pose(s + nose + ahead);
+    let p = p + Vec3::Y.cross(d).normalize() * aside;
+    app.world_mut()
+        .spawn((
+            who,
+            RigidBody::Static,
+            Position(p),
+            Transform::from_translation(p),
+        ))
+        .id()
+}
+
+fn player() -> Player {
+    Player {
+        id: PlayerId(0),
+        control: PlayerControl::Local,
+    }
+}
+
+fn ambient() -> AmbientCar {
+    AmbientCar {
+        class: 0,
+        drive: AmbientDrive::Knocked,
+        cursor: LaneCursor::new(
+            LaneId {
+                road: 0,
+                side: Side::Right,
+                index: 0,
+                kind: LaneKind::Vehicle,
+            },
+            0.0,
+        ),
+        target_speed: 0.0,
+        speed: 0.0,
+        stuck: StuckWindow::new([0.0; 3]),
+    }
+}
+
+/// Run `seconds` and return the car's speed afterwards and its nose's
+/// distance to `body` along the route.
+fn settle(app: &mut App, car: Entity, seconds: u32) -> f32 {
+    for _ in 0..(seconds * 60) {
+        app.update();
+    }
+    speed_of(app, car)
+}
+
+fn nose_to(app: &App, car: Entity, body: Entity) -> f32 {
+    let c = app.world().get::<CableCar>(car).unwrap();
+    (at(app, body) - at(app, car)).length() - c.nose
+}
+
+#[test]
+fn a_car_brakes_for_the_player_on_the_rails_and_goes_on_when_it_leaves() {
+    let mut app = app_in(SessionPhase::Playing);
+    let car = spawn_line(&mut app, 4, &[(0, 0.5)])[0];
+    // Let it get up to speed, then put the player 28 m ahead of the nose.
+    settle(&mut app, car, 8);
+    let top = speed_of(&app, car);
+    assert!((top - CABLE_CRUISE_SPEED).abs() < 0.01, "speed {top}");
+    let body = stand_ahead(&mut app, car, 28.0, 0.0, player());
+    let speed = settle(&mut app, car, 12);
+    assert_eq!(speed, 0.0, "the car should be at rest");
+    // Constant-rate braking to 2.5 m behind the blocker's front edge
+    // (its centre is 2 m further): the nose stops 4.5 m short, give or
+    // take the sensor's 1 m grain and the step error.
+    let short = nose_to(&app, car, body);
+    assert!((3.4..=5.6).contains(&short), "stopped {short} m short");
+    // It stays put while the player is there.
+    assert_eq!(settle(&mut app, car, 5), 0.0);
+    app.world_mut().despawn(body);
+    let speed = settle(&mut app, car, 10);
+    assert!(speed > 10.0, "the car did not resume: {speed} m/s");
+}
+
+#[test]
+fn an_ambient_car_on_the_rails_stops_the_car_too() {
+    let mut app = app_in(SessionPhase::Playing);
+    let car = spawn_line(&mut app, 4, &[(0, 0.5)])[0];
+    let body = stand_ahead(&mut app, car, 24.0, 0.0, ambient());
+    let speed = settle(&mut app, car, 15);
+    assert_eq!(speed, 0.0);
+    let short = nose_to(&app, car, body);
+    assert!(short > 3.0, "the nose is {short} m from the car");
+}
+
+#[test]
+fn a_body_beside_or_behind_the_rails_does_not_stop_the_car() {
+    let mut app = app_in(SessionPhase::Playing);
+    let car = spawn_line(&mut app, 4, &[(0, 0.5)])[0];
+    // Well to the side of the line, and the other lane of the road.
+    stand_ahead(&mut app, car, 20.0, 8.0, player());
+    stand_ahead(&mut app, car, 20.0, -8.0, ambient());
+    let speed = settle(&mut app, car, 8);
+    assert!(
+        (speed - CABLE_CRUISE_SPEED).abs() < 0.01,
+        "a bystander slowed the car to {speed}"
+    );
 }
 
 /// Retail: the circuits the original's init gives San Francisco's cars,
@@ -460,6 +574,17 @@ fn spawn_into_world(vfs: &Vfs, city: &str, eligible: bool) -> (CableReport, usiz
     };
     queue.apply(&mut world);
     let cars = world.query::<&CableCar>().iter(&world).count();
+    for car in world.query::<&CableCar>().iter(&world) {
+        // The body the obstacle sensor measures: a tram, not the
+        // fallback sizes.
+        eprintln!("cable car nose {} half-width {}", car.nose, car.half_width);
+        assert!((1.0..=12.0).contains(&car.nose), "nose {}", car.nose);
+        assert!(
+            (0.5..=4.0).contains(&car.half_width),
+            "half-width {}",
+            car.half_width
+        );
+    }
     let circuits = world.resource::<CableCircuits>().0.len();
     (report, cars, circuits)
 }

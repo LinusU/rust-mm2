@@ -18,7 +18,7 @@ mm2-inspect specials <install> [--city london|sf] [--strict]
 | parked-car strips | `…_parkedcar[_<stem>].pathset` | `mm2_app::city::spawn_parked_cars` |
 | water / recovery rooms | `city/<city>.water` | `mm2_app::water`, `mm2_app::recovery` |
 | rail curves | `city/<city>.bai` tram/train curve counts | measured only |
-| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; obstacles other than cable cars, audio, networking and the init gate not reproduced (UNK-44) |
+| cable car | `va_cablecar_f` assets + `city/<city>.bai` tram curves + executable evidence | `mm2_app::cablecar` — partial: 4 cars on 2 circuits in SF, none in London; audio, networking and the init gate not reproduced; cable cars, ambient cars and participants are obstacles (UNK-44) |
 
 Every family file is found by name (default, `_<event stem>` overlays and
 backup variants), parsed by the production `Pathset` parser, and each
@@ -173,10 +173,28 @@ the session clock.
   reach 15 m/s, stop 0.3 m short of the line on red and go on green; a
   screenshot shows the model on the rails facing its direction of travel.
 
+Obstacles beyond other cable cars (iteration 21): the sensor reads "any
+other AI vehicle … within a 30 m × 2 m probe ahead", so ambient cars are
+obstacles by the original's own rule. The port also counts every
+`Player` participant (the driver and AI opponents) — an *enhanced
+policy*, since whether the original's sensor sees the player's car is not
+recovered, and a kinematic tram that shoves the player is not acceptable
+either way. `CableRoute::blocker_gap` samples the route (1 m grain) from
+the nose out to 30 m and takes, per car body, the sample nearest its
+centre: it blocks when that sample is within the car's half-width + 1 m
+horizontally (retail model: 1.32 m → 2.32 m; the original's probe width is
+read as 2 m, the port's is a choice) and 2.5 m vertically (an overpass
+does not stop a tram under it), and the controller sees the distance to
+the centre less 2 m (a car's half-length). The corridor follows the
+curve, so a car parked beside a bend is not ahead. Unchanged from the
+original: no braking while in the junction between roads, constant-rate
+braking to 2.5 m. Not done: ambient cars do not brake for a cable car
+(their blocker list is participants and ambient cars), so a lane that
+crosses the rails relies on the junction gate alone.
+
 Still unrecovered or unreproduced: audio triggers (`cablecar`,
 `cablecarstart/stop`, `cablecarbell*`, `streetcable`), the `+0x40` gate,
-the AI-bubble behaviour above, ambient cars and the player as obstacles,
-the `+0x4c` offset's sign (the port stops the nose at the line), and the
+the AI-bubble behaviour above, the `+0x4c` offset's sign (the port stops the nose at the line), and the
 StopSign queue and `+0x160`/`+0x162` flag semantics on roads where they
 matter (no retail tram road ends in a stop sign; all but one end under a
 traffic light, the other `NeverStop`).
