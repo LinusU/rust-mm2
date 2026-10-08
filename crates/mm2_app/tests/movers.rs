@@ -396,3 +396,127 @@ fn retail_every_mover_path_steps_continuously() {
         );
     }
 }
+
+/// F28-AC05 (restart leg): a session restart through the real
+/// teardown/reload cycle brings every mover back at the phase a fresh
+/// session starts from, and the world clock back at zero — neither the
+/// boat's lap progress nor the clock's count survives. A mover's pose is
+/// always its recorded start replayed `ticks` steps, which is the state
+/// a late joiner is seeked to, so the restart and the seek agree.
+#[test]
+fn a_restart_returns_the_movers_and_the_clock_to_the_start_phase() {
+    use crate::banger::{city_app_with, city_install, pth1, pth1_path, write};
+    use mm2_app::session::SessionControl;
+    use mm2_app::worldclock::{
+        WorldClock, WorldStart, advance_world_clock, capture_world_start, replay_follower,
+    };
+    use mm2_game::SessionEntity;
+
+    let tmp = city_install();
+    // One closed sailboat loop; the path's name is the synthetic
+    // breakable's model, which resolves through the VFS.
+    let ring: Vec<[f32; 3]> = ring(8, 60.0, 0.0).iter().map(|p| p.to_array()).collect();
+    write(
+        tmp.path(),
+        "race/test/test_sailboat.pathset",
+        pth1(&[pth1_path("breakpkg", &ring, 2, 4)]),
+    );
+    let mut vfs = mm2_assets::Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    let mut app = city_app_with(vfs, |app| {
+        app.init_resource::<WorldClock>().add_systems(
+            FixedLast,
+            (capture_world_start, advance_world_clock, drive_movers).chain(),
+        );
+    });
+    app.update();
+    assert_eq!(
+        *app.world().resource::<Session>().phase(),
+        SessionPhase::Playing
+    );
+    assert_eq!(
+        app.world_mut().query::<&Mover>().iter(app.world()).count(),
+        1,
+        "the sailboat loop spawns one boat"
+    );
+    // The first fixed step records the boat's start, before it moves.
+    app.update();
+
+    // Every mover with its owner, its recorded start and its current state.
+    let movers = |app: &mut App| -> Vec<(SessionEntity, PathFollower, PathFollower)> {
+        app.world_mut()
+            .query::<(&SessionEntity, &Mover, &WorldStart<PathFollower>)>()
+            .iter(app.world())
+            .map(|(owner, mover, start)| (*owner, start.0.clone(), mover.follower.clone()))
+            .collect()
+    };
+    // The coherence law: the pose is the start stepped `ticks` times.
+    let assert_coherent = |app: &mut App, why: &str| {
+        let ticks = app.world().resource::<WorldClock>().ticks;
+        for (_, start, now) in movers(app) {
+            let replayed = replay_follower(&start, ticks, FIXED_DT);
+            let (a, b) = (now.pose().0, replayed.pose().0);
+            assert!(
+                a.distance(b) < 1e-2,
+                "{why}: at {a} after {ticks} ticks, a replay gives {b}"
+            );
+        }
+    };
+
+    let first = movers(&mut app);
+    assert_eq!(first.len(), 1, "the sailboat loop spawns one boat");
+    assert_eq!(first[0].0, SessionEntity(1));
+    let start_pose = first[0].1.pose().0;
+    assert_coherent(&mut app, "first generation, start");
+
+    // Sail for a while: the boat leaves its start and the clock counts.
+    for _ in 0..(20 * 60) {
+        app.update();
+    }
+    let ticks = app.world().resource::<WorldClock>().ticks;
+    assert!(ticks > 2_000, "the clock barely ran: {ticks}");
+    let sailed = movers(&mut app)[0].2.pose().0;
+    assert!(
+        sailed.distance(start_pose) > 10.0,
+        "the boat never left its start: {sailed} vs {start_pose}"
+    );
+    assert_coherent(&mut app, "first generation, underway");
+
+    // Restart through the real lifecycle.
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut restarted = false;
+    for _ in 0..40 {
+        app.update();
+        let s = app.world().resource::<Session>();
+        if s.generation() == 2 && matches!(s.phase(), SessionPhase::Playing) {
+            restarted = true;
+            break;
+        }
+    }
+    assert!(restarted, "restart never returned to Playing");
+    // The first fixed step of the new generation records its starts.
+    app.update();
+
+    let second = movers(&mut app);
+    assert_eq!(
+        second.len(),
+        1,
+        "exactly one boat after the restart, none left from generation 1"
+    );
+    assert_eq!(second[0].0, SessionEntity(2));
+    // Same authored start, and the boat sits near it — not 20 s down the
+    // loop where generation 1 left it.
+    assert!(
+        second[0].1.pose().0.distance(start_pose) < 1e-3,
+        "the restarted boat records a different start"
+    );
+    let ticks = app.world().resource::<WorldClock>().ticks;
+    assert!(ticks < 200, "the clock carried over the restart: {ticks}");
+    let now = second[0].2.pose().0;
+    assert!(
+        now.distance(start_pose) < 3.0,
+        "the restarted boat is {} m from its start after {ticks} ticks",
+        now.distance(start_pose)
+    );
+    assert_coherent(&mut app, "second generation");
+}

@@ -763,13 +763,13 @@ fn vehicle_bundle_stamps_the_authored_bound_as_strike_surface() {
 // else stays an ordinary prop.
 // ---------------------------------------------------------------------------
 
-fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
+pub(crate) fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, contents).unwrap();
 }
 
-fn pth1_path(name: &str, points: &[[f32; 3]], kind: u8, spacing: u8) -> Vec<u8> {
+pub(crate) fn pth1_path(name: &str, points: &[[f32; 3]], kind: u8, spacing: u8) -> Vec<u8> {
     let mut d = vec![0u8; 32];
     d[..name.len()].copy_from_slice(name.as_bytes());
     d.extend_from_slice(&(points.len() as u32).to_le_bytes());
@@ -786,7 +786,7 @@ fn pth1_path(name: &str, points: &[[f32; 3]], kind: u8, spacing: u8) -> Vec<u8> 
     d
 }
 
-fn pth1(paths: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn pth1(paths: &[Vec<u8>]) -> Vec<u8> {
     let mut d = b"PTH1".to_vec();
     d.extend_from_slice(&(paths.len() as u32).to_le_bytes());
     d.extend_from_slice(&0u32.to_le_bytes()); // current_path
@@ -1480,7 +1480,7 @@ fn city_psdl() -> Vec<u8> {
 
 /// A drivable synthetic city whose `props.pathset` stamps one
 /// breakable `breakpkg` prop on the road at (0, 0, 15).
-fn city_install() -> tempfile::TempDir {
+pub(crate) fn city_install() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     write(d, "city/test.psdl", city_psdl());
@@ -1508,6 +1508,12 @@ fn city_install() -> tempfile::TempDir {
 /// `headless_smoke` and the binary schedule, including the banger
 /// driver and the lifecycle driver a restart rides.
 fn city_app(vfs: Vfs) -> App {
+    city_app_with(vfs, |_| {})
+}
+
+/// [`city_app`] plus whatever `extend` adds before the app finishes
+/// building — the movers' restart leg schedules its own drivers.
+pub(crate) fn city_app_with(vfs: Vfs, extend: impl FnOnce(&mut App)) -> App {
     let mut session = Session::new();
     session
         .begin(SessionConfig {
@@ -1573,6 +1579,7 @@ fn city_app(vfs: Vfs) -> App {
                     .chain(),
             ),
         );
+    extend(&mut app);
     app.finish();
     app.cleanup();
     app

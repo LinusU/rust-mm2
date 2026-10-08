@@ -1,3 +1,13 @@
+# Last iteration — F28-C.3: a restart returns the movers and the world clock to the start phase (iteration 25 of the recovery run)
+
+Selection: the F28-A.4 review passed with no blockers. Of F28's open items the cable car (UNK-44) needs a play observation and the retail `.water`/boundary rooms need real routes, neither closable here; AC05 ("restart and late join restore a coherent actor phase") had late-join evidence (`worldclock`, `net_app`) but no restart test for the movers/clock — the plan listed "AC05 restart phase test" as open.
+Change: tests only, `mm2_app/tests/movers.rs` (+1 test) with `tests/banger.rs` helpers made `pub(crate)` and `city_app` split into `city_app_with(vfs, extend)` (no behaviour change to the existing tests). `a_restart_returns_the_movers_and_the_clock_to_the_start_phase`: a synthetic city with one sailboat pathset (model resolved through the VFS) runs the production `load_session_world` / `drive_session` / `capture_world_start` / `advance_world_clock` / `drive_movers`. After 20 s the boat is >10 m from its start and the clock is >2000 ticks; a real `SessionControl.restart` then yields exactly one boat owned by generation 2 (none from generation 1), the same recorded start, the clock under 200 ticks and the boat within 3 m of its start. The coherence law (pose == start replayed `clock.ticks` steps, the state a late-join seek lands on) is asserted in both generations.
+Mutation: removing the clock reset between sessions fails it ("the clock carried over the restart: 2406"); restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 56 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic city and path, one boat; drawbridge leaves and trains are covered by the same clock reset and `worldclock` replay tests, not by this restart test. Advances F28-AC05 (restart leg). Open on F28: AC01 cable car + other AIMAP actors, AC04 retail rooms against real routes.
+
+---
+
 # Last iteration — F28-A.4: direct tests for the specials report's model classification (iteration 24 of the recovery run)
 
 Selection: the F28-A.3 review passed with no blockers; two of its verification gaps were test gaps in `mm2-inspect specials` — the named / default / unresolved classification had no direct test on the shared-rule branch, and the intended edge fix (a path named like the family default that does not resolve is `unresolved`, not `named`) was unpinned. The retail rerun gap is not closable here (no change to the report, and no retail work this slice). Cable car (UNK-44) still needs a play observation, so a test slice was the highest-value ready work.
