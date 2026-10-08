@@ -427,6 +427,55 @@ fn the_mouse_drives_when_enabled() {
     );
 }
 
+/// A pause zeroes the mouse's hold like it does the keys', and the buttons
+/// still held when play resumes drive again: the hold is read from the
+/// live button state, never latched across the pause.
+#[test]
+fn a_pause_releases_a_held_mouse_button_and_resume_restores_it() {
+    use mm2_app::controls::ControlSettings;
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.init_resource::<ButtonInput<MouseButton>>();
+    let mut window = Window::default();
+    window.resolution.set(800.0, 600.0);
+    window.set_cursor_position(Some(Vec2::new(600.0, 300.0)));
+    app.world_mut().spawn(window);
+    let mut controls = ControlSettings::default();
+    controls.mouse_driving = true;
+    app.insert_resource(controls);
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.steering), (1.0, 0.5), "driving by mouse");
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.brake, vi.steering),
+        (0.0, 0.0, 0.0),
+        "paused: the held button and the cursor offset do not reach the car"
+    );
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (1.0, 0.5),
+        "resumed with the button still down"
+    );
+}
+
 /// A player car with a real config and gearbox state, in `gear`.
 fn spawn_geared_player(app: &mut App, gear: usize) {
     use mm2_vehicle::{Vehicle, VehicleConfig, VehicleState};
