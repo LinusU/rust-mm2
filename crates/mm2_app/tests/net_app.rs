@@ -1560,7 +1560,7 @@ fn a_headless_host_runs_the_advertised_session() {
                 paint: 0,
             },
             &VehicleConfig::default(),
-            600,
+            smoke::RunBudget::frames(600),
             smoke::Driver::Hold,
             None,
         )
@@ -1967,7 +1967,7 @@ fn a_lobby_start_loads_the_wired_world_headless() {
                 paint: 0,
             },
             &VehicleConfig::default(),
-            600,
+            smoke::RunBudget::frames(600),
             smoke::Driver::Hold,
             None,
         )

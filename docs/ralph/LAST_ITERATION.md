@@ -1,20 +1,18 @@
-# Last iteration — report 7 item 10: bound the race-row world-clock seek (iteration 4 of the new run)
+# Last iteration — report 7 item 11: the three-process collision test waits on its condition (iteration 5 of the new run)
 
-Selection: iteration 3's commit passed gates and review (no blocking findings); items 1–9 are done as candidates, item 10 is next in order.
+Selection: iteration 4's commit (`cd74a45`) passed gates and review with no blocking findings; item 11 is the last of report 7.
 
-Cause: `apply_race_snap` fed `world_ticks(race)` (countdown + the row's unvalidated `u64` clock) straight into `WorldClock::sync`, which queued any target; `advance_world_clock` then replays every actor that many steps in one fixed step. The `World`-frame path was already bounded by `MAX_SEEK_TICKS` in `WorldStage::push`, the row path was not. `countdown + race.clock` could also overflow at `u64::MAX`.
+Cause: `a_driven_collision_replicates_across_three_processes` ended its clients on frame budgets (raised to 2800/2500 by `70d53a5`). A frame budget is not a clock: under load the ram's first strike lands late in host ticks and the uninvolved client can exit before the impact row reaches it.
 
 Change:
-- `WorldClock::sync` now owns the `MAX_SEEK_TICKS` gate for all sources and returns `SyncOutcome::{InTolerance, Queued, Refused}`; a refusal queues nothing and leaves an already-queued seek alone.
-- `apply_race_snap` counts a refusal into the new `NetDriveReport.world_row_refused`; the row's phase/clock still mirror (diagnose, do not coerce). Smoke `wclk=` gains `rowref<n>` only when non-zero, so other records stay bit-identical.
-- `world_ticks` uses `saturating_add`.
+- Headless smoke gains `smoke::StopWhen` / `RunBudget` (`headless_lobby`/`headless_host` take a `RunBudget` in place of `frames`; `headless_smoke` unchanged). `--frames` stays the ceiling. CLI (all `requires = headless`): `--until-impacts <n>` (applied replicated impact rows), `--until-peer-left` with `--with-impacts <n>` (a held remote copy is gone and this process has emitted `n` impacts of its own), `--deadline <secs>` (wall-clock bound). The record prints `stop=impacts|peer-left|deadline` and counts the updates actually run in `updates=`; records without an armed condition are bit-identical.
+- The driven run: bob `--until-impacts 1 --deadline 120`, alice `--until-peer-left --with-impacts 1 --deadline 150`, frames 100000 as ceiling. The test asserts `stop=impacts` / `stop=peer-left`, so a deadline fallback fails loudly. Exact-count assertions are unchanged. The control run (nothing may collide, no condition to wait for) keeps its fixed 2800/2500 frames.
+- Alice's `--with-impacts 1` came from a first parallel stress run: 3 of 10 copies failed because bob left (and alice with him) before alice's own predicted sim had registered the contact (`impacts=0`).
 
-Tests (`mm2_app` lib): `sync_refuses_a_target_past_the_seek_bound_and_queues_nothing`; `an_absurd_race_row_clock_is_refused_and_the_client_stays_responsive` (production `apply_snapshots` + `advance_world_clock`: honest row seeks, bound+1 and `u64::MAX` rows are refused counted, no seek queued, clock keeps stepping, no overflow). `docs/research/net.md` documents the gate and the residual below.
+Tests: 3 unit (`mm2_app` `smoke::tests`: stop fires on its event and not before, peer-left needs a held peer first, deadline). Process level: the collision test alone ~10 s; 12 and then 16 copies in parallel all pass (before the `--with-impacts` fix: 7/10).
 
-Residual (stated, not closed): the `WorldLimits` rate/growth bound is not applied to race rows; a host raising its row clock under the cap can still force one capped replay per row.
+Gates: see the commit; fmt, clippy -D warnings, `cargo test --locked --workspace` run in the foreground.
 
-Gates: fmt, clippy -D warnings, `cargo test --locked --workspace` all exit 0.
+Not verified: no windowed or retail run (networking test harness only). Residual from iteration 4 stands (rate/growth limit not applied to race rows).
 
-Not verified: no two-process run with a hostile host; in-process tests only.
-
-Status: candidate; not independently checked. Next is item 11 (three-process collision test waits on its condition).
+Status: candidate; not independently checked. Report 7 items 1–11 are all implemented candidates; the next iteration returns to the F25-B/F25-C remainders in the plan.

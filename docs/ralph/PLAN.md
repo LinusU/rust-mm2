@@ -3292,7 +3292,7 @@ Lower priority. Take these after items 1–9, and before any unrelated work:
      refusal, per report 5's diagnose-not-coerce rule). Add a test that
      an absurd race clock is refused, and that the client stays
      responsive.
-11. **Make the three-process collision test wait on its condition, not on
+11. **[implemented, candidate — iteration 5 of the new run; see LAST_ITERATION]** **Make the three-process collision test wait on its condition, not on
    frame budgets.**
    - `net_drive::a_driven_collision_replicates_across_three_processes`
      failed once (run 20261008T121456, iteration 10): the uninvolved

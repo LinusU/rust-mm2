@@ -161,6 +161,116 @@ impl Driver {
     }
 }
 
+/// A condition that ends a headless run before its frame budget does —
+/// a frame count is not a clock, so a multi-process leg that waits for
+/// something the wire delivers names the thing it waits for instead.
+/// Unarmed fields never fire; the run's `frames` stay the ceiling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StopWhen {
+    /// Stop once this process has applied this many replicated impact
+    /// rows (`net=` `imp…s/<n>a`).
+    pub impacts_applied: Option<u64>,
+    /// Stop once a remote copy this process held is gone — a peer left
+    /// the session. Armed by the first remote copy appearing.
+    pub peer_left: bool,
+    /// With `peer_left`: also hold the stop until this process has
+    /// itself emitted this many impacts (`impacts=`) — a predicted
+    /// contact can trail the wire's news of the same collision.
+    pub peer_left_after_impacts: u64,
+    /// Stop once this much wall-clock time has passed since the first
+    /// update — the bound on a condition that never comes.
+    pub deadline: Option<Duration>,
+}
+
+impl StopWhen {
+    /// Whether any condition is armed.
+    pub fn is_armed(&self) -> bool {
+        self.impacts_applied.is_some() || self.peer_left || self.deadline.is_some()
+    }
+}
+
+/// How long a headless run lasts: `frames` updates at most, ended early
+/// by [`StopWhen`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunBudget {
+    pub frames: u32,
+    pub stop: StopWhen,
+}
+
+impl RunBudget {
+    /// A plain frame budget with no early-stop condition.
+    pub fn frames(frames: u32) -> Self {
+        Self {
+            frames,
+            stop: StopWhen::default(),
+        }
+    }
+}
+
+/// The record's `stop=` value when a [`StopWhen`] condition ended the
+/// run, in the order [`StopWatch::fired`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    Impacts,
+    PeerLeft,
+    Deadline,
+}
+
+impl StopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Impacts => "impacts",
+            Self::PeerLeft => "peer-left",
+            Self::Deadline => "deadline",
+        }
+    }
+}
+
+/// Evaluates a [`StopWhen`] against the live world once per update.
+struct StopWatch {
+    stop: StopWhen,
+    started: std::time::Instant,
+    /// The most remote copies this process has held at once.
+    peers_peak: usize,
+}
+
+impl StopWatch {
+    fn new(stop: StopWhen) -> Self {
+        Self {
+            stop,
+            started: std::time::Instant::now(),
+            peers_peak: 0,
+        }
+    }
+
+    fn fired(&mut self, world: &World) -> Option<StopReason> {
+        let report = world.get_resource::<crate::netdrive::NetDriveReport>();
+        if let (Some(want), Some(r)) = (self.stop.impacts_applied, report)
+            && r.impacts_applied >= want
+        {
+            return Some(StopReason::Impacts);
+        }
+        if self.stop.peer_left
+            && let Some(r) = report
+        {
+            self.peers_peak = self.peers_peak.max(r.remotes);
+            let local = world
+                .get_resource::<contracts::ImpactFilter>()
+                .map_or(0, |f| f.emitted);
+            if self.peers_peak > 0
+                && r.remotes < self.peers_peak
+                && local >= self.stop.peer_left_after_impacts
+            {
+                return Some(StopReason::PeerLeft);
+            }
+        }
+        match self.stop.deadline {
+            Some(limit) if self.started.elapsed() >= limit => Some(StopReason::Deadline),
+            _ => None,
+        }
+    }
+}
+
 /// Run the world + player vehicle headlessly for `frames` app updates
 /// (60 Hz virtual time; physics ticks at 120 Hz internally) through the
 /// same session systems the windowed binary runs.
@@ -196,7 +306,7 @@ pub fn headless_smoke(
         vfs,
         car,
         vehicle_config,
-        frames,
+        RunBudget::frames(frames),
         driver,
         profile,
     )
@@ -214,7 +324,7 @@ pub fn headless_lobby(
     vfs: Vfs,
     car: session::SelectedCar,
     vehicle_config: &VehicleConfig,
-    frames: u32,
+    budget: RunBudget,
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
@@ -223,7 +333,7 @@ pub fn headless_lobby(
         vfs,
         car,
         vehicle_config,
-        frames,
+        budget,
         driver,
         profile,
     )
@@ -240,7 +350,7 @@ pub fn headless_host(
     vfs: Vfs,
     car: session::SelectedCar,
     vehicle_config: &VehicleConfig,
-    frames: u32,
+    budget: RunBudget,
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
@@ -253,7 +363,7 @@ pub fn headless_host(
         vfs,
         car,
         vehicle_config,
-        frames,
+        budget,
         driver,
         profile,
     )
@@ -357,10 +467,11 @@ fn run_headless(
     vfs: Vfs,
     car: session::SelectedCar,
     vehicle_config: &VehicleConfig,
-    frames: u32,
+    budget: RunBudget,
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
+    let frames = budget.frames;
     // A "lobby run" is one the wire drives — joined (`Lobby`) or
     // hosted (`Host`): both park at `Menu` until a session mints.
     let lobby_mode = matches!(source, RunSource::Lobby(_) | RunSource::Host(_));
@@ -936,6 +1047,9 @@ fn run_headless(
     // an Avian-sleep settle are indistinguishable in the record.
     let mut bng_events = [0usize; 4];
     let mut bng_reclaims = 0usize;
+    let mut stop_watch = StopWatch::new(budget.stop);
+    let mut stopped: Option<StopReason> = None;
+    let mut ran = 0u32;
     for f in 0..frames {
         // The player entity is re-resolved every frame: a mid-run
         // session restart (`RestartEvent` disabled outcome, `--restart`)
@@ -973,6 +1087,7 @@ fn run_headless(
         }
         let t0 = std::time::Instant::now();
         app.update();
+        ran = f + 1;
         // A lobby run parked at `Menu` is waiting on the wire in wall
         // time — parked updates are near-free, so without a small pause
         // the frame budget evaporates long before a `Start` can arrive.
@@ -997,6 +1112,12 @@ fn run_headless(
                 break;
             }
             std::thread::sleep(Duration::from_millis(4));
+        }
+        // A condition the run was told to wait for ends it as soon as
+        // the world shows it — the frame budget is only the ceiling.
+        if let Some(reason) = stop_watch.fired(app.world()) {
+            stopped = Some(reason);
+            break;
         }
         if diag {
             let mut q = app.world_mut().query::<(
@@ -1119,6 +1240,13 @@ fn run_headless(
     };
     let world_ecs = app.world();
     let session = world_ecs.resource::<Session>();
+    // `updates=` counts the updates actually run when a stop condition
+    // was armed (the budget is only its ceiling); unarmed records stay
+    // bit-identical.
+    let updates = if budget.stop.is_armed() { ran } else { frames };
+    let stop_detail = stopped
+        .map(|r| format!(" stop={}", r.as_str()))
+        .unwrap_or_default();
     let ticks = session.tick();
     // Session restarts observed over the run — `begin` bumps the
     // generation, so the delta counts teardown/begin cycles the run
@@ -1391,7 +1519,7 @@ fn run_headless(
             &record_world(session, lobby_mode, &world),
             status,
             format!(
-                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}{}{}",
+                "updates={updates}{stop_detail} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}{}{}",
                 driver.as_str(),
                 rec_config.difficulty.as_str(),
                 session.phase().name(),
@@ -2231,7 +2359,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),
@@ -2548,6 +2676,62 @@ fn result_outcome(
 mod tests {
     use super::*;
     use mm2_game::{PlayerId, ResultId, SessionOutcome, SessionResult};
+
+    fn world_with(report: crate::netdrive::NetDriveReport) -> World {
+        let mut world = World::new();
+        world.insert_resource(report);
+        world
+    }
+
+    #[test]
+    fn a_stop_condition_fires_on_its_event_and_not_before() {
+        let mut watch = StopWatch::new(StopWhen {
+            impacts_applied: Some(2),
+            ..default()
+        });
+        let applied = |n| {
+            world_with(crate::netdrive::NetDriveReport {
+                impacts_applied: n,
+                ..default()
+            })
+        };
+        assert_eq!(watch.fired(&applied(1)), None);
+        assert_eq!(watch.fired(&applied(2)), Some(StopReason::Impacts));
+        // Unarmed, nothing ever fires — the frame budget decides.
+        let mut idle = StopWatch::new(StopWhen::default());
+        assert!(!StopWhen::default().is_armed());
+        assert_eq!(idle.fired(&applied(99)), None);
+    }
+
+    #[test]
+    fn a_peer_leaving_fires_only_after_one_was_held() {
+        let mut watch = StopWatch::new(StopWhen {
+            peer_left: true,
+            ..default()
+        });
+        let held = |n| {
+            world_with(crate::netdrive::NetDriveReport {
+                remotes: n,
+                ..default()
+            })
+        };
+        // Zero remotes before any joined is the lobby, not a departure.
+        assert_eq!(watch.fired(&held(0)), None);
+        assert_eq!(watch.fired(&held(2)), None);
+        assert_eq!(watch.fired(&held(2)), None);
+        assert_eq!(watch.fired(&held(1)), Some(StopReason::PeerLeft));
+    }
+
+    #[test]
+    fn the_deadline_ends_a_condition_that_never_comes() {
+        let mut watch = StopWatch::new(StopWhen {
+            impacts_applied: Some(1),
+            deadline: Some(Duration::ZERO),
+            ..default()
+        });
+        let world = world_with(default());
+        assert_eq!(watch.fired(&world), Some(StopReason::Deadline));
+    }
 
     fn result(generation: u64, participant: u16, sequence: u32, race_ticks: u64) -> SessionResult {
         SessionResult {

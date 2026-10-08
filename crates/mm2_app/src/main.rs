@@ -12,6 +12,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use avian3d::prelude::*;
 use bevy::audio::AddAudioSource;
@@ -363,6 +364,34 @@ struct Cli {
     /// (default 600), print a `smoke=headless-physics` record and exit.
     #[arg(long)]
     headless: bool,
+
+    /// End a `--headless` run once this process has applied `n`
+    /// replicated impact rows, instead of waiting out `--frames` (the
+    /// ceiling). A multi-process leg waits on the wire, and a frame
+    /// count is not a clock. The record prints `stop=impacts`.
+    #[arg(long, value_name = "n", requires = "headless")]
+    until_impacts: Option<u64>,
+
+    /// End a `--headless` run once a remote copy it held is gone — a
+    /// peer left the session. The record prints `stop=peer-left`.
+    #[arg(long, requires = "headless")]
+    until_peer_left: bool,
+
+    /// With `--until-peer-left`: also wait until this process has
+    /// emitted `n` impacts of its own (the record's `impacts=`).
+    #[arg(
+        long,
+        value_name = "n",
+        requires = "until_peer_left",
+        default_value_t = 0
+    )]
+    with_impacts: u64,
+
+    /// Wall-clock bound, in seconds, on a `--headless` run's
+    /// `--until-*` condition: the run ends when it passes, whether or
+    /// not the condition came. The record prints `stop=deadline`.
+    #[arg(long, value_name = "secs", requires = "headless")]
+    deadline: Option<u64>,
 
     /// Scripted course-follower: the player vehicle steers at the live
     /// race objective (the RACE-6 target / next ordered gate) instead of
@@ -1323,22 +1352,30 @@ fn main() {
         } else {
             smoke::Driver::Hold
         };
-        let frames = cli.frames.unwrap_or(600);
+        let budget = smoke::RunBudget {
+            frames: cli.frames.unwrap_or(600),
+            stop: smoke::StopWhen {
+                impacts_applied: cli.until_impacts,
+                peer_left: cli.until_peer_left,
+                peer_left_after_impacts: cli.with_impacts,
+                deadline: cli.deadline.map(Duration::from_secs),
+            },
+        };
         let car = SelectedCar {
             def: selected,
             paint,
         };
         let rec = if let Some(link) = lobby.take() {
-            smoke::headless_lobby(link, vfs, car, &vehicle, frames, driver, active_profile)
+            smoke::headless_lobby(link, vfs, car, &vehicle, budget, driver, active_profile)
         } else if let Some(link) = host_link.take() {
-            smoke::headless_host(link, vfs, car, &vehicle, frames, driver, active_profile)
+            smoke::headless_host(link, vfs, car, &vehicle, budget, driver, active_profile)
         } else {
             smoke::headless_smoke(
                 &session_config,
                 vfs,
                 car,
                 &vehicle,
-                frames,
+                budget.frames,
                 driver,
                 active_profile,
             )

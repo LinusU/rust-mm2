@@ -1397,25 +1397,56 @@ fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField,
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
 
-    // The budgets leave room for a slow strike: the ram is a pursuit
-    // through the wire's input latency, so the first contact lands
-    // anywhere from host tick ~700 to ~1850 depending on load (measured
-    // over parallel runs), and bob must still be connected — a frame
-    // budget is not a clock; a loaded host advances fewer ticks per
-    // client frame — when the impact row rides a snap past him.
-    let mut alice_flags = join_args(install, addr, "alice", 2800);
+    // The ram is a pursuit through the wire's input latency, so its
+    // first contact lands anywhere from host tick ~700 to ~1850
+    // depending on load, and a frame budget is not a clock: a loaded
+    // host advances fewer ticks per client frame. The driven run
+    // therefore waits on its conditions, not on frames. Bob (the
+    // uninvolved client) runs until he has applied the replicated
+    // impact; alice runs until bob has left and her own predicted sim has
+    // registered the contact, so she is still connected
+    // while the impact row rides a snap to him. Frames are only a
+    // ceiling, and a wall-clock deadline bounds a condition that never
+    // comes (the exact-count assertions then fail on the missing
+    // impact, not on a hang). The control run has no condition to wait
+    // for — nothing may collide — so it runs a fixed span.
+    let deadline = Duration::from_secs(120);
+    let with = |mut flags: Vec<String>, extra: &[&str]| {
+        flags.extend(extra.iter().map(|f| f.to_string()));
+        flags
+    };
+    let (mut alice_flags, mut bob_flags) = if alice_rams {
+        (
+            with(
+                join_args(install, addr, "alice", 100_000),
+                &[
+                    "--until-peer-left",
+                    "--with-impacts",
+                    "1",
+                    "--deadline",
+                    "150",
+                ],
+            ),
+            with(
+                join_args(install, addr, "bob", 100_000),
+                &["--until-impacts", "1", "--deadline", "120"],
+            ),
+        )
+    } else {
+        (
+            join_args(install, addr, "alice", 2800),
+            join_args(install, addr, "bob", 2500),
+        )
+    };
     alice_flags.push(if alice_rams { "--ram" } else { "--parked" }.into());
-    let mut bob_flags = join_args(install, addr, "bob", 2500);
     bob_flags.push("--parked".into());
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     let bob = Proc::spawn(MM2_EXE, &bob_flags);
     start_when_ready(&mut host, 2);
 
-    // Bob's cap is shorter so his record prints while alice is still
-    // connected, as in the other legs.
     // The clients are quiet for their whole run, which outlasts the
     // per-line wait on a loaded machine.
-    let bound = Duration::from_secs(90);
+    let bound = deadline + Duration::from_secs(60);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     assert!(alice.wait().success(), "alice did not exit cleanly");
@@ -1481,6 +1512,10 @@ fn a_driven_collision_replicates_across_three_processes() {
         bob_net.impacts_applied > 0,
         "the replicated impact never reached the uninvolved client: {bob_net:?} / {bob}"
     );
+    // Both clients ended on their conditions, not the wall-clock
+    // deadline: bob on the impact, alice on seeing him leave.
+    assert_eq!(field(&bob, "stop"), "impacts", "{bob}");
+    assert_eq!(field(&alice, "stop"), "peer-left", "{alice}");
 }
 
 /// Every `seats=<id>:<x>,<z>/…` cell of a record, by wire seat.
