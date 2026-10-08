@@ -231,8 +231,16 @@ the byte-level identity of gameplay content.
   `--expect-mod`. A `--mods` path that is not a directory, or whose scan fails
   (a duplicate id, a bad manifest), also exits 2 before any report: play
   carries on without mods, but a trace that silently dropped them would read
-  as "no mod serves this city". It traces the city load only: audio cues are fetched lazily
-  per voice, so audio has no `deps` target yet.
+  as "no mod serves this city".
+  `mm2 … --trace-deps --cue <stem> [--cue <stem> …]` is the audio counterpart
+  (instead of `--city`; naming both, or neither, exits 2). Cues are fetched
+  lazily per voice at play time, so a city trace never reads them; this
+  target runs each cardata sample stem (`enginesedan1`, `skidcobble`, …)
+  through the production `WaveBank` — the same stem index, 22 kHz-first
+  preference and decode the game uses — and prints which source served the
+  wave. A stem no source provides, or a wave that does not decode, exits 2
+  (the latter after naming the file it read). Siren stems resolve through a
+  separate `sirens/`-scoped map and are not traced yet.
 
 ## Portable cities with multiple PSDL parts
 

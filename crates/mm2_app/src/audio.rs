@@ -513,6 +513,27 @@ impl WaveBank {
     }
 }
 
+/// Resolve and decode each cue stem through the production [`WaveBank`]
+/// under a read trace, so a mod author can see which source serves the
+/// audio file behind a cue (F29-B's audio `deps` target). The decoded
+/// waves go into a throwaway store; nothing outlives the call. Stops at
+/// the first stem that does not resolve or decode, and a failed call still
+/// returns the reads made. The `Ok` label summarises what loaded.
+pub fn trace_cue_reads(
+    vfs: &Vfs,
+    stems: &[String],
+) -> (Result<String, String>, mm2_assets::ReadTrace) {
+    vfs.trace_reads(|| {
+        let mut bank = WaveBank::index(vfs);
+        let mut waves: Assets<PcmAudio> = Assets::default();
+        for stem in stems {
+            bank.load(vfs, &mut waves, stem)
+                .map_err(|e| format!("cue {stem:?}: {e}"))?;
+        }
+        Ok(format!("{} cue wave(s)", stems.len()))
+    })
+}
+
 /// Session-scoped impact table + selection stream (F07-B.3): the
 /// parsed player-side `default_impacts.csv` plus the seeded draw the
 /// band/frequency picks share. Inserted by `load_session_world` when

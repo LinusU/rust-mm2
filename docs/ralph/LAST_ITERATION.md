@@ -1,3 +1,14 @@
+# Last iteration — F29-B.8: the audio `deps` target (iteration 12 of the recovery run)
+
+Selection: the F29-B.7 review passed with no blockers. The remaining F29-B legs were the audio `deps` target, a gameplay example mod (none shippable without original-derived tuning) and AC03 on a real two-process run; the audio target is the one that needs no GPU, no unknown rule and no new loader.
+Change: `mm2_app::audio::trace_cue_reads(vfs, stems)` indexes the VFS into a `WaveBank`, loads each stem into a throwaway `Assets<PcmAudio>` under `Vfs::trace_reads` and returns the reads (a failed stem still returns what was read). `mm2 --trace-deps --cue <stem>` (repeatable, conflicts with `--city`) prints the same per-source report and `--expect-mod` check; a trace with neither target exits 2. `docs/modding.md` Debugging documents it. No ledger row (tooling).
+Tests (+2, `mod_override.rs`): `a_traced_cue_load_credits_the_mod_that_replaced_its_wave` (mod wave credited, untouched cue not, unknown stem errors naming it, junk mod wave fails but names its file); `the_trace_deps_flag_reports_and_checks_which_mod_serves_a_cue` (subprocess: exit 0 / unmet `--expect-mod` 2 / unknown stem 2 / no target 2 / both targets 2). No separate mutation run this iteration.
+Retail (read-only): `mm2 --mm2-path <retail> --trace-deps --cue skidcobble --cue enginesedan1` → both served by `mm2aud.ar` (22 kHz tree).
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 2660 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data plus a read-only retail listing. Open on F29: siren-stem tracing, a shippable gameplay example mod, AC03 on a real two-process run, AC06 coverage for other families.
+
+---
+
 # Last iteration — F29-B.7: `--trace-deps` refuses a `--mods` directory that did not mount (iteration 11 of the recovery run)
 
 Selection: the F29-B.6 review passed with no blockers but named a gap — a `--mods` directory that fails to mount (or is not a directory) only logged a warn, so `mm2 --city <stem> --trace-deps` without `--expect-mod` printed a report with no mod files and exited 0, reading as "no mod serves this city". Repairing a reviewer-named gap precedes the remaining F29-B legs (audio `deps` target, gameplay example, AC03 two-process run), which are unchanged.

@@ -17,7 +17,7 @@ use bevy::ecs::world::{CommandQueue, World};
 use bevy::image::Image;
 use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::StandardMaterial;
-use mm2_app::audio::{PcmAudio, WaveBank};
+use mm2_app::audio::{PcmAudio, WaveBank, trace_cue_reads};
 use mm2_app::city::{MaterialCache, load_city, trace_city_reads};
 use mm2_assets::Vfs;
 use mm2_content::{fingerprint, load_vehicle};
@@ -644,6 +644,115 @@ fn trace_deps_refuses_a_mods_directory_that_did_not_mount() {
         !out.contains("city/test.psdl ("),
         "no report is printed\n{out}"
     );
+}
+
+/// The audio leg of `mm2 --trace-deps`: cue stems resolve and decode through
+/// the production `WaveBank`, the mod that replaced a cue's wave is credited
+/// with it, a cue the mod did not touch is not, and a wave that fails to
+/// decode still names the mod file it choked on.
+#[test]
+fn a_traced_cue_load_credits_the_mod_that_replaced_its_wave() {
+    let f = fixture();
+    let root = f._tmp.path();
+    let mut vfs = mounted(&f.base, &f.audio);
+
+    let (loaded, trace) = trace_cue_reads(&vfs, &["roadskid1".into(), "grassskid".into()]);
+    assert_eq!(loaded.expect("both cues load"), "2 cue wave(s)");
+    assert_eq!(
+        trace.from_mod("cue"),
+        ["aud/aud22/surfaces/roadskid1.22k.wav"]
+    );
+    assert!(
+        trace
+            .accesses
+            .iter()
+            .any(|a| a.logical == "aud/aud22/surfaces/grassskid.11k.wav"),
+        "the untouched cue is traced too: {}",
+        trace.render()
+    );
+    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()]);
+    assert!(loaded.is_ok());
+    assert!(trace.from_mod("cue").is_empty(), "{}", trace.render());
+
+    // A stem no source provides fails, naming the stem.
+    let (loaded, _) = trace_cue_reads(&vfs, &["roadskid1".into(), "nosuchcue".into()]);
+    let err = loaded.expect_err("an unknown stem must not load");
+    assert!(err.contains("nosuchcue"), "{err}");
+
+    // A mod whose wave does not decode fails the load, and the trace still
+    // names the file read from it.
+    let bad = broken_mod(
+        root,
+        "brokencue",
+        "aud/aud22/surfaces/grassskid.22k.wav",
+        b"RIFFjunk",
+    );
+    vfs.mount_mod(&bad, 310).unwrap();
+    let (loaded, trace) = trace_cue_reads(&vfs, &["grassskid".into()]);
+    assert!(loaded.is_err(), "a junk wave must not decode");
+    assert_eq!(
+        trace.from_mod("brokencue"),
+        ["aud/aud22/surfaces/grassskid.22k.wav"]
+    );
+}
+
+/// `mm2 --trace-deps --cue` as a process: the same per-source report as the
+/// city target, `--expect-mod` as an exit status, and a usage error (exit 2)
+/// when no target is named or both are.
+#[test]
+fn the_trace_deps_flag_reports_and_checks_which_mod_serves_a_cue() {
+    let f = fixture();
+    let mods = f._tmp.path().join("cue_mods");
+    let m = mods.join("cue");
+    std::fs::create_dir_all(&m).unwrap();
+    audio_mod(&m);
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"))
+            .arg("--mm2-path")
+            .arg(&f.base)
+            .arg("--mods")
+            .arg(&mods)
+            .arg("--trace-deps")
+            .args(args)
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("spawn mm2");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (code, out) = run(&[
+        "--cue",
+        "roadskid1",
+        "--cue",
+        "grassskid",
+        "--expect-mod",
+        "cue",
+    ]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("mod `cue`: 1 file(s)"), "{out}");
+    assert!(
+        out.contains("  aud/aud22/surfaces/roadskid1.22k.wav ("),
+        "{out}"
+    );
+
+    let (code, out) = run(&["--cue", "grassskid", "--expect-mod", "cue"]);
+    assert_eq!(code, Some(2), "a mod that served nothing fails\n{out}");
+
+    let (code, out) = run(&["--cue", "nosuchcue"]);
+    assert_eq!(code, Some(2), "{out}");
+    assert!(out.contains("load failed after"), "{out}");
+
+    let (code, out) = run(&[]);
+    assert_eq!(
+        code,
+        Some(2),
+        "a trace with no target is a usage error\n{out}"
+    );
+    let (code, out) = run(&["--city", "test", "--cue", "roadskid1"]);
+    assert_eq!(code, Some(2), "one target at a time\n{out}");
 }
 
 /// A mod mounted over `base` that carries one broken file at `logical`.
