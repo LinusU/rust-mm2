@@ -1108,7 +1108,17 @@ fn mods_cmd(
                 .map(|e| format!(", first gameplay path {e}"))
                 .unwrap_or_default(),
         );
+        if let Some(effect) = r.declared {
+            println!("{:13} declared effect: {}", "", effect.as_str());
+        }
+        if let Some(why) = r.contradiction() {
+            println!("{:13} MISMATCH {}: {why}", "", r.id);
+        }
     }
+    let mismatches = reports
+        .iter()
+        .filter(|r| r.contradiction().is_some())
+        .count();
     let gameplay: Vec<_> = reports.iter().filter(|r| !r.is_cosmetic_only()).collect();
     println!(
         "{} mod(s), {} change gameplay content{}",
@@ -1120,6 +1130,10 @@ fn mods_cmd(
             ": records are not kept and multiplayer peers must run the same mods"
         }
     );
+    // A wrong `effect` claim is the mod's bug; the verdict above stands.
+    if mismatches > 0 {
+        return Err(format!("{mismatches} mod(s) declare an effect their files contradict").into());
+    }
     if expect_cosmetic && !gameplay.is_empty() {
         return Err(format!("{} mod(s) change gameplay content", gameplay.len()).into());
     }

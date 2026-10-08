@@ -212,6 +212,76 @@ fn mods_classifies_each_mod_by_the_files_it_wins() {
     );
 }
 
+/// A mod directory whose manifest carries an `effect` claim.
+fn claiming_mod(mods: &Path, id: &str, effect: &str, files: &[&str]) {
+    mod_dir(mods, id, files);
+    let manifest = format!("[mod]\nid = \"{id}\"\neffect = \"{effect}\"\n");
+    write(&mods.join(id), "mod.toml", manifest.as_bytes());
+}
+
+#[test]
+fn mods_reports_a_declared_effect_the_files_contradict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "tune/x.txt", b"install");
+    claiming_mod(&mods, "a-skin", "cosmetic", &["texture/x.png"]);
+    claiming_mod(&mods, "b-tuning", "gameplay", &["tune/x.txt"]);
+    let (install, mods) = (install.to_str().unwrap(), mods.to_str().unwrap());
+
+    let ok = inspect(&["--mods", mods, "mods", install]);
+    assert!(ok.status.success(), "{ok:?}");
+    let text = String::from_utf8(ok.stdout).unwrap();
+    assert!(text.contains("declared effect: cosmetic"), "{text}");
+    assert!(text.contains("declared effect: gameplay"), "{text}");
+    assert!(!text.contains("MISMATCH"), "{text}");
+
+    // A tuning mod claiming to be cosmetic is named, and the command fails
+    // — but the verdict stays GAMEPLAY, whatever the claim says.
+    claiming_mod(Path::new(mods), "c-liar", "cosmetic", &["tune/y.txt"]);
+    let bad = inspect(&["--mods", mods, "mods", install]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    let text = String::from_utf8(bad.stdout).unwrap();
+    assert!(text.contains("MISMATCH c-liar"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("GAMEPLAY") && l.contains("c-liar")),
+        "{text}"
+    );
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("1 mod(s) declare an effect"));
+}
+
+/// The shipped `examples/mods` are documentation authors copy from, so each
+/// must make an honest claim about what it changes.
+#[test]
+fn the_shipped_example_mods_declare_an_effect_their_files_confirm() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mods");
+    let mut dirs: Vec<_> = fs::read_dir(&examples)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("mod.toml").is_file())
+        .collect();
+    assert!(!dirs.is_empty(), "no example mods under {examples:?}");
+    dirs.sort();
+    for dir in &dirs {
+        let manifest = fs::read_to_string(dir.join("mod.toml")).unwrap();
+        assert!(manifest.contains("effect = "), "{dir:?} declares no effect");
+    }
+    let install = tempfile::tempdir().unwrap();
+    let out = inspect(&[
+        "--mods",
+        examples.to_str().unwrap(),
+        "mods",
+        install.path().to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("MISMATCH"), "{text}");
+    assert!(
+        text.contains(&format!("{} mod(s)", dirs.len())),
+        "every example mod is mounted and reported: {text}"
+    );
+}
+
 #[test]
 fn deps_shows_which_source_served_the_files_a_failed_load_read() {
     let tmp = tempfile::tempdir().unwrap();

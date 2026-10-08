@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::manifest::{MANIFEST_FILE, ModManifest};
+use crate::manifest::{DeclaredEffect, MANIFEST_FILE, ModManifest};
 use crate::source::{ArchiveSource, DirSource, ResolvedSource, Source};
 use crate::trace::{Access, ReadTrace};
 use crate::{AssetsError, normalize_path};
@@ -53,9 +53,10 @@ pub struct Vfs {
     /// shadowed candidates behind each `index` winner, kept so a conflict
     /// can be explained rather than only resolved.
     providers: HashMap<String, Vec<usize>>,
-    /// Mounted mods' manifest ids and directories: an id names one mod, so
-    /// a second mount of it is refused rather than merged into the first.
-    mod_ids: Vec<(String, PathBuf)>,
+    /// Mounted mods' manifest ids, directories and declared effects: an id
+    /// names one mod, so a second mount of it is refused rather than merged
+    /// into the first.
+    mod_ids: Vec<(String, PathBuf, Option<DeclaredEffect>)>,
     /// Bumped every time the set of mounted sources changes (a mount or a
     /// rollback) and never reused, so a value read earlier names exactly
     /// one mount set. See [`Vfs::revision`].
@@ -182,7 +183,7 @@ impl Vfs {
     /// (excluding the manifest itself).
     pub fn mount_mod(&mut self, dir: &Path, priority: i32) -> Result<ModManifest, AssetsError> {
         let manifest = ModManifest::load(dir)?;
-        if let Some((_, first)) = self.mod_ids.iter().find(|(id, _)| *id == manifest.id) {
+        if let Some((_, first, _)) = self.mod_ids.iter().find(|(id, ..)| *id == manifest.id) {
             return Err(AssetsError::DuplicateModId {
                 id: manifest.id,
                 first: first.clone(),
@@ -200,7 +201,8 @@ impl Vfs {
             "mounted mod"
         );
         self.push(Box::new(source), priority);
-        self.mod_ids.push((manifest.id.clone(), dir.to_path_buf()));
+        self.mod_ids
+            .push((manifest.id.clone(), dir.to_path_buf(), manifest.effect));
         Ok(manifest)
     }
 
@@ -484,7 +486,16 @@ impl Vfs {
 
     /// Manifest ids of the mounted mods, in mount order.
     pub fn mod_ids(&self) -> impl Iterator<Item = &str> {
-        self.mod_ids.iter().map(|(id, _)| id.as_str())
+        self.mod_ids.iter().map(|(id, ..)| id.as_str())
+    }
+
+    /// What a mounted mod's manifest says it changes, if it says. `None`
+    /// for an unknown id and for a mod that makes no claim.
+    pub fn declared_effect(&self, id: &str) -> Option<DeclaredEffect> {
+        self.mod_ids
+            .iter()
+            .find(|(mod_id, ..)| mod_id == id)
+            .and_then(|(_, _, effect)| *effect)
     }
 
     /// Number of mounted sources.

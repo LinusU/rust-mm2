@@ -22,7 +22,7 @@ mod trace;
 mod vfs;
 
 pub use error::AssetsError;
-pub use manifest::ModManifest;
+pub use manifest::{DeclaredEffect, ModManifest};
 pub use mount::{
     INSTALL_LABEL, InstallMount, MountReport, OverrideSummary, mount_install, mount_mods,
     override_summary,

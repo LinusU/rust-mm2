@@ -1,3 +1,13 @@
+# Last iteration — F29-B.5: a mod declares its effect and the engine checks the claim (iteration 9 of the recovery run)
+
+Selection: the F29-B.4 review passed with no blockers. Of the F29-B remainder (city/audio `deps` targets, examples with a declared classification, AC03 on a real run) the declared-classification leg needs no GPU, no unknown rule and no new loader, and the only shipped example mod made no claim at all.
+Change: `mod.toml` takes an optional `effect = "cosmetic" | "gameplay"` (`mm2_assets::DeclaredEffect`; any other spelling is a manifest error so a typo cannot read as "no claim"). `Vfs::declared_effect(id)`; `mm2_content::fingerprint::ModReport.declared` and `contradiction()` (cosmetic claim on a mod that wins gameplay paths; gameplay claim on a mod that wins none). The claim never alters the verdict — files decide, so a claim cannot launder a tuning edit. `mm2` warns per contradiction; `mm2-inspect mods` prints the claim, a `MISMATCH` line and exits 2. `examples/mods/checker-override` declares `cosmetic`. `docs/modding.md` "Declaring the effect". No ledger row (tooling/implementation choice).
+Tests (+6): `mm2_assets` manifest (optional, two spellings, typos/case/non-string rejected); `mm2_content` fingerprint ×2 (true/absent/lying claims, verdict unmoved by a lie; a gameplay claim on a fully shadowed mod names the shadowing); `mm2_inspect` ×2 (MISMATCH + exit 2 while the verdict line stays GAMEPLAY; the shipped `examples/mods` all declare an effect their files confirm). Mutation: setting the example's claim to `gameplay` fails the examples test with the MISMATCH output.
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; `cargo test --locked --workspace` rc 0, 2655 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data only. The examples are still one cosmetic mod: no shippable gameplay example exists because a meaningful one would be derived from original tuning. Open on F29: city-geometry and audio `deps` targets, `resolve`-only misses untraced, AC06 oversize/cycle coverage for other families, AC03 on a real two-process run.
+
+---
+
 # Last iteration — F29-B.4: `deps` traces an authored event (iteration 8 of the recovery run)
 
 Selection: the F29-B.3 review passed with no blockers. Its named gap was that `deps` had only a car target. A city target needs `mm2_app::load_city` (Bevy), which `mm2_inspect` deliberately does not link, so the race family — the other consumer the inspector already drives through production code (`event::inspect`: catalog scan, record parse, `race_definition`, roster builds) — is the smallest honest second target.

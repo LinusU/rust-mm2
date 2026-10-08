@@ -26,6 +26,8 @@ version = "0.1.0"
 # optional, informational only for now:
 author = "you"
 description = "..."
+# optional claim: what the mod changes ("cosmetic" or "gameplay"); see below
+effect = "cosmetic"
 ```
 
 `mod.toml` itself is never exposed as an asset.
@@ -145,6 +147,19 @@ mod, and a mod that wins nothing changes nothing.
 and first gameplay path; `--expect-cosmetic` exits non-zero if any mod
 changes gameplay (for a pack advertised as cosmetic). The game logs the same
 verdict per mod at startup.
+
+### Declaring the effect
+
+A manifest may state `effect = "cosmetic"` or `effect = "gameplay"`. It is a
+claim to check, never an input: the verdict above always comes from the files
+the mod wins, so a mod cannot launder a tuning edit by calling it cosmetic.
+A claim the files contradict — `cosmetic` on a mod that wins a gameplay path,
+or `gameplay` on one that wins none (empty, or shadowed by a later mod) — is a
+`warn` in the game's log and a `MISMATCH` line in `mm2-inspect mods`, which
+then exits 2. Any other spelling is a manifest error (a typo must not read as
+"no claim"); omitting the field is fine. Every mod under `examples/mods`
+declares one, and `mm2_inspect`'s `the_shipped_example_mods_declare_an_effect_their_files_confirm`
+fails if an example's claim stops matching its files.
 
 ## Replacement is a remount (cache identity)
 

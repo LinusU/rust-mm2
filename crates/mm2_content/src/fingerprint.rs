@@ -18,7 +18,7 @@
 //! side; the classifier and the protocol version move together).
 
 use mm2_assets::fingerprint::{self, FNV_OFFSET_BASIS, fnv};
-use mm2_assets::{AssetsError, Vfs};
+use mm2_assets::{AssetsError, DeclaredEffect, Vfs};
 
 /// Top-level logical prefixes whose resolved content is gameplay data.
 const GAMEPLAY_PREFIXES: &[&str] = &[
@@ -135,6 +135,9 @@ pub struct ModReport {
     pub shadowed: usize,
     /// First gameplay path the mod wins, in sorted order.
     pub example: Option<String>,
+    /// What the mod's manifest claims, if it claims anything. The verdict
+    /// is [`is_cosmetic_only`](Self::is_cosmetic_only) either way.
+    pub declared: Option<DeclaredEffect>,
 }
 
 impl ModReport {
@@ -143,6 +146,24 @@ impl ModReport {
     /// nothing.
     pub fn is_cosmetic_only(&self) -> bool {
         self.gameplay == 0
+    }
+
+    /// Why the manifest's claim disagrees with the files the mod wins, or
+    /// `None` when there is no claim or it holds. The claim never changes
+    /// the verdict; this only tells the author their `effect` is wrong.
+    pub fn contradiction(&self) -> Option<String> {
+        match (self.declared?, self.is_cosmetic_only()) {
+            (DeclaredEffect::Cosmetic, false) => Some(format!(
+                "declares effect = \"cosmetic\" but wins {} gameplay path(s), first {}",
+                self.gameplay,
+                self.example.as_deref().unwrap_or("?"),
+            )),
+            (DeclaredEffect::Gameplay, true) => Some(format!(
+                "declares effect = \"gameplay\" but wins no gameplay path ({} shadowed by other sources)",
+                self.shadowed,
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -160,6 +181,7 @@ pub fn mod_reports(vfs: &Vfs) -> Vec<ModReport> {
             cosmetic: 0,
             shadowed: 0,
             example: None,
+            declared: vfs.declared_effect(id),
         })
         .collect();
     if reports.is_empty() {
@@ -467,5 +489,100 @@ mod tests {
         let r = &mod_reports(&vfs)[0];
         assert_eq!((r.gameplay, r.cosmetic, r.shadowed), (0, 0, 0));
         assert!(mods_cosmetic_only(&vfs));
+    }
+
+    /// Mount one mod per `(id, declared effect, files)` over the stock tree.
+    fn declared(tmp: &Path, mods: &[(&str, Option<&str>, Files)]) -> Vfs {
+        let base = tmp.join("base");
+        write(&base, "tune/x.csv", b"stock");
+        let dir = tmp.join("mods");
+        for (id, effect, files) in mods {
+            let m = dir.join(id);
+            let claim = effect.map_or(String::new(), |e| format!("effect = \"{e}\"\n"));
+            write(
+                &m,
+                "mod.toml",
+                format!("[mod]\nid = \"{id}\"\n{claim}").as_bytes(),
+            );
+            for (rel, bytes) in *files {
+                write(&m, rel, bytes);
+            }
+        }
+        let mut vfs = vfs_of(&base);
+        vfs.mount_mods_dir(&dir, mm2_assets::priority::MOD).unwrap();
+        vfs
+    }
+
+    #[test]
+    fn a_declared_effect_is_checked_against_the_files_but_never_replaces_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = declared(
+            tmp.path(),
+            &[
+                (
+                    "a-honest-skin",
+                    Some("cosmetic"),
+                    &[("texture/x.tex", b"t")],
+                ),
+                ("b-honest-tuning", Some("gameplay"), &[("tune/x.csv", b"t")]),
+                ("c-silent", None, &[("tune/y.csv", b"t")]),
+                ("d-lying-tuning", Some("cosmetic"), &[("tune/z.csv", b"t")]),
+                ("e-lying-skin", Some("gameplay"), &[("texture/y.tex", b"t")]),
+            ],
+        );
+        let reports = mod_reports(&vfs);
+        let claims: Vec<_> = reports.iter().map(|r| r.declared).collect();
+        assert_eq!(
+            claims,
+            [
+                Some(DeclaredEffect::Cosmetic),
+                Some(DeclaredEffect::Gameplay),
+                None,
+                Some(DeclaredEffect::Cosmetic),
+                Some(DeclaredEffect::Gameplay),
+            ]
+        );
+        let contradictions: Vec<_> = reports.iter().map(ModReport::contradiction).collect();
+        assert_eq!(
+            contradictions[..3],
+            [None, None, None],
+            "true or absent claims"
+        );
+        assert!(
+            contradictions[3]
+                .as_ref()
+                .is_some_and(|c| c.contains("tune/z.csv"))
+        );
+        assert!(
+            contradictions[4]
+                .as_ref()
+                .is_some_and(|c| c.contains("no gameplay path"))
+        );
+        // The lie changes nothing: the verdict is the files'.
+        assert!(
+            !reports[3].is_cosmetic_only(),
+            "a cosmetic claim cannot launder tuning"
+        );
+        assert!(
+            reports[4].is_cosmetic_only(),
+            "a gameplay claim does not make a skin gameplay"
+        );
+        assert!(!mods_cosmetic_only(&vfs));
+    }
+
+    #[test]
+    fn a_gameplay_claim_on_a_fully_shadowed_mod_is_reported_with_its_shadowing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vfs = declared(
+            tmp.path(),
+            &[
+                ("a-early", Some("gameplay"), &[("tune/x.csv", b"early")]),
+                ("b-late", None, &[("tune/x.csv", b"late")]),
+            ],
+        );
+        let early = &mod_reports(&vfs)[0];
+        assert_eq!((early.gameplay, early.shadowed), (0, 1));
+        let why = early.contradiction().unwrap();
+        assert!(why.contains("1 shadowed"), "{why}");
     }
 }

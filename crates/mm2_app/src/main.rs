@@ -683,6 +683,9 @@ fn main() {
                 // fingerprint; cosmetic-only ones do neither.
                 let reports = mm2_content::fingerprint::mod_reports(&vfs);
                 for r in &reports {
+                    if let Some(why) = r.contradiction() {
+                        warn!(mod_id = %r.id, "mod manifest {why}; the files decide");
+                    }
                     if r.is_cosmetic_only() {
                         info!(mod_id = %r.id, cosmetic = r.cosmetic, shadowed = r.shadowed, "mod is cosmetic-only");
                     } else {

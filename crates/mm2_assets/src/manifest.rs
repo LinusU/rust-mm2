@@ -7,7 +7,13 @@
 //! id = "example-hd-pack"
 //! name = "Example HD Pack"
 //! version = "0.1.0"
+//! effect = "cosmetic" # optional: "cosmetic" or "gameplay"
 //! ```
+//!
+//! `effect` is the author's *claim* about what the mod changes. It never
+//! decides anything: the engine classifies a mod by the files it actually
+//! wins (`mm2_content::fingerprint::mod_reports`) and reports a claim the
+//! files contradict.
 
 use std::path::Path;
 
@@ -20,6 +26,30 @@ pub const MANIFEST_FILE: &str = "mod.toml";
 
 /// Largest manifest accepted; a real one is a few hundred bytes.
 pub const MAX_MANIFEST_SIZE: u64 = 1024 * 1024;
+
+/// What a mod's author says it changes (`effect` in `mod.toml`).
+///
+/// A declaration, not a classification: the gameplay/cosmetic verdict
+/// comes from the files the mod wins, and a mismatch is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeclaredEffect {
+    /// Textures, audio, menu art or lighting only.
+    Cosmetic,
+    /// Tuning, bounds, geometry, world or race data: records and
+    /// multiplayer compatibility are affected.
+    Gameplay,
+}
+
+impl DeclaredEffect {
+    /// The manifest spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cosmetic => "cosmetic",
+            Self::Gameplay => "gameplay",
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ManifestFile {
@@ -36,6 +66,9 @@ struct ModSection {
     description: Option<String>,
     #[serde(default)]
     authors: Vec<String>,
+    /// An unknown spelling fails the parse rather than reading as "none".
+    #[serde(default)]
+    effect: Option<DeclaredEffect>,
 }
 
 /// A loaded mod manifest.
@@ -51,6 +84,8 @@ pub struct ModManifest {
     pub description: Option<String>,
     /// Optional author list.
     pub authors: Vec<String>,
+    /// The author's claim about what the mod changes, if made.
+    pub effect: Option<DeclaredEffect>,
 }
 
 impl ModManifest {
@@ -92,6 +127,7 @@ impl ModManifest {
             version: file.section.version.unwrap_or_else(|| "0.0.0".to_string()),
             description: file.section.description,
             authors: file.section.authors,
+            effect: file.section.effect,
             id,
         })
     }
@@ -115,6 +151,26 @@ mod tests {
         assert_eq!(m.id, "example-hd-pack");
         assert_eq!(m.name, "Example HD Pack");
         assert_eq!(m.version, "0.1.0");
+    }
+
+    #[test]
+    fn effect_is_optional_and_only_two_spellings_parse() {
+        let parse = |effect: &str| {
+            ModManifest::parse(&format!("[mod]\nid = \"m\"\n{effect}\n")).map(|m| m.effect)
+        };
+        assert_eq!(parse(""), Ok(None));
+        assert_eq!(
+            parse("effect = \"cosmetic\""),
+            Ok(Some(DeclaredEffect::Cosmetic))
+        );
+        assert_eq!(
+            parse("effect = \"gameplay\""),
+            Ok(Some(DeclaredEffect::Gameplay))
+        );
+        // A typo must not read as "no claim".
+        assert!(parse("effect = \"cosmectic\"").is_err());
+        assert!(parse("effect = \"Cosmetic\"").is_err());
+        assert!(parse("effect = true").is_err());
     }
 
     #[test]
