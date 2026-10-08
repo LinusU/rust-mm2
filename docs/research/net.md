@@ -1144,6 +1144,19 @@ trains) has run since its session entered `Countdown`.
   number (`world_ticks(race)` is countdown + race clock), so they agree;
   the clock frame also keeps running after the race completes, when the
   row no longer yields a tick.
+- **Race-row seek bound (report 7 item 10).** The row's `clock` is an
+  unvalidated `u64` and used to reach `WorldClock::sync` unchecked, so a
+  host could ask a client for up to 2^64 replay steps inside one fixed
+  step. `sync` now owns the `MAX_SEEK_TICKS` gate for every source
+  (`SyncOutcome::{InTolerance, Queued, Refused}`): a refused row queues
+  no seek, counts into `NetDriveReport.world_row_refused` (the record's
+  `wclk=` gains a `rowref<n>` cell only once non-zero) and still mirrors
+  its phase and clock — diagnose, do not coerce. `world_ticks` adds the
+  countdown with `saturating_add`, so `u64::MAX` cannot overflow.
+  Residual, not claimed closed: the *rate/growth* limits (`WorldLimits`)
+  are not applied to rows, which arrive at the snap rate by design, so a
+  host stepping its row clock upward under the cap can still force a
+  replay per row; the cap bounds each replay, not their frequency.
 - **Latency.** No round trip is measured on the link, so a client
   applies the host's tick as of send time and trails by the one-way
   delay: a few ticks on a LAN, inside the tolerance. A path with more

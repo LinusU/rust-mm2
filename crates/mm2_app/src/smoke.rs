@@ -1273,10 +1273,24 @@ fn run_headless(
     // while the wire carried none.
     let world_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
-        .filter(|r| r.world_sent + r.world_landed + r.world_refused + r.world_throttled > 0)
+        .filter(|r| {
+            r.world_sent
+                + r.world_landed
+                + r.world_refused
+                + r.world_throttled
+                + r.world_row_refused
+                > 0
+        })
         .map(|r| {
+            // `rowref` only once a race row's clock was refused, so
+            // every record without one stays bit-identical.
+            let row = if r.world_row_refused > 0 {
+                format!(",rowref{}", r.world_row_refused)
+            } else {
+                String::new()
+            };
             format!(
-                " wclk=sent{},landed{},seek{},ref{},thr{}",
+                " wclk=sent{},landed{},seek{},ref{},thr{}{row}",
                 r.world_sent, r.world_landed, r.world_seeks, r.world_refused, r.world_throttled
             )
         })

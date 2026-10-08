@@ -3279,7 +3279,7 @@ for item 1, a measured run) shows it fixed.
 
 Lower priority. Take these after items 1–9, and before any unrelated work:
 
-10. **Bound the race-row world-clock seek.**
+10. **[implemented, candidate — iteration 4 of the new run; see LAST_ITERATION and `docs/research/net.md`]** **Bound the race-row world-clock seek.**
    - `WorldClock::sync` in `crates/mm2_app/src/worldclock.rs` queues a
      re-seek to `countdown_ticks + row.clock`. `row.clock` is an
      unvalidated wire value from the race row (`apply_race_snap`), and

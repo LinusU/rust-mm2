@@ -348,7 +348,7 @@ pub fn apply_world_clock(
         && let Some(mut clock) = clock
     {
         stage.landed += 1;
-        if clock.sync(ticks) {
+        if clock.sync(ticks) == SyncOutcome::Queued {
             stage.seeks += 1;
         }
     }
@@ -369,16 +369,34 @@ pub struct WorldClock {
     pub seek: Option<u64>,
 }
 
+/// What [`WorldClock::sync`] did with a target tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// Already within [`SYNC_TOLERANCE_TICKS`]; nothing queued.
+    InTolerance,
+    /// A re-seek to the target is queued.
+    Queued,
+    /// The target is past [`MAX_SEEK_TICKS`]: nothing queued, and the
+    /// caller reports it as a counted refusal.
+    Refused,
+}
+
 impl WorldClock {
     /// Ask for a re-seek to `target` unless the clock is already
-    /// within [`SYNC_TOLERANCE_TICKS`] of it. Returns whether one was
-    /// queued.
-    pub fn sync(&mut self, target: u64) -> bool {
+    /// within [`SYNC_TOLERANCE_TICKS`] of it, or the target is past
+    /// [`MAX_SEEK_TICKS`]. A seek replays every actor from its start
+    /// inside one fixed step, so a corrupt or hostile target must never
+    /// reach [`advance_world_clock`] — this is the one gate every
+    /// source of a target (clock frame, race row) goes through.
+    pub fn sync(&mut self, target: u64) -> SyncOutcome {
+        if target > MAX_SEEK_TICKS {
+            return SyncOutcome::Refused;
+        }
         if self.ticks.abs_diff(target) <= SYNC_TOLERANCE_TICKS {
-            return false;
+            return SyncOutcome::InTolerance;
         }
         self.seek = Some(target);
-        true
+        SyncOutcome::Queued
     }
 }
 
@@ -389,7 +407,8 @@ pub fn world_ticks(race: &RaceState) -> Option<u64> {
     let countdown = u64::from(race.definition.countdown_ticks);
     match race.phase {
         RacePhase::Countdown { remaining } => Some(countdown.saturating_sub(u64::from(remaining))),
-        RacePhase::Running => Some(countdown + race.clock),
+        // Saturating: the clock is a wire value on a predicted client.
+        RacePhase::Running => Some(countdown.saturating_add(race.clock)),
         RacePhase::Complete => None,
     }
 }
@@ -670,11 +689,40 @@ mod tests {
             ticks: 100,
             seek: None,
         };
-        assert!(!clock.sync(100 + SYNC_TOLERANCE_TICKS));
-        assert!(!clock.sync(100 - SYNC_TOLERANCE_TICKS));
+        assert_eq!(
+            clock.sync(100 + SYNC_TOLERANCE_TICKS),
+            SyncOutcome::InTolerance
+        );
+        assert_eq!(
+            clock.sync(100 - SYNC_TOLERANCE_TICKS),
+            SyncOutcome::InTolerance
+        );
         assert_eq!(clock.seek, None);
-        assert!(clock.sync(100 + SYNC_TOLERANCE_TICKS + 1));
+        assert_eq!(
+            clock.sync(100 + SYNC_TOLERANCE_TICKS + 1),
+            SyncOutcome::Queued
+        );
         assert_eq!(clock.seek, Some(100 + SYNC_TOLERANCE_TICKS + 1));
+    }
+
+    #[test]
+    fn sync_refuses_a_target_past_the_seek_bound_and_queues_nothing() {
+        let mut clock = WorldClock {
+            ticks: 100,
+            seek: None,
+        };
+        assert_eq!(clock.sync(MAX_SEEK_TICKS + 1), SyncOutcome::Refused);
+        assert_eq!(clock.sync(u64::MAX), SyncOutcome::Refused);
+        assert_eq!(clock.seek, None, "a refusal leaves no seek behind");
+        assert_eq!(clock.sync(MAX_SEEK_TICKS), SyncOutcome::Queued);
+        assert_eq!(clock.seek, Some(MAX_SEEK_TICKS), "the bound is inclusive");
+        // A refusal does not cancel a seek already queued.
+        let mut clock = WorldClock {
+            ticks: 100,
+            seek: Some(500),
+        };
+        assert_eq!(clock.sync(u64::MAX), SyncOutcome::Refused);
+        assert_eq!(clock.seek, Some(500));
     }
 
     #[test]
@@ -730,7 +778,7 @@ mod tests {
             ticks: 1_000,
             seek: None,
         };
-        assert!(clock.sync(2_000));
+        assert_eq!(clock.sync(2_000), SyncOutcome::Queued);
         client = replay_leaf(DrawbridgeMode::Timed, clock.seek.unwrap(), DT);
         assert_eq!(host, client);
     }

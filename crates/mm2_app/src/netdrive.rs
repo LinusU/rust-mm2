@@ -1027,6 +1027,10 @@ pub struct NetDriveReport {
     /// [`WorldLimits::min_interval`](crate::worldclock::WorldLimits)
     /// allows (F26-A).
     pub world_throttled: u64,
+    /// Race rows whose clock asked the scenery to re-seek past
+    /// [`MAX_SEEK_TICKS`](crate::worldclock::MAX_SEEK_TICKS): the seek
+    /// was refused (the row's phase and clock still mirror).
+    pub world_row_refused: u64,
     /// Cops & Robbers frames the host published (F27-B, protocol v21).
     pub cnr_sent: u64,
     /// Cops & Robbers frames a client folded into its replica (F27-B).
@@ -2902,12 +2906,16 @@ fn apply_race_snap(
     race.phase = phase;
     race.clock = row.clock;
     // The scenery keys off the same clock: re-seek it to the
-    // authority's world tick when this peer has drifted.
+    // authority's world tick when this peer has drifted. The clock is
+    // an unvalidated wire value, so the seek goes through the same
+    // `MAX_SEEK_TICKS` gate the `World` frames do; a refusal is
+    // counted, not coerced into a nearer tick.
     if let (Some(world), Some(target)) = (
         mirror.world.as_deref_mut(),
         crate::worldclock::world_ticks(race),
-    ) {
-        world.sync(target);
+    ) && world.sync(target) == crate::worldclock::SyncOutcome::Refused
+    {
+        report.world_row_refused += 1;
     }
     if releasing {
         for mut progress in mirror.progress.p0().iter_mut() {
@@ -4840,6 +4848,90 @@ mod tests {
             2,
             "the unnamed phase died at push"
         );
+    }
+
+    /// The race row's clock is an unvalidated wire value that also
+    /// steers the scenery's re-seek (report 7 item 10). A row whose
+    /// world tick lies past `MAX_SEEK_TICKS` — up to `u64::MAX`, which
+    /// must not overflow the countdown sum either — is refused counted
+    /// on the seek only: nothing is queued, the clock keeps stepping
+    /// and the next honest seek would still land. The row's phase and
+    /// clock still mirror (diagnose, do not coerce).
+    #[test]
+    fn an_absurd_race_row_clock_is_refused_and_the_client_stays_responsive() {
+        use crate::worldclock::{MAX_SEEK_TICKS, WorldClock, advance_world_clock};
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let countdown = u64::from(def.countdown_ticks);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(RaceState::new(def, generation))
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<WorldClock>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, (apply_snapshots, advance_world_clock).chain());
+        let push = |app: &mut App, clock: u64| {
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                1,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(SnapRace {
+                    phase: SNAP_PHASE_RUNNING,
+                    countdown: 0,
+                    clock,
+                }),
+            );
+        };
+        let world = |app: &App| *app.world().resource::<WorldClock>();
+        let refused = |app: &App| app.world().resource::<NetDriveReport>().world_row_refused;
+
+        // An honest row first: the clock seeks to it.
+        push(&mut app, 500);
+        app.update();
+        assert_eq!(world(&app).ticks, countdown + 500, "the seek landed");
+        assert_eq!(refused(&app), 0);
+
+        // The edge of the bound is still a seek; one past it is not.
+        push(&mut app, MAX_SEEK_TICKS - countdown + 1);
+        app.update();
+        let after = world(&app);
+        assert_eq!(refused(&app), 1);
+        assert_eq!(after.seek, None, "no replay was queued");
+        assert_eq!(after.ticks, countdown + 501, "the clock kept stepping");
+        assert_eq!(
+            app.world().resource::<RaceState>().clock,
+            MAX_SEEK_TICKS - countdown + 1,
+            "the row's own clock still mirrors"
+        );
+
+        // The extreme neither panics (overflow) nor seeks.
+        push(&mut app, u64::MAX);
+        app.update();
+        assert_eq!(refused(&app), 2);
+        assert_eq!(world(&app).seek, None);
+        assert_eq!(world(&app).ticks, countdown + 502);
+        assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 3);
     }
 
     /// A `Snap.race` row on a session with no `RaceState` — cruise and
