@@ -140,8 +140,8 @@ pub const RECORDS: [CapabilityRecord; 11] = [
     },
     CapabilityRecord {
         capability: Capability::MouseDriving,
-        status: Status::NotImplemented,
-        note: "the original's mouse steering and button throttle (CTL-2) is not built; mouse is menu-only",
+        status: Status::SyntheticOnly,
+        note: "an opt-in Controls row (off by default): the cursor's offset from the window centre steers, left button throttles, right brakes/reverses (CTL-2's documented scheme, exact original feel unverified); synthetic window and button state only, no real mouse",
     },
     CapabilityRecord {
         capability: Capability::ManualTransmission,

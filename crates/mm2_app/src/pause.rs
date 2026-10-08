@@ -906,7 +906,14 @@ pub fn pause_present(
                 Color::srgb(0.45, 0.45, 0.5),
             ),
         };
-        lines.push((text, 22.0, color));
+        // The controls page has the most rows; 22 px no longer fits 720p
+        // once the mouse row joined it (19 rows became 20).
+        let size = if pause.page == PausePage::Controls {
+            20.0
+        } else {
+            22.0
+        };
+        lines.push((text, size, color));
     }
     lines.push((String::new(), 8.0, Color::NONE));
     if let Some(status) = &pause.status {

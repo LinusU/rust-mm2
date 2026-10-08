@@ -369,6 +369,11 @@ pub struct ControlSettings {
     pub invert_steering: bool,
     /// Automatic gearbox, or manual with the shift keys.
     pub transmission: TransmissionPolicy,
+    /// Drive with the mouse (CTL-2, F23-A.6): the cursor's offset from
+    /// the window centre steers, the left button throttles and the right
+    /// brakes. Off by default — the keys, and any pad, keep working
+    /// either way.
+    pub mouse_driving: bool,
     /// The gamepad's digital buttons (F23-A.4).
     pub pad: PadMap,
 }
@@ -382,9 +387,22 @@ impl Default for ControlSettings {
             steer_sensitivity: 1.0,
             invert_steering: false,
             transmission: TransmissionPolicy::Automatic,
+            mouse_driving: false,
             pad: PadMap::default(),
         }
     }
+}
+
+/// What the mouse says this frame, already reduced to the three facts
+/// [`ControlSettings::apply_mouse`] needs — the system that reads the
+/// window and the buttons owns the device, this table owns the mapping.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MouseDrive {
+    /// The cursor's horizontal offset from the window centre, -1 at the
+    /// left edge to 1 at the right; `None` when it is outside the window.
+    pub offset: Option<f32>,
+    pub left: bool,
+    pub right: bool,
 }
 
 impl ControlSettings {
@@ -535,6 +553,31 @@ impl ControlSettings {
         input
     }
 
+    /// Fill the channels nothing else touched from the mouse, when
+    /// mouse driving is on: the left button is full throttle, the right
+    /// full brake (which reverses once stopped, like the brake key), and
+    /// the cursor's offset steers through the stick's deadzone and
+    /// sensitivity. A key or pad already holding a channel keeps it, so
+    /// the mouse never fights the other devices. Steering inversion is
+    /// the stick's setting and does not apply.
+    pub fn apply_mouse(&self, input: &mut VehicleInput, mouse: MouseDrive) {
+        if !self.mouse_driving {
+            return;
+        }
+        if input.throttle == 0.0 && mouse.left {
+            input.throttle = 1.0;
+        }
+        if input.brake == 0.0 && mouse.right {
+            input.brake = 1.0;
+        }
+        if input.steering == 0.0
+            && let Some(x) = mouse.offset
+            && x.abs() > self.steer_deadzone
+        {
+            input.steering = (x * self.steer_sensitivity).clamp(-1.0, 1.0);
+        }
+    }
+
     /// Lay `pad`'s analog state over `input`; whether the pad is being
     /// used at all (past a deadzone, or the handbrake button held).
     fn apply_pad(&self, input: &mut VehicleInput, pad: &Gamepad) -> bool {
@@ -629,6 +672,14 @@ impl ControlSettings {
         }
     }
 
+    /// These controls with mouse driving flipped.
+    pub fn toggled_mouse_driving(&self) -> Self {
+        Self {
+            mouse_driving: !self.mouse_driving,
+            ..self.clone()
+        }
+    }
+
     /// These controls with the stick inversion flipped.
     pub fn toggled_inversion(&self) -> Self {
         Self {
@@ -711,6 +762,10 @@ impl ControlSettings {
                 format!("Invert stick steering: {}", on_off(self.invert_steering)),
                 ControlItem::InvertSteering,
             ),
+            row(
+                format!("Mouse driving: {}", on_off(self.mouse_driving)),
+                ControlItem::MouseDriving,
+            ),
             ControlRow {
                 text: "Reset to defaults".to_string(),
                 item: ControlItem::Reset,
@@ -733,6 +788,7 @@ impl ControlSettings {
             ControlItem::Sensitivity => self.cycled_sensitivity(forward),
             ControlItem::InvertSteering => self.toggled_inversion(),
             ControlItem::Transmission => self.toggled_transmission(),
+            ControlItem::MouseDriving => self.toggled_mouse_driving(),
             ControlItem::Reset => Self::default(),
             ControlItem::Key { .. } => return None,
         })
@@ -855,6 +911,7 @@ pub enum ControlItem {
     Sensitivity,
     InvertSteering,
     Transmission,
+    MouseDriving,
     Reset,
 }
 
@@ -895,6 +952,7 @@ struct ControlsFile {
     steer_sensitivity: Option<f32>,
     invert_steering: Option<bool>,
     transmission: Option<String>,
+    mouse_driving: Option<bool>,
     /// Gamepad buttons by action name; `null` is a cleared action. Keyed
     /// by string so an action this build does not know is dropped on its
     /// own rather than failing the whole file (and the key bindings in it).
@@ -1021,6 +1079,7 @@ impl ControlSettings {
             &mut issues,
         );
         out.invert_steering = file.invert_steering.unwrap_or(d.invert_steering);
+        out.mouse_driving = file.mouse_driving.unwrap_or(d.mouse_driving);
         out.transmission = match file.transmission.as_deref() {
             None => d.transmission,
             Some("automatic") => TransmissionPolicy::Automatic,
@@ -1082,6 +1141,7 @@ impl ControlSettings {
             trigger_deadzone: Some(self.trigger_deadzone),
             steer_sensitivity: Some(self.steer_sensitivity),
             invert_steering: Some(self.invert_steering),
+            mouse_driving: Some(self.mouse_driving),
             pad: PadAction::ALL
                 .into_iter()
                 .map(|a| {
@@ -1486,18 +1546,19 @@ mod tests {
                 ControlItem::TriggerDeadzone,
                 ControlItem::Sensitivity,
                 ControlItem::InvertSteering,
+                ControlItem::MouseDriving,
                 ControlItem::Reset,
             ]
         );
         assert_eq!(rows[1].text, "Stick deadzone: 5%");
         assert!(
-            rows[5].enabled.is_err(),
+            rows[6].enabled.is_err(),
             "reset is disabled at the shipped map"
         );
 
         let tuned = c.adjusted(ControlItem::InvertSteering, true).unwrap();
         assert!(tuned.invert_steering);
-        assert!(tuned.tuning_rows()[5].enabled.is_ok());
+        assert!(tuned.tuning_rows()[6].enabled.is_ok());
         assert_eq!(tuned.adjusted(ControlItem::Reset, true), Some(c.clone()));
         assert_eq!(
             c.adjusted(ControlItem::Sensitivity, true),
@@ -1514,6 +1575,151 @@ mod tests {
             None,
             "keys rebind by listening, not by stepping"
         );
+    }
+
+    fn mouse_on() -> ControlSettings {
+        ControlSettings {
+            mouse_driving: true,
+            ..ControlSettings::default()
+        }
+    }
+
+    #[test]
+    fn mouse_driving_is_off_until_asked_for() {
+        let mut input = VehicleInput::default();
+        ControlSettings::default().apply_mouse(
+            &mut input,
+            MouseDrive {
+                offset: Some(1.0),
+                left: true,
+                right: true,
+            },
+        );
+        assert_eq!(
+            (input.throttle, input.brake, input.steering),
+            (0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn the_mouse_buttons_throttle_and_brake_and_the_cursor_steers() {
+        let c = mouse_on();
+        let mut input = VehicleInput::default();
+        c.apply_mouse(
+            &mut input,
+            MouseDrive {
+                offset: Some(0.5),
+                left: true,
+                right: false,
+            },
+        );
+        assert_eq!(
+            (input.throttle, input.brake, input.steering),
+            (1.0, 0.0, 0.5)
+        );
+
+        let mut input = VehicleInput::default();
+        c.apply_mouse(
+            &mut input,
+            MouseDrive {
+                offset: Some(-1.0),
+                left: false,
+                right: true,
+            },
+        );
+        assert_eq!(
+            (input.throttle, input.brake, input.steering),
+            (0.0, 1.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn the_mouse_respects_the_deadzone_and_sensitivity_and_ignores_inversion() {
+        let mut c = mouse_on();
+        c.steer_deadzone = 0.2;
+        c.steer_sensitivity = 2.0;
+        c.invert_steering = true;
+        let steer = |c: &ControlSettings, x: f32| {
+            let mut input = VehicleInput::default();
+            c.apply_mouse(
+                &mut input,
+                MouseDrive {
+                    offset: Some(x),
+                    ..MouseDrive::default()
+                },
+            );
+            input.steering
+        };
+        assert_eq!(steer(&c, 0.15), 0.0, "inside the deadzone");
+        assert!((steer(&c, 0.25) - 0.5).abs() < 1e-6, "gain, not inverted");
+        assert_eq!(steer(&c, 0.9), 1.0, "gain clamps at full lock");
+    }
+
+    #[test]
+    fn the_mouse_never_overrides_a_channel_another_device_holds() {
+        let c = mouse_on();
+        let mut input = VehicleInput {
+            throttle: 0.4,
+            brake: 0.3,
+            steering: -0.7,
+            ..VehicleInput::default()
+        };
+        c.apply_mouse(
+            &mut input,
+            MouseDrive {
+                offset: Some(0.9),
+                left: true,
+                right: true,
+            },
+        );
+        assert_eq!(
+            (input.throttle, input.brake, input.steering),
+            (0.4, 0.3, -0.7)
+        );
+    }
+
+    #[test]
+    fn a_cursor_outside_the_window_steers_nothing() {
+        let mut input = VehicleInput::default();
+        mouse_on().apply_mouse(&mut input, MouseDrive::default());
+        assert_eq!(
+            (input.throttle, input.brake, input.steering),
+            (0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn mouse_driving_persists_and_an_older_file_keeps_it_off() {
+        let dir = std::env::temp_dir().join(format!("mm2-mouse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONTROLS_FILE);
+        mouse_on().save(&path).unwrap();
+        assert!(ControlSettings::load(&path).mouse_driving);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let (c, issues) = ControlSettings::from_json(br#"{"steer_deadzone": 0.1}"#).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(!c.mouse_driving);
+    }
+
+    #[test]
+    fn the_mouse_row_toggles_and_enables_reset() {
+        let c = ControlSettings::default();
+        let rows = c.tuning_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.item == ControlItem::MouseDriving)
+            .expect("a mouse row");
+        assert_eq!(row.text, "Mouse driving: Off");
+        let on = c.adjusted(ControlItem::MouseDriving, true).unwrap();
+        assert!(on.mouse_driving);
+        assert!(
+            on.tuning_rows()
+                .iter()
+                .any(|r| r.text == "Mouse driving: On"),
+            "the row reads the new state"
+        );
+        assert_eq!(on.adjusted(ControlItem::Reset, true), Some(c));
     }
 
     #[test]

@@ -4020,6 +4020,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Trigger deadzone: 5%",
             "Steering sensitivity: 1.00x",
             "Invert stick steering: Off",
+            "Mouse driving: Off",
             "Reset to defaults",
             "Gamepad buttons",
             "In-game keys",
@@ -4034,7 +4035,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
     assert_eq!(alts[4].as_deref(), Some("Alt: -"));
     assert_eq!(alts[6].as_deref(), Some("Alt: -"), "shift down");
     assert_eq!(alts[7], None, "tuning rows have no alternate");
-    assert!(shell(&app).rows[12].enabled.is_err());
+    assert!(shell(&app).rows[13].enabled.is_err());
     // Esc leaves for the graphics screen with the Controls row focused.
     press(&mut app, KeyCode::Escape);
     assert_eq!(shell(&app).screen, menu::Screen::Options);
@@ -4076,7 +4077,7 @@ fn a_captured_key_rebinds_the_action_and_persists() {
     );
     assert_eq!(&ControlSettings::load(&path), live);
     // The reset row woke up; it restores the shipped map everywhere.
-    assert!(shell(&app).rows[12].enabled.is_ok());
+    assert!(shell(&app).rows[13].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(
@@ -4531,13 +4532,17 @@ fn tuning_rows_apply_and_persist_and_leaving_drops_a_capture() {
     press(&mut app, KeyCode::ArrowRight);
     focus_row(&mut app, "Invert");
     press(&mut app, KeyCode::Enter);
+    focus_row(&mut app, "Mouse driving");
+    press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(rows[8], "Stick deadzone: 10%");
     assert_eq!(rows[10], "Steering sensitivity: 1.25x");
     assert_eq!(rows[11], "Invert stick steering: On");
+    assert_eq!(rows[12], "Mouse driving: On");
     let live = app.world().resource::<ControlSettings>().clone();
     assert_eq!(live.steer_deadzone, 0.10);
     assert!(live.invert_steering);
+    assert!(live.mouse_driving, "the row turns mouse driving on");
     assert_eq!(ControlSettings::load(&path), live);
 
     // Start a capture, then back out with the pad's East button path:

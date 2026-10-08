@@ -358,6 +358,75 @@ fn pad_deadzone_sensitivity_and_inversion_apply() {
     assert_eq!(player_input(&mut app).steering, 1.0);
 }
 
+/// The mouse drives through the production system: the cursor's offset
+/// from the window centre steers, the buttons throttle and brake, a
+/// cursor outside the window steers nothing, and with the setting off
+/// (the default) none of it reaches the car. Synthetic window and button
+/// state only — no real mouse.
+#[test]
+fn the_mouse_drives_when_enabled() {
+    use mm2_app::controls::ControlSettings;
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.init_resource::<ButtonInput<MouseButton>>();
+    let mut window = Window::default();
+    window.resolution.set(800.0, 600.0);
+    window.set_cursor_position(Some(Vec2::new(600.0, 300.0)));
+    let window = app.world_mut().spawn(window).id();
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (0.0, 0.0),
+        "mouse driving is off by default"
+    );
+
+    let mut controls = ControlSettings::default();
+    controls.mouse_driving = true;
+    app.insert_resource(controls);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(vi.throttle, 1.0, "left button throttles");
+    assert_eq!(vi.steering, 0.5, "600 of 800 is halfway right of centre");
+
+    let mut buttons = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+    buttons.release(MouseButton::Left);
+    buttons.press(MouseButton::Right);
+    app.world_mut()
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(Some(Vec2::new(0.0, 300.0)));
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.brake), (0.0, 1.0), "right button brakes");
+    assert_eq!(vi.steering, -1.0, "the left edge is full left lock");
+
+    app.world_mut()
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(None);
+    app.update();
+    assert_eq!(player_input(&mut app).steering, 0.0, "off the window");
+
+    // The same gates as the keys: an unfocused window releases the mouse.
+    app.world_mut()
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(Some(Vec2::new(800.0, 300.0)));
+    app.world_mut().get_mut::<Window>(window).unwrap().focused = false;
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.brake, vi.steering),
+        (0.0, 0.0, 0.0),
+        "focus loss clears the mouse's hold"
+    );
+}
+
 /// A player car with a real config and gearbox state, in `gear`.
 fn spawn_geared_player(app: &mut App, gear: usize) {
     use mm2_vehicle::{Vehicle, VehicleConfig, VehicleState};

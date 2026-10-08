@@ -12,7 +12,7 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
 use crate::contracts::ImpactFilter;
-use crate::controls::{ControlSettings, DriveAction, SLOTS, bound_keys, pad_button};
+use crate::controls::{ControlSettings, DriveAction, MouseDrive, SLOTS, bound_keys, pad_button};
 use crate::manual_gear::ManualGear;
 use crate::pad_map::PadAction;
 use crate::session::{self, SpawnPoint};
@@ -395,6 +395,7 @@ pub fn vehicle_input(
     race: Option<Res<RaceState>>,
     windows: Query<&Window>,
     controls: Option<Res<ControlSettings>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
 ) {
     // Driving controls are active in every drive view — the chase
     // lenses and the cockpit (HUD-3's three views are all drive views);
@@ -428,7 +429,8 @@ pub fn vehicle_input(
             &fallback
         }
     };
-    let input = controls.drive_input(&keys, gamepads.iter());
+    let mut input = controls.drive_input(&keys, gamepads.iter());
+    controls.apply_mouse(&mut input, mouse_drive(&windows, mouse.as_deref()));
     let manual_box = controls.pad_shifts(session.authority_role().is_authority());
     if !manual_box {
         manual.release();
@@ -454,6 +456,24 @@ pub fn vehicle_input(
                 shift_down,
             ));
         }
+    }
+}
+
+/// The mouse as [`ControlSettings::apply_mouse`] reads it: the first
+/// window holding the cursor gives the horizontal offset from its centre
+/// (logical pixels, so scale factor cancels), and the buttons are the
+/// held left and right. A harness without the button resource sees none
+/// pressed.
+fn mouse_drive(windows: &Query<&Window>, buttons: Option<&ButtonInput<MouseButton>>) -> MouseDrive {
+    let offset = windows.iter().find_map(|w| {
+        let half = w.width() / 2.0;
+        let x = w.cursor_position()?.x;
+        (half > 0.0).then(|| ((x - half) / half).clamp(-1.0, 1.0))
+    });
+    MouseDrive {
+        offset,
+        left: buttons.is_some_and(|b| b.pressed(MouseButton::Left)),
+        right: buttons.is_some_and(|b| b.pressed(MouseButton::Right)),
     }
 }
 
