@@ -783,8 +783,18 @@ struct ControlsFile {
     steer_sensitivity: Option<f32>,
     invert_steering: Option<bool>,
     transmission: Option<String>,
-    /// Gamepad buttons by action; `null` is a cleared action.
-    pad: BTreeMap<PadAction, Option<String>>,
+    /// Gamepad buttons by action name; `null` is a cleared action. Keyed
+    /// by string so an action this build does not know is dropped on its
+    /// own rather than failing the whole file (and the key bindings in it).
+    pad: BTreeMap<String, Option<String>>,
+}
+
+/// The file key of a pad action: its serde name.
+fn pad_action_key(action: PadAction) -> String {
+    serde_json::to_value(action)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// Take `value` when it is finite and in `range`, else `default` plus a
@@ -842,11 +852,17 @@ impl ControlSettings {
             out.bindings = Self::default().bindings;
         }
 
-        for (action, name) in &file.pad {
+        for (action_name, name) in &file.pad {
+            let Ok(action) = serde_json::from_value::<PadAction>(action_name.clone().into()) else {
+                issues.push(format!(
+                    "{action_name:?} is not a gamepad action; ignoring its button"
+                ));
+                continue;
+            };
             match name.as_deref() {
-                None => out.pad.set_raw(*action, None),
+                None => out.pad.set_raw(action, None),
                 Some(name) => match button_from_name(name) {
-                    Some(button) => out.pad.set_raw(*action, Some(button)),
+                    Some(button) => out.pad.set_raw(action, Some(button)),
                     None => issues.push(format!(
                         "{} button {name:?} is not a bindable gamepad button; using {}",
                         action.label(),
@@ -958,7 +974,7 @@ impl ControlSettings {
                 .into_iter()
                 .map(|a| {
                     (
-                        a,
+                        pad_action_key(a),
                         self.pad.button(a).and_then(button_name).map(str::to_owned),
                     )
                 })
@@ -1421,6 +1437,16 @@ mod tests {
             Some(PadAction::Camera.default_button())
         );
         assert_eq!(c.pad.button(PadAction::Reset), None, "null stays cleared");
+    }
+
+    #[test]
+    fn an_unknown_pad_action_is_dropped_without_losing_the_keys() {
+        let json = br#"{"bindings": {"handbrake": ["KeyU"]}, "pad": {"hnadbrake": "North", "camera": null}}"#;
+        let (c, issues) = ControlSettings::from_json(json).unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("hnadbrake"));
+        assert_eq!(c.pad.button(PadAction::Camera), None);
+        assert_eq!(c.key_at(DriveAction::Handbrake, 0), Some(KeyCode::KeyU));
     }
 
     #[test]
