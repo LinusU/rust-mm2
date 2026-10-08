@@ -981,6 +981,78 @@ fn failed_load_leaves_no_player_simulation() {
     assert_eq!(count::<With<SessionEntity>>(&mut app), 0);
 }
 
+/// F29-AC04 at the session level: the dev world mounts the global
+/// `materials.{mtl,csv}` pair too, so a present-but-broken pair (a lone
+/// half, or an unparsable one — a mod override included) fails the
+/// session with no player simulation, instead of loading a world whose
+/// every collider is blanket `Unspecified`. Quit still tears the partial
+/// world down.
+#[test]
+fn a_broken_surface_pair_fails_the_dev_world_session() {
+    use mm2_content::surface::{CSV_PATH, MTL_PATH};
+
+    let mods = tempfile::tempdir().unwrap();
+    type Files = &'static [(&'static str, &'static [u8])];
+    let cases: [(&str, Files); 2] = [
+        ("lone half of the pair", &[(CSV_PATH, b"material,sound\n")]),
+        (
+            "unparsable pair",
+            &[(MTL_PATH, b"mtl cobblestone {"), (CSV_PATH, b"a,b\n")],
+        ),
+    ];
+    for (n, (why, files)) in cases.iter().enumerate() {
+        let dir = mods.path().join(format!("mod{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mod.toml"),
+            format!("[mod]\nid = \"mod{n}\"\neffect = \"gameplay\"\n"),
+        )
+        .unwrap();
+        for (rel, body) in *files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+
+        let mut app = dev_app();
+        app.world_mut()
+            .resource_mut::<Mm2Vfs>()
+            .0
+            .mount_mod(&dir, 300)
+            .unwrap();
+        app.update();
+        let phase = app.world().resource::<Session>().phase().clone();
+        match phase {
+            SessionPhase::Failed(why_failed) => {
+                assert!(why_failed.contains("surface tables"), "{why}: {why_failed}");
+            }
+            other => panic!("{why}: expected Failed, got {other:?}"),
+        }
+        assert_eq!(count::<With<PlayerVehicle>>(&mut app), 0, "{why}");
+        assert_eq!(count::<With<Vehicle>>(&mut app), 0, "{why}");
+
+        // The partial dev world (spawned before the tables were read)
+        // is still session-owned, so quitting sweeps it.
+        app.world_mut().resource_mut::<SessionControl>().quit = true;
+        assert!(
+            run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+            "{why}: failed session never unloaded"
+        );
+        assert_eq!(count::<With<SessionEntity>>(&mut app), 0, "{why}");
+    }
+
+    // Control: no pair at all is an absent table, not a broken one.
+    let mut app = dev_app();
+    app.update();
+    assert!(
+        !matches!(
+            app.world().resource::<Session>().phase(),
+            SessionPhase::Failed(_)
+        ),
+        "an install with no surface tables must still load the dev world"
+    );
+}
+
 /// Spawn a marked dynamic box that falls onto the dev-world ground and
 /// produce its `ImpactEvent`. The player car's raycast wheels catch its
 /// spawn drop without a chassis contact, so a box gives a deterministic
