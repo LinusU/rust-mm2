@@ -160,3 +160,18 @@ is now and sets the
 velocities that reach the next step's pose, so a car resting on a
 ferry rides it. Sailboat speed draws are seeded from the session
 (designed).
+
+## Continuity check (F28-AC02/AC03)
+
+Measured, not recovered: stepping every retail sailboat, ferry and
+train path for 400 s at the fixed 120 Hz rate (`mm2_app` test
+`retail_every_mover_path_steps_continuously`), no step exceeds 3.6× its
+nominal `speed · dt` — sailboats 3.3× (32 paths), ferries 2.1× (25),
+Tube cars 3.6× (8, all in the first step after the 10 s wait). The
+Hermite parameter is not arc length and the closed-loop tangents at a
+line's first segment wrap to its last point, so a segment can run
+fast; a teleport would be tens of metres. Whether the original shows
+the same first-segment surge is not verified. Through the production
+`drive_movers` system and a real Avian world, a body resting on a
+moving platform rides it, a platform does not move before the
+countdown, and a train turns round without a jump (synthetic boxes).

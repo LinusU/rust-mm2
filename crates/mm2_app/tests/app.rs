@@ -33,6 +33,7 @@ mod menu;
 mod mirror;
 mod mod_override;
 mod mod_override_race;
+mod movers;
 mod nav_overlay;
 mod navarrow;
 mod navarrow3d;

@@ -1,3 +1,14 @@
+# Last iteration — F28-C.1: moving scenery is continuous and carries its riders (iteration 20 of the recovery run)
+
+Selection: the last five iterations were all F26-C test pins (reviewed, no blockers); F28 had no acceptance evidence at all for its moving-collider criteria (AC02 route traversal with no teleport discontinuity, AC03 physically stable contact with a moving collider) although `drive_movers` has shipped with only pure-`mm2_game` follower tests. AC05 (late join/restart phase) is already covered by `worldclock`.
+Change: tests only (`mm2_app/tests/movers.rs`, +5, registered in `tests/app.rs`; docs `research/movers.md`). Production `drive_movers` in a real Avian world: boat past the path wraparound (step <= 1.5x nominal, heading never snaps); crate resting on a moving ferry rides it; deck frozen before `Countdown` (zero velocity, rider untouched) then sets off; synthetic train leaves after the 10 s wait and reverses with no step beyond 4x nominal. `MM2_RETAIL`-gated: every retail sailboat/ferry/train path stepped for 400 s at 120 Hz, denominators reported (sailboat 2 files/32 paths, ferry 5/25, train 1/8, all stepped), worst step 3.3x/2.1x/3.6x of `speed*dt`; unparsed or missing mover files fail rather than skip.
+Finding (not fixed, documented): Tube cars surge up to 3.6x nominal in the first step after the departure wait — the closed-loop tangent wrap at a line's first segment; not verified against the original, so the 4x bound is a measurement, not an original rule.
+Mutation: zeroing the posed linear velocity fails the rider test; ungating dt from the session phase fails the freeze test. Both restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass; `cargo test --locked --workspace` rc 0, 56 result blocks ok, 0 failed (retail leg skipped there; run separately with `MM2_RETAIL`, passes).
+Status: implemented candidate, not independently checked. Synthetic boxes for the physics legs (no retail model collider); retail leg steps paths only, not collision. Advances F28-AC02/AC03. Open on F28: AC01 other special actors, AC04 boundary/water recovery, AC05 restart test, AC06 coverage report.
+
+---
+
 # Last iteration — F26-C.5: a rematch does not carry the last round's broken props to the client (iteration 19 of the recovery run)
 
 Selection: the F26-C.4 review passed with no blockers; its open list named "restart consistency". The prop leg had late-join evidence but nothing across a *rematch*, where the host's `PropLedger`, the client's `PropStage` and both stamp ordinals all have to start over under a fresh generation.
