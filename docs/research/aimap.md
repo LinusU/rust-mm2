@@ -68,7 +68,10 @@ meaning is separate (ledger MP-9).
     - `[GoodWeatherPedName / BadWeatherPedName]` — `good-name bad-name`
       ped model pairs (city files only).
     - `[Hookmen]` — counted; only a 0-count instance exists
-      (`race/sf/roam.aimap{,_p}`), row shape unknown.
+      (`race/sf/roam.aimap{,_p}`). Row shape from the original's
+      writer: `name model x y z w flag` (`docs/research/specials.md`).
+    - `[Subway]` — one `model cars` line (no count line); parsed into
+      `Aimap::subway`, defined by no retail file.
   - **Free-form** — `[Traffic Lights]`: one line of two model names
     (`sp_traflitsingle_ped_l sp_traflitsingle_ped_l`), `city/london.
     aimap` only. Shape unverified, preserved raw.

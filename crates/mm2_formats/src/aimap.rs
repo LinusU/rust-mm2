@@ -48,10 +48,29 @@ mod section {
     pub const TRAFFIC_LIGHTS: &str = "Traffic Lights";
     /// Hookmen spawns (counted; only a 0-count instance on retail).
     pub const HOOKMEN: &str = "Hookmen";
+    /// Subway train model and car count (one `name cars` line; no retail
+    /// file has it uncommented).
+    pub const SUBWAY: &str = "Subway";
 }
 
 /// Hard cap on a declared section row count (retail maximum is 20).
 const MAX_ROWS: u64 = 1 << 16;
+
+/// The `[Subway]` line: the model and car count of the trains the
+/// executable's AI-map init builds on the BAI train rails. Recovered from
+/// the section's reader (`0x555b38`, format `%s %d` into a 16-byte name
+/// and a count read as a 16-bit value); retail ships it only as a `#`
+/// comment in `city/london.aimap`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubwayRecord {
+    /// Car model name (`va_ug_l` in the commented London line).
+    pub model: String,
+    /// Cars per train; the original creates no train for a count of 0
+    /// or less.
+    pub cars: i32,
+    /// 1-based source line.
+    pub line: u32,
+}
 
 /// One `[Exceptions]` row: per-road ambient overrides.
 #[derive(Debug, Clone)]
@@ -168,6 +187,8 @@ pub struct Aimap {
     /// `[Hookmen]` data rows, preserved raw — only a 0-count instance
     /// exists on retail, so the row shape is unknown.
     pub hookmen: Vec<String>,
+    /// `[Subway]` train definition ([`SubwayRecord`]).
+    pub subway: Option<SubwayRecord>,
     /// Uninterpreted sections, preserved verbatim.
     pub unknown_sections: Vec<UnknownSection>,
     /// Recoverable row-level problems (malformed rows, stray data).
@@ -544,6 +565,33 @@ impl Aimap {
                         .hookmen
                         .extend(sec.lines[1..].iter().map(|&(_, l)| l.to_string()));
                 }
+                section::SUBWAY => {
+                    let Some(&(line_no, line)) = sec.lines.first() else {
+                        return Err(FormatError::parse(
+                            0,
+                            "[Subway] has no `name cars` line".to_string(),
+                        ));
+                    };
+                    let toks: Vec<&str> = line.split_whitespace().collect();
+                    if toks.len() != 2 {
+                        aimap.diagnostics.push(TableDiagnostic {
+                            line: line_no,
+                            message: format!("subway row: expected 2 fields, have {}", toks.len()),
+                        });
+                    } else if let Some(cars) = parse_num(toks[1], line_no, &mut aimap.diagnostics) {
+                        aimap.subway = Some(SubwayRecord {
+                            model: toks[0].to_string(),
+                            cars,
+                            line: line_no,
+                        });
+                    }
+                    for &(line_no, _) in sec.lines.iter().skip(1) {
+                        aimap.diagnostics.push(TableDiagnostic {
+                            line: line_no,
+                            message: "[Subway] stray data after the train line".into(),
+                        });
+                    }
+                }
                 _ => aimap.unknown_sections.push(UnknownSection {
                     name: sec.name.to_string(),
                     lines: sec.lines.iter().map(|&(_, l)| l.to_string()).collect(),
@@ -786,6 +834,41 @@ sp_traflitsingle_ped_l sp_traflitsingle_ped_l\r\n\
                 .iter()
                 .any(|i| matches!(i, AimapIssue::NegativeScalar { .. }))
         );
+    }
+
+    #[test]
+    fn subway_section_is_a_train_model_and_car_count() {
+        let a = Aimap::parse("[Subway]\nva_ug_l 3\n").unwrap();
+        assert_eq!(
+            a.subway,
+            Some(SubwayRecord {
+                model: "va_ug_l".into(),
+                cars: 3,
+                line: 2
+            })
+        );
+        assert!(a.unknown_sections.is_empty() && a.diagnostics.is_empty());
+        assert!(a.validate().is_empty());
+    }
+
+    #[test]
+    fn a_commented_subway_section_defines_no_train() {
+        // Retail's `city/london.aimap` ships exactly this.
+        let a = Aimap::parse("#[Subway]\n#va_ug_l 3\n[Density]\n0.1\n").unwrap();
+        assert!(a.subway.is_none() && a.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn malformed_subway_rows_are_diagnostics_and_a_missing_line_is_an_error() {
+        for text in ["[Subway]\nva_ug_l\n", "[Subway]\nva_ug_l three\n"] {
+            let a = Aimap::parse(text).unwrap();
+            assert!(a.subway.is_none(), "{text:?}");
+            assert_eq!(a.diagnostics.len(), 1, "{text:?}");
+        }
+        let a = Aimap::parse("[Subway]\nva_ug_l 3\nstray\n").unwrap();
+        assert!(a.subway.is_some());
+        assert_eq!(a.diagnostics.len(), 1);
+        assert!(Aimap::parse("[Subway]\n").is_err());
     }
 
     #[test]
