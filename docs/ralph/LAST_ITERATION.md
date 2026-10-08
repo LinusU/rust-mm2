@@ -1,3 +1,13 @@
+# Last iteration — F29-C.1: race-rule mods through the production race consumer (iteration 14 of the recovery run)
+
+Selection: the F29-B.9 review passed with no blockers. F29-B's remaining legs (a shippable gameplay example mod, AC03 on a real two-process run) need original-derived tuning or a longer process harness; F29-C ("override/revert/conflict/security tests across vehicle/world/audio/race consumers") was queued and its race leg was the one consumer family F29-A.2 never exercised. Tooling slices on F29-B stop here.
+Change: tests only (no production change was needed — the race consumer already reads through the VFS). New `mm2_app/tests/mod_override_race.rs` (wired in `app.rs`), synthetic `race/testcity/` install with two Checkpoint events; one mod retunes event 0's table row (opponents 0→3, ambient 0.1→0.9), another replaces its waypoint file.
+Tests (+4): `a_mod_replaces_a_races_table_row_and_course_through_the_race_consumer` (each mod moves only its record via `event_race_setup`; both together move both; event 1 untouched; a fresh base-only mount restores stock — AC01/AC02); `race_rule_mods_are_gameplay_and_move_the_fingerprint` (classified gameplay, declared `effect = "gameplay"` uncontradicted, fingerprint moves — AC05); `a_conflicting_race_record_names_the_mod_the_consumer_loaded` (later mount wins, `Vfs::explain` names both mods — AC03 in-process only); `a_malformed_race_override_is_refused_not_replaced_by_the_stock_course` (a gate-less override errors `TooFewRows`; stock course does not leak; bystander event still loads — AC04). Note: the first/last waypoint rows are start line/finish, so a checkpoint course needs ≥3 rows (fixture assumption corrected during the run, no product defect). No separate mutation run.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings pass (no warnings); `cargo test --locked --workspace` rc 0, 2665 passed, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic data only; Checkpoint table + waypoint record only (`.aimap` rosters, Blitz/Circuit/Crash tables, surface tables, menu art, localization still uncovered by F29-C). Open on F29: gameplay example mod, AC03 on a real two-process run, AC06 for other families, F29-C remainder.
+
+---
+
 # Last iteration — F29-B.9: `--trace-deps` traces siren-program stems (iteration 13 of the recovery run)
 
 Selection: the F29-B.8 review passed with no blockers and named siren stems as untraced. It is the smallest open F29 leg that needs no GPU, no unknown rule and no new loader (the other legs — a shippable gameplay example mod, AC03 on a real two-process run — are unchanged).
