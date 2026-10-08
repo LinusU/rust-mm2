@@ -643,6 +643,9 @@ pub fn spawn_hud_map(
 /// only); while `Paused` with the map up, Q/Esc close it straight back
 /// to play — ahead of `pause_input`, so the closing press is never
 /// double-read as a menu resume.
+// A Bevy system: each parameter is one injected resource or query, and the
+// pad map is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub fn hudmap_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -650,9 +653,13 @@ pub fn hudmap_input(
     cam_mode: Res<CameraMode>,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     map: Option<ResMut<HudMap>>,
 ) {
-    use crate::input::{control_just_pressed, pad};
+    use crate::controls::pad_button;
+    use crate::input::control_just_pressed;
+    use crate::pad_map::PadAction;
+    let button = |action| pad_button(controls.as_deref(), action);
     let Some(mut map) = map else { return };
     if map.is_stale(session.generation()) {
         return;
@@ -666,15 +673,33 @@ pub fn hudmap_input(
     let free_cam = *cam_mode == CameraMode::Free;
     match *session.phase() {
         SessionPhase::Playing => {
-            if control_just_pressed(&keys, &pads, &windows, KeyCode::Tab, pad::MAP_VIEW) {
+            if control_just_pressed(
+                &keys,
+                &pads,
+                &windows,
+                KeyCode::Tab,
+                button(PadAction::MapView),
+            ) {
                 map.cycle_view();
             }
             if !free_cam
-                && control_just_pressed(&keys, &pads, &windows, KeyCode::KeyE, pad::MAP_ZOOM)
+                && control_just_pressed(
+                    &keys,
+                    &pads,
+                    &windows,
+                    KeyCode::KeyE,
+                    button(PadAction::MapZoom),
+                )
             {
                 map.toggle_zoom();
             }
-            if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyF, pad::MAP_ROTATE) {
+            if control_just_pressed(
+                &keys,
+                &pads,
+                &windows,
+                KeyCode::KeyF,
+                button(PadAction::MapRotate),
+            ) {
                 map.toggle_orientation();
             }
             if !free_cam

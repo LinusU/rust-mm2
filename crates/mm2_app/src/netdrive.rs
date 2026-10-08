@@ -155,7 +155,7 @@ use crate::audio::{SkidContact, SurfaceContact};
 use crate::banger::BangerMut;
 use crate::breakaway::{self, BreakVisualMut};
 use crate::car_visual;
-use crate::input::{control_just_pressed, pad};
+use crate::input::control_just_pressed;
 use crate::net::{HostLink, LobbyLink, LobbyState};
 use crate::opponents::SPAWN_LIFT;
 use crate::session::SpawnPoint;
@@ -2066,13 +2066,20 @@ pub fn send_reset_request(
     windows: Query<&Window>,
     link: Res<LobbyLink>,
     session: Res<Session>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     if session.authority_role().is_authority()
         || !session.is_playing()
         || link.closed
         || link.leaving()
-        || !control_just_pressed(&keys, &pads, &windows, KeyCode::KeyR, pad::RESET)
+        || !control_just_pressed(
+            &keys,
+            &pads,
+            &windows,
+            KeyCode::KeyR,
+            crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Reset),
+        )
     {
         return;
     }

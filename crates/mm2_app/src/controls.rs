@@ -12,9 +12,10 @@
 //! Scope, on purpose: the five *driving* actions. The in-session
 //! function keys (camera, mirror, map, reset…) stay on their documented
 //! keys; [`RESERVED_KEYS`] keeps a driving action from being bound over
-//! one of them. Menu navigation keeps its own keys. There is no
-//! rebinding screen yet (F23-B) — the file is the edit surface, and
-//! [`ControlSettings::rebind`] is the validated API that screen will call.
+//! one of them. Menu navigation keeps its own keys. The main menu's and
+//! the pause overlay's Controls pages rebind through
+//! [`ControlSettings::with_key`]; the pad's digital buttons live in
+//! [`ControlSettings::pad`] (see [`crate::pad_map`]).
 //!
 //! The settings are machine-level like [`crate::settings::GraphicsSettings`]
 //! and persist beside them as `controls.json` in the profile store's
@@ -33,6 +34,7 @@ use mm2_vehicle::VehicleInput;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::pad_map::{PadAction, PadMap, button_from_name, button_name};
 use crate::settings::write_json_atomically;
 
 /// File name inside the settings directory.
@@ -267,6 +269,8 @@ pub struct ControlSettings {
     pub invert_steering: bool,
     /// Automatic gearbox, or manual with the shift keys.
     pub transmission: TransmissionPolicy,
+    /// The gamepad's digital buttons (F23-A.4).
+    pub pad: PadMap,
 }
 
 impl Default for ControlSettings {
@@ -278,6 +282,7 @@ impl Default for ControlSettings {
             steer_sensitivity: 1.0,
             invert_steering: false,
             transmission: TransmissionPolicy::Automatic,
+            pad: PadMap::default(),
         }
     }
 }
@@ -431,7 +436,7 @@ impl ControlSettings {
     }
 
     /// Lay `pad`'s analog state over `input`; whether the pad is being
-    /// used at all (past a deadzone, or South held).
+    /// used at all (past a deadzone, or the handbrake button held).
     fn apply_pad(&self, input: &mut VehicleInput, pad: &Gamepad) -> bool {
         let mut used = false;
         if let Some(x) = pad.get(GamepadAxis::LeftStickX)
@@ -453,7 +458,11 @@ impl ControlSettings {
             input.brake = lt;
             used = true;
         }
-        if pad.pressed(GamepadButton::South) {
+        if self
+            .pad
+            .button(PadAction::Handbrake)
+            .is_some_and(|b| pad.pressed(b))
+        {
             input.handbrake = 1.0;
             used = true;
         }
@@ -630,6 +639,97 @@ impl ControlSettings {
     }
 }
 
+/// The button `action` answers to under `controls`, or its shipped
+/// button for a harness app that never inserted the settings. `None`
+/// when the player cleared it.
+pub fn pad_button(controls: Option<&ControlSettings>, action: PadAction) -> Option<GamepadButton> {
+    match controls {
+        Some(c) => c.pad.button(action),
+        None => Some(action.default_button()),
+    }
+}
+
+/// What a row of the gamepad-buttons page edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadItem {
+    /// One action's button — rebinds by listening for a pad button.
+    Button(PadAction),
+    /// Restore the shipped button map (the keys and tuning stay).
+    Reset,
+}
+
+/// A row of the gamepad-buttons page: its label, what it edits and why
+/// it is disabled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadRow {
+    pub text: String,
+    pub item: PadItem,
+    pub enabled: Result<(), String>,
+}
+
+impl ControlSettings {
+    /// These controls with `button` bound to the pad `action`, and the
+    /// status line to show; `Err` is the refusal, worded for a page that
+    /// keeps listening.
+    pub fn with_pad_button(
+        &self,
+        action: PadAction,
+        button: GamepadButton,
+    ) -> Result<(Self, String), String> {
+        let mut next = self.clone();
+        match next.pad.bind(action, button) {
+            Ok(()) => {
+                let line = format!("{} is now {}", action.label(), next.pad.label(action));
+                Ok((next, line))
+            }
+            Err(e) => Err(format!(
+                "{}: {e} - press another button (Esc cancels)",
+                button_name(button).unwrap_or("that button")
+            )),
+        }
+    }
+
+    /// These controls with the pad `action` cleared, and the status line.
+    pub fn without_pad_button(&self, action: PadAction) -> Result<(Self, String), String> {
+        let mut next = self.clone();
+        match next.pad.unbind(action) {
+            Ok(()) => Ok((next, format!("{} button cleared", action.label()))),
+            Err(e) => Err(format!("{}: {e}", action.label())),
+        }
+    }
+
+    /// These controls with the gamepad buttons back at the shipped map.
+    pub fn with_default_pad(&self) -> Self {
+        Self {
+            pad: PadMap::default(),
+            ..self.clone()
+        }
+    }
+
+    /// The rows of the gamepad-buttons page: one per [`PadAction`], then
+    /// a reset that disables itself, with its reason, at the shipped map.
+    pub fn pad_rows(&self) -> Vec<PadRow> {
+        let mut rows: Vec<PadRow> = PadAction::ALL
+            .into_iter()
+            .map(|a| PadRow {
+                text: format!("{}: {}", a.label(), self.pad.label(a)),
+                item: PadItem::Button(a),
+                enabled: Ok(()),
+            })
+            .collect();
+        rows.push(PadRow {
+            text: "Reset gamepad buttons".to_string(),
+            item: PadItem::Reset,
+            enabled: if self.pad == PadMap::default() {
+                Err("already at the shipped buttons".to_string())
+            } else {
+                Ok(())
+            },
+        });
+        rows
+    }
+}
+
 /// What a row of a driving-controls page edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlItem {
@@ -683,6 +783,8 @@ struct ControlsFile {
     steer_sensitivity: Option<f32>,
     invert_steering: Option<bool>,
     transmission: Option<String>,
+    /// Gamepad buttons by action; `null` is a cleared action.
+    pad: BTreeMap<PadAction, Option<String>>,
 }
 
 /// Take `value` when it is finite and in `range`, else `default` plus a
@@ -738,6 +840,34 @@ impl ControlSettings {
             }
             issues.push("using the default keys".into());
             out.bindings = Self::default().bindings;
+        }
+
+        for (action, name) in &file.pad {
+            match name.as_deref() {
+                None => out.pad.set_raw(*action, None),
+                Some(name) => match button_from_name(name) {
+                    Some(button) => out.pad.set_raw(*action, Some(button)),
+                    None => issues.push(format!(
+                        "{} button {name:?} is not a bindable gamepad button; using {}",
+                        action.label(),
+                        button_name(action.default_button()).unwrap_or("its default")
+                    )),
+                },
+            }
+        }
+        // As with the keys, a clash rejects the whole button map rather
+        // than guessing which action loses.
+        if !out.pad.conflicts().is_empty() {
+            for (button, a, b) in out.pad.conflicts() {
+                issues.push(format!(
+                    "{} is bound to both {} and {}",
+                    button_name(button).unwrap_or("?"),
+                    a.label(),
+                    b.label()
+                ));
+            }
+            issues.push("using the default gamepad buttons".into());
+            out.pad = PadMap::default();
         }
 
         let d = Self::default();
@@ -824,6 +954,15 @@ impl ControlSettings {
             trigger_deadzone: Some(self.trigger_deadzone),
             steer_sensitivity: Some(self.steer_sensitivity),
             invert_steering: Some(self.invert_steering),
+            pad: PadAction::ALL
+                .into_iter()
+                .map(|a| {
+                    (
+                        a,
+                        self.pad.button(a).and_then(button_name).map(str::to_owned),
+                    )
+                })
+                .collect(),
             transmission: Some(
                 match self.transmission {
                     TransmissionPolicy::Automatic => "automatic",
@@ -1241,5 +1380,128 @@ mod tests {
             None,
             "keys rebind by listening, not by stepping"
         );
+    }
+
+    #[test]
+    fn pad_buttons_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("mm2-pad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONTROLS_FILE);
+        let mut c = ControlSettings::default();
+        c.pad.unbind(PadAction::Reset).unwrap();
+        c.pad
+            .bind(PadAction::Handbrake, GamepadButton::North)
+            .unwrap();
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"reset\": null"),
+            "a cleared action is null: {text}"
+        );
+        assert!(text.contains("\"handbrake\": \"North\""), "{text}");
+        assert_eq!(ControlSettings::load(&path), c);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_without_pad_buttons_keeps_the_shipped_ones() {
+        let (c, issues) = ControlSettings::from_json(br#"{"steer_deadzone": 0.1}"#).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(c.pad, PadMap::default());
+    }
+
+    #[test]
+    fn an_unknown_pad_button_name_is_repaired_to_its_default() {
+        let json = br#"{"pad": {"camera": "Triangle", "reset": null}}"#;
+        let (c, issues) = ControlSettings::from_json(json).unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("Change camera") && issues[0].contains("Triangle"));
+        assert_eq!(
+            c.pad.button(PadAction::Camera),
+            Some(PadAction::Camera.default_button())
+        );
+        assert_eq!(c.pad.button(PadAction::Reset), None, "null stays cleared");
+    }
+
+    #[test]
+    fn a_clashing_pad_map_is_rejected_whole() {
+        // Handbrake and Reset both claim North: which one loses is not
+        // ours to guess, so every button returns to the shipped map.
+        let json = br#"{"pad": {"handbrake": "North", "mirror": "C"}}"#;
+        let (c, issues) = ControlSettings::from_json(json).unwrap();
+        assert!(issues.iter().any(|i| i.contains("North is bound to both")));
+        assert!(issues.iter().any(|i| i.contains("default gamepad buttons")));
+        assert_eq!(c.pad, PadMap::default(), "the valid C binding goes too");
+    }
+
+    #[test]
+    fn a_pad_rebind_is_refused_with_the_owner_named_and_changes_nothing() {
+        let c = ControlSettings::default();
+        let err = c
+            .with_pad_button(PadAction::Handbrake, GamepadButton::East)
+            .unwrap_err();
+        assert!(
+            err.contains("East") && err.contains("Rear-view mirror"),
+            "{err}"
+        );
+        let err = c
+            .with_pad_button(PadAction::Handbrake, GamepadButton::Start)
+            .unwrap_err();
+        assert!(err.contains("cannot be used in-game"), "{err}");
+        let (next, line) = c.without_pad_button(PadAction::Reset).unwrap();
+        assert_eq!(line, "Reset vehicle button cleared");
+        let (next, line) = next
+            .with_pad_button(PadAction::Handbrake, GamepadButton::North)
+            .unwrap();
+        assert_eq!(line, "Handbrake is now North");
+        assert_eq!(next.with_default_pad(), c);
+    }
+
+    #[test]
+    fn the_pad_rows_list_every_action_and_reset_wakes_when_changed() {
+        let c = ControlSettings::default();
+        let rows = c.pad_rows();
+        assert_eq!(rows.len(), PadAction::ALL.len() + 1);
+        assert_eq!(rows[0].text, "Handbrake: South");
+        assert!(rows.last().unwrap().enabled.is_err());
+        let (c, _) = c.without_pad_button(PadAction::Horn).unwrap();
+        let rows = c.pad_rows();
+        assert_eq!(rows[7].text, "Horn / siren: -");
+        assert!(rows.last().unwrap().enabled.is_ok());
+    }
+
+    #[test]
+    fn the_handbrake_follows_its_pad_button() {
+        let held = |button| {
+            let mut pad = Gamepad::default();
+            pad.digital_mut().press(button);
+            pad
+        };
+        let keys = ButtonInput::<KeyCode>::default();
+        let mut c = ControlSettings::default();
+        let south = held(GamepadButton::South);
+        assert_eq!(c.drive_input(&keys, [&south]).handbrake, 1.0);
+
+        c.pad.unbind(PadAction::Reset).unwrap();
+        c.pad
+            .bind(PadAction::Handbrake, GamepadButton::North)
+            .unwrap();
+        let north = held(GamepadButton::North);
+        assert_eq!(c.drive_input(&keys, [&north]).handbrake, 1.0);
+        assert_eq!(c.drive_input(&keys, [&south]).handbrake, 0.0);
+
+        c.pad.unbind(PadAction::Handbrake).unwrap();
+        assert_eq!(c.drive_input(&keys, [&north]).handbrake, 0.0);
+    }
+
+    #[test]
+    fn a_harness_without_settings_gets_the_shipped_button() {
+        assert_eq!(
+            pad_button(None, PadAction::Camera),
+            Some(PadAction::Camera.default_button())
+        );
+        let mut c = ControlSettings::default();
+        c.pad.unbind(PadAction::Camera).unwrap();
+        assert_eq!(pad_button(Some(&c), PadAction::Camera), None);
     }
 }

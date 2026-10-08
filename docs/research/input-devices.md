@@ -27,7 +27,7 @@ the command that reproduced it — not editing a note.
 - gamepad menus: synthetic only — D-pad, stick edges, South/East/West/Start over every connected pad; synthetic events only
 - gamepad hot-plug: synthetic only — connection and disconnection events clear and restore driving; no physical unplug performed
 - focus-loss release: synthetic only — KeyboardFocusLost and unfocused windows release held input; no real window focus change
-- pad rebinding: not implemented — the pad map is fixed (stick/triggers/South plus the designed in-session buttons)
+- pad rebinding: synthetic only — every digital in-session pad button (handbrake, manual shifts, camera, mirror, map, HUD...) rebinds on the main-menu and pause Gamepad buttons pages and persists in controls.json; stick and triggers stay analog, Start/Mode are app-owned; synthetic pad events only
 - mouse driving: not implemented — the original's mouse steering and button throttle (CTL-2) is not built; mouse is menu-only
 - manual transmission: synthetic only — a Controls-page policy pins the gearbox through the shift keys (G/B) or the pad shoulders (right up, left down; they stop cycling the nav-arrow target while manual), inert on a predicted multiplayer client; the brake pedal still doubles as reverse once stopped
 - steering wheel: not implemented — no wheel-specific mapping; a wheel the OS exposes as a gamepad would be read as a pad, axis layout untested and no wheel hardware available

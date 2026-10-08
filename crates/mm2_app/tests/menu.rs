@@ -4021,6 +4021,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Steering sensitivity: 1.00x",
             "Invert stick steering: Off",
             "Reset to defaults",
+            "Gamepad buttons",
         ]
     );
     let alts: Vec<Option<String>> = shell(&app)
@@ -4082,6 +4083,171 @@ fn a_captured_key_rebinds_the_action_and_persists() {
         &ControlSettings::default()
     );
     assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+}
+
+/// Open the gamepad-buttons screen from the root, returning the controls
+/// file it saves to and the pad that will press buttons.
+fn open_pad_buttons(app: &mut App, dir: &Path) -> (std::path::PathBuf, Entity) {
+    let path = open_controls(app, dir);
+    let pad = spawn_pad(app);
+    focus_row(app, "Gamepad buttons");
+    press(app, KeyCode::Enter);
+    assert_eq!(shell(app).screen, menu::Screen::PadButtons);
+    (path, pad)
+}
+
+/// F23-A.4: the gamepad-buttons screen lists every pad action with its
+/// shipped button, and a reset that is disabled at the shipped map.
+#[test]
+fn the_pad_screen_lists_every_pad_action_with_its_button() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    open_pad_buttons(&mut app, dir.path());
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(
+        rows,
+        [
+            "Handbrake: South",
+            "Shift up (manual): RightBumper",
+            "Shift down (manual): LeftBumper",
+            "Change camera: RightStick",
+            "Cockpit view: West",
+            "Rear-view mirror: East",
+            "Reset vehicle: North",
+            "Horn / siren: LeftStick",
+            "Map view: Select",
+            "Map zoom: DPadLeft",
+            "Map orientation: DPadRight",
+            "Driving HUD: DPadUp",
+            "Opponent indicators: DPadDown",
+            "Previous target: LeftBumper",
+            "Next target: RightBumper",
+            "Reset gamepad buttons",
+        ]
+    );
+    assert!(
+        shell(&app).rows[15].enabled.is_err(),
+        "nothing to reset yet"
+    );
+    // Esc returns to the Controls screen on the row that opened this one.
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Controls);
+    assert!(
+        shell(&app).rows[shell(&app).focus]
+            .text
+            .contains("Gamepad buttons")
+    );
+}
+
+/// Listening takes the next pad button: nav buttons bind instead of
+/// navigating, a button another action holds is refused naming its
+/// owner (and listening continues), `Start` cancels, X clears an action
+/// to free a button, and every change reaches the live resource and
+/// `controls.json`.
+#[test]
+fn a_captured_pad_button_rebinds_the_action_and_persists() {
+    use mm2_app::pad_map::PadAction;
+
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let (path, pad) = open_pad_buttons(&mut app, dir.path());
+
+    focus_row(&mut app, "Handbrake");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).pad_capture, Some(PadAction::Handbrake));
+    assert_eq!(shell(&app).capture, None);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("press the new button")
+    );
+
+    // East is Back on every menu — here it is just a candidate, and a
+    // taken one.
+    pad_press(&mut app, pad, GamepadButton::East);
+    assert_eq!(shell(&app).screen, menu::Screen::PadButtons);
+    assert_eq!(shell(&app).pad_capture, Some(PadAction::Handbrake));
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("already bound to Rear-view mirror"),
+        "{:?}",
+        shell(&app).status
+    );
+    // `Start` is app-owned: it cancels rather than binds.
+    pad_press(&mut app, pad, GamepadButton::Start);
+    assert_eq!(shell(&app).pad_capture, None);
+    assert_eq!(shell(&app).status.as_deref(), Some("rebinding cancelled"));
+    assert!(
+        app.world().get_resource::<ControlSettings>().is_none() && !path.exists(),
+        "refusals and cancels publish and save nothing"
+    );
+
+    // Free North (X clears), then give it to the handbrake.
+    focus_row(&mut app, "Reset vehicle");
+    press(&mut app, KeyCode::KeyX);
+    assert_eq!(shell(&app).rows[6].text, "Reset vehicle: -");
+    focus_row(&mut app, "Handbrake");
+    press(&mut app, KeyCode::Enter);
+    pad_press(&mut app, pad, GamepadButton::North);
+    assert_eq!(shell(&app).pad_capture, None);
+    assert_eq!(shell(&app).rows[0].text, "Handbrake: North");
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("Handbrake is now North")
+    );
+    let live = app.world().resource::<ControlSettings>();
+    assert_eq!(
+        live.pad.button(PadAction::Handbrake),
+        Some(GamepadButton::North)
+    );
+    assert_eq!(live.pad.button(PadAction::Reset), None);
+    assert_eq!(&ControlSettings::load(&path), live, "saved as it stands");
+
+    // Clearing an action that is already clear says so.
+    focus_row(&mut app, "Reset vehicle");
+    press(&mut app, KeyCode::KeyX);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("no button is bound")
+    );
+
+    // The page's reset restores the shipped buttons.
+    focus_row(&mut app, "Reset gamepad");
+    assert!(shell(&app).rows[15].enabled.is_ok());
+    press(&mut app, KeyCode::Enter);
+    assert!(shell(&app).rows[15].enabled.is_err());
+    let live = app.world().resource::<ControlSettings>();
+    assert_eq!(live.pad, mm2_app::pad_map::PadMap::default());
+}
+
+/// The mouse's right button and the keyboard's Esc cancel a pad capture
+/// the way they cancel a key capture; hovering and nav keys are inert.
+#[test]
+fn escape_cancels_a_pad_capture_and_nav_keys_stay_inert() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    open_pad_buttons(&mut app, dir.path());
+    focus_row(&mut app, "Map zoom");
+    let focus = shell(&app).focus;
+    press(&mut app, KeyCode::Enter);
+    assert!(shell(&app).pad_capture.is_some());
+    press(&mut app, KeyCode::ArrowDown);
+    assert_eq!(shell(&app).focus, focus, "no navigation while listening");
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).pad_capture, None);
+    assert_eq!(shell(&app).screen, menu::Screen::PadButtons);
+    assert!(app.world().get_resource::<ControlSettings>().is_none());
 }
 
 /// The Transmission row flips automatic/manual in place, reaches the

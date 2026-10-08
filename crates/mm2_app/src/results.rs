@@ -240,7 +240,8 @@ pub fn results_input(
             | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
             | MenuCommand::Erase
-            | MenuCommand::Capture(_) => {}
+            | MenuCommand::Capture(_)
+            | MenuCommand::CapturePad(_) => {}
         }
         results.dirty = true;
     }

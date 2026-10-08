@@ -422,17 +422,32 @@ pub fn toggle_camera(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     windows: Query<&Window>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut mode: ResMut<CameraMode>,
     mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
-    use crate::input::pad;
-    let next = if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyC, pad::CAMERA) {
+    use crate::controls::pad_button;
+    use crate::pad_map::PadAction;
+    let button = |action| pad_button(controls.as_deref(), action);
+    let next = if control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        KeyCode::KeyC,
+        button(PadAction::Camera),
+    ) {
         match next_available(*mode, &cams) {
             Some(m) => m,
             None => return,
         }
-    } else if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyV, pad::COCKPIT) {
+    } else if control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        KeyCode::KeyV,
+        button(PadAction::Cockpit),
+    ) {
         match *mode {
             CameraMode::Cockpit => CameraMode::Chase,
             _ if have_mode(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
@@ -804,6 +819,7 @@ pub fn mirror_input(
     pads: Query<&Gamepad>,
     windows: Query<&Window>,
     session: Res<Session>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut mirror: ResMut<RearView>,
 ) {
     if !matches!(
@@ -817,7 +833,7 @@ pub fn mirror_input(
         &pads,
         &windows,
         KeyCode::Backspace,
-        crate::input::pad::MIRROR,
+        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Mirror),
     ) {
         mirror.0 = !mirror.0;
     }

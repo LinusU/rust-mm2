@@ -179,6 +179,7 @@ pub fn indicator_input(
     pads: Query<&Gamepad>,
     windows: Query<&Window>,
     session: Res<Session>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut indicators: ResMut<OpponentIndicators>,
 ) {
     if !matches!(
@@ -192,7 +193,7 @@ pub fn indicator_input(
         &pads,
         &windows,
         KeyCode::KeyI,
-        crate::input::pad::INDICATORS,
+        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Indicators),
     ) {
         indicators.0 = !indicators.0;
     }

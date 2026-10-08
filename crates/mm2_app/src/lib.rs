@@ -46,6 +46,7 @@ pub mod netdrive;
 pub mod object_sound;
 pub mod oppind;
 pub mod opponents;
+pub mod pad_map;
 pub mod pause;
 pub mod pedestrian;
 pub mod perf;

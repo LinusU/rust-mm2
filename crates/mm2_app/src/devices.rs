@@ -135,8 +135,8 @@ pub const RECORDS: [CapabilityRecord; 11] = [
     },
     CapabilityRecord {
         capability: Capability::PadRebinding,
-        status: Status::NotImplemented,
-        note: "the pad map is fixed (stick/triggers/South plus the designed in-session buttons)",
+        status: Status::SyntheticOnly,
+        note: "every digital in-session pad button (handbrake, manual shifts, camera, mirror, map, HUD...) rebinds on the main-menu and pause Gamepad buttons pages and persists in controls.json; stick and triggers stay analog, Start/Mode are app-owned; synthetic pad events only",
     },
     CapabilityRecord {
         capability: Capability::MouseDriving,

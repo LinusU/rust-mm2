@@ -175,6 +175,36 @@ fn pad_east_toggles_the_strip_while_driving() {
     }
 }
 
+/// F23-A.4: the mirror button is a setting — a remap moves it (the old
+/// button stops, the key stays) and a cleared action has no pad button.
+#[test]
+fn a_remapped_pad_button_toggles_the_strip() {
+    use mm2_app::controls::ControlSettings;
+    use mm2_app::pad_map::PadAction;
+
+    let mut controls = ControlSettings::default();
+    controls
+        .pad
+        .bind(PadAction::Mirror, GamepadButton::C)
+        .unwrap();
+    let mut app = base_app(SessionPhase::Playing);
+    app.world_mut().spawn(Gamepad::default());
+    app.insert_resource(controls);
+    spawn_strip(&mut app);
+
+    pad_press(&mut app, GamepadButton::East);
+    assert!(!app.world().resource::<RearView>().0, "the old button");
+    pad_press(&mut app, GamepadButton::C);
+    assert!(app.world().resource::<RearView>().0, "the new button");
+
+    let mut cleared = ControlSettings::default();
+    cleared.pad.unbind(PadAction::Mirror).unwrap();
+    app.insert_resource(cleared);
+    pad_press(&mut app, GamepadButton::East);
+    pad_press(&mut app, GamepadButton::C);
+    assert!(app.world().resource::<RearView>().0, "no button toggles it");
+}
+
 /// The dev free camera yields nothing to the HUD: an armed mirror
 /// renders in Chase and Cockpit but never over `Free`.
 #[test]

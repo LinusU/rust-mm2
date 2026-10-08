@@ -1548,6 +1548,7 @@ pub fn horn_input(
     pads: Query<&Gamepad>,
     session: Res<Session>,
     windows: Query<&Window>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut requests: MessageWriter<HornRequest>,
 ) {
     if crate::input::control_just_pressed(
@@ -1555,7 +1556,7 @@ pub fn horn_input(
         &pads,
         &windows,
         KeyCode::Enter,
-        crate::input::pad::HORN,
+        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Horn),
     ) && session.is_playing()
     {
         requests.write(HornRequest);

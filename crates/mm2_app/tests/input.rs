@@ -196,6 +196,85 @@ fn a_persisted_remap_drives_the_player_after_restart() {
     assert_eq!(hold(&mut app, KeyCode::ArrowLeft).steering, -1.0);
 }
 
+/// F23-A.4: the handbrake button is a setting. A pad remap saved to
+/// `controls.json` survives a restart: the new button holds the
+/// handbrake, the shipped one no longer does, and a cleared action
+/// leaves the pad without one (the key still works).
+#[test]
+fn a_persisted_pad_remap_moves_the_handbrake_button() {
+    use mm2_app::controls::{ControlSettings, controls_path};
+    use mm2_app::pad_map::PadAction;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = controls_path(dir.path());
+    let mut chosen = ControlSettings::default();
+    chosen.pad.unbind(PadAction::Reset).unwrap();
+    chosen
+        .pad
+        .bind(PadAction::Handbrake, GamepadButton::North)
+        .unwrap();
+    chosen.save(&path).unwrap();
+
+    let mut app = drive_app(CameraMode::Chase);
+    app.world_mut().spawn(Gamepad::default());
+    app.insert_resource(ControlSettings::load(&path));
+    let held = |app: &mut App, button: GamepadButton| {
+        let mut pads = app.world_mut().query::<&mut Gamepad>();
+        for mut pad in pads.iter_mut(app.world_mut()) {
+            pad.digital_mut().release_all();
+            pad.digital_mut().press(button);
+        }
+        app.update();
+        player_input(app).handbrake
+    };
+    assert_eq!(held(&mut app, GamepadButton::North), 1.0, "the new button");
+    assert_eq!(held(&mut app, GamepadButton::South), 0.0, "the old one");
+
+    // Cleared: no pad button holds the handbrake, Space still does.
+    let mut cleared = ControlSettings::default();
+    cleared.pad.unbind(PadAction::Handbrake).unwrap();
+    app.insert_resource(cleared);
+    assert_eq!(held(&mut app, GamepadButton::South), 0.0);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    app.update();
+    assert_eq!(player_input(&mut app).handbrake, 1.0);
+}
+
+/// F23-A.4: the manual shifts follow their pad buttons — a remapped
+/// shift answers on the new button and ignores the shoulder it left.
+#[test]
+fn rebound_pad_shift_buttons_shift_the_manual_gearbox() {
+    use mm2_app::controls::ControlSettings;
+    use mm2_app::pad_map::PadAction;
+
+    let mut controls = ControlSettings::default().toggled_transmission();
+    controls
+        .pad
+        .bind(PadAction::ShiftUp, GamepadButton::C)
+        .unwrap();
+    let mut app = drive_app(CameraMode::Chase);
+    app.world_mut().spawn(Gamepad::default());
+    spawn_geared_player(&mut app, 2);
+    app.insert_resource(controls);
+    app.update();
+    assert_eq!(player_input(&mut app).forced_gear, Some(2));
+
+    pad_tap(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(2),
+        "the old shoulder"
+    );
+    pad_tap(&mut app, GamepadButton::C);
+    assert_eq!(
+        player_input(&mut app).forced_gear,
+        Some(3),
+        "the new button"
+    );
+}
+
 /// A remapped key is still gated like any other: the free camera, a
 /// non-`Playing` session and the countdown zero it, so a rebind cannot
 /// open a path that drives while a menu or the fly camera owns the keys.

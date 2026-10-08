@@ -2283,6 +2283,100 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     assert!(phase_is(&mut app, SessionPhase::Playing));
 }
 
+/// F23-A.4 from inside a session: the pause overlay's Gamepad buttons
+/// page listens for a pad button — a taken one is refused naming its
+/// owner, `Start` cancels without resuming — clears an action, binds the
+/// freed button, resets, saves every change and backs out a page at a
+/// time.
+#[test]
+fn pause_gamepad_buttons_page_rebinds_by_listening_and_backs_out() {
+    use mm2_app::pad_map::{PadAction, PadMap};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = controls_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(ControlSettings::default())
+        .insert_resource(ControlsSave(Some(path.clone())));
+    app.world_mut().spawn(Gamepad::default());
+    app.update();
+    open_pause_controls(&mut app);
+    let live = |a: &App| a.world().resource::<ControlSettings>().clone();
+    let pause_status = |a: &App| a.world().resource::<PauseMenu>().status.clone();
+    let capture = |a: &App| a.world().resource::<PauseMenu>().pad_capture;
+
+    // The page hangs off the last row before Back: 7 actions x 2 slots
+    // and 6 tuning rows come first.
+    pause_focus_row(&mut app, 20);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::PadButtons
+    );
+
+    // Listening takes the next pad button. East would be Back on a
+    // normal page; here it is a (taken) candidate.
+    pause_focus_row(&mut app, 0);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(capture(&app), Some(PadAction::Handbrake));
+    pad_press(&mut app, GamepadButton::East);
+    assert_eq!(capture(&app), Some(PadAction::Handbrake), "still listening");
+    assert!(
+        pause_status(&app)
+            .unwrap()
+            .contains("already bound to Rear-view mirror")
+    );
+    assert_eq!(live(&app), ControlSettings::default());
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    // Start cancels the capture; it must not also resume the game.
+    pad_press(&mut app, GamepadButton::Start);
+    assert_eq!(capture(&app), None);
+    assert_eq!(pause_status(&app).as_deref(), Some("rebinding cancelled"));
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::PadButtons
+    );
+
+    // X clears Reset vehicle, freeing North for the handbrake.
+    pause_focus_row(&mut app, 6);
+    press_key(&mut app, KeyCode::KeyX);
+    assert_eq!(live(&app).pad.button(PadAction::Reset), None);
+    pause_focus_row(&mut app, 0);
+    press_key(&mut app, KeyCode::Enter);
+    pad_press(&mut app, GamepadButton::North);
+    assert_eq!(capture(&app), None);
+    assert_eq!(
+        live(&app).pad.button(PadAction::Handbrake),
+        Some(GamepadButton::North)
+    );
+    assert_eq!(ControlSettings::load(&path), live(&app));
+    assert_eq!(
+        pause_status(&app).as_deref(),
+        Some("Handbrake is now North")
+    );
+
+    // Esc cancels a capture on the keyboard too, then the reset row
+    // restores the shipped buttons.
+    press_key(&mut app, KeyCode::Enter);
+    press_key(&mut app, KeyCode::Escape);
+    assert_eq!(capture(&app), None);
+    pause_focus_row(&mut app, 15);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(live(&app).pad, PadMap::default());
+    assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+
+    // Esc steps back a page: pad buttons -> controls (on the row that
+    // opened it) -> graphics.
+    press_key(&mut app, KeyCode::Escape);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 20));
+    }
+    press_key(&mut app, KeyCode::Escape);
+    assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+}
+
 /// A rig with no `ControlSettings` (a bare harness) leaves the Driving
 /// controls row disabled with its reason instead of opening an empty
 /// page, and a capture left pending is dropped when the pause ends.

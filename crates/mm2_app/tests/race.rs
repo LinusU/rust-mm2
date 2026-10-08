@@ -2011,6 +2011,55 @@ fn a_manual_gearbox_takes_the_bumpers_from_the_arrow() {
     assert_eq!(picked(&app), Some(0), "automatic gives the shoulder back");
 }
 
+/// F23-A.4: only a button bound to a *shift* is taken from the arrow. A
+/// manual box whose shifts moved off the shoulders hands the bumpers
+/// back; a target button moved onto a shift's button yields to it.
+#[test]
+fn the_arrow_yields_only_to_buttons_that_shift() {
+    use mm2_app::controls::ControlSettings;
+    use mm2_app::pad_map::PadAction;
+
+    let def = RaceDefinition {
+        checkpoints: vec![cp(-100.0, 0.0), cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, -50.0));
+    app.world_mut().spawn(Gamepad::default());
+    let mut controls = ControlSettings::default().toggled_transmission();
+    controls
+        .pad
+        .bind(PadAction::ShiftUp, GamepadButton::C)
+        .unwrap();
+    controls
+        .pad
+        .bind(PadAction::ShiftDown, GamepadButton::Z)
+        .unwrap();
+    app.insert_resource(controls.clone());
+    run(&mut app, 3);
+    let picked = |app: &App| app.world().get::<TargetSelection>(car).unwrap().picked;
+
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(picked(&app), Some(2), "the shifts left the bumper: it aims");
+    // The shift buttons themselves are not arrow buttons.
+    pad_press(&mut app, GamepadButton::C);
+    assert_eq!(picked(&app), Some(2));
+
+    // Move NextTarget onto the shift button: manual shifting wins it.
+    controls.pad.unbind(PadAction::TargetNext).unwrap();
+    controls
+        .pad
+        .bind(PadAction::TargetNext, GamepadButton::C)
+        .unwrap();
+    app.insert_resource(controls);
+    pad_press(&mut app, GamepadButton::C);
+    assert_eq!(picked(&app), Some(2), "manual: C shifts, it does not aim");
+    app.insert_resource(ControlSettings::default());
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(picked(&app), Some(0), "automatic: the shipped bumper aims");
+}
+
 /// The arrow is already live while the race counts down — the
 /// original's arrow works before the start too (RACE-6 names no
 /// phase gate).

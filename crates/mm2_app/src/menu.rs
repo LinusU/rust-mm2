@@ -55,7 +55,9 @@
 //!   for the next key ([`MenuShell::capture`]), conflicts and reserved
 //!   keys are refused with the reason, X clears a key, and stick
 //!   deadzone/sensitivity/inversion cycle in place — all saved to
-//!   `controls.json` on every change. The original's other audio rows
+//!   `controls.json` on every change. Its last row opens
+//!   [`Screen::PadButtons`], where each pad action's button rebinds by
+//!   listening for the next pad button ([`MenuShell::pad_capture`]). The original's other audio rows
 //!   (on/off toggles, device, stereo, quality, balance) are still open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
@@ -82,8 +84,9 @@ use mm2_game::{
 };
 use tracing::{info, warn};
 
-use crate::controls::{ControlItem, ControlSettings, DriveAction, SLOTS};
+use crate::controls::{ControlItem, ControlSettings, DriveAction, PadItem, SLOTS};
 use crate::input::pad_nav;
+use crate::pad_map::PadAction;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 use crate::settings::{AudioLevel, GraphicsSettings, RunOverrides};
@@ -126,6 +129,10 @@ pub enum MenuCommand {
     /// binding. Only `menu_input` produces it, and only while
     /// [`MenuShell::capture`] is set.
     Capture(KeyCode),
+    /// A pad button pressed while the gamepad-buttons screen listens for
+    /// a new binding ([`MenuShell::pad_capture`]); the pad's `Start` and
+    /// the keyboard's `Esc` come through as `Back` instead.
+    CapturePad(GamepadButton),
 }
 
 /// The menu's navigation state. Each screen rebuilds its rows from
@@ -204,6 +211,9 @@ pub enum Screen {
     /// tuning and a reset. Rows read and write [`MenuData`]'s
     /// [`ControlSettings`]; a pending key capture lives on the shell.
     Controls,
+    /// The gamepad's digital buttons: one row per pad action, rebound by
+    /// listening for the next pad button.
+    PadButtons,
     /// Condition options for a cruise or a customization-unlocked
     /// event (UI-2, RACE-3/RACE-4). `conditions`/`densities` are the
     /// working picks Left/Right adjusts in place; the `seed_*` fields
@@ -323,6 +333,10 @@ pub enum Action {
     ToggleTransmission,
     /// Put every driving control back to the shipped map.
     ResetControls,
+    /// Listen for the pad button to bind to one pad action.
+    RebindPad(PadAction),
+    /// Put the gamepad buttons back at the shipped map.
+    ResetPad,
     /// Launch the session the Customize screen configures.
     LaunchCustomize,
     /// Cycle the Cops & Robbers variant.
@@ -474,6 +488,9 @@ pub struct MenuShell {
     /// action's slot. While set, [`Self::apply`] takes only
     /// [`MenuCommand::Capture`] and `Back` (cancel).
     pub capture: Option<(DriveAction, usize)>,
+    /// The gamepad-buttons screen is waiting for the pad button to bind
+    /// to this action; the pad twin of [`Self::capture`] (never both).
+    pub pad_capture: Option<PadAction>,
     dirty: bool,
     /// Last gamepad nav-axis reading — edge detection for stick moves.
     pad_axis: f32,
@@ -809,6 +826,7 @@ impl MenuShell {
             difficulty,
             pending: Vec::new(),
             capture: None,
+            pad_capture: None,
             dirty: true,
             pad_axis: 0.0,
         }
@@ -826,6 +844,7 @@ impl MenuShell {
         // shell — a click queued while a session ran has no screen.
         self.pending.clear();
         self.capture = None;
+        self.pad_capture = None;
         self.dirty = true;
     }
 
@@ -842,11 +861,13 @@ impl MenuShell {
         self.side = false;
         self.status = None;
         self.capture = None;
+        self.pad_capture = None;
     }
 
     fn pop(&mut self) -> bool {
         if let Some((screen, focus, side)) = self.stack.pop() {
             self.capture = None;
+            self.pad_capture = None;
             self.screen = screen;
             self.focus = focus;
             self.side = side;
@@ -937,6 +958,20 @@ impl MenuShell {
             self.dirty = true;
             return effects;
         }
+        if let Some(action) = self.pad_capture {
+            match cmd {
+                MenuCommand::Back => {
+                    self.pad_capture = None;
+                    self.status = Some("rebinding cancelled".into());
+                }
+                MenuCommand::CapturePad(button) => {
+                    self.bind_pad(data, action, button, &mut effects)
+                }
+                _ => return effects,
+            }
+            self.dirty = true;
+            return effects;
+        }
         match cmd {
             // Vertical moves keep the column, so walking a list of
             // options stays on the options.
@@ -992,6 +1027,12 @@ impl MenuShell {
                     {
                         self.clear_key(data, action, slot, &mut effects);
                     }
+                } else if self.screen == Screen::PadButtons {
+                    if let Some(Action::RebindPad(action)) =
+                        self.focused_row().map(|r| r.action.clone())
+                    {
+                        self.clear_pad(data, action, &mut effects);
+                    }
                 } else if self.screen == Screen::Profiles
                     && let Some(row) = self.rows.get(self.focus)
                     && let Action::BindProfile(id) = &row.action
@@ -1013,7 +1054,10 @@ impl MenuShell {
                 }
             }
             // Row screens carry no text field — typing is inert.
-            MenuCommand::Type(_) | MenuCommand::Erase | MenuCommand::Capture(_) => {}
+            MenuCommand::Type(_)
+            | MenuCommand::Erase
+            | MenuCommand::Capture(_)
+            | MenuCommand::CapturePad(_) => {}
         }
         self.dirty = true;
         effects
@@ -1090,6 +1134,18 @@ impl MenuShell {
                     "press the new key for {} (Esc cancels)",
                     action.label()
                 ));
+            }
+            Action::RebindPad(action) => {
+                self.pad_capture = Some(action);
+                self.status = Some(format!(
+                    "press the new button for {} (Esc cancels)",
+                    action.label()
+                ));
+            }
+            Action::ResetPad => {
+                let next = data.controls.with_default_pad();
+                self.set_controls(data, next, effects);
+                self.status = Some("gamepad buttons reset to the defaults".into());
             }
             Action::ResetControls => {
                 self.tune_controls(data, ControlItem::Reset, true, effects);
@@ -1427,6 +1483,36 @@ impl MenuShell {
         match data.controls.with_key(action, slot, key) {
             Ok((next, line)) => {
                 self.capture = None;
+                self.status = Some(line);
+                self.set_controls_keep_status(data, next, effects);
+            }
+            Err(line) => self.status = Some(line),
+        }
+    }
+
+    /// Finish a pad capture: bind `button`, or keep listening with the
+    /// refusal (taken by another action, app-owned...) on the status line.
+    fn bind_pad(
+        &mut self,
+        data: &mut MenuData,
+        action: PadAction,
+        button: GamepadButton,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        match data.controls.with_pad_button(action, button) {
+            Ok((next, line)) => {
+                self.pad_capture = None;
+                self.status = Some(line);
+                self.set_controls_keep_status(data, next, effects);
+            }
+            Err(line) => self.status = Some(line),
+        }
+    }
+
+    /// Clear one action's pad button.
+    fn clear_pad(&mut self, data: &mut MenuData, action: PadAction, effects: &mut Vec<MenuEffect>) {
+        match data.controls.without_pad_button(action) {
+            Ok((next, line)) => {
                 self.status = Some(line);
                 self.set_controls_keep_status(data, next, effects);
             }
@@ -1905,6 +1991,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         }
         Screen::Options => options_screen_rows(data),
         Screen::Controls => controls_screen_rows(data),
+        Screen::PadButtons => pad_screen_rows(data),
         Screen::Garage => garage_rows(shell, data, vfs),
         Screen::Paints { car } => paint_rows(shell, data, vfs, car),
         Screen::Profiles => profile_rows(shell, data),
@@ -2430,7 +2517,33 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
         };
         row(r.text, r.enabled, action, None)
     }));
+    rows.push(row(
+        "Gamepad buttons".to_string(),
+        Ok(()),
+        Action::Push(Screen::PadButtons),
+        None,
+    ));
     rows
+}
+
+/// The gamepad-buttons screen: one row per pad action showing its
+/// button, then a reset that disables itself, with its reason, at the
+/// shipped buttons.
+fn pad_screen_rows(data: &MenuData) -> Vec<Row> {
+    data.controls
+        .pad_rows()
+        .into_iter()
+        .map(|r| Row {
+            text: r.text,
+            enabled: r.enabled,
+            action: match r.item {
+                PadItem::Button(action) => Action::RebindPad(action),
+                PadItem::Reset => Action::ResetPad,
+            },
+            won: None,
+            side: None,
+        })
+        .collect()
 }
 
 /// The RACE-3 per-event options entry, drawn beside the event's row:
@@ -2906,6 +3019,7 @@ pub fn menu_input(
     let mut cmds: Vec<MenuCommand> = std::mem::take(&mut shell.pending);
     let name_entry = matches!(shell.screen, Screen::NewProfile { .. });
     let capturing = shell.capture.is_some();
+    let pad_capturing = shell.pad_capture.is_some();
     // The stream is drained every frame — on other screens typed text
     // is discarded so a nav key's character (WASD all carry text)
     // can't leak into a freshly opened name field. On the entry
@@ -2931,7 +3045,17 @@ pub fn menu_input(
     // read on every screen so a held stick never fires a stale edge when
     // the screen changes under it.
     let nav = pad_nav(pads.iter(), &mut shell.pad_axis);
-    if capturing {
+    if pad_capturing {
+        // The gamepad-buttons screen is waiting for a pad button: the
+        // first one pressed this frame is the candidate. `Start` and
+        // `Esc` cancel (neither is bindable); no nav edge may fire, or
+        // the button being bound would also move the focus.
+        if keys.just_pressed(KeyCode::Escape) || nav.start {
+            cmds.push(MenuCommand::Back);
+        } else if let Some(button) = pads.iter().find_map(|p| p.get_just_pressed().next()) {
+            cmds.push(MenuCommand::CapturePad(*button));
+        }
+    } else if capturing {
         // The Controls screen is waiting for a key: the first key
         // pressed this frame is the candidate (Esc cancels in `apply`),
         // and the pad can only back out — no nav key may fire, or the
@@ -3198,6 +3322,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::Records { .. } => "Race records".to_string(),
         Screen::Options => "Graphics and audio options".to_string(),
         Screen::Controls => "Driving controls - X clears a key".to_string(),
+        Screen::PadButtons => "Gamepad buttons - X clears a button".to_string(),
         Screen::Customize { target, .. } => match target {
             CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),
             CustomizeTarget::Event { stem, .. } => format!("Race options - {stem}"),

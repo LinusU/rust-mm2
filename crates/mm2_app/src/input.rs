@@ -12,11 +12,12 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
 use crate::contracts::ImpactFilter;
-use crate::controls::ControlSettings;
+use crate::controls::{ControlSettings, pad_button};
 use crate::manual_gear::ManualGear;
+use crate::pad_map::PadAction;
 use crate::session::{self, SpawnPoint};
 
-/// The designed in-session pad map (F22-AC06's bindings leg; the
+/// The *shipped* designed in-session pad map (F22-AC06's bindings leg; the
 /// gamepad-only leg F23 req 4 asks for). The original's pad button
 /// layout is unrecovered — MM2HELP's joystick/gamepad topics are
 /// documented but not yet transcribed into the rules ledger — so
@@ -28,9 +29,13 @@ use crate::session::{self, SpawnPoint};
 /// (`Q`), headlights (`L`), the `F1`/`F4` debug keys and the
 /// fly-camera axes stay keyboard-only: `Start` is already the
 /// menu-owned pause and no designed button is left that doesn't
-/// collide with a driving control.
+/// collide with a driving control. These are the defaults of
+/// [`crate::pad_map::PadMap`]; systems read the player's map through
+/// [`crate::controls::pad_button`], not these constants.
 pub mod pad {
     use bevy::prelude::GamepadButton;
+    /// Handbrake (`Space`) — held, like the key.
+    pub const HANDBRAKE: GamepadButton = GamepadButton::South;
     /// Cycle the HUD-3 camera chain (`C`) — right stick click.
     pub const CAMERA: GamepadButton = GamepadButton::RightThumb;
     /// Cockpit/dash toggle (`V`).
@@ -92,10 +97,11 @@ pub fn control_just_pressed(
     pads: &Query<&Gamepad>,
     windows: &Query<&Window>,
     key: KeyCode,
-    button: GamepadButton,
+    button: Option<GamepadButton>,
 ) -> bool {
     windows_focused(windows)
-        && (keys.just_pressed(key) || pads.iter().any(|p| p.just_pressed(button)))
+        && (keys.just_pressed(key)
+            || button.is_some_and(|b| pads.iter().any(|p| p.just_pressed(b))))
 }
 
 /// Stick deflection past which a menu stick push counts as a nav press.
@@ -413,8 +419,14 @@ pub fn vehicle_input(
         manual.release();
     }
     let (key_up, key_down) = controls.shift_edges(&keys);
-    let shift_up = key_up || gamepads.iter().any(|p| p.just_pressed(pad::SHIFT_UP));
-    let shift_down = key_down || gamepads.iter().any(|p| p.just_pressed(pad::SHIFT_DOWN));
+    let pad_edge = |action| {
+        controls
+            .pad
+            .button(action)
+            .is_some_and(|b| gamepads.iter().any(|p| p.just_pressed(b)))
+    };
+    let shift_up = key_up || pad_edge(PadAction::ShiftUp);
+    let shift_down = key_down || pad_edge(PadAction::ShiftDown);
 
     for (car, mut vi, state, vehicle) in &mut vehicles {
         *vi = input;
@@ -439,18 +451,28 @@ pub fn vehicle_input(
 /// sends a `ResetRequest`, and the granted answer returns as the seat's
 /// epoch-declared `Snap` (F25-A.5's own-seat reconcile; the wire request
 /// is F25-B).
+// A Bevy system: each parameter is one injected resource or query, and the
+// pad map is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     windows: Query<&Window>,
     session: Res<Session>,
     spawn: Res<SpawnPoint>,
+    controls: Option<Res<ControlSettings>>,
     player: Query<Entity, With<PlayerVehicle>>,
     mut writer: MessageWriter<ResetVehicle>,
 ) {
     if !session.is_playing()
         || !session.authority_role().is_authority()
-        || !control_just_pressed(&keys, &pads, &windows, KeyCode::KeyR, pad::RESET)
+        || !control_just_pressed(
+            &keys,
+            &pads,
+            &windows,
+            KeyCode::KeyR,
+            pad_button(controls.as_deref(), PadAction::Reset),
+        )
     {
         return;
     }

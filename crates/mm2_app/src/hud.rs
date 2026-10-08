@@ -70,6 +70,7 @@ pub fn hud_input(
     pads: Query<&Gamepad>,
     windows: Query<&Window>,
     session: Res<Session>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
     mut hud: ResMut<HudVisible>,
 ) {
     if !matches!(
@@ -83,7 +84,7 @@ pub fn hud_input(
         &pads,
         &windows,
         KeyCode::KeyH,
-        crate::input::pad::HUD,
+        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Hud),
     ) {
         hud.0 = !hud.0;
     }
