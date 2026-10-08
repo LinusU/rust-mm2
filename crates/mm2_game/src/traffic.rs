@@ -1085,9 +1085,26 @@ impl Junctions {
         stopped: bool,
         box_occupied: bool,
     ) -> JunctionGate {
-        let Some((ix, road, rule)) = Self::approach(graph, lane) else {
+        let Some(approach) = Self::approach(graph, lane) else {
             return JunctionGate::Open;
         };
+        self.gate_approach(graph, approach, car, at_line, stopped, box_occupied)
+    }
+
+    /// [`Junctions::gate`] for a car that is not on a nav lane — one
+    /// that follows its own route and knows the junction it is bound
+    /// for: `approach` is the `(junction, road, rule)` triple
+    /// [`Junctions::approach`] would have read off the lane.
+    pub fn gate_approach(
+        &mut self,
+        graph: &NavGraph,
+        approach: (u16, u16, Option<VehicleRule>),
+        car: Entity,
+        at_line: bool,
+        stopped: bool,
+        box_occupied: bool,
+    ) -> JunctionGate {
+        let (ix, road, rule) = approach;
         let occupied = box_occupied || self.entered(ix);
         match rule {
             None | Some(VehicleRule::NeverStop) => JunctionGate::Open,

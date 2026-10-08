@@ -1093,6 +1093,33 @@ fn junction_gate_binds_the_authored_end_rule() {
     assert_eq!(Junctions::approach(&g, lane_id(0, Side::Left, 0)), None);
 }
 
+/// A car that follows its own route (the cable car) gates through
+/// `gate_approach` with the triple `approach` reads off a lane — and
+/// must get the answer a lane follower on that approach gets, rule by
+/// rule and tick by tick.
+#[test]
+fn a_routed_car_is_gated_like_a_lane_follower_on_the_same_approach() {
+    let r0 = lane_id(0, Side::Right, 0);
+    for rule in 0..=3 {
+        let g = chain_with_rules(rule, 3);
+        let approach = Junctions::approach(&g, r0).expect("road 0 ends at the junction");
+        assert_eq!(approach.0, 0);
+        assert_eq!(approach.1, 0);
+        let (mut lane, mut routed) = (Junctions::default(), Junctions::default());
+        for tick in 0..800 {
+            let (at_line, stopped) = (tick % 3 == 0, tick % 5 != 0);
+            assert_eq!(
+                routed.gate_approach(&g, approach, car(1), at_line, stopped, false),
+                lane.gate(&g, r0, car(1), at_line, stopped, false),
+                "rule {rule} tick {tick}"
+            );
+            lane.advance_tick();
+            routed.advance_tick();
+        }
+        assert_eq!(routed.waiting(), lane.waiting(), "rule {rule}");
+    }
+}
+
 #[test]
 fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
     // StopSign on both approaches into the same junction.
