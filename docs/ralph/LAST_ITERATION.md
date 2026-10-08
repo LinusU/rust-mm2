@@ -1,8 +1,12 @@
-# Last iteration — F29-C.8: dev-world surface-table refusal is tested (iteration 16 of the new run)
+# Last iteration — F29-C.9: retail run of the F29-C refusals (iteration 17 of the new run)
 
-Selection: F29-C.7 (`bcf1b85`) passed gates and review with no blocking findings, so no repair was owed. The review's verification gaps named an untested production branch: the dev-world arm of `load_session_world` that fails the session on a broken `materials.{mtl,csv}` pair (only `load_city`'s refusal was covered), and the "lone half of the pair" case, which the F29-C.7 test's comment mentioned but did not exercise. Closed those two with a test rather than starting unrelated work.
-Production change: none (test-only).
-Test: `session::a_broken_surface_pair_fails_the_dev_world_session` drives the real `load_session_world` under a mod-mounted `Mm2Vfs`: a lone `materials.csv` (→ `SurfaceLoadError::Missing`) and an unparsable pair each leave the session `Failed("surface tables unusable: …")` with no `PlayerVehicle`/`Vehicle`; quitting returns to Menu with zero `SessionEntity` left (this also covers the review's "partial dev world cleanup" gap); a control app with no pair still loads. Mutation-checked: making the arm swallow the error fails the test ("expected Failed, got Playing").
-Not done: retail install not exercised (MM2_RETAIL unset for this change; the refusal is synthetic-only), no rendered evidence; menu art, localization, retail lesson sweep (LeadRoute refusal unrun on retail) remain.
-Gates (foreground): fmt pass; clippy `--locked --workspace --all-targets --all-features -D warnings` clean; `cargo test --locked --workspace` rc 0, 58 result blocks ok, 0 failed.
-Status: implemented candidate, not independently checked.
+Selection: F29-C.8 (`fb39a18`) passed gates and review with no blocking findings, so no repair was owed. Its review and F29-C.5/.7 handoffs named one open verification gap: the new refusals (`LessonSetupError::{Aimap,LeadRoute}`, `LoadCityError::Surfaces`) had only been exercised on synthetic installs. A refusal that fires on stock content would break the retail game, so the highest-value ready work was to run them against the real install rather than add more synthetic coverage. Capability check: `/Users/linus/coding/rust-mm2/retail` is present.
+Production change: none. Docs-only (this file + the PLAN F29-C row).
+Original-content validation (opt-in, `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`, foreground, `cargo test --locked -p mm2_app --test app`):
+- `lesson_launch::every_retail_lesson_launches_at_both_difficulties`: expected 52, launched 52 — no stock Crash Course lesson hits the `Aimap` or `LeadRoute` refusal at Amateur or Professional.
+- `every_retail_lesson_wired_opponent_becomes_a_lead_car_with_a_route`: wired 18, fielded 18, routed 18 (two roster notes unchanged: london `crash:10` `crash10-0.opp` and sf `crash:6` `stop-1.opp` are wired to no opponent — pre-existing, not refusals).
+- `a_retried_retail_lesson_rebuilds_the_same_world`: 52/52 compared.
+- Whole `app` test binary with `MM2_RETAIL` set: 1046 passed, 0 failed.
+Not covered by this run: the retail `import_pipeline` tests look for `<repo>/retail` (not `MM2_RETAIL`) and mount only `mm2core.ar`, so they report "surfaces: no tables" and say nothing about the stock `materials.{mtl,csv}` pair; that pair's stock acceptance remains the F29-C.7 `--trace-deps` city run (sf/london loaded 148/152 named). No rendered or audible evidence.
+Gates: code unchanged since `fb39a18` (gates green there: fmt, clippy `-D warnings`, `cargo test --locked --workspace`); docs-only commit.
+Status: evidence recorded; the F29-C remainder (menu art, localization) stays open.
