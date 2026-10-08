@@ -1493,27 +1493,39 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
 /// car with no prediction and no input latency, so its pursuit is the
 /// run's only variable. Returns the two clients' mid-session records
 /// (bob prints while alice is still connected, so he holds copies of
-/// everyone).
+/// everyone). With `impair`, both clients reach the host through a
+/// seeded [`ImpairProxy`] whose recipe is armed on both directions once
+/// the lobby has crossed clean (as in the matrix cells), so the shove
+/// itself is paid for on a bad link.
 fn run_shove_trio(
     install: &std::path::Path,
     host_rams: bool,
     alice_frames: u32,
     bob_frames: u32,
+    impair: Option<Impair>,
 ) -> (String, String) {
     let mut host_flags = host_args(install, 9000);
     host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
-    let mut alice_flags = join_args(install, addr, "alice", alice_frames);
+    let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC02).unwrap());
+    let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
+    let mut alice_flags = join_args(install, join_addr, "alice", alice_frames);
     alice_flags.push("--parked".into());
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     host.until("ready=true");
-    let mut bob_flags = join_args(install, addr, "bob", bob_frames);
+    let mut bob_flags = join_args(install, join_addr, "bob", bob_frames);
     bob_flags.push("--parked".into());
     let bob = Proc::spawn(MM2_EXE, &bob_flags);
     host.until("ready=true");
     host.cmd("start");
     host.until("event=started generation=1");
+    if let (Some(proxy), Some(impair)) = (&proxy, impair) {
+        // `Start` rides Down: let the clean lane deliver it first.
+        std::thread::sleep(Duration::from_millis(400));
+        proxy.set(LinkDir::Up, impair);
+        proxy.set(LinkDir::Down, impair);
+    }
     // The clients print nothing for ~2.5k frames, longer than the
     // per-line wait under a loaded full-suite run: bound the whole wait.
     let bound = Duration::from_secs(90);
@@ -1521,6 +1533,9 @@ fn run_shove_trio(
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     assert!(alice.wait().success(), "alice did not exit cleanly");
     assert!(bob.wait().success(), "bob did not exit cleanly");
+    // The relay holds socket clones until it drops: the host only sees
+    // the clients leave once the proxy is down.
+    drop(proxy);
     for _ in 0..2 {
         host.until("event=left");
     }
@@ -1542,11 +1557,40 @@ fn run_shove_trio(
 #[test]
 fn a_shoved_seat_converges_across_three_processes() {
     let install = tempfile::tempdir().unwrap();
-    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000);
-    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500);
+    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000, None);
+    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500, None);
     eprintln!("shove control bob={control_bob}\nshove ram alice={alice}\n bob={bob}");
+    assert_shove_converged(&control_bob, &alice, &bob);
+}
 
-    for rec in [&alice, &bob] {
+/// The same shove paid for on a bad link: both clients reach the host
+/// through the matrix's `combined` recipe (latency, jitter, loss,
+/// duplication, reordering) armed on both directions for the driving
+/// window. The control run is clean — it only supplies the nominal
+/// grid. Convergence is judged at rest exactly as on the clean link, so
+/// what the recipe may cost is the *route* to the rest pose, never the
+/// pose itself.
+#[test]
+fn a_shoved_seat_converges_across_three_processes_on_an_impaired_link() {
+    let install = tempfile::tempdir().unwrap();
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.05,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000, None);
+    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500, Some(recipe));
+    eprintln!("impaired shove control bob={control_bob}\n ram alice={alice}\n bob={bob}");
+    assert_shove_converged(&control_bob, &alice, &bob);
+}
+
+/// The shove leg's verdicts: `control_bob` is the all-parked grid,
+/// `alice`/`bob` the shoved run's mid-session records.
+fn assert_shove_converged(control_bob: &str, alice: &str, bob: &str) {
+    let (control_bob, alice, bob) = (control_bob, alice, bob);
+    for rec in [alice, bob] {
         assert_eq!(field(rec, "status"), "pass", "{rec}");
         assert_eq!(field(rec, "phase"), "playing", "{rec}");
         assert_eq!(field(rec, "finite"), "true", "{rec}");
@@ -1558,7 +1602,7 @@ fn a_shoved_seat_converges_across_three_processes() {
             .find(|(i, ..)| *i == id)
             .map(|(_, x, z)| (x, z))
     };
-    let grid = seat_poses(&control_bob);
+    let grid = seat_poses(control_bob);
     assert_eq!(
         grid.len(),
         3,
@@ -1567,18 +1611,15 @@ fn a_shoved_seat_converges_across_three_processes() {
 
     // Bob printed while alice was connected, so he holds all three
     // seats; alice holds the host's and her own (bob had left).
-    assert_eq!(seat_poses(&bob).len(), 3, "{bob}");
-    assert!(
-        at(&alice, 0).is_some() && at(&alice, 1).is_some(),
-        "{alice}"
-    );
+    assert_eq!(seat_poses(bob).len(), 3, "{bob}");
+    assert!(at(alice, 0).is_some() && at(alice, 1).is_some(), "{alice}");
 
     // The shove really moved both cars on the authority: the host
     // drove off its grid slot and alice's car was pushed clear of hers
     // (judged on bob's complete view, against the control's grid).
-    let nominal = |id: u16| at(&control_bob, id).unwrap();
+    let nominal = |id: u16| at(control_bob, id).unwrap();
     for id in [0, 1] {
-        let moved = dist(at(&bob, id).unwrap(), nominal(id));
+        let moved = dist(at(bob, id).unwrap(), nominal(id));
         assert!(
             moved > 1.5,
             "seat {id} stayed on its slot ({moved:.1} m): {bob}"
@@ -1588,8 +1629,8 @@ fn a_shoved_seat_converges_across_three_processes() {
     // Convergence: every seat both clients hold sits in the same place,
     // to within the interpolation and the prediction's residual.
     let mut compared = 0;
-    for (id, x, z) in seat_poses(&alice) {
-        let other = at(&bob, id).unwrap_or_else(|| panic!("bob lacks seat {id}: {bob}"));
+    for (id, x, z) in seat_poses(alice) {
+        let other = at(bob, id).unwrap_or_else(|| panic!("bob lacks seat {id}: {bob}"));
         let apart = dist((x, z), other);
         assert!(
             apart < 1.0,
@@ -1602,6 +1643,6 @@ fn a_shoved_seat_converges_across_three_processes() {
     // car — it did in the rare run her local sim shoved her harder than
     // the authority did — but never more than the one shove warrants,
     // and a bystander that was never shoved is never reseated.
-    assert!(net_field(&alice).own_settles <= 1, "{alice}");
-    assert_eq!(net_field(&bob).own_settles, 0, "{bob}");
+    assert!(net_field(alice).own_settles <= 1, "{alice}");
+    assert_eq!(net_field(bob).own_settles, 0, "{bob}");
 }

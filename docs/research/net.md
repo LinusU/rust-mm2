@@ -1612,6 +1612,19 @@ wire actually moved rather than an in-process mailbox's contents.
   copy), and the stronger-shove cause itself (the kinematic copy's
   infinite mass in the predicted world) is untouched.
 
+- **Shove on an impaired link (F25-C.3).** The same scenario with both
+  clients behind a seeded `ImpairProxy` armed with the matrix's
+  `combined` recipe (40 ms + 30 ms jitter, 5 % loss, 10 % duplicate,
+  10 % reorder, both directions, armed after `Start` crossed clean):
+  `a_shoved_seat_converges_across_three_processes_on_an_impaired_link`.
+  Same assertions as the clean leg (seats left their slots, every
+  shared seat within 1.0 m at rest, `own_settles` ≤ 1 / bystander 0).
+  The recipe provably bit — alice's stale-drop counter reads ≈1.9 k
+  (`snap0s/≈890a/≈1900x`) against 0 clean — and the rest poses came out
+  the same (host ≈(3.1, 2.4), alice ≈(3.9, −2.4…−2.7)). 6/6 passes in
+  isolation. Loopback, dev world, one recipe; the other seven cells
+  are not run against a collision.
+
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
 delay/jitter/loss matrix exists at both levels now — in-process (see

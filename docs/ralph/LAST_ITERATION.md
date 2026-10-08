@@ -1,16 +1,13 @@
-# Last iteration — F25-C.2: cross-process pose agreement after a shove (iteration 6 of the run)
+# Last iteration — F25-C.3: the shove on an impaired link (iteration 7 of the run)
 
-Selection: the previous checkpoint (`4301bb7`) passed gates and review with no blocking findings, so no repair was owed. Its named gap was "pose agreement across processes after the shove is not asserted". F25-AC02 (collision converges, no permanently diverged replicas) is the highest-value open networking item inside F25-C.
+Selection: checkpoint `9fc43a1` passed gates and review with no blocking findings, so no repair was owed beyond the reviewer's doc nit (net_app test comment said 1.5 m; the bound is 0.75 m — fixed). Next-highest F25-C item that is deterministic enough to land: AC02 (collision converges) under AC03 (impairment) — the first collision run on anything but a clean link.
 
 Change:
-- Smoke record: `seats=<id>:<x>,<z>/…` (every wire seat the process holds, own car + copies; lobby runs only) and a trailing `fix<n>` cell in `net=`.
-- `--ram` is role-split (`input::ram_drive`): on the authority it turns at 5 m/s while the target is off the nose and parks after its first strike at speed (`RamStrike`), so the field comes to rest; a joined client keeps the old law. Applying the new law on the client broke `a_driven_collision…` (3/6, then 0/8), because client inputs reach the authority late.
-- `net_drive::a_shoved_seat_converges_across_three_processes`: the *host* rams (deterministic: no prediction, no latency), alice/bob parked, joined in fixed order; control run gives the grid. Asserts both cars left their slots (>1.5 m) and every seat both clients hold agrees within 1.0 m. The host's own record is not usable (remote seats are gone when it prints), so the authority is seen through the copies.
-- **Real defect found and fixed:** in 2 of 26 runs alice's predicted car ended 7 m from the authority's copy permanently (own seat only took snapshots on a reset epoch; the local sim shoved it harder because the host car is a kinematic copy). New `netdrive::SettleWatch` reseats a car that sits at rest (<0.3 m/s both sides) >0.75 m from the authority's copy for 60 snaps. First bound 1.5 m failed a loaded full-suite run (1.43 m off), so 0.75 m. Documented in `docs/research/net.md`.
-- Tests: 2 `SettleWatch` units, `net_app::a_predicted_car_at_rest_apart_from_the_authority_is_reseated` (loopback socket), 2 `ram` units, the process leg. Test waits use `until_within(90 s)`: the 15 s per-line wait timed out under the loaded full run.
+- `net_drive::run_shove_trio` gains `impair: Option<Impair>`; when set, both clients join through a seeded `ImpairProxy` (`0xAC02`) armed on both directions 400 ms after `Start` (same one-shot-verb reasoning as the matrix cells), dropped before awaiting `event=left`.
+- The clean leg's assertions moved into `assert_shove_converged(control_bob, alice, bob)`, shared by both legs.
+- New `a_shoved_seat_converges_across_three_processes_on_an_impaired_link`: `combined` recipe (40 ms + 30 ms jitter, 5 % loss, 10 % dup, 10 % reorder); same verdicts as the clean leg. Evidence the recipe bit: alice's `snap…/≈1.9k x` stale drops vs 0 clean.
+- `docs/research/net.md` and PLAN row updated.
 
-Gates (foreground): `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `cargo test --locked --workspace` all pass: fmt exit 0, clippy exit 0, test exit 0 with 58 `test result: ok`, none failed.
+Results (foreground): impaired leg 6/6 in isolation, clean leg 3/3 (one ran the settle bound for real: `fix1`, `resets=1`). Gates: `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed.
 
-Flake notes: process leg 10/10 idle, 3/3 inside full `network` runs; `a_driven_collision…` 8/8 after the role split.
-
-Not covered / open: divergence while moving is unbounded; the kinematic-copy shove asymmetry itself; collision under an impairment recipe; trailer/extra-wheel/reset legs at process level; dev world, loopback only; no rendered observation. F25-C stays open. Status: implemented candidate; not independently checked.
+Not covered / open: other seven recipe cells against a collision; divergence while moving is unbounded; kinematic-copy shove asymmetry; trailer/extra-wheel/reset legs at process level; dev world, loopback only, no rendered observation. F25-C stays open. Status: implemented candidate; not independently checked.

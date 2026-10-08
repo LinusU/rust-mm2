@@ -3438,7 +3438,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
 }
 
 /// F25-C's settled-divergence bound, in-process over a real loopback
-/// socket: a predicted own car that sits at rest more than 1.5 m from
+/// socket: a predicted own car that sits at rest more than 0.75 m from
 /// the authority's copy of it is reseated on the copy after a run of
 /// snaps — and a car that agrees with it, or is still moving, is left
 /// alone. (The multi-process pose leg met this for real: a shove the
