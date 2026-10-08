@@ -3478,10 +3478,13 @@ translate them.
   verified_original/documented/inferred/designed/unknown; its UNK list
   (cop AI, C&R mechanics, enum maps, race names, ped behavior, …) stays
   open until evidenced — documented ≠ verified.
-- Observed flake (iteration 10 of the run): `net_drive::a_driven_collision_replicates_across_three_processes` failed in 2 of 4 full-workspace
-  runs (bob's `impacts_applied == 0`; bob applied 330 snaps vs 506 in the control and its copy of alice sat at (-170,138)) and passed on
-  re-run and in isolation. Not touched by that iteration's change (display trial only). Unrepaired — timing under whole-workspace load;
-  a future network iteration should reproduce it before changing the assertion.
+- Repaired flake (iteration 11 of the run, implemented candidate, not independently checked): `net_drive::a_driven_collision_replicates_across_three_processes`
+  failed the external gate in iteration 10 (bob `impacts_applied == 0`). Root cause (reproduced: 1 of 6 copies of the test in parallel):
+  a client's frame budget is not a clock — under load the host advances fewer ticks per client frame, and the ram's first strike lands
+  anywhere from host tick ~700 to ~1850 (measured with temporary prints on the publish/push paths, since removed) while bob's 1000-frame
+  budget covered ~2000 ticks, so a late strike rode a snap past bob's exit. Not a replication defect: the host published the rows and
+  every client that was connected applied them. Fix is test-side: budgets 2800/2500 (as the shove legs) and `until_within(90 s)` for
+  the quiet clients. After: 10/10 passes with 10 copies in parallel (before: 1/6 failed at 6 copies).
 - Single writer rule: this worktree shares build artifacts/stash with
   other agents per AGENTS.md — rebuilds must be coordinated.
 

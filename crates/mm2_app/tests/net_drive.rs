@@ -1397,9 +1397,15 @@ fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField,
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
 
-    let mut alice_flags = join_args(install, addr, "alice", 1400);
+    // The budgets leave room for a slow strike: the ram is a pursuit
+    // through the wire's input latency, so the first contact lands
+    // anywhere from host tick ~700 to ~1850 depending on load (measured
+    // over parallel runs), and bob must still be connected — a frame
+    // budget is not a clock; a loaded host advances fewer ticks per
+    // client frame — when the impact row rides a snap past him.
+    let mut alice_flags = join_args(install, addr, "alice", 2800);
     alice_flags.push(if alice_rams { "--ram" } else { "--parked" }.into());
-    let mut bob_flags = join_args(install, addr, "bob", 1000);
+    let mut bob_flags = join_args(install, addr, "bob", 2500);
     bob_flags.push("--parked".into());
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     let bob = Proc::spawn(MM2_EXE, &bob_flags);
@@ -1407,8 +1413,11 @@ fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField,
 
     // Bob's cap is shorter so his record prints while alice is still
     // connected, as in the other legs.
-    let bob_rec = bob.until("smoke=headless-physics");
-    let alice_rec = alice.until("smoke=headless-physics");
+    // The clients are quiet for their whole run, which outlasts the
+    // per-line wait on a loaded machine.
+    let bound = Duration::from_secs(90);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
     assert!(alice.wait().success(), "alice did not exit cleanly");
     assert!(bob.wait().success(), "bob did not exit cleanly");
     for _ in 0..2 {
