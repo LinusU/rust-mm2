@@ -82,6 +82,8 @@ pub struct CableCar {
     pub lift: f32,
     /// How far ahead of the model's origin its front is, m.
     pub nose: f32,
+    /// How far behind the model's origin its tail is, m.
+    pub tail: f32,
     /// Half the model's width, m — the track strip it blocks.
     pub half_width: f32,
 }
@@ -230,6 +232,13 @@ pub fn spawn_cable_cars(
         .filter(|z| z.is_finite())
         .unwrap_or(4.0)
         .clamp(1.0, 12.0);
+    let tail = model
+        .collider
+        .as_ref()
+        .map(|c| -c.aabb(Vec3::ZERO, Quat::IDENTITY).min.z)
+        .filter(|z| z.is_finite())
+        .unwrap_or(nose)
+        .clamp(1.0, 12.0);
     let half_width = model
         .collider
         .as_ref()
@@ -251,11 +260,10 @@ pub fn spawn_cable_cars(
             motion,
             lift,
             nose,
+            tail,
             half_width,
         });
-        commands
-            .entity(body)
-            .insert(RoadObstacle { half_length: nose });
+        commands.entity(body).insert(RoadObstacle { nose, tail });
         report.cars += 1;
     }
     report.missing_textures = models.finish(commands, owner).len();

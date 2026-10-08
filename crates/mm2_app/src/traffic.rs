@@ -409,8 +409,10 @@ pub enum AmbientDrive {
 /// body's local +Z axis (nose first) at a car's own sensing grain.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoadObstacle {
-    /// Distance from the body's origin to its front and tail, m.
-    pub half_length: f32,
+    /// Distance from the body's origin to its front, m.
+    pub nose: f32,
+    /// Distance from the body's origin back to its tail, m.
+    pub tail: f32,
 }
 
 impl RoadObstacle {
@@ -419,9 +421,9 @@ impl RoadObstacle {
     /// half-length (2 m) inside each end, so a car stops short of the
     /// body's edge and not of its middle.
     pub fn sense_points(&self, at: Vec3, rotation: Quat) -> impl Iterator<Item = Vec3> {
-        let reach = (self.half_length.min(12.0) - OBSTACLE_END_INSET).max(0.0);
+        let reach = |end: f32| (end.min(12.0) - OBSTACLE_END_INSET).max(0.0);
         let fwd = rotation * Vec3::Z;
-        [at, at + fwd * reach, at - fwd * reach]
+        [at, at + fwd * reach(self.nose), at - fwd * reach(self.tail)]
             .into_iter()
             .filter(|p| p.is_finite())
     }

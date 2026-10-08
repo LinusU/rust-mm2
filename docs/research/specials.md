@@ -197,9 +197,11 @@ corridor blockers (`RoadObstacle`: the origin, plus a point 2 m inside the
 nose and the tail, since the sense reads centres and a car's own
 half-length is 2 m). An ambient car then queues behind a tram under the
 same follow law as behind a car and stops at least a car's length short
-of the body, tail first or head-on. The tram's extent is the nose
-(`aabb.max.z`) taken as symmetric; the retail origin-to-tail distance is
-not measured. A tram in the junction box also counts as an occupant of
+of the body, tail first or head-on. The tram's nose is
+`aabb.max.z` and its tail `-aabb.min.z` of the model's collider
+(`CableCar::tail`, `RoadObstacle::tail`); on retail `va_cablecar_f` they
+measure 4.3602 m and 4.3602 m — symmetric, so the earlier assumption
+held. A tram in the junction box also counts as an occupant of
 it for the box yield. Synthetic lane only (no windowed run with retail
 traffic).
 

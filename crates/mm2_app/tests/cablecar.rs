@@ -229,6 +229,7 @@ fn spawn_line(app: &mut App, roads: u32, cars: &[(usize, f32)]) -> Vec<Entity> {
                         motion,
                         lift: 0.0,
                         nose,
+                        tail: nose,
                         half_width: 1.25,
                     },
                 ))
@@ -577,15 +578,27 @@ fn spawn_into_world(vfs: &Vfs, city: &str, eligible: bool) -> (CableReport, usiz
     // Each car is also a body the ambient traffic queues behind, as
     // long as the car's nose.
     for (car, obstacle) in world.query::<(&CableCar, &RoadObstacle)>().iter(&world) {
-        assert_eq!(obstacle.half_length, car.nose);
+        assert_eq!((obstacle.nose, obstacle.tail), (car.nose, car.tail));
     }
     let obstacles = world.query::<&RoadObstacle>().iter(&world).count();
     assert_eq!(obstacles, cars, "every cable car must be sensed by traffic");
     for car in world.query::<&CableCar>().iter(&world) {
         // The body the obstacle sensor measures: a tram, not the
         // fallback sizes.
-        eprintln!("cable car nose {} half-width {}", car.nose, car.half_width);
+        eprintln!(
+            "cable car nose {} tail {} half-width {}",
+            car.nose, car.tail, car.half_width
+        );
         assert!((1.0..=12.0).contains(&car.nose), "nose {}", car.nose);
+        assert!((1.0..=12.0).contains(&car.tail), "tail {}", car.tail);
+        // Measured on the retail collider: the tail is as far behind the
+        // origin as the nose is ahead of it.
+        assert!(
+            (car.tail - car.nose).abs() < 0.05,
+            "nose {} tail {}",
+            car.nose,
+            car.tail
+        );
         assert!(
             (0.5..=4.0).contains(&car.half_width),
             "half-width {}",

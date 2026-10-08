@@ -1557,7 +1557,8 @@ fn follower_toward_cable_car(facing: f32, obstacle: bool) -> (f32, f32) {
     ));
     if obstacle {
         body.insert(RoadObstacle {
-            half_length: HALF_LENGTH,
+            nose: HALF_LENGTH,
+            tail: HALF_LENGTH,
         });
     }
     let follower = spawn_follower(&mut app, lane, 2.0, 15.0);
@@ -1570,6 +1571,31 @@ fn follower_toward_cable_car(facing: f32, obstacle: bool) -> (f32, f32) {
     }
     let speed = car_state(&mut app, follower).map_or(f32::NAN, |(_, v, _)| v);
     (closest, speed)
+}
+
+/// The sensing points follow the body's own extents: a long nose and a
+/// short tail put the end points at different distances, each two
+/// metres inside its end, and a body shorter than the inset is only
+/// sensed at its origin.
+#[test]
+fn an_obstacles_sense_points_follow_its_nose_and_tail() {
+    let at = Vec3::new(10.0, 1.0, -5.0);
+    let rot = mm2_game::movers::mover_rotation(Vec3::X);
+    let obstacle = RoadObstacle {
+        nose: 6.0,
+        tail: 3.0,
+    };
+    let along = |p: Vec3| (p - at).dot(Vec3::X);
+    let pts: Vec<f32> = obstacle.sense_points(at, rot).map(along).collect();
+    assert_eq!(pts.len(), 3);
+    assert!(pts[0].abs() < 1e-4);
+    assert!((pts[1] - 4.0).abs() < 1e-4, "nose point {}", pts[1]);
+    assert!((pts[2] + 1.0).abs() < 1e-4, "tail point {}", pts[2]);
+    let stub = RoadObstacle {
+        nose: 1.0,
+        tail: 1.0,
+    };
+    assert!(stub.sense_points(at, rot).all(|p| p.distance(at) < 1e-4));
 }
 
 /// Ambient cars queue behind a cable car as behind any car: held short
