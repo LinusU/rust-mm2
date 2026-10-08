@@ -1,3 +1,13 @@
+# Last iteration — F28-A.4: direct tests for the specials report's model classification (iteration 24 of the recovery run)
+
+Selection: the F28-A.3 review passed with no blockers; two of its verification gaps were test gaps in `mm2-inspect specials` — the named / default / unresolved classification had no direct test on the shared-rule branch, and the intended edge fix (a path named like the family default that does not resolve is `unresolved`, not `named`) was unpinned. The retail rerun gap is not closable here (no change to the report, and no retail work this slice). Cable car (UNK-44) still needs a play observation, so a test slice was the highest-value ready work.
+Change: tests only, `tools/mm2_inspect/src/specials.rs` (+2 tests, +1 helper; no production change). `a_path_named_like_the_family_default_that_resolves_nowhere_is_unresolved`: a ferry file with a named tug, a case-folded default-named path and a `PATHnn` label counts (1,0,2) with the default geometry absent and (2,1,0) once installed. `drawbridge_paths_resolve_by_asset_name_else_the_leaf_default`: `OPEN:`-decorated/case-folded own model, a `PATHnn` label and an uninstalled asset count (1,0,2) without the shared leaf default and (1,2,0) with it.
+Mutation: disabling the `!resolves(&model)` branch fails the edge test (and the existing strict-failure test); restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 56 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Synthetic fixtures only. Open on F28 unchanged: AC01 cable car + other AIMAP actors, AC04 retail rooms, AC05 restart phase test.
+
+---
+
 # Last iteration — F28-A.3: one model-resolution rule for the movers and the coverage report (iteration 23 of the recovery run)
 
 Selection: the F28-A.2 review passed with no blockers; its verification gap was that `mm2-inspect specials` re-implemented the managers' model-resolution rule, so the report and the runtime could drift. Closing that is the cheapest honest improvement to the AC01/AC06 evidence before the larger cable-car work (UNK-44) that needs the `0x54a200` rail-curve walk and a play observation.

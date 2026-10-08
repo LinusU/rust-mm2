@@ -664,6 +664,69 @@ mod tests {
         assert!(by(".bak").loaded.is_none());
     }
 
+    /// `(named, default, unresolved)` of a city's default file for `object`.
+    fn counts(a: &CityAudit, object: &str) -> (usize, usize, usize) {
+        let f = row(a, object)
+            .files
+            .iter()
+            .find(|f| f.role == Role::Default)
+            .unwrap();
+        let l = f.loaded.clone().unwrap().unwrap();
+        (l.named, l.default, l.unresolved)
+    }
+
+    #[test]
+    fn a_path_named_like_the_family_default_that_resolves_nowhere_is_unresolved() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "geometry/giz_tug01_l.pkg", b"x");
+        write(
+            d.path(),
+            "race/london/london_ferry.pathset",
+            &pth1(&[
+                ("giz_tug01_l", POINTS),
+                // The ferry default, but its geometry is not installed:
+                // not `named` (nothing resolved), not `default` either.
+                ("GIZ_CarFerry01_F", POINTS),
+                ("PATH02", POINTS),
+            ]),
+        );
+        let a = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(counts(&a, "ferry"), (1, 0, 2));
+        // Putting the default model in place resolves the other two: the
+        // case-folded default-named path becomes a named one.
+        write(d.path(), "geometry/giz_carferry01_f.pkg", b"x");
+        let a = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(counts(&a, "ferry"), (2, 1, 0));
+    }
+
+    #[test]
+    fn drawbridge_paths_resolve_by_asset_name_else_the_leaf_default() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "geometry/giz_span_x.pkg", b"x");
+        write(
+            d.path(),
+            "race/london/london_bridge.pathset",
+            &pth1(&[
+                // Event-state decoration stripped, case folded: own model.
+                ("OPEN:GIZ_Span_X", POINTS),
+                // Route label: never an asset reference.
+                ("PATH01", POINTS),
+                // An asset that is not installed.
+                ("giz_gone", POINTS),
+            ]),
+        );
+        // No leaf default installed: only the own-model path resolves.
+        let a = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(counts(&a, "bridge"), (1, 0, 2));
+        write(
+            d.path(),
+            &format!("geometry/{DRAWBRIDGE_LEAF_MODEL}.pkg"),
+            b"x",
+        );
+        let a = audit_city(&vfs_of(d.path()), "london");
+        assert_eq!(counts(&a, "bridge"), (1, 2, 0));
+    }
+
     #[test]
     fn an_unreachable_garbled_overlay_is_shown_but_does_not_fail() {
         let d = tempfile::tempdir().unwrap();
