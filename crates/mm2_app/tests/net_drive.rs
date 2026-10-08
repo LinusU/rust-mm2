@@ -440,6 +440,128 @@ fn a_client_that_joins_a_running_session_is_handed_the_live_one() {
     quit_and_assert_host_drove(host);
 }
 
+/// F26-AC02's "not default noon" leg at process level: the host is
+/// started with rain (`--weather 3`) and sits in generation 1 alone;
+/// a client that connects *afterwards* must come up in the same wet
+/// session, not in a default dry one. The wetness is read off each
+/// record's `traction=` cell — `TireConditions.traction` is the
+/// weather's gameplay consequence (F18-B.1), so a joiner that rebuilt
+/// its session from defaults would read no cell at all (the record
+/// omits a unit factor). The host's own record is no witness: by
+/// the time it prints, the joiner's departure has already ended the
+/// session (`phase=menu`).
+///
+/// Dev world, synthetic install: the visual half (which `.ltNN` preset
+/// lit the scene) needs a city and is the retail leg below.
+#[test]
+fn a_late_joiner_inherits_the_hosts_weather_not_the_default() {
+    let install = tempfile::tempdir().unwrap();
+    let mut args = host_args(install.path(), 12000);
+    args.extend(["--weather".into(), "3".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &args);
+    let addr = listening_addr(&host);
+
+    host.cmd("start");
+    host.until("event=started generation=1");
+    let late = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "late", 4500));
+    host.until("remote participant spawned");
+
+    let rec = late.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove(&rec, 1);
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
+    assert!(
+        rec.contains("traction=0.8"),
+        "the late joiner is not in the host's rain: {rec}"
+    );
+    assert!(
+        late.wait().success(),
+        "the late joiner did not exit cleanly"
+    );
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
+/// The `env=lt<NN>(<preset>) fog=… sky=…` cells of a record — which
+/// authored light preset, fog and sky the session bound.
+fn env_cells(line: &str) -> String {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let at = tokens
+        .iter()
+        .position(|t| t.starts_with("env="))
+        .unwrap_or_else(|| panic!("no env= field in {line}"));
+    tokens[at..(at + 3).min(tokens.len())].join(" ")
+}
+
+/// The same on a real city, where the conditions have a visible
+/// consequence: a retail sf Cruise hosted at a non-default time of day
+/// and weather, a late joiner arriving after it started, and the
+/// joiner's lighting preset must be the one those conditions bind in a
+/// plain single-player run — and not the one a default-conditions run
+/// binds. (The host's own record is no witness: it prints after the
+/// session has ended.) Skipped without the operator's install
+/// (`MM2_RETAIL=<dir>`), like the other retail legs.
+///
+/// Same machine, loopback, headless: it shows the joiner *bound* the
+/// host's preset, not how it looks.
+#[test]
+fn a_late_joiner_lights_the_scene_like_the_host_on_a_retail_city() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let conditions = ["--time-of-day", "2", "--weather", "3"];
+    // The preset a solo run binds, for the default and the hosted
+    // conditions: the oracle the joiner is compared against.
+    let solo = |extra: &[&str]| {
+        let mut args: Vec<String> = vec![
+            "--mm2-path".into(),
+            retail.to_str().unwrap().into(),
+            "--city".into(),
+            "sf".into(),
+            "--headless".into(),
+            "--frames".into(),
+            "60".into(),
+        ];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        let proc = Proc::spawn(MM2_EXE, &args);
+        let rec = proc.until_within("smoke=headless-physics", Duration::from_secs(240));
+        assert_eq!(field(&rec, "status"), "pass", "{rec}");
+        env_cells(&rec)
+    };
+    let default_env = solo(&[]);
+    let expected_env = solo(&conditions);
+    assert_ne!(
+        expected_env, default_env,
+        "the conditions bind the default preset, so this leg proves nothing"
+    );
+
+    let mut host_args = host_args(&retail, 9000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(["--city".into(), "sf".into()]);
+    host_args.extend(conditions.iter().map(|a| a.to_string()));
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    host.cmd("start");
+    host.until("event=started generation=1");
+    let late = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "late", 1000));
+    host.until("remote participant spawned");
+
+    let rec = late.until_within("smoke=headless-physics", Duration::from_secs(240));
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
+    assert_eq!(
+        env_cells(&rec),
+        expected_env,
+        "the late joiner lit the scene differently from the hosted conditions: {rec}"
+    );
+    assert!(
+        late.wait().success(),
+        "the late joiner did not exit cleanly"
+    );
+    quit_and_assert_host_drove(host);
+    eprintln!("default {default_env}\nhosted  {expected_env}\nlate    {rec}");
+}
+
 /// F26-AC02's reconnect-shaped leg at process level: a late joiner
 /// plays and leaves, then a *second* process joins the same running
 /// session. Identity is not carried across a reconnect (the wire id is
