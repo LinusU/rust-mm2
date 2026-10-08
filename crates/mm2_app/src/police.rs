@@ -44,7 +44,7 @@ use avian3d::prelude::{Position, Rotation, SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    ChaseMode, ChaseNav, DamageSignals, EmergencyLights, NavGraph, ObjectIdentity,
+    ChaseMode, ChaseNav, DamageSignals, EmergencyLights, ImpactEvent, NavGraph, ObjectIdentity,
     ParticipantState, Player, PlayerControl, PlayerVehicle, PoliceRoster, PoliceSpec, Pursuit,
     PursuitEvent, PursuitPhase, PursuitPolicy, RaceProgress, Session, SessionAuthority,
     SessionEntity, Sighting, relative_bearing,
@@ -291,6 +291,9 @@ pub struct PursuitReport {
     pub planned: u32,
     /// Router queries that found no line — the cop aimed straight.
     pub unrouted: u32,
+    /// Impacts between a cop and a local human's car ([`count_cop_impacts`]):
+    /// the evidence that a pursuing cop really reaches its target.
+    pub rams: u32,
 }
 
 impl PursuitReport {
@@ -306,6 +309,9 @@ impl PursuitReport {
         if self.unrouted > 0 {
             s.push_str(&format!(",nr{}", self.unrouted));
         }
+        if self.rams > 0 {
+            s.push_str(&format!(",x{}", self.rams));
+        }
         s
     }
 
@@ -320,10 +326,21 @@ impl PursuitReport {
     }
 }
 
-/// Distance (m) from the goal inside which a pursuing cop stops
-/// closing — it shadows the target instead of ramming through it
-/// (what a catch does is unverified, COP-4, so none is invented).
-const SHADOW_RANGE: f32 = 8.0;
+/// Distance (m) from an *empty* goal — the place a target was last seen,
+/// with the target no longer in contact — inside which a pursuing cop
+/// stops closing: there is nothing there to drive into. A target in
+/// contact is rammed instead ([`RAM_PRESS_RANGE`]; operator report 7,
+/// ledger DSN-99).
+const ARRIVE_RANGE: f32 = 8.0;
+
+/// Centre distance (m) inside which a ramming cop is in contact with its
+/// target (about a car length): it keeps its foot down and its nose on
+/// the target, and a stalled car there is the push itself, not a wedge.
+const RAM_PRESS_RANGE: f32 = 7.0;
+
+/// A ramming cop ignores the cornering pace limit inside this range (m):
+/// a target alongside is a target to hit, not a bend to slow for.
+const RAM_COMMIT_RANGE: f32 = 25.0;
 
 /// A cop's driving state: the shared AI-driver stuck/escape machine
 /// plus this car's own steering/brake limits (what `steer_toward` needs
@@ -354,10 +371,15 @@ const TURNAROUND_SPEED: f32 = 4.0;
 /// point on the road line the cop follows ([`ChaseNav::aim`]), or the
 /// `goal` itself when there is no line; `goal` is where the chase ends.
 ///
-/// The cop closes on the goal at a pace the remaining distance can
-/// stop from, brakes to a halt within [`SHADOW_RANGE`] of it, and
-/// slows for a bend: the speed at which its cornering grip holds the arc
-/// to `aim` caps its pace.
+/// With `ram` set the goal is the live target in contact: the cop drives
+/// *through* it at speed, never braking for arrival, and while within
+/// [`RAM_PRESS_RANGE`] keeps its throttle down and its nose on the target
+/// instead of backing off. Otherwise the goal is the place the target was
+/// last seen, and the cop closes on it at a pace the remaining distance
+/// can stop from and halts within [`ARRIVE_RANGE`]. Either way it slows
+/// for a bend: the speed at which its cornering grip holds the arc to
+/// `aim` caps its pace (a ramming cop at close range excepted).
+#[allow(clippy::too_many_arguments)] // one frame of pose + two points + the mode; a struct would only rename them
 pub fn chase_input(
     drive: &mut PoliceDrive,
     pos: Vec3,
@@ -366,9 +388,21 @@ pub fn chase_input(
     grounded: bool,
     aim: Vec3,
     goal: Vec3,
+    ram: bool,
 ) -> VehicleInput {
     let dist = (goal.x - pos.x).hypot(goal.z - pos.z);
-    if !dist.is_finite() || !yaw.is_finite() || !aim.is_finite() || dist < SHADOW_RANGE {
+    if ram && dist.is_finite() && yaw.is_finite() && aim.is_finite() && dist < RAM_PRESS_RANGE {
+        // In contact: keep pushing. Not a wedge, so the stuck watch
+        // and the turn-around stay quiet.
+        drive.bot.stuck_frames = 0;
+        let bearing = relative_bearing(yaw, pos, goal);
+        return VehicleInput {
+            steering: steer_toward(bearing, dist.max(1.0), speed, &drive.limits),
+            throttle: 1.0,
+            ..VehicleInput::default()
+        };
+    }
+    if !dist.is_finite() || !yaw.is_finite() || !aim.is_finite() || (!ram && dist < ARRIVE_RANGE) {
         // At the goal (or nothing usable to chase): stop, and do not
         // read a deliberate halt as being wedged.
         drive.bot.stuck_frames = 0;
@@ -393,9 +427,15 @@ pub fn chase_input(
     }
     // Close at a speed the remaining distance can brake down from, and
     // no faster than the arc to the aim point can be held.
-    let arrive = (2.0 * drive.limits.brake_accel * (dist - SHADOW_RANGE)).sqrt();
+    let arrive = if ram {
+        f32::INFINITY
+    } else {
+        (2.0 * drive.limits.brake_accel * (dist - ARRIVE_RANGE)).sqrt()
+    };
     let curvature = 2.0 * bearing.sin().abs() / aim_dist.max(1.0);
-    let bend = if curvature > 1e-3 {
+    let bend = if ram && dist < RAM_COMMIT_RANGE {
+        f32::INFINITY
+    } else if curvature > 1e-3 {
         (drive.limits.corner_accel / curvature).sqrt()
     } else {
         f32::INFINITY
@@ -414,6 +454,36 @@ pub fn chase_input(
     };
     watch_stuck(&mut drive.bot, &input, speed, grounded);
     input
+}
+
+/// Count the physics impacts between a fielded cop and a local human's
+/// car into [`PursuitReport::rams`] (operator report 7, item 1: "prove it
+/// with a run that counts cop-on-player impacts"). Reads the filtered
+/// [`ImpactEvent`] stream every other consumer reads; one event per
+/// contact the filter passed, so a cop pressing a target counts each
+/// re-contact, not each frame.
+pub fn count_cop_impacts(
+    mut impacts: MessageReader<ImpactEvent>,
+    report: Option<ResMut<PursuitReport>>,
+    cops: Query<&ObjectIdentity, With<PoliceCar>>,
+    humans: Query<(&Player, &ObjectIdentity), With<PlayerVehicle>>,
+) {
+    // Drained unconditionally so a session without cops leaves no stale
+    // backlog for the next one.
+    let impacts: Vec<ImpactEvent> = impacts.read().copied().collect();
+    let Some(mut report) = report else { return };
+    let is_cop = |id| cops.iter().any(|c| c.0 == id);
+    let is_human = |id| {
+        humans
+            .iter()
+            .any(|(p, i)| p.control == PlayerControl::Local && i.0 == id)
+    };
+    for hit in impacts {
+        let (a, b) = hit.participants;
+        if (is_cop(a) && is_human(b)) || (is_cop(b) && is_human(a)) {
+            report.rams += 1;
+        }
+    }
 }
 
 /// How far over a bend's pace a cop must be before it brakes rather than
@@ -545,6 +615,10 @@ pub fn police_pursuit(
                 let aim = chase.aim(nav.as_deref().map(|n| &n.0), dt, pos.0, goal, in_view);
                 report.planned += u32::from(aim.planned);
                 report.unrouted += u32::from(aim.failed);
+                // Contact this tick (`Pursuing(0)`): the goal is the live
+                // target, so ram it; once contact is lost the goal is an
+                // empty last-seen spot.
+                let ram = pursuit.phase == PursuitPhase::Pursuing(0.0);
                 chase_input(
                     &mut drive,
                     pos.0,
@@ -553,6 +627,7 @@ pub fn police_pursuit(
                     vstate.grounded,
                     aim.point,
                     goal,
+                    ram,
                 )
             }
             // Gave up: roll to a stop where it is.
@@ -580,6 +655,32 @@ mod tests {
             limits: CarLimits::of(&mm2_vehicle::VehicleConfig::default(), None),
             turnarounds: 0,
         }
+    }
+
+    /// The last-seen-spot chase (no target in contact): the older tests
+    /// drive this shape.
+    fn chase_input(
+        d: &mut PoliceDrive,
+        pos: Vec3,
+        yaw: f32,
+        speed: f32,
+        grounded: bool,
+        aim: Vec3,
+        goal: Vec3,
+    ) -> VehicleInput {
+        super::chase_input(d, pos, yaw, speed, grounded, aim, goal, false)
+    }
+
+    /// The same frame with the target in contact: ram it.
+    fn ram_goal(
+        d: &mut PoliceDrive,
+        pos: Vec3,
+        yaw: f32,
+        speed: f32,
+        grounded: bool,
+        goal: Vec3,
+    ) -> VehicleInput {
+        super::chase_input(d, pos, yaw, speed, grounded, goal, goal, true)
     }
 
     /// A chase with no road line: the aim is the goal.
@@ -673,6 +774,93 @@ mod tests {
             Vec3::new(0.0, 0.0, -90.0),
         );
         assert_eq!((go.throttle, go.brake), (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_cop_in_contact_with_its_target_drives_through_it_at_speed() {
+        let mut d = drive();
+        // 20 m from the target at 40 m/s: a shadowing cop would brake
+        // (it cannot stop inside 8 m); a ramming one holds the throttle.
+        let go = ram_goal(
+            &mut d,
+            Vec3::ZERO,
+            0.0,
+            40.0,
+            true,
+            Vec3::new(0.0, 0.0, -20.0),
+        );
+        assert_eq!((go.throttle, go.brake), (1.0, 0.0), "{go:?}");
+        // The same cop reaching an empty last-seen spot still brakes.
+        let stop = chase_goal(
+            &mut d,
+            Vec3::ZERO,
+            0.0,
+            40.0,
+            true,
+            Vec3::new(0.0, 0.0, -20.0),
+        );
+        assert_eq!((stop.throttle, stop.brake), (0.0, 1.0), "{stop:?}");
+        // Inside the old shadow range it still does not stop.
+        let near = ram_goal(
+            &mut d,
+            Vec3::ZERO,
+            0.0,
+            20.0,
+            true,
+            Vec3::new(0.0, 0.0, -3.0),
+        );
+        assert_eq!((near.throttle, near.brake), (1.0, 0.0), "{near:?}");
+    }
+
+    #[test]
+    fn a_target_alongside_is_hit_not_slowed_for() {
+        let mut d = drive();
+        // 15 m off the nose to the side at speed: the cornering pace
+        // would cap this to a crawl for a last-seen spot, not for a ram.
+        let side = Vec3::new(15.0, 0.0, -2.0);
+        let ram = ram_goal(&mut d, Vec3::ZERO, 0.0, 25.0, true, side);
+        assert_eq!((ram.throttle > 0.0, ram.brake), (true, 0.0), "{ram:?}");
+        assert!(ram.steering > 0.0, "steers into it: {ram:?}");
+    }
+
+    #[test]
+    fn a_cop_in_contact_keeps_pressing_and_never_reads_as_wedged() {
+        let mut d = drive();
+        // Nose on the target, at a standstill: the push. Run past the
+        // stuck window and the turn-around speed gate many times over.
+        for _ in 0..600 {
+            let i = ram_goal(
+                &mut d,
+                Vec3::ZERO,
+                0.0,
+                0.0,
+                true,
+                Vec3::new(0.0, 0.0, -4.0),
+            );
+            assert_eq!((i.throttle, i.brake, i.handbrake), (1.0, 0.0, 0.0), "{i:?}");
+        }
+        assert_eq!((d.bot.escapes, d.turnarounds), (0, 0));
+        // Target alongside and behind (a pass-through that overshot):
+        // still pressing, steering round, never reversing off.
+        let behind = ram_goal(&mut d, Vec3::ZERO, 0.0, 1.0, true, Vec3::new(2.0, 0.0, 4.0));
+        assert_eq!((behind.throttle, behind.brake), (1.0, 0.0), "{behind:?}");
+        assert_eq!(d.turnarounds, 0);
+    }
+
+    #[test]
+    fn a_degenerate_ram_goal_still_brakes_instead_of_driving() {
+        let mut d = drive();
+        let nan = ram_goal(&mut d, Vec3::ZERO, 0.0, 5.0, true, Vec3::NAN);
+        assert_eq!((nan.throttle, nan.brake), (0.0, 1.0));
+        let yaw = ram_goal(
+            &mut d,
+            Vec3::ZERO,
+            f32::NAN,
+            5.0,
+            true,
+            Vec3::new(0.0, 0.0, -2.0),
+        );
+        assert_eq!((yaw.throttle, yaw.brake), (0.0, 1.0));
     }
 
     #[test]
@@ -826,6 +1014,8 @@ mod tests {
         assert_eq!(r.smoke_detail(), "1/1/2,r3");
         r.unrouted = 1;
         assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1");
+        r.rams = 4;
+        assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1,x4");
         assert_eq!((r.noticed, r.dismissed), (1, 0));
     }
 }

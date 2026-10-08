@@ -3182,7 +3182,7 @@ Take the items in this order. Use one slice per item unless two
 genuinely share a cause. Do not mark an item done until a capture (or,
 for item 1, a measured run) shows it fixed.
 
-1. **Police do not ram.** The operator wrote: "When a police chases me,
+1. **[implemented, candidate — iteration 1 of the new run; see LAST_ITERATION]** **Police do not ram.** The operator wrote: "When a police chases me,
    they should try and drive straight into me, knocking me off my
    course. Now they stay a few meters away."
    - Cause: `SHADOW_RANGE = 8.0` in `crates/mm2_app/src/police.rs`. A

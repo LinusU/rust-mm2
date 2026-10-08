@@ -1872,7 +1872,7 @@ fn main() {
     // the other AI in ordinary static captures; no-ops without a fleet.
     .add_systems(
         Update,
-        police::police_pursuit.run_if(evidence_capture_input_allowed),
+        (police::police_pursuit, police::count_cop_impacts).run_if(evidence_capture_input_allowed),
     )
     // F25-B: the trailer reseat follower reads every `ResetVehicle` the
     // frame produced — the FixedLast resolvers, `vehicle_self_right`

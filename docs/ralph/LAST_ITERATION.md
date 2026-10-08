@@ -1,13 +1,14 @@
-# Last iteration — F23-A.7 Auto Reverse (iteration 18 of the run)
+# Last iteration — report 7 item 1: police ram (iteration 1 of the new run)
 
-Selection: the iteration-17 review passed with no blocking findings; its only code-closable gap was already closed. Next ready F23 item that needs no hardware or unavailable content: the original's documented **Auto Reverse** control option (CTL-3). Subtitles are blocked (no retail table references voice text, UNK-35); render scale needs a render-world resolution override that cannot be checked without a GPU capture; both left open.
+Selection: report 7 outranks everything and item 1 is first. `chase_input` braked every pursuing cop to a halt within `SHADOW_RANGE` 8 m of its goal.
 
-Change (DSN-98, designed — what the original does with the option off is unrecovered):
-- `ControlSettings.auto_reverse` (default on = shipped behaviour; persisted; older `controls.json` stays on) with an `Auto reverse: On/Off` row (`ControlItem::AutoReverse`) on the main-menu Controls screen and the pause Controls page; Reset to defaults restores it.
-- `controls::BrakeCarry`, called from `input::vehicle_input` after the device mapping: with the option off, a brake pressed while the car moves (> 0.5 m/s) and still held at <= 0.5 m/s becomes a handbrake hold, so the sim never sees a brake at a standstill and never engages reverse. Release and press again at a standstill = reverse; it stays a reverse pedal while backing away. Pause/countdown forgets the press. No sim or wire change (brake/handbrake bytes only), so a predicted copy matches the authority.
-- Pause Controls page grew to 21 rows and draws at 19 px (was 20 px); fit against 720p is estimated, not captured.
-- Tests: +7 `controls` unit (default-on passthrough, carry-through-stop hold, fresh press reverses and keeps reversing, stronger handbrake kept + `release`, no-state passthrough, persistence/older file, row toggle + reset), +1 `tests/input.rs::auto_reverse_off_needs_a_fresh_press_to_reverse` through the real system including a pause; menu and session row pins moved by one. Ledger row DSN-98 added.
+Change (ledger DSN-99, COP-4/COP-9 notes updated; operator recollection is the only evidence):
+- `police::chase_input` takes `ram`. `police_pursuit` passes it when the cop has the target in contact this tick (`Pursuing(0)`). Ram: no arrival braking, no stop inside 8 m; inside `RAM_PRESS_RANGE` 7 m full throttle toward the target with the stuck watch and turn-around quiet (a push is not a wedge, so it does not back off); inside `RAM_COMMIT_RANGE` 25 m the bend pace cap is lifted. Contact lost keeps the old halt at the empty last-seen spot (renamed `ARRIVE_RANGE`).
+- `police::count_cop_impacts` (+ `PursuitReport::rams`, smoke `pur=...,x<N>`) counts `ImpactEvent`s between a cop and a local human, scheduled with `police_pursuit` in the app and the headless smoke.
+- Tests: +4 unit (drive through at speed, target alongside, keeps pressing without wedge/turn-around, degenerate goal), report string, +1 `tests/police.rs::a_chasing_cop_rams_the_player_and_stays_in_contact` (verified to FAIL with ram forced off: `rams: 0`).
 
-Gates (foreground): `cargo fmt --all -- --check` PASS; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (58 `test result:` lines in my run, none failed; the external verify.log counts differently).
+Measured run (retail `fnv1a64:e91e6cd4b2ae30d9`, sf Cruise, `--spawn=59,1.5,95,0 --headless`, player idle): 600 frames `status=pass pur=1/0/1,x4`; 1800 frames `pur=1/0/1,nr2,x8`. No before figure recorded (counter did not exist).
 
-Status: candidate; not independently checked. Synthetic only: no real keyboard, no capture of the new row, feel unverified. Still open for F23: render scale, wheel/FFB hardware audit, AC06 hardware record, `Q`/menu/free-fly keys not rebindable, mouse-button rebinding, original R reverse toggle, subtitles (content-blocked), 720p fit of the pause Controls page.
+Gates (foreground): fmt PASS; clippy `--locked --workspace --all-targets --all-features -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (73 `test result` lines, none failed).
+
+Status: candidate; not independently checked. Not seen: no windowed capture of a ram; damage/spin-out feel unverified; a moving player was not measured. Report 7 items 2-11 untouched; next is item 2 (light-bar flares).

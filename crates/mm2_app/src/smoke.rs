@@ -733,7 +733,13 @@ fn run_headless(
         // F20-A.3: the fielded cops' detect → pursue machine; no-ops
         // without a fleet. Own slot — the main tuple is at the arity
         // limit.
-        .add_systems(Update, crate::police::police_pursuit)
+        .add_systems(
+            Update,
+            (
+                crate::police::police_pursuit,
+                crate::police::count_cop_impacts,
+            ),
+        )
         // F25-B: towed trailers reseat off the `ResetVehicle` stream —
         // after every writer, before the apply; own slot, the main
         // tuple is at the arity limit.

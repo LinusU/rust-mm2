@@ -247,7 +247,7 @@ fn restart_refields_the_lineup_under_the_new_generation() {
 // ---------------------------------------------------------------------------
 
 use mm2_app::layers::GameLayer;
-use mm2_app::police::{PursuitReport, police_pursuit};
+use mm2_app::police::{PursuitReport, count_cop_impacts, police_pursuit};
 use mm2_game::{
     EmergencyLights, ParticipantState, Pursuit, PursuitPhase, PursuitPolicy, SessionPhase as Phase,
 };
@@ -259,7 +259,7 @@ fn pursuit_app(rows: &str) -> (tempfile::TempDir, App) {
     let n = rows.lines().filter(|l| !l.trim().is_empty()).count() as i64;
     let tmp = install(n, rows);
     let mut app = event_app(event_config(), vfs_of(tmp.path()));
-    app.add_systems(Update, police_pursuit);
+    app.add_systems(Update, (police_pursuit, count_cop_impacts));
     app.update();
     assert_eq!(phase(&app), Phase::Countdown);
     (tmp, app)
@@ -355,6 +355,51 @@ fn a_cop_in_sight_chases_the_racing_player_and_a_far_one_does_not() {
     // idle one does not.
     assert!(app.world().get::<EmergencyLights>(near).is_some());
     assert!(app.world().get::<EmergencyLights>(far).is_none());
+}
+
+/// Operator report 7, item 1: a pursuing cop drives into the target and
+/// keeps pressing it instead of halting a few metres short. The run
+/// counts cop-on-player impacts through the production impact stream.
+#[test]
+fn a_chasing_cop_rams_the_player_and_stays_in_contact() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    let (cop, player) = (cop_at(&mut app, 0), local_car(&mut app));
+    run_to_racing(&mut app);
+
+    let mut first_ram = None;
+    let mut closest_after = f32::MAX;
+    let mut farthest_late = 0.0_f32;
+    let frames = 1500;
+    for frame in 0..frames {
+        app.update();
+        let gap = pos_of(&app, cop).distance(pos_of(&app, player));
+        let rams = app.world().resource::<PursuitReport>().rams;
+        if rams > 0 && first_ram.is_none() {
+            first_ram = Some(frame);
+        }
+        if first_ram.is_some() {
+            closest_after = closest_after.min(gap);
+        }
+        if frame >= frames - 240 {
+            farthest_late = farthest_late.max(gap);
+        }
+    }
+    let report = app.world().resource::<PursuitReport>();
+    assert!(
+        first_ram.is_some() && report.rams >= 1,
+        "the cop never hit the player: {report:?}"
+    );
+    assert!(
+        matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)),
+        "{:?}",
+        phase_of(&app, cop)
+    );
+    // The old shadow policy held the cop 8 m out; it now stays against the
+    // car (two car lengths at most) for the last four seconds.
+    assert!(
+        farthest_late < 8.0,
+        "the cop backed off to {farthest_late:.1} m (closest {closest_after:.1} m): {report:?}"
+    );
 }
 
 #[test]
