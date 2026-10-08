@@ -30,7 +30,10 @@ pub struct RaceAudioWatch {
     countdown: Option<u32>,
     started: bool,
     terminal: bool,
-    warned: bool,
+    /// The displayed second the low-time beep last sounded for; it only
+    /// ever counts down, so a clock that wobbles back across a boundary
+    /// cannot repeat a beep.
+    warned_second: Option<u32>,
     final_gate: bool,
 }
 
@@ -147,15 +150,20 @@ pub fn race_cue_voices(
                 commentary.request(EventCue::FinalCheckpoint);
             }
         }
-        if !watch.terminal
-            && !watch.warned
-            && matches!(race.phase, RacePhase::Running)
-            && race
+        // One beep each time the displayed second drops (10, 9 … 1) while
+        // the clock is inside the low-time window (DSN-65). A render hitch
+        // that spans several seconds coalesces to the current one.
+        if !watch.terminal && matches!(race.phase, RacePhase::Running) {
+            let second = race
                 .time_remaining()
-                .is_some_and(|ticks| ticks > 0 && ticks <= LOW_TIME_TICKS)
-        {
-            watch.warned = true;
-            cues.push("timerwarning");
+                .filter(|&ticks| ticks > 0 && ticks <= LOW_TIME_TICKS)
+                .map(|ticks| ticks.div_ceil(RACE_TICK_HZ));
+            if let Some(second) = second
+                && watch.warned_second.is_none_or(|last| second < last)
+            {
+                watch.warned_second = Some(second);
+                cues.push("timerwarning");
+            }
         }
     }
     watch.progress = total;

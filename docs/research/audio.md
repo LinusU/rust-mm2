@@ -619,7 +619,7 @@ been recovered. The replacement engine uses this designed mapping:
 | Countdown releases control | `startracehigh` |
 | Checkpoint credited (including driven-route credit) | `waypoint` |
 | All any-order checkpoints cleared, or final lap's closing gate becomes next | `lastwaypoint` |
-| Running timer first enters the existing 10-second HUD warning band | `timerwarning` |
+| Running timer's displayed second drops through 10, 9 … 1 (once per second; operator recollection) | `timerwarning` |
 | Local participant finishes | `endofracetag` |
 | Local participant times out | `youlose` |
 

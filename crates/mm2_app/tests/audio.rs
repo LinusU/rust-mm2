@@ -4461,6 +4461,67 @@ fn race_effects_countdown_checkpoints_warning_and_finish_once() {
     assert!(race_effect_stems(&mut app).is_empty());
 }
 
+/// Stepping the race clock one fixed tick at a time through the low-time
+/// window sounds `timerwarning` exactly once per displayed second, 10 down
+/// to 1 — at the tick each second first shows, never at 0 (operator report 7).
+#[test]
+fn the_low_time_warning_beeps_once_per_second_from_ten_to_one() {
+    use mm2_game::{RACE_TICK_HZ, RacePhase, RaceState};
+    let tmp = race_effect_fixture();
+    let (mut app, _player) = race_effect_app(tmp.path());
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    let hz = u64::from(RACE_TICK_HZ);
+    let limit = 20 * hz;
+    let mut beeps = Vec::new();
+    let mut seen = 0;
+    for clock in 0..=limit + hz {
+        app.world_mut().resource_mut::<RaceState>().clock = clock;
+        app.update();
+        let now = race_effect_stems(&mut app)
+            .iter()
+            .filter(|s| **s == "timerwarning")
+            .count();
+        if now > seen {
+            assert_eq!(now, seen + 1, "one beep per update at clock {clock}");
+            beeps.push(limit.saturating_sub(clock));
+            seen = now;
+        }
+    }
+    let expected: Vec<u64> = (1..=10).rev().map(|s| s * hz).collect();
+    assert_eq!(beeps, expected);
+}
+
+/// A hitch spanning seconds coalesces to one beep, and a clock that wobbles
+/// back across a boundary does not repeat one.
+#[test]
+fn the_low_time_warning_coalesces_hitches_and_ignores_clock_wobble() {
+    use mm2_game::{RACE_TICK_HZ, RacePhase, RaceState};
+    let tmp = race_effect_fixture();
+    let (mut app, _player) = race_effect_app(tmp.path());
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    let hz = u64::from(RACE_TICK_HZ);
+    let limit = 20 * hz;
+    let count = |app: &mut App| {
+        race_effect_stems(app)
+            .iter()
+            .filter(|s| **s == "timerwarning")
+            .count()
+    };
+    let at = |app: &mut App, remaining: u64| {
+        app.world_mut().resource_mut::<RaceState>().clock = limit - remaining;
+        app.update();
+    };
+    at(&mut app, 11 * hz);
+    assert_eq!(count(&mut app), 0);
+    at(&mut app, 7 * hz + hz / 2); // hitch: 10 -> 8 shown
+    assert_eq!(count(&mut app), 1);
+    at(&mut app, 8 * hz + 1); // wobble back to the 9 s display
+    at(&mut app, 7 * hz + hz / 2 + 1);
+    assert_eq!(count(&mut app), 1);
+    at(&mut app, 7 * hz);
+    assert_eq!(count(&mut app), 2);
+}
+
 #[test]
 fn race_effects_hold_during_pause_ignore_remote_progress_and_scope_to_restart() {
     use mm2_game::{RacePhase, RaceProgress, RaceState};

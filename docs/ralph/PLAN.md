@@ -3245,7 +3245,7 @@ for item 1, a measured run) shows it fixed.
      - a LOD mismatch.
 
    Establish which one before fixing.
-8. **The low-time warning beeps once instead of every second.** The
+8. **[implemented, candidate — iteration 2 of the new run; see LAST_ITERATION and ledger DSN-65]** **The low-time warning beeps once instead of every second.** The
    operator wrote: "when there is low time (10 seconds) there is
    currently a single beep. But this beep should be repeated for every
    second <= 10 to really give the urgency that the time is about to run
