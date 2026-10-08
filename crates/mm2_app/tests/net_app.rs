@@ -3437,6 +3437,135 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.shutdown();
 }
 
+/// F25-C's settled-divergence bound, in-process over a real loopback
+/// socket: a predicted own car that sits at rest more than 1.5 m from
+/// the authority's copy of it is reseated on the copy after a run of
+/// snaps — and a car that agrees with it, or is still moving, is left
+/// alone. (The multi-process pose leg met this for real: a shove the
+/// local sim resolved harder than the authority left the car 7 m off,
+/// for good.)
+#[test]
+fn a_predicted_car_at_rest_apart_from_the_authority_is_reseated() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            VehicleInput::default(),
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    // Snaps are latest-wins at the push watermark, so each is sent and
+    // waited for in turn: the count the bound sees is the applied one.
+    let mut tick = 0;
+    let mut send = |app: &mut App, own_at: [f32; 3], own_vel: [f32; 3]| {
+        tick += 1;
+        host.ctl()
+            .broadcast(&Message::Snap {
+                impacts: Vec::new(),
+                race: None,
+                trailers: Vec::new(),
+                generation,
+                tick,
+                entries: vec![SnapEntry {
+                    player: our_id,
+                    pos: own_at,
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: own_vel,
+                    ..SnapEntry::default()
+                }],
+            })
+            .unwrap();
+        spin(app, |a| {
+            a.world()
+                .resource::<netdrive::NetDriveReport>()
+                .snaps_applied
+                >= tick
+        });
+    };
+    let settles = |app: &App| {
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .own_settles
+    };
+    let local_pos = |app: &App| {
+        app.world()
+            .get::<avian3d::prelude::Position>(local)
+            .unwrap()
+            .0
+    };
+
+    // Agreeing at rest, then 4 m apart but the authority's copy still
+    // moving: nothing, however long it goes on.
+    for _ in 0..100 {
+        send(&mut app, [0.0, 0.0, 0.0], [0.0; 3]);
+    }
+    for _ in 0..100 {
+        send(&mut app, [-4.0, 0.0, 0.0], [3.0, 0.0, 0.0]);
+    }
+    assert_eq!(settles(&app), 0, "agreement or motion never reseats");
+    assert!(local_pos(&app).length() < 1e-3);
+
+    // Apart and at rest on both sides: reseated on the asserted pose
+    // once the run is long enough — and not a snap before.
+    for _ in 0..40 {
+        send(&mut app, [-4.0, 0.0, 0.0], [0.0; 3]);
+    }
+    assert_eq!(settles(&app), 0, "a short run is a settle in progress");
+    for _ in 0..40 {
+        send(&mut app, [-4.0, 0.0, 0.0], [0.0; 3]);
+    }
+    assert_eq!(settles(&app), 1);
+    let at = local_pos(&app);
+    assert!(
+        (at - Vec3::new(-4.0, 0.0, 0.0)).length() < 1e-3,
+        "the car was reseated on the authority's pose: {at:?}"
+    );
+    host.shutdown();
+}
+
 /// F25-B (protocol v15), authority half: a remote seat whose pick
 /// carries authored cardata binds `VehicleAudio` like a local or
 /// opponent spawn — the component `engine_rigs` voices — and the

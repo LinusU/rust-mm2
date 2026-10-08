@@ -199,7 +199,9 @@ cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --parked
 cargo run -- --mm2-path <dir> --dev-world --headless --ram --frames 600
 #   --ram holds throttle and steers at the nearest other vehicle (F25-C):
 #   a driven car-to-car collision for multi-process runs against
-#   --parked neighbours. An evidence driver; works windowed too.
+#   --parked neighbours. On the authority it turns slowly and parks
+#   after its first strike, so the field comes to rest. An evidence
+#   driver; works windowed too.
 cargo run -- --mm2-path <dir> --dev-world --car vpbug --headless --seq --frames 2200
 #   --seq runs the staged idle → accelerate → coast → brake → reverse
 #   audio evidence program (F07-AC02): the record's seq= field reports

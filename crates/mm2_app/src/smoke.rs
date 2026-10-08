@@ -1090,6 +1090,27 @@ fn run_headless(
         }
     }
 
+    // F25-C pose-agreement evidence: where this process holds every
+    // wire seat's car at the end of the run — its own (predicted or
+    // authoritative) and each remote copy — so a multi-process test can
+    // compare one seat across the processes that see it. Absent without
+    // a wire seat, so every non-lobby record stays bit-identical.
+    let seats_detail = {
+        let mut q = app
+            .world_mut()
+            .query::<(&crate::netdrive::NetPlayer, &Position)>();
+        let mut seats: Vec<(u16, Vec3)> = q.iter(app.world()).map(|(n, p)| (n.0, p.0)).collect();
+        seats.sort_by_key(|(id, _)| *id);
+        if seats.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<String> = seats
+                .iter()
+                .map(|(id, at)| format!("{id}:{:.1},{:.1}", at.x, at.z))
+                .collect();
+            format!(" seats={}", rows.join("/"))
+        }
+    };
     let world_ecs = app.world();
     let session = world_ecs.resource::<Session>();
     let ticks = session.tick();
@@ -1163,14 +1184,15 @@ fn run_headless(
     // `SurfaceContact` (0 while every seat rolls on unresolvable ground
     // — a dev world mounts the authored `materials` pair when the
     // install carries one, so the `_default` block's sound class can
-    // resolve there).
+    // resolve there), and `fix`, the times the predicted own seat sat at
+    // rest apart from the authority's copy long enough to be reseated.
     // Absent without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{},surf{}s/{}a",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{},surf{}s/{}a,fix{}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1195,7 +1217,8 @@ fn run_headless(
                 r.progress_dropped,
                 r.wire_seats_retired,
                 r.surfaces_sent,
-                r.surfaces_applied
+                r.surfaces_applied,
+                r.own_settles
             )
         })
         .unwrap_or_default();
@@ -2188,7 +2211,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

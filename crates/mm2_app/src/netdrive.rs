@@ -95,7 +95,10 @@
 //!   advances: the authority teleported us, so the local pose snaps to
 //!   the asserted state (F25-A.5). Between resets the local sim owns the
 //!   seat — sub-epoch divergence stays local, which is what `Predicted`
-//!   means; continuous drift correction is named later scope. The `R`
+//!   means, with one bound: a car at rest more than [`SETTLE_DIST`]
+//!   from the authority's copy for [`SETTLE_SNAPS`] snaps in a row is
+//!   reseated on it (F25-C); continuous drift correction while moving
+//!   is named later scope. The `R`
 //!   key is the exception to a client's inertness: it sends a
 //!   `ResetRequest` up (F25-B), and the host's granted answer arrives
 //!   back as the own-seat epoch snap — the requester's car teleports to
@@ -178,6 +181,58 @@ const SEAT_STAGE_GAP: f32 = 4.0;
 /// for teleports the epoch cannot describe (drift past the bound, a
 /// pose written by hand).
 const CORRECTION_SNAP_DIST: f32 = 20.0;
+
+/// Settled-divergence bound for the *own* seat (F25-C, designed): a
+/// predicted car that sits at rest more than this far from the
+/// authority's copy of it for [`SETTLE_SNAPS`] snaps in a row is
+/// reseated on the authority's pose. Between epochs the own seat
+/// ignores snapshots (they lag by the round trip, so a mid-drive pull
+/// would rubber-band the driver) — but a collision resolved differently
+/// in the local sim (a kinematic copy shoves the predicted car harder
+/// than the authority's dynamic one did) left the car permanently
+/// elsewhere, measured at 7 m after a shove (`net_drive`'s pose leg).
+/// At rest on both sides the lag is irrelevant, so the comparison is
+/// exact; 0.75 m is well outside the prediction's residual (≤ 0.3 m
+/// measured on an idle machine, 1.4 m under a loaded test run — the
+/// case that set this bound) and a suspension settle.
+const SETTLE_DIST: f32 = 0.75;
+
+/// Speed (m/s) below which a car counts as at rest for the
+/// settled-divergence check, on the local and the asserted side alike.
+const SETTLE_SPEED: f32 = 0.3;
+
+/// Consecutive at-rest, diverged snaps before the own seat is reseated
+/// (~1 s at the ~60 Hz snapshot rate): long enough that a car still
+/// coming to rest on both sides is never caught mid-settle.
+const SETTLE_SNAPS: u32 = 60;
+
+/// Counts the own seat's consecutive at-rest, diverged snaps.
+#[derive(Debug, Default)]
+pub struct SettleWatch {
+    snaps: u32,
+}
+
+impl SettleWatch {
+    /// Feed one snap: the local car's pose/speed and the pose/speed the
+    /// authority asserted for it. True once the car has sat apart for
+    /// [`SETTLE_SNAPS`] snaps — the caller reseats it; the count then
+    /// restarts. Any motion or any agreement restarts the count.
+    pub fn observe(&mut self, local: Vec3, local_speed: f32, wire: Vec3, wire_speed: f32) -> bool {
+        let apart = local.distance(wire) > SETTLE_DIST
+            && local_speed < SETTLE_SPEED
+            && wire_speed < SETTLE_SPEED;
+        if !apart {
+            self.snaps = 0;
+            return false;
+        }
+        self.snaps += 1;
+        if self.snaps < SETTLE_SNAPS {
+            return false;
+        }
+        self.snaps = 0;
+        true
+    }
+}
 
 /// A granted reset request mutes further asks from the same seat for
 /// this long (F25-B; designed — the original's networked reset rule is
@@ -329,6 +384,8 @@ pub struct RemoteSnaps {
     /// carries its frame's generation for the apply-side staleness
     /// check.
     pending: VecDeque<(u64, SnapImpact)>,
+    /// The own seat's settled-divergence count ([`SettleWatch`]).
+    own_settle: SettleWatch,
     /// Per-seat repair ledger: the (generation, snap tick) of the
     /// newest `damage` byte `>0 → 0` transition the apply pass
     /// performed — the wire's repair signal. A pending impact row
@@ -793,6 +850,7 @@ impl RemoteSnaps {
         self.applied = None;
         self.dropped += self.pending.len() as u64;
         self.pending.clear();
+        self.own_settle = SettleWatch::default();
         self.repaired.clear();
         self.seen.clear();
         self.seen_order.clear();
@@ -840,6 +898,9 @@ pub struct NetDriveReport {
     /// landings that bumped a wire epoch; client: epoch-declared
     /// teleports applied to a copy or the own seat.
     pub resets: u64,
+    /// Times the own seat sat at rest apart from the authority's copy
+    /// long enough to be reseated on it ([`SettleWatch`]).
+    pub own_settles: u64,
     /// Driver reset requests this client sent on `R`/pad — the
     /// predicted-session form of the local reset key (F25-B).
     pub requests_sent: u64,
@@ -2698,7 +2759,9 @@ type SnapTrailerFilter = (
 /// velocities — since the authority moved the car the local sim thought
 /// it owned. Between epochs the own seat's entries are ignored: local
 /// physics predicts it, and a mid-drive blend would rubber-band the
-/// driver toward a host copy that lags by the round-trip. Both snap
+/// driver toward a host copy that lags by the round-trip — except a
+/// car that has sat at rest apart from the host's copy for
+/// [`SETTLE_SNAPS`] snaps, which is reseated on it ([`SettleWatch`]). Both snap
 /// paths mark [`Teleported`] so a swept-segment consumer breaks rather
 /// than banking the jump.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
@@ -3142,19 +3205,34 @@ fn apply_snap_frame(
                     report,
                 );
             }
-            // The own seat: only an authority reset may move it — the
-            // host teleported our car (its copy of us is the truth),
-            // so the predicted pose yields to the asserted one. Its
+            // The own seat: only an authority reset — or a settled
+            // divergence ([`SettleWatch`]) — may move it. The host
+            // teleported our car (its copy of us is the truth), or the
+            // car came to rest elsewhere than the host's copy; either
+            // way the predicted pose yields to the asserted one. Its
             // presentation fields stay ignored — the local sim's
             // `VehicleState`/`VehicleInput` is already the truth here.
             if player.control == PlayerControl::Local {
-                if authority_reset {
+                let asserted_vel = Vec3::from(entry.vel);
+                let settled = !authority_reset
+                    && snaps.own_settle.observe(
+                        pos.0,
+                        vel.0.length(),
+                        to_pos,
+                        asserted_vel.length(),
+                    );
+                if authority_reset || settled {
                     *pos = Position(to_pos);
                     *rot = Rotation(to_rot);
-                    *vel = LinearVelocity(Vec3::from(entry.vel));
+                    *vel = LinearVelocity(asserted_vel);
                     *ang = AngularVelocity(Vec3::from(entry.angvel));
                     commands.entity(entity).insert(Teleported);
-                    report.resets += 1;
+                    if authority_reset {
+                        snaps.own_settle = SettleWatch::default();
+                        report.resets += 1;
+                    } else {
+                        report.own_settles += 1;
+                    }
                 }
                 break;
             }
@@ -3428,6 +3506,45 @@ pub fn drive_remote_lerp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settled-divergence count: only an unbroken run of at-rest,
+    /// diverged snaps reseats, and any motion or agreement restarts it.
+    #[test]
+    fn settle_watch_needs_an_unbroken_run_of_rest_and_divergence() {
+        let (here, there) = (Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0));
+        let mut watch = SettleWatch::default();
+        for _ in 0..SETTLE_SNAPS - 1 {
+            assert!(!watch.observe(here, 0.0, there, 0.0));
+        }
+        // One agreeing snap restarts the run...
+        assert!(!watch.observe(here, 0.0, here, 0.0));
+        for _ in 0..SETTLE_SNAPS - 1 {
+            assert!(!watch.observe(here, 0.0, there, 0.0));
+        }
+        // ...and so does motion on either side.
+        assert!(!watch.observe(here, 2.0, there, 0.0));
+        for _ in 0..SETTLE_SNAPS - 1 {
+            assert!(!watch.observe(here, 0.0, there, 0.0));
+        }
+        assert!(!watch.observe(here, 0.0, there, 2.0));
+        // A full run fires once, then starts over.
+        for _ in 0..SETTLE_SNAPS - 1 {
+            assert!(!watch.observe(here, 0.0, there, 0.0));
+        }
+        assert!(watch.observe(here, 0.0, there, 0.0));
+        assert!(!watch.observe(here, 0.0, there, 0.0));
+    }
+
+    /// A residual inside the bound — the measured prediction error —
+    /// never counts, however long the car sits.
+    #[test]
+    fn settle_watch_ignores_the_predictions_residual() {
+        let mut watch = SettleWatch::default();
+        let near = Vec3::new(SETTLE_DIST * 0.5, 0.0, 0.0);
+        for _ in 0..SETTLE_SNAPS * 4 {
+            assert!(!watch.observe(Vec3::ZERO, 0.0, near, 0.0));
+        }
+    }
 
     /// The quantized wire sample is the exact complement of the input
     /// dequantize — extremes and a midpoint both ways.

@@ -11,6 +11,7 @@ use mm2_game::{PlayerVehicle, RaceState, Session};
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
+use crate::contracts::ImpactFilter;
 use crate::controls::ControlSettings;
 use crate::manual_gear::ManualGear;
 use crate::session::{self, SpawnPoint};
@@ -202,6 +203,13 @@ const RAM_STANDOFF: f32 = 14.0;
 /// dev car's top speed its lock circle is too wide to return on.
 const RAM_SPEED: f32 = 11.0;
 
+/// Pace (m/s) [`ram_drive`] holds while the target is off the nose:
+/// slow enough that the lock circle fits inside a grid's spacing. Only
+/// a pursuer whose inputs act at once (the authority) takes it: through
+/// the wire's input latency a joined client's slow turns missed about
+/// half of its hits, where the full-pace law landed 8 in 8.
+const RAM_TURN_SPEED: f32 = 5.0;
+
 /// Bearing (rad) off the nose that still counts as on a charge line.
 const RAM_ALIGNED: f32 = 0.45;
 
@@ -212,36 +220,94 @@ const RAM_ALIGNED: f32 = 0.45;
 /// `Hold` driver cannot provide on a side-by-side grid. Paired with
 /// `--parked` neighbours it gives a multi-process run a victim that
 /// holds still, so the authority's contact response and the replicated
-/// impact stream are the only thing that moves it. An evidence driver,
+/// impact stream are the only thing that moves it. On the authority the
+/// car turns at a slow pace and, once it has struck something after
+/// getting up to speed, parks (handbrake, as [`parked_drive`]), so the
+/// whole field comes to rest and every process can be asked where each
+/// seat ended up; a joined client keeps the full-pace law (see
+/// [`RAM_TURN_SPEED`]). An evidence driver,
 /// not a gameplay feature. With no other vehicle it drives straight.
 pub fn ram_drive(
     mut me: Query<(&GlobalTransform, &LinearVelocity, &mut VehicleInput), With<PlayerVehicle>>,
     others: Query<&GlobalTransform, (With<Vehicle>, Without<PlayerVehicle>)>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
+    impacts: Option<Res<ImpactFilter>>,
+    mut strike: Local<RamStrike>,
 ) {
     // The countdown lock holds for this driver as it does for the
     // keyboard mapping (AC03): outside a live, unlocked session the car
     // gets a neutral input rather than a launch.
     let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
     let driving = session.is_playing() && !race_locked;
+    if !driving {
+        *strike = RamStrike::default();
+    }
+    // A pursuer whose inputs act at once (the authority) turns at the
+    // slow pace and parks after its strike; a joined client's inputs
+    // reach the authority late, so both would starve the authority's
+    // own contact (it would see the handbrake before the impact) — it
+    // keeps the full-pace law and drives on.
+    let authority = session.authority_role().is_authority();
+    let turn_pace = if authority { RAM_TURN_SPEED } else { RAM_SPEED };
     for (at, vel, mut vi) in &mut me {
-        *vi = if driving {
+        *vi = if !driving {
+            VehicleInput::default()
+        } else if authority
+            && strike.observe(vel.length(), impacts.as_ref().map_or(0, |i| i.emitted))
+        {
+            VehicleInput {
+                handbrake: 1.0,
+                ..default()
+            }
+        } else {
             let from = at.translation();
             let nearest = others.iter().map(|t| t.translation()).min_by(|a, b| {
                 a.distance_squared(from)
                     .total_cmp(&b.distance_squared(from))
             });
-            ram_input(at, vel.length(), nearest)
-        } else {
-            VehicleInput::default()
+            ram_input(at, vel.length(), nearest, turn_pace)
         };
     }
 }
 
+/// Pace (m/s) the ramming car must pass before a later impact counts as
+/// its strike — the spawn landing happens at rest and must not park it.
+const RAM_LAUNCHED: f32 = 3.0;
+
+/// [`ram_drive`]'s per-session memory: has the car launched, and has it
+/// since struck something. Impacts are read off the contract pipeline's
+/// running count ([`ImpactFilter::emitted`]) against the count at launch.
+#[derive(Debug, Default)]
+pub struct RamStrike {
+    baseline: u64,
+    launched: bool,
+    struck: bool,
+}
+
+impl RamStrike {
+    /// Feed one frame (`speed` m/s, `emitted` impacts so far); true once
+    /// the car has struck something after launching.
+    pub fn observe(&mut self, speed: f32, emitted: u64) -> bool {
+        if !self.launched {
+            self.baseline = emitted;
+            self.launched = speed > RAM_LAUNCHED;
+        } else if emitted > self.baseline {
+            self.struck = true;
+        }
+        self.struck
+    }
+}
+
 /// One frame of [`ram_drive`]'s law: the car at `at` moving `speed`
-/// m/s, pursuing `target` (none = drive straight).
-pub fn ram_input(at: &GlobalTransform, speed: f32, target: Option<Vec3>) -> VehicleInput {
+/// m/s, pursuing `target` (none = drive straight), holding `turn_pace`
+/// while the target is off the nose.
+pub fn ram_input(
+    at: &GlobalTransform,
+    speed: f32,
+    target: Option<Vec3>,
+    turn_pace: f32,
+) -> VehicleInput {
     let from = at.translation();
     let steering = target.map_or(0.0, |to| {
         // Forward is −Z at yaw 0 — the `Quat::from_rotation_y` frame
@@ -260,10 +326,19 @@ pub fn ram_input(at: &GlobalTransform, speed: f32, target: Option<Vec3>) -> Vehi
             (bearing * RAM_STEER_GAIN).clamp(-1.0, 1.0)
         }
     });
+    // Still turning onto the target: stay at the pace the lock circle
+    // can take. On a charge line (or with nothing to chase) the full
+    // pace is allowed.
+    let turning = target.is_some_and(|to| {
+        let fwd = at.rotation() * Vec3::NEG_Z;
+        let yaw = (-fwd.x).atan2(-fwd.z);
+        mm2_game::relative_bearing(yaw, from, to).abs() > RAM_ALIGNED
+    });
+    let pace = if turning { turn_pace } else { RAM_SPEED };
     VehicleInput {
         // Lifting off above the pace keeps the turning circle small
         // enough for the car to come back round to the target.
-        throttle: if speed > RAM_SPEED { 0.0 } else { 1.0 },
+        throttle: if speed > pace { 0.0 } else { 1.0 },
         steering,
         ..default()
     }

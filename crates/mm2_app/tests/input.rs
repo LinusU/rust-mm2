@@ -509,7 +509,7 @@ mod ram {
     use super::*;
 
     fn input_at(speed: f32, target: Option<Vec3>) -> VehicleInput {
-        input::ram_input(&GlobalTransform::default(), speed, target)
+        input::ram_input(&GlobalTransform::default(), speed, target, 5.0)
     }
 
     #[test]
@@ -542,6 +542,36 @@ mod ram {
         assert_eq!(fast.throttle, 0.0);
         let alone = input_at(0.0, None);
         assert_eq!((alone.throttle, alone.steering), (1.0, 0.0));
+    }
+
+    #[test]
+    fn it_slows_to_the_turning_pace_while_the_target_is_off_the_nose() {
+        // Beside the car and far: still turning, so above the turning
+        // pace it lifts off; the same speed on a charge line keeps going.
+        let turning = input_at(8.0, Some(Vec3::new(30.0, 0.0, -10.0)));
+        assert_eq!(turning.throttle, 0.0, "{turning:?}");
+        let charging = input_at(8.0, Some(Vec3::new(0.0, 0.0, -40.0)));
+        assert_eq!(charging.throttle, 1.0, "{charging:?}");
+        // A pursuer given the full pace as its turning pace does not slow.
+        let wide = input::ram_input(
+            &GlobalTransform::default(),
+            8.0,
+            Some(Vec3::new(30.0, 0.0, -10.0)),
+            11.0,
+        );
+        assert_eq!(wide.throttle, 1.0, "{wide:?}");
+    }
+
+    #[test]
+    fn it_parks_after_the_first_impact_it_makes_at_speed() {
+        let mut strike = input::RamStrike::default();
+        // The spawn landing: an impact at rest does not count.
+        assert!(!strike.observe(0.0, 1));
+        assert!(!strike.observe(2.0, 1));
+        // Launched, then a new impact: struck, and it stays struck.
+        assert!(!strike.observe(6.0, 1));
+        assert!(strike.observe(5.0, 2));
+        assert!(strike.observe(0.0, 2));
     }
 
     #[test]

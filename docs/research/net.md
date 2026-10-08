@@ -1561,11 +1561,56 @@ wire actually moved rather than an in-process mailbox's contents.
   Not asserted, deliberately: *which* parked car is shoved (the
   lobby's connect order picks the seats, so it varies), alice's own
   applied count (a client replays authority rows only for seats it
-  does not predict), and any post-shove pose agreement — the record
-  carries only each process's own car, so cross-process pose
-  convergence after a collision is still unmeasured at process level.
-  Dev world, loopback, headless: no authored damage record binds
-  (`dsyn0`), no rendered observation.
+  does not predict), and any post-shove pose agreement (the next
+  leg measures it). Dev world, loopback, headless: no authored damage
+  record binds (`dsyn0`), no rendered observation. The pursuit law is
+  role-split: only a pursuer on the authority takes the slow turning
+  pace and parks after its strike; a joined client's inputs reach the
+  authority late, and the same law there starved the authority's own
+  contact (this leg fell from 8/8 to 3/6 and then 0/8 with it
+  applied), so the client keeps the full-pace law.
+
+- **Pose-agreement leg**
+  (`a_shoved_seat_converges_across_three_processes`, F25-AC02 /
+  F25-C.2): the *host* runs `--ram` (no prediction, no input latency —
+  the one deterministic pursuit; a client-driven one hit squarely in
+  about half the runs) at the next grid seat while two clients sit
+  `--parked`, joined in a fixed order so alice holds the seat beside
+  the host. The smoke record gained `seats=<id>:<x>,<z>/…` — where
+  each process holds every wire seat's car (its own and the copies) —
+  and `net=` gained a trailing `fix<n>` cell. Bob's shorter cap prints
+  while alice is connected, so he holds all three seats; the field is
+  at rest by then (host ram parks itself on its strike). An all-parked
+  control run gives the nominal grid (x = 0/4/8, z ≈ 0.1). Measured
+  (dev world, loopback): the host drives from x=0 to (3.0–3.1, 2.4)
+  at ≤5.7 m/s and shoves alice from (4.0, 0.2) to (3.9, −2.7…−2.9); the
+  two clients' views of seats 0 and 1 agree within 0.1–0.3 m (alice's
+  own predicted car −2.7…−3.1 against bob's copy −2.8). Asserted:
+  both cars left their slots by more than 1.5 m, and every seat both
+  clients hold agrees within 1.0 m. The host's own record is not
+  compared — it prints after the clients left, with the remote seats
+  already despawned — so the authority is seen through the copies.
+
+  **Finding, fixed:** in a minority of runs (2 of 26 before the fix; the
+  bound later fired in 3 of 14 and 1 of 10) the predicted own car
+  was shoved harder in alice's local sim (the host's car is a
+  kinematic copy there, so it shoves with infinite mass; peak 10.5 m/s
+  against the authority's 5.7) and ended at (3.7, −10.1) while the
+  authority had her at −2.8 — 7 m apart, *permanently*: the own seat
+  took snapshots only on a declared reset epoch, with no divergence
+  bound at all. The own seat now reseats on the authority's pose when
+  it has sat at rest (< 0.3 m/s on both sides) more than 0.75 m from it
+  for 60 consecutive snaps (`netdrive::SettleWatch`, ≈1 s; designed
+  policy — at rest the round-trip lag is irrelevant, so the
+  comparison is exact; the bound was first 1.5 m, until a full-suite run
+  under load left alice 1.43 m off — below the bound, above the leg's
+  1.0 m agreement floor). Afterwards the leg passed 10/10 in isolation (the bound fired in one
+  of them) and 3/3 inside full `network` target runs, where the
+  snapshot rate falls to under half the sim rate. `fix1` appears on
+  alice only. Still open: divergence *while moving* has
+  no bound (a reseat there would rubber-band against the lagged
+  copy), and the stronger-shove cause itself (the kinematic copy's
+  infinite mass in the predicted world) is untouched.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded

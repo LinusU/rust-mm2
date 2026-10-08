@@ -97,7 +97,7 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>,surf<s>s/<a>a`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>,surf<s>s/<a>a,fix<n>`
 /// record field decoded — the wire counters the run actually moved.
 /// `stall` (F25-B wire-seat retirements) is authority-side only and
 /// reads 0 on a clean run — it is not parsed here since nothing in
@@ -146,6 +146,7 @@ struct NetField {
     progress_dropped: u64,
     surfaces_sent: u64,
     surfaces_applied: u64,
+    own_settles: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -167,6 +168,7 @@ fn net_field(line: &str) -> NetField {
     let race = cells(parts[9], "race");
     let prog = cells(parts[10], "prog");
     let surf = cells(parts[12], "surf");
+    let own_settles = leading_u64(parts[13].strip_prefix("fix").unwrap());
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -187,6 +189,7 @@ fn net_field(line: &str) -> NetField {
         progress_dropped: prog[1],
         surfaces_sent: surf[0],
         surfaces_applied: surf[1],
+        own_settles,
     }
 }
 
@@ -1469,4 +1472,136 @@ fn a_driven_collision_replicates_across_three_processes() {
         bob_net.impacts_applied > 0,
         "the replicated impact never reached the uninvolved client: {bob_net:?} / {bob}"
     );
+}
+
+/// Every `seats=<id>:<x>,<z>/…` cell of a record, by wire seat.
+fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
+    field(rec, "seats")
+        .split('/')
+        .map(|cell| {
+            let (id, xz) = cell.split_once(':').expect("id:x,z");
+            let (x, z) = xz.split_once(',').expect("x,z");
+            (id.parse().unwrap(), x.parse().unwrap(), z.parse().unwrap())
+        })
+        .collect()
+}
+
+/// One lobby of three processes on the dev world where the *host*
+/// drives (`--ram`, or `--parked` for the control) at the neighbouring
+/// grid seat, and two parked clients join in a fixed order — alice
+/// first, so she holds the seat beside the host. The host is the one
+/// car with no prediction and no input latency, so its pursuit is the
+/// run's only variable. Returns the two clients' mid-session records
+/// (bob prints while alice is still connected, so he holds copies of
+/// everyone).
+fn run_shove_trio(
+    install: &std::path::Path,
+    host_rams: bool,
+    alice_frames: u32,
+    bob_frames: u32,
+) -> (String, String) {
+    let mut host_flags = host_args(install, 9000);
+    host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
+    let mut host = Proc::spawn(MM2_EXE, &host_flags);
+    let addr = listening_addr(&host);
+    let mut alice_flags = join_args(install, addr, "alice", alice_frames);
+    alice_flags.push("--parked".into());
+    let alice = Proc::spawn(MM2_EXE, &alice_flags);
+    host.until("ready=true");
+    let mut bob_flags = join_args(install, addr, "bob", bob_frames);
+    bob_flags.push("--parked".into());
+    let bob = Proc::spawn(MM2_EXE, &bob_flags);
+    host.until("ready=true");
+    host.cmd("start");
+    host.until("event=started generation=1");
+    // The clients print nothing for ~2.5k frames, longer than the
+    // per-line wait under a loaded full-suite run: bound the whole wait.
+    let bound = Duration::from_secs(90);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    for _ in 0..2 {
+        host.until("event=left");
+    }
+    quit_and_assert_host_drove(host);
+    (alice_rec, bob_rec)
+}
+
+/// F25-AC02's pose leg: a *shoved* car converges to one place on every
+/// process. The host rams the next grid seat (alice, who joined first)
+/// head-on while both clients sit parked; once the field has come to
+/// rest, each client prints where it holds every wire seat — its own
+/// car (predicted, reconciled to the authority) and the copies — and a
+/// seat both of them hold must agree. The control run parks the host
+/// too, giving the nominal grid the shove is measured against.
+///
+/// The authority's own record is not compared: it prints after the
+/// clients left, with the remote seats gone. The host's car is seen
+/// through both clients' copies of seat 0 instead.
+#[test]
+fn a_shoved_seat_converges_across_three_processes() {
+    let install = tempfile::tempdir().unwrap();
+    let (_, control_bob) = run_shove_trio(install.path(), false, 1100, 1000);
+    let (alice, bob) = run_shove_trio(install.path(), true, 2800, 2500);
+    eprintln!("shove control bob={control_bob}\nshove ram alice={alice}\n bob={bob}");
+
+    for rec in [&alice, &bob] {
+        assert_eq!(field(rec, "status"), "pass", "{rec}");
+        assert_eq!(field(rec, "phase"), "playing", "{rec}");
+        assert_eq!(field(rec, "finite"), "true", "{rec}");
+    }
+    let dist = |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+    let at = |rec: &str, id: u16| -> Option<(f64, f64)> {
+        seat_poses(rec)
+            .into_iter()
+            .find(|(i, ..)| *i == id)
+            .map(|(_, x, z)| (x, z))
+    };
+    let grid = seat_poses(&control_bob);
+    assert_eq!(
+        grid.len(),
+        3,
+        "the control holds all three seats: {control_bob}"
+    );
+
+    // Bob printed while alice was connected, so he holds all three
+    // seats; alice holds the host's and her own (bob had left).
+    assert_eq!(seat_poses(&bob).len(), 3, "{bob}");
+    assert!(
+        at(&alice, 0).is_some() && at(&alice, 1).is_some(),
+        "{alice}"
+    );
+
+    // The shove really moved both cars on the authority: the host
+    // drove off its grid slot and alice's car was pushed clear of hers
+    // (judged on bob's complete view, against the control's grid).
+    let nominal = |id: u16| at(&control_bob, id).unwrap();
+    for id in [0, 1] {
+        let moved = dist(at(&bob, id).unwrap(), nominal(id));
+        assert!(
+            moved > 1.5,
+            "seat {id} stayed on its slot ({moved:.1} m): {bob}"
+        );
+    }
+
+    // Convergence: every seat both clients hold sits in the same place,
+    // to within the interpolation and the prediction's residual.
+    let mut compared = 0;
+    for (id, x, z) in seat_poses(&alice) {
+        let other = at(&bob, id).unwrap_or_else(|| panic!("bob lacks seat {id}: {bob}"));
+        let apart = dist((x, z), other);
+        assert!(
+            apart < 1.0,
+            "seat {id} diverged by {apart:.2} m between processes:\n {alice}\n {bob}"
+        );
+        compared += 1;
+    }
+    assert!(compared >= 2, "{alice}");
+    // The settled-divergence bound (`fix`) may have reseated alice's own
+    // car — it did in the rare run her local sim shoved her harder than
+    // the authority did — but never more than the one shove warrants,
+    // and a bystander that was never shoved is never reseated.
+    assert!(net_field(&alice).own_settles <= 1, "{alice}");
+    assert_eq!(net_field(&bob).own_settles, 0, "{bob}");
 }
