@@ -1,13 +1,11 @@
-# Last iteration — F28-C.4: retail water-vs-route audit (iteration 2 of the run)
+# Last iteration — F28-C.5: opponent routes in the retail water audit (iteration 3 of the run)
 
-Selection: the previous checkpoint (`2ea98b0`) passed gates and review, so no repair was owed. Its review flagged the retail cable-car leg as not run by the gate; I ran it here (`MM2_RETAIL=<retail> cargo test --locked -p mm2_app --test network two_retail_processes_replicate_the_hosts_traffic -- --nocapture`; the review's claim that the test lives under `--test net_drive` is wrong, `net_drive.rs` is a module of the `network` target): host `cable=sent1152,live0`, client `cable=sent0,live4`, ok. This reproduces the previous figures (sent count differs run to run).
+Selection: the previous checkpoint (`7cc40e8`) passed gates and review with no blocking findings, so no repair was owed. Its first verification gap was that `.opp` opponent routes were not in the water audit; this iteration closes that gap for the anchors.
 
-Task: F28 AC04's open item, "retail boundaries/`.water` rooms against real routes".
+Change (test only, no production code): `tests/recovery.rs` `retail_no_authored_race_point_stands_in_deadly_water` also builds the production `opponent_roster` for every ready event at both difficulties and tests every wired route anchor against the city's `CityWater`, with non-empty route/anchor denominators asserted. Retail (`MM2_RETAIL=<retail> cargo test --locked -p mm2_app --test app retail_no_authored -- --nocapture`): sf 246 routes / 4591 anchors, london 271 / 7216, 0 in deadly water; start/gate counts unchanged (732 / 614).
 
-Production change: `mm2_app::water::CityWater::is_deadly` now bounds a room's column `WATER_DEPTH` = 5 m under its bound. The new retail audit found London's Thames tunnel (rooms 670–672, floors y −13…−11) under water rooms 347–349 (surface −4.0): the 2D point-in-perimeter test counted a Blitz gate there (and any car driving the tunnel) as drowned. Designed stand-in for the original's room occupancy; DSN-34 and `docs/research/environment.md` corrected.
+Control: a throwaway probe (reverted) dropped each anchor to 1 m under the surface; SF 0 and London 6 anchors lie over a water footprint (bridge deck, y −0.15, surface −3.8), so the y-aware test does discriminate and those six are correctly dry.
 
-Tests: `tests/recovery.rs` `retail_no_authored_race_point_stands_in_deadly_water` (MM2_RETAIL-gated; SF 45 water rooms, 64 definitions, 732 points; London 23 rooms, 64 definitions, 614 points; 0 in deadly water; wet-grid control > 0) — failed before the fix with 2 London points, passes after. `water::tests::a_tunnel_under_the_footprint_is_not_water` plus the deep-point assertion moved from −10 to −8.
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (MM2_RETAIL unset there; the retail audit was run separately with it set, as above).
 
-Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (MM2_RETAIL unset in that run; the retail audit and the cable-car test were run separately with it set).
-
-Not covered / open: `.opp` opponent routes, Crash Course points and ambient/BAI lanes are not in the audit; no windowed drive through the tunnel; cable-car audio and the other F28 items in PLAN. Status: implemented candidate; not independently checked.
+Not covered / open: route segments between anchors, ambient/BAI lanes, Crash Course lesson routes/points, windowed tunnel/bridge drive; the 5 m column cap remains a designed stand-in. Status: implemented candidate; not independently checked.

@@ -1257,13 +1257,15 @@ fn a_rescue_keeps_the_gates_already_earned() {
     );
 }
 
-/// Every retail city's authored race points (start slots and checkpoint
-/// gates, both difficulties of every ready event) against the city's
+/// Every retail city's authored race points (start slots, checkpoint
+/// gates and the anchors of every wired opponent `.opp` route, both
+/// difficulties of every ready event) against the city's
 /// real `CityWater` built through the production path (F28-AC04).
 /// Deadly water is scoped to the listed rooms, so a start slot or gate
 /// inside one would drown a car on the authored route; the audit
 /// reports its denominators and fails when a city has no usable water
-/// or a point sits in it. A positive control samples a grid so the
+/// or a point sits in it. (Six London route anchors lie over a water
+/// footprint on bridges 3.6 m above the surface and are rightly dry.) A positive control samples a grid so the
 /// check cannot pass over empty water. Skipped without the operator's
 /// install (`MM2_RETAIL=<dir>`).
 #[test]
@@ -1307,6 +1309,7 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
         let catalog = EventCatalog::scan(&vfs, city);
         assert!(!catalog.events.is_empty(), "{city}: no events");
         let (mut events, mut points, mut wading) = (0usize, 0usize, Vec::new());
+        let (mut routes, mut route_points) = (0usize, 0usize);
         for event in catalog.events.iter().filter(|e| e.status.is_ready()) {
             for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
                 let Ok(race) = race_definition(event, difficulty) else {
@@ -1325,15 +1328,36 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
                         wading.push(format!("{:?} {what} at {p}", event.event_ref));
                     }
                 }
+                // The wired opponent driving lines: a route anchor in
+                // deadly water would send the field into the harbour.
+                let roster = mm2_content::opponent_roster(&vfs, event, difficulty).unwrap();
+                for (i, entry) in roster.entries.iter().enumerate() {
+                    let Some(route) = &entry.route else { continue };
+                    routes += 1;
+                    for (n, row) in route.points.iter().enumerate() {
+                        route_points += 1;
+                        if water.is_deadly(row.position) {
+                            wading.push(format!(
+                                "{:?} {difficulty:?} opponent {i} anchor {n} at {}",
+                                event.event_ref, row.position
+                            ));
+                        }
+                    }
+                }
             }
         }
         eprintln!(
             "{city}: {} water rooms, {wet} wet grid cells, {events} race definitions, \
-             {points} start/gate points, {} in deadly water",
+             {points} start/gate points, {routes} opponent routes / {route_points} anchors, \
+             {} in deadly water",
             water.room_count(),
             wading.len()
         );
         assert!(events > 0 && points > 0, "{city}: nothing audited");
+        assert!(
+            routes > 0 && route_points > 0,
+            "{city}: no opponent route audited"
+        );
         assert!(wading.is_empty(), "{city}: {wading:?}");
     }
 }
