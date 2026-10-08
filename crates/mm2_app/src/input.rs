@@ -72,6 +72,13 @@ pub fn windows_focused(windows: &Query<&Window>) -> bool {
     windows.iter().all(|w| w.focused)
 }
 
+/// A minimized client: the OS reports a window with no pixels. Nothing
+/// can be drawn into it and a viewport floored at one pixel would
+/// overrun the target, so viewport-bearing cameras sleep while it holds.
+pub fn window_minimized(window: &Window) -> bool {
+    window.resolution.physical_width() == 0 || window.resolution.physical_height() == 0
+}
+
 /// One in-session control on either device: the documented key OR its
 /// designed [`pad`] binding — inert while a window is unfocused (the
 /// pad's edges would otherwise fire where the key's never could).

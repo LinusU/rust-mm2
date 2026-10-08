@@ -888,7 +888,13 @@ pub fn drive_hud_map(
         };
         // The corner views are HUD instruments — off with the layer —
         // while `fullscreen` is the pause overlay's surface and exempt.
-        cam.is_active = map.visible() && (hud.0 || map.fullscreen);
+        // A minimized client has a 0x0 window: no inset fits, and the
+        // 1-pixel viewport floor below would overrun the target.
+        let minimized = windows
+            .iter()
+            .next()
+            .is_some_and(crate::input::window_minimized);
+        cam.is_active = map.visible() && (hud.0 || map.fullscreen) && !minimized;
         if !cam.is_active {
             continue;
         }

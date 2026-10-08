@@ -435,6 +435,43 @@ fn the_map_camera_parks_with_the_layer() {
     set_hud(&mut app, true);
     app.update();
     assert!(active(&mut app));
+
+    // F30 edge case, minimized client: a 0x0 window has no room for
+    // the inset or the pause map, so the camera sleeps (and never gets
+    // a viewport floored at one pixel) until the window returns.
+    let mut window = Window::default();
+    window.resolution.set_physical_resolution(1280, 960);
+    let window = app
+        .world_mut()
+        .spawn((window, bevy::window::PrimaryWindow))
+        .id();
+    app.update();
+    assert!(active(&mut app), "a window with pixels keeps the inset up");
+    let viewport = app.world().get::<Camera>(map_cam).unwrap().viewport.clone();
+    assert!(viewport.is_some(), "the inset got a viewport");
+
+    let resize = |app: &mut App, w: u32, h: u32| {
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set_physical_resolution(w, h);
+    };
+    resize(&mut app, 0, 0);
+    app.update();
+    assert!(!active(&mut app), "minimized: the inset sleeps");
+    app.world_mut()
+        .resource_mut::<mm2_game::HudMap>()
+        .fullscreen = true;
+    app.update();
+    assert!(
+        !active(&mut app),
+        "minimized: the pause map has nothing to fill either"
+    );
+
+    resize(&mut app, 1280, 960);
+    app.update();
+    assert!(active(&mut app), "restored: the full-screen map is back");
 }
 
 // ---------------------------------------------------------------------------

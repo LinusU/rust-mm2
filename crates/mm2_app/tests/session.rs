@@ -1236,6 +1236,58 @@ fn f4_restarts_and_backspace_is_the_mirror() {
     );
 }
 
+/// F30 edge case, minimized client: a 0x0 window cannot host the mirror
+/// strip (a one-pixel floor would overrun the target), so the strip
+/// sleeps while the window has no pixels and re-arms from `RearView`
+/// when it returns, with a viewport that fits.
+#[test]
+fn a_minimized_window_puts_the_mirror_strip_to_sleep() {
+    use bevy::window::PrimaryWindow;
+    use mm2_app::camera::MirrorCamera;
+
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    let mirror_cam = single::<With<MirrorCamera>>(&mut app);
+    let mut window = Window::default();
+    window.resolution.set_physical_resolution(1280, 960);
+    let window = app.world_mut().spawn((window, PrimaryWindow)).id();
+    press_key(&mut app, KeyCode::Backspace);
+    app.update();
+    let cam = |app: &App| app.world().get::<Camera>(mirror_cam).unwrap().clone();
+    assert!(cam(&app).is_active, "the strip is up in a normal window");
+    let fitted = cam(&app)
+        .viewport
+        .expect("a window gives the strip a viewport");
+    assert!(fitted.physical_size.x <= 1280 && fitted.physical_size.y <= 960);
+
+    let resize = |app: &mut App, w: u32, h: u32| {
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set_physical_resolution(w, h);
+    };
+    resize(&mut app, 0, 0);
+    app.update();
+    assert!(!cam(&app).is_active, "minimized: the strip sleeps");
+    assert!(
+        app.world().resource::<mm2_app::camera::RearView>().0,
+        "the driver's choice is kept, not cleared"
+    );
+
+    resize(&mut app, 800, 600);
+    app.update();
+    let back = cam(&app);
+    assert!(back.is_active, "restored: the strip re-arms");
+    let vp = back.viewport.expect("and gets a viewport again");
+    assert!(vp.physical_size.x <= 800 && vp.physical_size.y <= 600);
+    assert_ne!(
+        vp.physical_size, fitted.physical_size,
+        "sized to the new window"
+    );
+}
+
 /// F22-B.5: `--reset-at` emits the `R`-key reset bundle at its
 /// session tick — the player teleports back to the spawn point
 /// through the production `ResetVehicle` path (`Teleported` stamped)

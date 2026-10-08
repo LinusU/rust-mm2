@@ -837,12 +837,18 @@ pub fn drive_mirror(
     window: Query<&Window, With<PrimaryWindow>>,
     mut cams: Query<&mut Camera, With<MirrorCamera>>,
 ) {
-    let want = mirror.0 && *mode != CameraMode::Free;
-    let viewport = window.single().ok().map(|w| {
-        let size = UVec2::new(
+    let size = window.single().ok().map(|w| {
+        UVec2::new(
             w.resolution.physical_width(),
             w.resolution.physical_height(),
-        );
+        )
+    });
+    // A minimized client reports a 0x0 window: there is nothing to
+    // draw into, and a 1x1 strip would overrun the target. The strip
+    // sleeps and re-arms from `RearView` when the window returns.
+    let minimized = window.single().is_ok_and(crate::input::window_minimized);
+    let want = mirror.0 && *mode != CameraMode::Free && !minimized;
+    let viewport = size.filter(|_| !minimized).map(|size| {
         let width = (size.x as f32 * MIRROR_WIDTH_FRAC).round().max(1.0) as u32;
         let height = (size.y as f32 * MIRROR_HEIGHT_FRAC).round().max(1.0) as u32;
         Viewport {
