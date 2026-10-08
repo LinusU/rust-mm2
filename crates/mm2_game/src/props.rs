@@ -944,13 +944,12 @@ pub struct PathStampSites {
 ///   toward the second. A lone trailing point on an odd-count path
 ///   stamps nothing (`Pathset::validate` reports the anomaly; the
 ///   expansion does not guess its mate).
-/// - `LineStrip`: each segment is filled with stamps at `spacing`
-///   intervals measured from the segment's start (t = 0, s, 2s, …
-///   strictly below the segment length, so the shared vertex is
-///   stamped once by the following segment), and the path's final
-///   vertex caps the row. Stamps face along their segment. The
-///   per-segment restart is the literal R3 rule — whether the original
-///   resets spacing at vertices is unverified (UNK-20).
+/// - `LineStrip`: a segment shorter than the spacing stamps nothing;
+///   a longer one is fitted with `k = floor(len / spacing)` stamps at
+///   stride `len / k` from its start, facing along it. The vertex
+///   ending a segment is the next segment's first stamp and the final
+///   vertex is never stamped — recovered from the retail executable's
+///   strip stamper (`Midtown2.exe` `0x466d30`, `docs/research/pathset.md`).
 ///
 /// A zero `spacing` on a strip stamps one unrotated prop per vertex
 /// (designed fallback — spacing 0 means "densest possible" and no
@@ -1066,7 +1065,6 @@ fn line_strip_sites(path: &Path, spacing: f32, budget: usize) -> PathStampSites 
     let mut out = Vec::new();
     let mut capped = 0usize;
     let mut left = budget;
-    let mut last_dir = [1.0, 0.0, 0.0];
     for w in pts.windows(2) {
         let seg = sub(w[1], w[0]);
         let len = (seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2]).sqrt();
@@ -1077,17 +1075,23 @@ fn line_strip_sites(path: &Path, spacing: f32, budget: usize) -> PathStampSites 
             continue;
         }
         let dir = [seg[0] / len, seg[1] / len, seg[2] / len];
-        last_dir = dir;
-        // Stamps sit at t = 0, s, 2s, … strictly below len: ceil(len/s)
-        // of them, counted arithmetically so a huge or hostile segment
-        // is measured against the budget instead of walked — `t += s`
-        // stalls below the f32 ulp long before a multi-thousand-km
-        // segment ends. The float→int cast saturates, which `min`
-        // turns into the full remaining budget.
-        let want = (f64::from(len) / f64::from(spacing)).ceil() as usize;
+        // The original's strip stamper (`Midtown2.exe` `0x466d30`, kind
+        // 2) skips a segment shorter than the spacing, otherwise fits
+        // `k = floor(len/s)` stamps evenly — stride `len/k`, which is
+        // never below `s` — starting at the segment's start. The
+        // vertex that ends the segment is the next segment's first
+        // stamp; the path's final vertex is never stamped. Counted
+        // arithmetically so a huge or hostile segment is measured
+        // against the budget instead of walked. The float→int cast
+        // saturates, which `min` turns into the full remaining budget.
+        if f64::from(len) < f64::from(spacing) {
+            continue;
+        }
+        let want = (f64::from(len) / f64::from(spacing)).floor() as usize;
+        let step = (f64::from(len) / want as f64) as f32;
         let take = want.min(left);
         for i in 0..take {
-            let t = i as f32 * spacing;
+            let t = i as f32 * step;
             out.push(PathStampSite {
                 position: [
                     w[0][0] + dir[0] * t,
@@ -1099,20 +1103,6 @@ fn line_strip_sites(path: &Path, spacing: f32, budget: usize) -> PathStampSites 
         }
         left -= take;
         capped = capped.saturating_add(want - take);
-    }
-    // The walk stops short of the final vertex by construction;
-    // the authored row is capped at its end point. A lone vertex
-    // (no segments) still stamps once, unrotated. A non-finite final
-    // vertex stamps nothing.
-    if let Some(&last) = pts.last().filter(|p| p.iter().all(|c| c.is_finite())) {
-        if left == 0 {
-            capped = capped.saturating_add(1);
-        } else {
-            out.push(PathStampSite {
-                position: last,
-                forward: (pts.len() > 1).then_some(last_dir),
-            });
-        }
     }
     PathStampSites { sites: out, capped }
 }
@@ -2139,7 +2129,9 @@ mod tests {
     #[test]
     fn line_strip_restarts_spacing_per_segment() {
         // Two 4 m segments with a bend, spacing 1 m (code 4): four
-        // stamps per segment at t = 0,1,2,3 plus the final vertex = 9.
+        // stamps per segment at t = 0,1,2,3 — the bend's vertex is the
+        // second segment's first stamp and the final vertex is never
+        // stamped (`Midtown2.exe` `0x466d30`).
         let p = ppath(&[[0., 0., 0.], [4., 0., 0.], [4., 0., 4.]], 2, 4);
         let s = path_stamp_sites(&p, 100);
         assert_eq!(s.capped, 0);
@@ -2155,13 +2147,47 @@ mod tests {
                 [4., 0., 1.],
                 [4., 0., 2.],
                 [4., 0., 3.],
-                [4., 0., 4.],
             ]
         );
-        // The bend: the shared vertex's stamp faces the second
-        // segment, and the cap faces it too.
+        // The bend: the shared vertex's stamp faces the second segment.
         assert_eq!(s.sites[4].forward, Some([0., 0., 1.]));
-        assert_eq!(s.sites[8].forward, Some([0., 0., 1.]));
+    }
+
+    #[test]
+    fn a_strip_fits_whole_strides_and_never_stamps_its_end() {
+        // 10 m at 4 m spacing: k = floor(2.5) = 2 stamps at stride 5,
+        // not 4 — the stride stretches so the last stamp sits one
+        // stride short of the vertex, never on or past it.
+        let p = ppath(&[[0., 0., 0.], [10., 0., 0.]], 2, 16);
+        let s = path_stamp_sites(&p, 100);
+        let xs: Vec<f32> = s.sites.iter().map(|s| s.position[0]).collect();
+        assert_eq!(xs, vec![0., 5.]);
+        // The retail london tree row (`props.pathset` path 12): a
+        // 49.1 m segment at 16 m spacing stamps three trees, the last
+        // 16.4 m before the junction vertex — where the old row capped
+        // two trees on top of each other in the box junction.
+        let end = [214.96, 4.85, -817.73];
+        let start = [207.87, 4.85, -866.35];
+        let p = ppath(&[start, end], 2, 64);
+        let s = path_stamp_sites(&p, 100);
+        assert_eq!(s.sites.len(), 3);
+        let last = s.sites[2].position;
+        let gap = ((end[0] - last[0]).powi(2) + (end[2] - last[2]).powi(2)).sqrt();
+        assert!((gap - 49.1 / 3.0).abs() < 0.1, "gap {gap}");
+    }
+
+    #[test]
+    fn a_strip_segment_shorter_than_its_spacing_stamps_nothing() {
+        // 3 m at 4 m spacing: nothing from that segment — but the next
+        // (long enough) segment still stamps from its own start.
+        let p = ppath(&[[0., 0., 0.], [3., 0., 0.], [3., 0., 8.]], 2, 16);
+        let s = path_stamp_sites(&p, 100);
+        let zs: Vec<f32> = s.sites.iter().map(|s| s.position[2]).collect();
+        assert_eq!(zs, vec![0., 4.]);
+        assert!(s.sites.iter().all(|s| s.position[0] == 3.));
+        // A lone vertex has no segment, so a strip of one stamps nothing.
+        let p = ppath(&[[1., 0., 1.]], 2, 16);
+        assert!(path_stamp_sites(&p, 100).sites.is_empty());
     }
 
     #[test]
@@ -2169,8 +2195,8 @@ mod tests {
         let p = ppath(&[[0., 0., 0.], [4., 0., 0.]], 2, 4);
         let s = path_stamp_sites(&p, 2);
         assert_eq!(s.sites.len(), 2);
-        // Four wanted on the segment + the cap vertex; 2 emitted.
-        assert_eq!(s.capped, 3);
+        // Four wanted on the segment; 2 emitted.
+        assert_eq!(s.capped, 2);
     }
 
     #[test]

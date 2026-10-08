@@ -771,8 +771,9 @@ fn testprop_pkg() -> Vec<u8> {
 }
 
 /// `event_install` plus a `race0.pathset` overlay: one `testprop`
-/// line strip — a 12 m segment stamped at 5 m intervals gives 4
-/// placements (t = 0, 5, 10 + the end cap).
+/// line strip — a 12 m segment at 5 m spacing gives
+/// floor(12/5) = 2 placements at stride 6 (t = 0, 6; the end vertex is
+/// never stamped, WLD-33).
 fn overlay_install() -> tempfile::TempDir {
     let tmp = event_install();
     write(tmp.path(), "geometry/testprop.pkg", testprop_pkg());
@@ -813,8 +814,8 @@ fn event_pathset_overlay_spawns_session_owned_props() {
     let props = overlay_entities(&mut app);
     assert_eq!(
         props.len(),
-        8,
-        "4 stamps × (1 render part + 1 collider), got {props:?}"
+        4,
+        "2 stamps × (1 render part + 1 collider), got {props:?}"
     );
     assert!(
         props.iter().all(|(_, owner)| *owner == SessionEntity(1)),
@@ -831,7 +832,7 @@ fn restarting_the_event_respawns_its_overlay_once() {
     let mut app = event_app(event_config(), vfs_of(tmp.path()));
     app.update();
     let first = overlay_entities(&mut app);
-    assert_eq!(first.len(), 8);
+    assert_eq!(first.len(), 4);
 
     app.world_mut().resource_mut::<SessionControl>().restart = true;
     let mut reached = false;
@@ -910,7 +911,7 @@ fn event_pathset_classification_counts_every_path() {
 
     assert_eq!(report.files, 1);
     assert!(report.failed_files.is_empty());
-    assert_eq!(report.stats.spawned, 4, "the one prop strip stamps");
+    assert_eq!(report.stats.spawned, 2, "the one prop strip stamps");
     assert_eq!(report.stats.label_paths, 1, "PATH03 is a route label");
     assert_eq!(report.stats.animated_paths, 1, "giz_pcar01_l is animated");
     assert_eq!(
@@ -925,7 +926,7 @@ fn event_pathset_classification_counts_every_path() {
         .iter(&world)
         .filter(|n| n.as_str().starts_with("event-pathset-"))
         .count();
-    assert_eq!(stamped, 8, "4 stamps × (part + collider)");
+    assert_eq!(stamped, 4, "2 stamps × (part + collider)");
 
     // A record that does not parse is reported, never silently dropped.
     write(d, "race/testcity/race1.pathset", b"PTH1\x01bad");

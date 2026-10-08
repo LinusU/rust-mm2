@@ -4887,13 +4887,14 @@ mod tests {
     }
 
     #[test]
-    fn line_strip_stamps_every_spacing_and_caps_the_end() {
+    fn line_strip_fits_whole_strides_and_never_stamps_the_end() {
         // One 12 m segment, 5 m spacing (spacing code is quarter metres):
-        // t = 0, 5, 10 along it, plus the authored end vertex at 12.
+        // floor(12/5) = 2 stamps at stride 6 — t = 0, 6 — and nothing at
+        // the end vertex (`Midtown2.exe` `0x466d30`, WLD-33).
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0]], 2, 20);
         let out = stamps(&p).transforms;
         let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
-        assert_eq!(zs, vec![0.0, 5.0, 10.0, 12.0]);
+        assert_eq!(zs, vec![0.0, 6.0]);
         // Every stamp is yawed along the segment.
         for m in &out {
             assert!((x_axis_of(m) - Vec3::Z).length() < 1e-5);
@@ -4904,7 +4905,7 @@ mod tests {
     fn line_strip_restarts_spacing_at_each_vertex() {
         // Two 12 m segments joined at (0,0,12); the second runs +X.
         // The shared vertex is stamped once, by the second segment's
-        // t = 0, and the row is capped at its final vertex.
+        // t = 0, and the final vertex is not stamped.
         let p = path(
             &[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0], [12.0, 0.0, 12.0]],
             2,
@@ -4916,17 +4917,14 @@ mod tests {
             origins,
             vec![
                 Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, 5.0),
-                Vec3::new(0.0, 0.0, 10.0),
+                Vec3::new(0.0, 0.0, 6.0),
                 Vec3::new(0.0, 0.0, 12.0),
-                Vec3::new(5.0, 0.0, 12.0),
-                Vec3::new(10.0, 0.0, 12.0),
-                Vec3::new(12.0, 0.0, 12.0),
+                Vec3::new(6.0, 0.0, 12.0),
             ]
         );
         // First segment stamps face +Z, second +X.
         assert!((x_axis_of(&out[0]) - Vec3::Z).length() < 1e-5);
-        assert!((x_axis_of(&out[3]) - Vec3::X).length() < 1e-5);
+        assert!((x_axis_of(&out[2]) - Vec3::X).length() < 1e-5);
     }
 
     #[test]
@@ -4942,15 +4940,18 @@ mod tests {
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 6.0]], 2, 20);
         let out = stamps(&p).transforms;
         let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
-        assert_eq!(zs, vec![0.0, 5.0, 6.0]);
+        // The 6 m segment holds floor(6/5) = 1 stamp, at its start.
+        assert_eq!(zs, vec![0.0]);
     }
 
     #[test]
-    fn single_vertex_strip_stamps_once() {
+    fn a_short_segment_and_a_single_vertex_strip_stamp_nothing() {
+        // A 3 m segment is under the 5 m spacing: the original skips it.
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 3.0]], 2, 20);
+        assert!(stamps(&p).transforms.is_empty());
+        // A lone vertex is no segment, so it stamps nothing either.
         let p = path(&[[7.0, 0.0, 7.0]], 2, 20);
-        let out = stamps(&p).transforms;
-        assert_eq!(out.len(), 1);
-        assert!((origin_of(&out[0]) - Vec3::new(7.0, 0.0, 7.0)).length() < 1e-5);
+        assert!(stamps(&p).transforms.is_empty());
     }
 
     #[test]
@@ -4978,13 +4979,13 @@ mod tests {
 
     #[test]
     fn expansion_is_bounded_by_the_stamp_budget() {
-        // 12 m at 5 m spacing wants t = 0, 5, 10 plus the end cap = 4
-        // stamps; a budget of 2 emits the first two and counts the
-        // suppressed rest rather than truncating silently.
-        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0]], 2, 20);
+        // 30 m at 5 m spacing wants six stamps; a budget of 2 emits the
+        // first two and counts the suppressed rest rather than
+        // truncating silently.
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 30.0]], 2, 20);
         let s = stamped_transforms(&p, 2);
         assert_eq!(s.transforms.len(), 2);
-        assert_eq!(s.capped, 2);
+        assert_eq!(s.capped, 4);
         // The budget applies to point/directed expansions too.
         let p = path(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], 0, 0);
         let s = stamped_transforms(&p, 2);

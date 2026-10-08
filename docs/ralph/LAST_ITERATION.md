@@ -1,22 +1,21 @@
-# Last iteration — report 7 item 5: Cops & Robbers arrow and map markers (iteration 5 of the new run)
+# Last iteration — report 7 item 6: trees in a London intersection (iteration 6 of the new run)
 
-Selection: report 7 outranks everything; items 1-4 are implemented and the previous gate/review passed with no blocking findings, so item 5 is next.
+Selection: report 7 outranks everything; items 1-5 are implemented and the previous gate/review passed with no blocking findings, so item 6 is next.
 
-Cause: the premise in the report was slightly off — `hudmap.rs` had *no* gold/bank/hideout roles (its `MarkerRole` was Player/Opponent/Gate/Finish; the three in `cnr.rs` are the 3D world markers). Both instruments were race-only: `spawn_nav_arrow` ran in the event arm and `update_nav_arrow` read `RaceState`; `spawn_hud_map` drew dots only from a `RaceDefinition`. A C&R match has no race, so neither existed.
+Channel: `mm2-inspect placement` (london) pointed at the `props.pathset` channel — `props.pathset:12:3/12:4 sp_tree1_s` at (214.8, 4.85, -818.9)/(215.0, -817.7), room 1207 `RoadFan`, ~5 m inside the carriageway, a metre apart. Path 12 is a two-point `LineStrip` (49.1 m, spacing 16 m) whose *end vertex* sits in the junction. Not INST, not prop_rule.
 
-Change:
-- `cnrhud::objective` + `CnrScene` (SystemParam): one answer off the host's match or the client's replica — gold position (carrier's car while a rival holds it, none while the local car does), hideout/bank sites, and the arrow target (gold, or the local side's `delivery_target` site while carrying; none after the match ends or while unseated).
-- `navarrow`: `spawn_nav_arrow_pkg` + `GENERIC_ARROW_PKG`; `update_nav_arrow` falls back to the C&R objective with the local car's bearing. `session.rs` spawns the arrow (and its 3D view) after `start_match`.
-- `hudmap`: `MarkerRole::{Gold,Hideout,Bank}` with the authored `hudmap_square` paint jobs 6/7/8 (shader records `GOLD_DOT`/`BANK_DOT`/`HIDEOUT_DOT`, read with `mm2-inspect pkg --shaders`); `spawn_hud_map` takes a `cnr` flag; `drive_hud_map` places them from the objective every frame. Host and client share the path (the client reads `CnrReplica`).
-- Ledger DSN-101 (designed): arrow family, chasing the carrier's car, hiding while carrying are implementation choices.
+Cause: `line_strip_sites` stamped `ceil(len/spacing)` props at the raw spacing and then capped the row with the final vertex (an inference, UNK-20). The cap stamps the end vertex whatever the spacing, so every row's last two props crowd together at the row's end — here, inside a box junction.
 
-Tests: `cnrhud::tests` +4 — objective for resting/carried (robber → hideout, cop → bank, rival carrier followed, carrier out of view), unseated/decided match, and `update_nav_arrow` end to end with no race (visible, bearing = gold, swings to hideout on carry, `H` gate hides, no match hides).
+Fix (recovered from the retail exe, not fudged): the shared strip stamper `Midtown2.exe` `0x466d30` (props loader `0x445130`/`0x4451d0`, parked-car manager `0x579906`), kind 2: per segment skip if `len < spacing`, else `step = len / floor(len/spacing)` (`0x5828a0` is the CRT `floor`; its other caller `0x443aab` is the `floor(x+0.5)` idiom) and stamp `k = floor(len/spacing)` times at stride `step` from the segment start. The end vertex is the next segment's first stamp; the final vertex and a lone vertex are never stamped. `mm2_game::props::line_strip_sites` now does exactly that (still counted arithmetically against the budget). Zero spacing keeps the designed one-per-vertex fallback (the original would divide by zero). Ledger WLD-33 (verified_original); WLD-13/UNK-20/`docs/research/pathset.md` updated.
 
-Retail evidence (sf, Apple M1, local, uncommitted in `/tmp/rm5`): `--city sf --cnr cops --frames 240 --screenshot` shows the green 3D arrow at top-centre and the scoreboard; headless smoke `arr=hudarrow01/ahead map=inset/north/z1195/hudmap_sf.pkg/6t/4m` (markers 1 → 4). `--pause-map` capture shows the gold, bank and hideout dots at their sites on the full-screen map. No before capture: the before state is structural (no arrow node, 1 map marker), not a rendering difference.
+Effect (placement audit, retail): london `props.pathset` 1188 → 1033 stamps, in-road 185 → 121, RoadFan in-road 48 → 11, Crosswalk 4 → 0, body-in-road 193 → 128; sf 925 → 778 stamps, in-road 34 → 30. Parked cars share the stamper, so their per-path counts shift the same way (spacing floored to 5 m still applies).
 
-Not done / open: the dots use the authored `IconScale`, so they are small on the full-screen map (same as race gate dots); not enlarged. The arrow's pointing direction was only checked by the unit test and the screenshot showing it live, not against a driven approach to the gold. Remote cars still have no opponent tri on the C&R map (opponent pool is sized from the race roster, 0 here) — a candidate follow-up. Two-process client check not run; the client path is the same `CnrScene` reading `CnrReplica` (the replica branch is exercised by the existing scoreboard test, not by a new arrow test).
+Capture (london, Apple M1, local, uncommitted in `/tmp/it6`): before/after at `--cam=203.0,7.7,-827.7,-125,-20` — the three/four trunks standing on the beige box junction are gone; the kerb rows of trees stay. Not fixed and out of scope: the flat beige box fill itself reads as a decal with no hatch texture there (not in the report).
 
-Status: candidate; not independently checked. Next is item 6 (trees standing in a London intersection).
+Tests: `mm2_game::props` +2 (whole strides / never stamps the end incl. the retail path-12 numbers; short segment + lone vertex), 2 rewritten; `mm2_app::city` 5 rewritten to the new rule; `tests/event.rs` 3 counts (4 → 2 stamps) for its 12 m / 5 m fixture.
 
-Gates: see below.
-Gates (foreground): fmt PASS; clippy `--locked --workspace --all-targets --all-features -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (73 `test result` lines, none failed).
+Not verified: the original's behaviour was read from disassembly, not run; the spacing byte's quarter-metre decode into the float at `path+0x34` was taken from the existing parse. Kind 0/1 branches unchanged (read, consistent with the port). Residual in-road pathset stamps (121) are other rows and kinds, not investigated.
+
+Status: candidate; not independently checked. Next is item 7 (hole in a London building wall).
+
+Gates (foreground): fmt PASS; clippy `--locked --workspace --all-targets --all-features -D warnings` PASS; `cargo test --locked --workspace --no-fail-fast` exit 0 (2927 passed, 0 failed).

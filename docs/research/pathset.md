@@ -102,8 +102,9 @@ per path: char[32] name (NUL-padded, may fill all 32 bytes)
 loaded PSDL (`<dir>/<stem>.psdl` → `<dir>/<stem>/props.pathset`) and
 stamps each path's prop PKG through the same `PropCache` INST uses —
 shared meshes, materials and one static trimesh collider per instance.
-Measured on retail: london 1188 instances / 87 paths, sf 925 / 113
-paths — the 31 remaining sf paths are `r4i_rails_f` *decal* names
+Measured on retail (after the strip-stamper recovery below): london 1033
+instances / 87 paths, sf 778 / 113 paths (1188 / 925 under the earlier
+capped-row reading) — the 31 remaining sf paths are `r4i_rails_f` *decal* names
 living inside `props.pathset`, reported as `decal paths`, not
 failures. Rendered check: sf's `sp_lightstreet_rt_f` lamp row draws
 evenly spaced along its authored strip.
@@ -121,11 +122,29 @@ are inferred and tracked under UNK-20):
   and `sp_barricadeconcl_*_f`'s 5 m wall segment — authored extending
   local +X — forms continuous barriers under the same reading where
   a +Z→direction yaw would comb them perpendicular to the road.
-- `LineStrip`: each segment fills at `spacing` intervals from its
-  start (t = 0, s, 2s, … < len — the shared vertex is stamped by the
-  following segment's t = 0), the final vertex caps the row, stamps
-  yaw along their segment. Whether the original restarts spacing per
-  segment or runs it continuously is unverified.
+- `LineStrip` (**recovered from `Midtown2.exe`, 2026-10-08, operator
+  report 7 item 6**): the kind-2 branch of the shared strip stamper
+  `0x466d30` — called by the props loader (`0x445130` → callback
+  `0x4451d0`) and by the parked-car manager (`0x579906`) — walks the
+  consecutive point pairs. For each segment of length `len` it skips
+  the segment when `len < spacing`; otherwise it computes
+  `step = len / floor(len / spacing)` (`0x5828a0`, the CRT `floor`: the
+  same routine is the `floor(x + 0.5)` rounding elsewhere) and stamps
+  from the segment's start along its direction, advancing `step` per
+  stamp while the remaining length is still `>= spacing` — so exactly
+  `k = floor(len / spacing)` stamps at stride `step >= spacing`, the last
+  one a stride short of the segment's end. The vertex ending a segment
+  is the next segment's first stamp; **the final vertex is never
+  stamped** and a lone vertex stamps nothing. Stamps face along their
+  segment (the same yaw matrix as the directed kind). The earlier port
+  stamped `ceil(len/spacing)` stamps at the raw spacing and capped the
+  row with the final vertex — which dropped a second tree 1 m from the
+  penultimate one at the end of every `sp_tree1_s` row, in the middle of
+  the junction the row ends at (retail london `props.pathset` path 12:
+  49.1 m at 16 m spacing, end vertex 5 m inside a `RoadFan` room).
+  Placement audit, london `props.pathset`: 1188 → 1033 stamps, in-road
+  185 → 121, `RoadFan` in-road 48 → 11, `Crosswalk` in-road 4 → 0; sf 925
+  → 778 stamps, in-road 34 → 30.
 - Zero spacing on a strip → one unrotated prop per vertex; a lone
   vertex stamps once. Undocumented kinds and odd `Directed` tails
   stamp nothing (`validate()` reports them).

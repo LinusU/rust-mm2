@@ -3226,7 +3226,7 @@ for item 1, a measured run) shows it fixed.
      the full-screen map. `hudmap.rs` already has gold, bank and hideout
      marker roles, so bind them to the live match state on host and
      client.
-6. **Trees standing in the middle of an intersection**
+6. **[implemented, candidate — iteration 6 of the new run; see LAST_ITERATION and ledger WLD-33]** **Trees standing in the middle of an intersection**
    (`4-trees-in-intersection-london.webp`, london,
    `--cam=203.0,7.7,-827.7,-125,-20`).
    - A group of trees stands in the carriageway at a junction.
