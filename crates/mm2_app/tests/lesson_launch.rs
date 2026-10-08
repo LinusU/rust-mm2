@@ -299,6 +299,68 @@ fn a_non_crash_row_never_installs_a_lesson_driver() {
     assert!(app.world().get_resource::<LessonDriver>().is_none());
 }
 
+/// The lesson's own `crash<N>.aimap{,_p}` rides on the launch setup so
+/// its ambient-traffic overrides reach the session's traffic load
+/// (CC-7; sf crash1/2/4/12 author ten per-road speed limits). The Professional record
+/// wins at Professional, the Amateur one at Amateur; a lesson without a
+/// resolvable record launches on the city's own aimap.
+#[test]
+fn a_lesson_launch_carries_its_difficulty_selected_aimap() {
+    use mm2_game::Difficulty;
+
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Exceptions]\n2\n10\t0.00\t0\n11\t0.00\t0\n",
+    );
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap_p",
+        "[Exceptions]\n1\n12\t0.00\t0\n",
+    );
+    let vfs = vfs_of(tmp.path());
+    let event_ref = EventRef {
+        city: "london".into(),
+        table: EventTableKind::CrashCourse,
+        index: 0,
+    };
+    let roads = |difficulty| {
+        let (setup, _driver) = race::lesson_launch(&vfs, &event_ref, difficulty).unwrap();
+        setup
+            .aimap
+            .expect("the lesson's aimap resolves")
+            .exceptions
+            .iter()
+            .map(|e| e.road)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roads(Difficulty::Amateur), vec![10, 11]);
+    assert_eq!(roads(Difficulty::Professional), vec![12]);
+
+    // crash1's record authors no exceptions: an aimap, but an empty one.
+    let other = EventRef {
+        index: 1,
+        ..event_ref.clone()
+    };
+    let (setup, _driver) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
+    assert!(setup.aimap.unwrap().exceptions.is_empty());
+    // And an unreadable one degrades to the city's own aimap, the
+    // lesson still launching.
+    write(
+        tmp.path(),
+        "race/london/crash1.aimap",
+        "[Exceptions]\n2\n1 0.0 0\n",
+    );
+    write(
+        tmp.path(),
+        "race/london/crash1.aimap_p",
+        "[Exceptions]\n2\n1 0.0 0\n",
+    );
+    let (setup, _driver) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
+    assert!(setup.aimap.is_none());
+}
+
 /// Original-content validation (opt-in: `MM2_RETAIL` names an install).
 /// Every Crash Course row of both cities, at both difficulties, loads
 /// through the real `load_session_world` into `Countdown` on leg 0 with

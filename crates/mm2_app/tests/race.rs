@@ -1178,6 +1178,7 @@ fn restart_removes_the_lesson_driver() {
             legs,
             rewards: Default::default(),
             availability: Default::default(),
+            aimap: None,
         },
     ));
     run(&mut app, 3);

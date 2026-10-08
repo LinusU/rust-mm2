@@ -231,6 +231,15 @@ pub struct LessonSetup {
     /// The city's derived availability surface (CC-3's chain) — the
     /// same table the menu gates a midterm/final on.
     pub availability: mm2_game::AvailabilityTable,
+    /// The lesson's own difficulty-selected `crash<N>.aimap{,_p}`,
+    /// parsed — the ambient-traffic layer the lesson authors (sf
+    /// crash1/2/4/12 set a default speed limit of 15 and ten per-road
+    /// `[Exceptions]` limits of 35, CC-7).
+    /// Only the traffic overrides are consumed: the `[Opponent]` lead
+    /// car and `[Police]` spawns stay unbuilt (UNK-35). `None` when no
+    /// record resolves or parses — the lesson then runs on the city's
+    /// own aimap.
+    pub aimap: Option<mm2_formats::aimap::Aimap>,
 }
 
 /// Resolve a Crash Course `EventRef` into its lesson legs and
@@ -256,6 +265,14 @@ pub fn lesson_race_setup(
     let lesson = mm2_content::crash_lesson(vfs, &catalog, event);
     let legs = mm2_content::lesson_legs(&catalog, &lesson, difficulty)?;
     let run = mm2_game::LessonRun::new(legs.len())?;
+    let aimap = match mm2_content::event_aimap(vfs, event, difficulty) {
+        Ok((aimap, _)) => Some(aimap),
+        Err(mm2_content::RosterBuildError::NoAimapRecord) => None,
+        Err(e) => {
+            warn!(error = %e, "lesson aimap unreadable — city ambient defaults apply");
+            None
+        }
+    };
     Ok(LessonSetup {
         key: mm2_game::EventKey {
             city: event.event_ref.city.clone(),
@@ -266,6 +283,7 @@ pub fn lesson_race_setup(
         run,
         rewards: mm2_content::reward_table(&catalog),
         availability: mm2_content::availability_table(&catalog),
+        aimap,
     })
 }
 
@@ -274,10 +292,15 @@ pub fn lesson_race_setup(
 /// [`EventSetup`] shape carrying leg 0's definition and the lesson's
 /// stable key, plus the [`LessonDriver`](crate::lesson::LessonDriver)
 /// that swaps in the later legs. A lesson fields no authored
-/// opponents/police and stamps no `.pathset` overlay yet; the city's
-/// reward and availability tables ride along so the lesson's *pass*
-/// (never a leg clear) credits the profile (`record_session_results`); the driver is built fresh per call, so a session
-/// restart re-enters on leg 0 with cleared counters.
+/// opponents/police and stamps no `crash<N>.pathset` event overlay
+/// (retail authors none; the `<object>_crash<N>` bridge/parked-car/
+/// ferry sets load through the object managers off the lesson's key
+/// stem). The lesson's own aimap rides along as `aimap`, so its
+/// ambient-traffic overrides apply; the city's reward and availability
+/// tables ride along so the lesson's *pass* (never a leg clear)
+/// credits the profile (`record_session_results`); the driver is
+/// built fresh per call, so a session restart re-enters on leg 0 with
+/// cleared counters.
 pub fn lesson_launch(
     vfs: &Vfs,
     event_ref: &EventRef,
@@ -286,6 +309,7 @@ pub fn lesson_launch(
     let mut lesson = lesson_race_setup(vfs, event_ref, difficulty)?;
     let rewards = std::mem::take(&mut lesson.rewards);
     let availability = std::mem::take(&mut lesson.availability);
+    let aimap = lesson.aimap.take();
     let driver = crate::lesson::LessonDriver::new(lesson);
     let definition = driver
         .current_leg()
@@ -300,7 +324,7 @@ pub fn lesson_launch(
         police: mm2_game::PoliceRoster::default(),
         rewards,
         availability,
-        aimap: None,
+        aimap,
     };
     Ok((setup, driver))
 }

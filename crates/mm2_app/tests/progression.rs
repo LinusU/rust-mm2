@@ -733,6 +733,7 @@ fn lesson_driver(app: &App) -> mm2_app::lesson::LessonDriver {
         legs,
         rewards: Default::default(),
         availability: Default::default(),
+        aimap: None,
     })
 }
 

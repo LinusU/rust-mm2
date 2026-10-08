@@ -536,6 +536,9 @@ pub fn load_ambient_traffic(
         &policy,
     );
 
+    let closed_roads = setup.overrides.closed_roads.len();
+    let exceptions = setup.overrides.exceptions.len();
+    let default_speed_limit = setup.overrides.default_speed_limit;
     let role = session.authority_role();
     let mut traffic = AmbientTraffic {
         eligible: eligible_lanes(&build.graph, &setup.overrides),
@@ -621,6 +624,9 @@ pub fn load_ambient_traffic(
         target = traffic.target,
         spawned = traffic.spawned,
         eligible = traffic.eligible.len(),
+        closed_roads,
+        exceptions,
+        default_speed_limit,
         signals = traffic.signals,
         signals_dropped = traffic.signals_dropped,
         issues = traffic.issues.len(),
