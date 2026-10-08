@@ -268,6 +268,17 @@ pub struct Culling {
     pub small: Vec<Vec<u16>>,
 }
 
+/// An intersection where exactly one incident road carries tram rails:
+/// the end of a tram line. The retail executable's AI-map init creates one
+/// cable car per such intersection (see [`Bai::tram_termini`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TramTerminus {
+    /// Index into [`Bai::intersections`].
+    pub intersection: usize,
+    /// Index into [`Bai::roads`] of the one tram-carrying road.
+    pub road: usize,
+}
+
 /// A parsed BAI file.
 #[derive(Debug, Clone)]
 pub struct Bai {
@@ -522,6 +533,49 @@ impl Bai {
             intersections,
             culling,
         })
+    }
+
+    /// The tram-line termini, in intersection order.
+    ///
+    /// Recovered from `Midtown2.exe` (`AIMAP.Init: Create the cable cars.`,
+    /// the caller of `0x54a200`): for each intersection the original counts
+    /// its listed roads whose side facing away from the intersection has
+    /// tram curves; exactly one such road makes the intersection a
+    /// terminus and the cable car is created on that road. An intersection
+    /// with zero (no line) or two or more (mid-line or a junction of lines)
+    /// yields none. Road references outside [`Bai::roads`] are skipped
+    /// ([`Bai::validate`] reports them).
+    ///
+    /// The executable tests the single side facing away from the
+    /// intersection, and which in-memory side that is has not been mapped
+    /// to this parser's `left`/`right`. A road therefore counts here when
+    /// *either* side carries trams; [`Bai::tram_side_asymmetries`] counts
+    /// the roads where the choice could matter, and it is zero on both
+    /// retail cities.
+    pub fn tram_termini(&self) -> Vec<TramTerminus> {
+        let carries = |road: usize| {
+            self.roads
+                .get(road)
+                .is_some_and(|r| r.left.tram_count > 0 || r.right.tram_count > 0)
+        };
+        let mut out = Vec::new();
+        for (intersection, i) in self.intersections.iter().enumerate() {
+            let mut tram_roads = i.roads.iter().map(|&r| r as usize).filter(|&r| carries(r));
+            if let (Some(road), None) = (tram_roads.next(), tram_roads.next()) {
+                out.push(TramTerminus { intersection, road });
+            }
+        }
+        out
+    }
+
+    /// Roads whose two sides disagree on whether they carry tram rails —
+    /// where [`Bai::tram_termini`]'s either-side test could differ from
+    /// the executable's one-side test.
+    pub fn tram_side_asymmetries(&self) -> usize {
+        self.roads
+            .iter()
+            .filter(|r| (r.left.tram_count > 0) != (r.right.tram_count > 0))
+            .count()
     }
 
     /// Check internal cross-reference integrity: ids, references between
@@ -1060,6 +1114,81 @@ mod tests {
         assert_eq!(r0.end.vehicle_rule(), Some(VehicleRule::StopSign));
         assert_eq!(bai.intersections[0].roads, vec![0, 1]);
         assert!(bai.validate().is_empty());
+    }
+
+    /// A chain of `n` roads joined at `n - 1` interior intersections with a
+    /// dead-end intersection at each extremity: intersection `k` lists
+    /// roads `k - 1` and `k` (clamped at the ends).
+    fn chain(n: u32) -> Bai {
+        let mut b = Bai::parse(&two_road_fixture()).unwrap();
+        let road = b.roads[0].clone();
+        b.roads = (0..n).map(|_| road.clone()).collect();
+        let template = b.intersections[0].clone();
+        b.intersections = (0..=n)
+            .map(|k| Intersection {
+                roads: [k.checked_sub(1), (k < n).then_some(k)]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                ..template.clone()
+            })
+            .collect();
+        b
+    }
+
+    #[test]
+    fn a_tram_line_has_a_terminus_at_each_end_and_none_between() {
+        let mut b = chain(3);
+        assert!(b.tram_termini().is_empty(), "no trams, no cable cars");
+        for r in &mut b.roads[..2] {
+            r.left.tram_count = 1;
+            r.right.tram_count = 1;
+        }
+        // Roads 0 and 1 carry the line: it ends at intersection 0 (only
+        // road 0) and at intersection 2 (road 1 meets the tram-free road 2);
+        // intersection 1 joins two tram roads, 3 sees none.
+        assert_eq!(
+            b.tram_termini(),
+            vec![
+                TramTerminus {
+                    intersection: 0,
+                    road: 0
+                },
+                TramTerminus {
+                    intersection: 2,
+                    road: 1
+                },
+            ]
+        );
+        assert_eq!(b.tram_side_asymmetries(), 0);
+    }
+
+    #[test]
+    fn a_junction_of_tram_lines_is_not_a_terminus() {
+        let mut b = chain(2);
+        // One intersection listing both roads plus a third reference to
+        // road 0: three tram listings.
+        for r in &mut b.roads {
+            r.right.tram_count = 1;
+        }
+        b.intersections[1].roads = vec![0, 1, 0];
+        let found: Vec<_> = b.tram_termini().iter().map(|t| t.intersection).collect();
+        assert_eq!(found, vec![0, 2]);
+        // One-sided trams are counted, and flagged for the side question.
+        assert_eq!(b.tram_side_asymmetries(), 2);
+    }
+
+    #[test]
+    fn a_dangling_road_reference_is_no_terminus() {
+        let mut b = chain(1);
+        b.roads[0].left.tram_count = 1;
+        b.intersections[0].roads = vec![0, 99];
+        let found = b.tram_termini();
+        assert_eq!(
+            found.len(),
+            2,
+            "the ghost reference is skipped, not counted"
+        );
     }
 
     #[test]

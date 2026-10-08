@@ -18,7 +18,7 @@ mm2-inspect specials <install> [--city london|sf] [--strict]
 | parked-car strips | `…_parkedcar[_<stem>].pathset` | `mm2_app::city::spawn_parked_cars` |
 | water / recovery rooms | `city/<city>.water` | `mm2_app::water`, `mm2_app::recovery` |
 | rail curves | `city/<city>.bai` tram/train curve counts | measured only |
-| cable car | `va_cablecar_f` assets + executable evidence | **none — unresolved** (UNK-44) |
+| cable car | `va_cablecar_f` assets + executable evidence | **none** — start sites recovered (4 in SF, 0 in London); motion unresolved (UNK-44) |
 
 Every family file is found by name (default, `_<event stem>` overlays and
 backup variants), parsed by the production `Pathset` parser, and each
@@ -54,10 +54,29 @@ invented.
 `"Returning a NULL CableCar. Idx: %d"` accessor is at `0x534a3b`). The
 model, its bound and its `aivehicledata` ship, as do the `cablecar*` and
 `streetcable` audio clips, yet no pathset names a cable car and the model
-is in neither city's ambient roster. Which data places and routes the
-cars is **not recovered**. San Francisco's 42 tram-rail curves are a
-candidate, nothing more; the report lists the actor as unresolved and no
-behaviour is claimed (`original-rules.md` UNK-44).
+is in neither city's ambient roster.
+
+**Where the cars start (verified_original, read from the executable).**
+The init walks every BAI intersection and calls `0x54a200(intersection)`,
+which counts the intersection's listed roads that carry tram rails on
+the side facing away from it (`0x549960`: a nonzero per-side tram-curve
+pointer; the train-rail twin at `0x549990`/`0x54a290` serves the next
+init step, `"AIMAP.Init: Create the subways."`). Exactly one such road makes
+the intersection a **tram-line terminus** and yields `(road id, ±1
+direction)`; zero or two-plus yield nothing. The init allocates one
+`0x184`-byte cable-car object per terminus and constructs it
+(`0x53f7c0`) from the model name, its index, that road id (`+0xd0`) and
+the direction (`+0xd2`). `Bai::tram_termini` implements the selection.
+Retail: San Francisco has **4** termini (21 tram roads, none one-sided),
+London **0** — so London has no cable cars. The step only runs when a
+flag in the init's parameter block (`+0x40`) is set; what sets it (per
+city, per game type, or a detail option) was not traced, so whether
+every San Francisco session spawns the four is **unknown**.
+
+Still unrecovered: the cars' motion along the road chain (speed, stops,
+turnaround, bell/start/stop audio triggers) and which in-memory side
+`±1` names (immaterial on retail, where every tram road carries rails on
+both sides).
 
 Out of scope here: the object-audio tables (`drawbridge`, `ferry`,
 `subwaycar`, `trolleycable`, …) are sound emitters covered by

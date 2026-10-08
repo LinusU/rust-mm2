@@ -182,6 +182,11 @@ enum Rails {
         roads_with_rails: usize,
         tram_curves: usize,
         train_curves: usize,
+        /// Cable-car start sites: intersections ending a tram line.
+        tram_termini: usize,
+        /// Tram roads whose sides disagree (the terminus rule's side
+        /// question; zero means it cannot matter).
+        tram_side_asymmetries: usize,
     },
 }
 
@@ -330,6 +335,8 @@ fn audit_rails(vfs: &Vfs, city: &str) -> Rails {
         roads_with_rails: with,
         tram_curves: tram,
         train_curves: train,
+        tram_termini: bai.tram_termini().len(),
+        tram_side_asymmetries: bai.tram_side_asymmetries(),
     }
 }
 
@@ -416,8 +423,9 @@ fn unresolved(vfs: &Vfs) -> Vec<String> {
          Midtown2.exe creates cable cars in the AI map init (string \"AIMAP.Init: Create the \
          cable cars.\" at 0x5d66d0, referenced from 0x5358cf; \"Returning a NULL CableCar\" at \
          0x5d64bc) and ships `cablecar*`/`streetcable` audio; no per-city cable-car pathset \
-         exists. Which authored data routes it (San Francisco's BAI tram-rail curves, listed above, are the candidate) is \
-         not recovered, so no behaviour is claimed.",
+         exists. Start sites are recovered (one per BAI tram-line terminus, counted above; \
+         the init's caller of 0x54a200); the cars' motion, speed and stop behaviour are not, so \
+         no behaviour is claimed.",
         assets.join(", ")
     )]
 }
@@ -495,9 +503,12 @@ fn render(audit: &CityAudit) -> String {
             roads_with_rails,
             tram_curves,
             train_curves,
+            tram_termini,
+            tram_side_asymmetries,
         } => writeln!(
             s,
-            "  rails     city/{}.bai: {roads_with_rails}/{roads} road(s) carry rails — {tram_curves} tram curve(s), {train_curves} train curve(s)",
+            "  rails     city/{}.bai: {roads_with_rails}/{roads} road(s) carry rails — {tram_curves} tram curve(s), {train_curves} train curve(s); \
+             {tram_termini} tram-line terminus(es) (cable-car start sites), {tram_side_asymmetries} one-sided tram road(s)",
             audit.city
         ),
     };
@@ -817,6 +828,24 @@ mod tests {
         let b = audit_city(&vfs_of(empty.path()), "london");
         assert_eq!(b.water, Water::Absent);
         assert!(b.failures().iter().any(|f| f.contains("london.water")));
+    }
+
+    #[test]
+    fn the_rail_line_reports_the_cable_car_start_sites() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path());
+        let mut a = audit_city(&vfs_of(d.path()), "london");
+        a.rails = Rails::Loaded {
+            roads: 379,
+            roads_with_rails: 21,
+            tram_curves: 42,
+            train_curves: 0,
+            tram_termini: 4,
+            tram_side_asymmetries: 0,
+        };
+        let text = render(&a);
+        assert!(text.contains("4 tram-line terminus(es) (cable-car start sites)"));
+        assert!(text.contains("0 one-sided tram road(s)"));
     }
 
     #[test]
