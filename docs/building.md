@@ -107,6 +107,43 @@ original archive or extracted asset, no profile, no screenshot or perf
 capture, no credential. `assets/` holds only the project's own synthetic
 files; `retail/` and `screenshots/` are git-ignored.
 
+## Packaging
+
+```sh
+scripts/package.sh                      # release build, then package
+scripts/package.sh --bin-dir <dir>      # package binaries you already built
+```
+
+`scripts/package.sh` runs `scripts/release-build.sh`, then assembles
+`target/package/rust-mm2-<os>-<arch>/` — the four binaries, the
+repository's synthetic `assets/`, `README.md` and `docs/building.md` +
+`docs/modding.md` — and a `.tar.gz` beside it. It checks the folder with
+`scripts/check-package.sh`, writes the tarball, **extracts the tarball into
+a scratch directory and checks that too**, since the archive is what
+ships. It never overwrites: an existing folder or tarball is an error.
+
+`scripts/check-package.sh <dir>` is an allowlist, not a blocklist. A file
+the package is not meant to carry fails even if nobody thought to forbid
+it; the mistakes worth naming (an original `*.ar` archive, a `driver-*`
+profile or `settings.json`, a `*.csv`/`*.report.json` perf capture, a
+`*.log`, `.env`/`*.pem`/`*.key`) get their own message. Symlinks fail
+(they can point out of the package), assets must be of a known type and
+under 8 MiB, all four binaries (all `.exe` or none) and
+`assets/texture/dev_road.png` must be present, and every file goes through
+`scripts/scan-private-paths.sh`. Every problem is listed, not only the
+first. Run it on any folder you are about to hand to someone.
+
+A package carries no `LICENSE` file because the repository has none yet;
+the check accepts one when it appears. It carries no original content by
+construction: nothing in the script reads an install.
+
+The flat folder, the macOS `.app` (`Contents/MacOS/mm2` with
+`Contents/Resources/assets`) and the Unix prefix (`bin/mm2` with
+`share/rust-mm2/assets`) layouts are each launched in
+`tests/package.rs` with the freshly built `mm2` copied into place and run
+from an unrelated directory. Only the flat tarball is produced; nothing
+yet assembles the `.app` bundle or a prefix install, or a Windows zip.
+
 ## Where the app finds files
 
 **Its own base assets** (`assets/texture/dev_road.png` and friends) are
@@ -123,8 +160,8 @@ these that holds `texture/dev_road.png` wins:
 So a portable build is the binary with the repository's `assets/` folder
 beside it, and it works when launched from any directory. No path is
 compiled in. The lookup is unit-tested and process-tested
-(`tests/app_assets.rs`); the `.app` and prefix layouts are only unit-tested
-because nothing builds those packages yet.
+(`tests/app_assets.rs`, `tests/package.rs`); the `.app` and prefix layouts
+are launched from a copied binary, but nothing builds those packages yet.
 
 **The original game** is never bundled and never modified. Point at a
 retail installation with `--mm2-path "/path/to/Midtown Madness 2"` (the
@@ -161,9 +198,12 @@ The README documents the flags in context; `mm2 --help` lists them all.
 
 ## Not done yet
 
-- A packaging step (a `.app` bundle, a Windows zip, a Linux tarball) and
-  the release-candidate checks that run on it.
-- A hosted CI job that runs `scripts/release-build.sh`, and passing
+- The `.app` bundle, a prefix install and a Windows zip (only the Unix
+  tarball is produced), and a `LICENSE` file to put in it.
+- The release-candidate checks that run the game-rule tests *on the
+  packaged binary* (F30-AC06): the package is checked for contents, not yet
+  exercised end to end.
+- A hosted CI job that runs `scripts/package.sh`, and passing
   Windows/macOS jobs (the added `build-check` job has not run yet).
 - Windowed runs on Linux and Windows; non-ASCII installation paths on
   every platform.

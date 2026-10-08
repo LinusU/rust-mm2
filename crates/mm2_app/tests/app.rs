@@ -41,6 +41,7 @@ mod navarrow3d;
 mod non_ascii_paths;
 mod oppind;
 mod opponents;
+mod package;
 mod pedestrian;
 mod police;
 mod precip;

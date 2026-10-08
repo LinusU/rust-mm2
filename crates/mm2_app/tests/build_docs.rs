@@ -111,6 +111,31 @@ fn the_doc_and_the_release_script_cover_every_binary() {
 }
 
 #[test]
+fn the_package_scripts_and_the_doc_agree_on_the_binary_set() {
+    let doc = read("docs/building.md");
+    for script in ["scripts/package.sh", "scripts/check-package.sh"] {
+        assert!(doc.contains(script), "docs/building.md omits {script}");
+    }
+    // Both scripts loop over the same four names the manifests define.
+    for script in ["scripts/package.sh", "scripts/check-package.sh"] {
+        let text = read(script);
+        let mut looped: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("for bin in "))
+            .filter_map(|l| l.strip_suffix("; do"))
+            .flat_map(str::split_whitespace)
+            .collect();
+        looped.sort();
+        looped.dedup();
+        assert_eq!(
+            looped,
+            workspace_bins(),
+            "{script} does not loop over the workspace binaries"
+        );
+    }
+}
+
+#[test]
 fn the_doc_lists_the_asset_search_order_the_code_uses() {
     let doc = read("docs/building.md");
     let code = read("crates/mm2_app/src/app_assets.rs");
