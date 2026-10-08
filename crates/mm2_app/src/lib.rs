@@ -27,6 +27,7 @@ pub mod dash;
 pub mod decals;
 pub mod dev_world;
 pub mod devices;
+pub mod display_trial;
 pub mod drawbridge;
 pub mod environment;
 pub mod hud;

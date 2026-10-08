@@ -599,6 +599,13 @@ impl MenuData {
         self.settings
     }
 
+    /// Take `settings` as what the Options screen shows — for a change
+    /// made behind its back (a display trial reverting), so the next
+    /// edit steps from the live value instead of undoing it.
+    pub fn adopt_settings(&mut self, settings: GraphicsSettings) {
+        self.settings = settings;
+    }
+
     /// Scan content once — the mounted set cannot change mid-run.
     fn ensure_scan(&mut self, vfs: &Vfs) {
         if self.scanned {
@@ -819,6 +826,11 @@ impl MenuShell {
         // shell — a click queued while a session ran has no screen.
         self.pending.clear();
         self.capture = None;
+        self.dirty = true;
+    }
+
+    /// Redraw the current screen on the next `menu_present`.
+    pub fn redraw(&mut self) {
         self.dirty = true;
     }
 

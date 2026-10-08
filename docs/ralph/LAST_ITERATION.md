@@ -1,12 +1,13 @@
-# Last iteration — F25-C.3 test hardening (iteration 9 of the run)
+# Last iteration — F23-B.10 safe display recovery (iteration 10 of the run)
 
-Selection: the previous checkpoint (`00c09e5`, F23-B.9) passed gates and review with no blocking findings, so no repair was owed. I took the small open verification gap I had left on F25-C.3 (`abd3a55`): the impaired shove test judged convergence without asserting that the impairment recipe actually fired. F23's remaining items (display revert countdown, subtitles, pad rebinding) are each larger than one focused change, so they stay open.
+Selection: the previous checkpoint (`e563eab`, F25-C.3 test hardening) passed gates and review with no blocking findings, so no repair was owed (its one verification gap — fmt/clippy not visible in its log — is covered by this iteration's recorded gates). Of F23's remaining items (display revert countdown, subtitles, pad rebinding), I took the revert countdown: it is the only one that closes a named spec requirement (req 6 "safe display recovery", AC04's invalid-display-mode edge) with a testable, UI-independent mechanism; subtitles have no speech surface to caption yet and pad rebinding needs a pad-capture UI on two screens.
 
-Change (test-only, `crates/mm2_app/tests/net_drive.rs`):
-- `run_shove_trio` now returns the `ImpairProxy` up/down `LinkStats` (read before the proxy drops) alongside the two client records.
-- `a_shoved_seat_converges_across_three_processes_on_an_impaired_link` asserts both directions carried frames, were delayed, and dropped/duplicated/reordered at least one frame, so a recipe that silently did nothing now fails the test instead of passing it.
-- Dropped the no-op `let (control_bob, alice, bob) = (...)` shadowing in `assert_shove_converged`.
+Change:
+- New `mm2_app::display_trial` (`DisplayTrialPlugin`, `drive_display_trial`, `display_trial_pending`): watches `GraphicsSettings`; a visible display mode/size change opens a 15 s trial with a banner. Enter/Space/pad A keeps; Esc/Backspace/pad B or the timeout reverts to the last kept display. Fullscreen-hidden size changes and vsync do not trial.
+- While pending, `menu_input`, `menu_mouse` and `pause_input` are run-gated off in `main.rs`, so the confirming key is never also a row activation or Back. The saved `settings.json` keeps the confirmed display during the trial (crash-safe) and follows the outcome.
+- Revert hands the Options screen the live value: `MenuData::adopt_settings` + `MenuShell::redraw` (new, small).
+- Tests: 9 unit (state machine; real watcher over a real settings file; keys; gate; countdown line) and 1 menu-rig test `a_display_change_from_the_options_screen_is_a_trial_the_menu_cannot_answer` (rig now mirrors the binary's gating; confirmed to fail with the menu gate removed).
 
-Results (foreground): `cargo test --locked -p mm2_app --test network shoved_seat` 2 passed (the recipe bites on the seeded run). Full gates below.
+Gates (foreground): `cargo fmt --all -- --check` PASS; `cargo clippy --workspace --all-targets --all-features -- -D warnings` PASS (exit 0); `cargo test --workspace`: the first run was green; two later full runs failed with a single network-suite test (the one whose name I captured is `net_drive::a_driven_collision_replicates_across_three_processes`, bob `impacts_applied == 0`; the other showed `115 passed; 1 failed` in the same suite, name not captured) and one passed; the network suite alone, run twice, passed 116/116. Unrelated to this change (headless three-process timing under workspace load); recorded in PLAN Blockers as an observed flake, not repaired.
 
-Status: implemented candidate; not independently checked. Evidence level: synthetic loopback, three real processes. No production code changed; F25-C stays open (other impairment legs, wider matrix).
+Status: implemented candidate; not independently checked. Evidence: synthetic only — no real display/monitor mode switch, no banner capture. F23 stays open (subtitles, pad rebinding, render scale, wheel/FFB audit, AC06).

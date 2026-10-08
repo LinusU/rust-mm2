@@ -21,10 +21,10 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, contracts, controls, crowd, damage,
-    damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
-    netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug, precip, profile,
-    progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence, session,
-    settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    damage_fx, dash, display_trial, environment, hud, hudmap, input, lesson, menu, nav_overlay,
+    navarrow, net, netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug,
+    precip, profile, progression, pvs, race, racestat, racetime, recovery, results, scripted,
+    sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1533,6 +1533,7 @@ fn main() {
         settings::SettingsFile::new(settings_path.clone()).with_overrides(run_overrides.clone()),
     )
     .add_plugins(settings::GraphicsSettingsPlugin)
+    .add_plugins(display_trial::DisplayTrialPlugin)
     .add_message::<ImpactEvent>()
     .add_message::<netdrive::RemoteImpact>()
     .add_message::<DamageEvent>()
@@ -1842,7 +1843,8 @@ fn main() {
             pause::pause_input
                 .after(session::session_control_input)
                 .before(session::drive_session)
-                .run_if(not(capturing)),
+                .run_if(not(capturing))
+                .run_if(not(display_trial::display_trial_pending)),
             pause::sync_physics_pause.after(session::drive_session),
             pause::pause_present.after(session::drive_session),
             // Results owns the keyboard while `Results` — same
@@ -2139,8 +2141,12 @@ fn main() {
                     // update. Frozen during a capture like every other
                     // input: a `--menu --frames` screenshot must be
                     // reproducible.
-                    menu::menu_mouse.run_if(not(capturing)),
-                    menu::menu_input.run_if(not(capturing)),
+                    menu::menu_mouse
+                        .run_if(not(capturing))
+                        .run_if(not(display_trial::display_trial_pending)),
+                    menu::menu_input
+                        .run_if(not(capturing))
+                        .run_if(not(display_trial::display_trial_pending)),
                     menu::menu_present,
                     menu::menu_preview_motion,
                 )

@@ -21,6 +21,7 @@ use bevy::window::PrimaryWindow;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::ImpactFilter;
 use mm2_app::controls::{ControlSettings, DriveAction};
+use mm2_app::display_trial;
 use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
 use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
@@ -398,7 +399,8 @@ fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
                 // ignores `Paused`) and the driver.
                 pause::pause_input
                     .after(session::session_control_input)
-                    .before(session::drive_session),
+                    .before(session::drive_session)
+                    .run_if(not(display_trial::display_trial_pending)),
                 // `Results` gets the same ownership contract — the
                 // overlay's keys, between the intent reader and the
                 // driver.
@@ -417,8 +419,8 @@ fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
                 // commands for `menu_input`.
                 (
                     menu::menu_watch,
-                    menu::menu_mouse,
-                    menu::menu_input,
+                    menu::menu_mouse.run_if(not(display_trial::display_trial_pending)),
+                    menu::menu_input.run_if(not(display_trial::display_trial_pending)),
                     menu::menu_present,
                     menu::menu_preview_motion,
                 )
@@ -3659,6 +3661,82 @@ fn the_display_and_vsync_rows_toggle_persist_and_reset() {
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
     assert_eq!(shell(&app).rows[5].text, "VSync: On");
     assert_eq!(shell(&app).rows[6].text, "Window size: 1280 x 720");
+}
+
+/// F23 req 6: a display change made on the Options screen is a trial.
+/// The file keeps the confirmed display until it is kept, the menu's
+/// own keys are dead while the banner is up (the confirming Enter is
+/// not also a row activation, Esc is not also Back), and a revert hands
+/// the Options screen the live value so its next edit steps from it.
+#[test]
+fn a_display_change_from_the_options_screen_is_a_trial_the_menu_cannot_answer() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    )
+    .init_resource::<GraphicsSettings>()
+    .insert_resource(mm2_app::settings::SettingsFile::new(Some(path.clone())))
+    .init_resource::<display_trial::DisplayTrial>()
+    // `DisplayTrialPlugin`'s system, ordered as there (the rig is
+    // already finished, so a plugin can no longer be added).
+    .add_systems(
+        Update,
+        display_trial::drive_display_trial
+            .after(menu::menu_input)
+            .after(pause::pause_input),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+    focus_row(&mut app, "Display");
+    let display = |app: &App| app.world().resource::<GraphicsSettings>().display;
+    let pending = |app: &App| {
+        app.world()
+            .resource::<display_trial::DisplayTrial>()
+            .is_pending()
+    };
+
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert!(pending(&app), "the change opened a trial");
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Windowed,
+        "the file keeps the confirmed display while the trial runs"
+    );
+
+    // Enter keeps — and does not also activate the focused Display row.
+    press(&mut app, KeyCode::Enter);
+    assert!(!pending(&app));
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Fullscreen
+    );
+
+    // A second change, answered with Esc: reverts to the kept display
+    // and does not also leave the Options screen.
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(display(&app), DisplayMode::Windowed);
+    assert!(pending(&app));
+    press(&mut app, KeyCode::Escape);
+    assert!(!pending(&app));
+    assert_eq!(display(&app), DisplayMode::Fullscreen);
+    assert_eq!(
+        GraphicsSettings::load(&path).display,
+        DisplayMode::Fullscreen
+    );
+    app.update();
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
+    assert_eq!(shell(&app).rows[4].text, "Display: Borderless fullscreen");
+
+    // The next edit steps from the reverted value, not the stale one.
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(display(&app), DisplayMode::Windowed);
 }
 
 /// A menu with nowhere to save (an evidence run) still applies the
