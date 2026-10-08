@@ -4100,6 +4100,7 @@ fn lesson_driver() -> mm2_app::lesson::LessonDriver {
         rewards: Default::default(),
         availability: Default::default(),
         aimap: None,
+        police: mm2_game::PoliceRoster::default(),
     })
 }
 

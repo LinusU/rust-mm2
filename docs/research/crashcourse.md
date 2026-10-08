@@ -121,6 +121,12 @@ code belongs to the row, not the filename.
   `crash10` 14 police over `vpauditt`/`vpdb7`/`vpmustang99`;
   london `crash11` 5; sf `crash5` 14 `vpcop` plus the only authored
   `[CopChaseDistance]` (150); sf `crash7` 6 `vpcop`.
+  Launch fields the lineup (F21-B.18): headless retail runs
+  (`--event crash:<row>`, both difficulties) report `pol=N/N` with N =
+  14 (london crash10), 5 (london crash11), 14 (sf crash5), 6 (sf
+  crash7); a cop sees the standing player and begins a pursuit in
+  crash5/crash11, the others stay out of sight at the start. What
+  makes a cop-chase lesson pass or fail is still unrecovered.
 - **Exceptions**: four sf lessons — `crash1` (slalom), `crash2`
   (corner), `crash4` (oneeighty) and `crash12` (final) — wire an
   identical ten-road `[Exceptions]` block (roads 10–19, `1.0 35.0`)

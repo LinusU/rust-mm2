@@ -1179,6 +1179,7 @@ fn restart_removes_the_lesson_driver() {
             rewards: Default::default(),
             availability: Default::default(),
             aimap: None,
+            police: mm2_game::PoliceRoster::default(),
         },
     ));
     run(&mut app, 3);

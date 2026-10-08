@@ -86,6 +86,7 @@ fn two_leg_setup(first_limit: Option<u32>) -> LessonSetup {
         rewards: Default::default(),
         availability: Default::default(),
         aimap: None,
+        police: mm2_game::PoliceRoster::default(),
     }
 }
 

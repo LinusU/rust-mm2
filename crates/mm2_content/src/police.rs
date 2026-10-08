@@ -76,6 +76,35 @@ pub fn police_roster_from_aimap(
     Ok(roster)
 }
 
+/// The police lineup a Crash Course lesson's own `crash<N>.aimap{,_p}`
+/// wires (F21-B.18; the cop-chase lessons — retail london crash10/11,
+/// sf crash5/7). The lesson counterpart of [`police_roster_from_aimap`],
+/// which refuses Crash Course rows: the lesson is `Ready`-checked and
+/// the rows are distilled the same way, but the `Cops` column is **not**
+/// cross-checked — a lesson's `mmcrashdata` params author `0` cops on
+/// every retail row (CC-7), so a count comparison would only report the
+/// authored disagreement as noise. A missing difficulty variant is still
+/// reported. The caller passes a Crash Course row; any other table row
+/// goes through [`police_roster_from_aimap`] and its count check.
+pub fn lesson_police_roster(
+    event: &CatalogEvent,
+    difficulty: Difficulty,
+    aimap: &Aimap,
+    picked: &EventAimap,
+) -> Result<PoliceRoster, RosterBuildError> {
+    if !event.status.is_ready() {
+        return Err(RosterBuildError::NotReady(event.status.clone()));
+    }
+    let mut roster = roster_of(aimap);
+    if picked.used != difficulty {
+        roster.issues.push(PoliceIssue::MissingVariant {
+            wanted: difficulty,
+            used: picked.used,
+        });
+    }
+    Ok(roster)
+}
+
 /// The police lineup of a city's free-roam (Cruise) record,
 /// `race/<city>/roam.aimap` for Amateur and `roam.aimap_p` for
 /// Professional, falling back to the one that ships (issue

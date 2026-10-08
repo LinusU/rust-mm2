@@ -76,7 +76,7 @@ pub use opponents::{
 pub use ped::{PedArchetype, PedLoadError};
 pub use police::{
     ExtraPolice, PoliceBuild, PoliceEntry, PoliceReport, PoliceSummary, cruise_police_roster,
-    police_roster, police_roster_from_aimap,
+    lesson_police_roster, police_roster, police_roster_from_aimap,
 };
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,

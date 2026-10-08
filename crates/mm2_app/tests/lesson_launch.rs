@@ -377,6 +377,131 @@ fn a_lesson_launch_carries_its_difficulty_selected_aimap() {
     assert!(setup.aimap.is_none());
 }
 
+/// A cop-chase lesson's own `[Police]` lineup (F21-B.18; retail london
+/// crash10/11, sf crash5/7) rides on the launch setup, difficulty-
+/// selected, with the lesson's `[CopChaseDistance]`. A lesson that
+/// authors none launches copless, and the lesson's table `Cops` column
+/// (0 on every retail row) is not a count to disagree with.
+#[test]
+fn a_lesson_launch_carries_its_difficulty_selected_police() {
+    use mm2_game::Difficulty;
+
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Police]\n2\nvpcop 10 0 40 90 0 15 0.5 50\nvpcop -20 0 60 0 0 15 0.5 50\n[CopChaseDistance]\n150\n",
+    );
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap_p",
+        "[Police]\n3\nvpcop 10 0 40 90 0 15 0.5 50\nvpcop -20 0 60 0 0 15 0.5 50\nvpcop 0 0 80 0 0 15 0.5 50\n",
+    );
+    let vfs = vfs_of(tmp.path());
+    let event_ref = EventRef {
+        city: "london".into(),
+        table: EventTableKind::CrashCourse,
+        index: 0,
+    };
+    let (setup, _) = race::lesson_launch(&vfs, &event_ref, Difficulty::Amateur).unwrap();
+    assert_eq!(setup.police.entries.len(), 2);
+    assert_eq!(setup.police.chase_distance, Some(150.0));
+    assert_eq!(setup.police.entries[0].position, Vec3::new(10.0, 0.0, 40.0));
+    assert!(
+        setup.police.issues.is_empty(),
+        "no table-count disagreement is reported: {:?}",
+        setup.police.issues
+    );
+    let (setup, _) = race::lesson_launch(&vfs, &event_ref, Difficulty::Professional).unwrap();
+    assert_eq!(
+        setup.police.entries.len(),
+        3,
+        "the Professional record wins"
+    );
+    assert_eq!(setup.police.chase_distance, None);
+
+    // crash1 authors only an `[Opponent]` section: no police.
+    let other = EventRef {
+        index: 1,
+        ..event_ref
+    };
+    let (setup, _) = race::lesson_launch(&vfs, &other, Difficulty::Amateur).unwrap();
+    assert!(setup.police.entries.is_empty());
+}
+
+/// The lesson's police are fielded by the production loader as
+/// session-owned `PoliceCar`s standing at their authored posts, a
+/// retry refields them under the new generation without doubling, and a
+/// copless lesson fields none.
+#[test]
+fn a_cop_chase_lessons_police_is_fielded_and_refielded_on_retry() {
+    use mm2_app::police::{PoliceCar, PoliceFleet};
+
+    let tmp = lesson_install();
+    write(
+        tmp.path(),
+        "race/london/crash0.aimap",
+        "[Police]\n2\nvpcop 10 0 40 90 0 15 0.5 50\nvpcop -20 0 60 0 0 15 0.5 50\n",
+    );
+    crate::support::tuned_car(tmp.path(), "vpcop", 1500.0);
+    let cops = |app: &mut App| -> Vec<(Entity, u64)> {
+        app.world_mut()
+            .query::<(Entity, &PoliceCar, &SessionEntity)>()
+            .iter(app.world())
+            .map(|(e, _, owner)| (e, owner.0))
+            .collect()
+    };
+
+    let mut app = event_app(lesson_config(0), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+    let first = cops(&mut app);
+    assert_eq!(first.len(), 2, "both authored rows became cars");
+    assert!(first.iter().all(|&(_, owner)| owner == 1));
+    let fleet = app.world().resource::<PoliceFleet>();
+    assert_eq!(
+        (fleet.authored, fleet.spawned, fleet.load_failed),
+        (2, 2, 0)
+    );
+    // Cops are not participants of the lesson's race.
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<RaceProgress>>()
+            .iter(app.world())
+            .count(),
+        1,
+        "only the player carries progress"
+    );
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..20 {
+        app.update();
+        if phase(&app) == SessionPhase::Countdown
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Countdown");
+    let second = cops(&mut app);
+    assert_eq!(second.len(), 2, "refielded, none doubled or left over");
+    assert!(second.iter().all(|&(_, owner)| owner == 2));
+    assert!(
+        second
+            .iter()
+            .all(|(e, _)| !first.iter().any(|(f, _)| f == e)),
+        "new entities, not the first attempt's"
+    );
+
+    // crash1 authors no `[Police]`: a copless lesson.
+    let mut app = event_app(lesson_config(1), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+    assert!(cops(&mut app).is_empty());
+}
+
 /// Original-content validation (opt-in: `MM2_RETAIL` names an install).
 /// Every Crash Course row of both cities, at both difficulties, loads
 /// through the real `load_session_world` into `Countdown` on leg 0 with

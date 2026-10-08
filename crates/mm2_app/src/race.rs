@@ -235,11 +235,18 @@ pub struct LessonSetup {
     /// parsed — the ambient-traffic layer the lesson authors (sf
     /// crash1/2/4/12 set a default speed limit of 15 and ten per-road
     /// `[Exceptions]` limits of 35, CC-7).
-    /// Only the traffic overrides are consumed: the `[Opponent]` lead
-    /// car and `[Police]` spawns stay unbuilt (UNK-35). `None` when no
+    /// The traffic overrides ride on the launch setup; the lesson's
+    /// `[Police]` rows become [`LessonSetup::police`], while its
+    /// `[Opponent]` lead car stays unbuilt (UNK-35). `None` when no
     /// record resolves or parses — the lesson then runs on the city's
     /// own aimap.
     pub aimap: Option<mm2_formats::aimap::Aimap>,
+    /// The lesson's authored `[Police]` lineup at the chosen difficulty
+    /// (F21-B.18; the cop-chase lessons — retail london crash10/11, sf
+    /// crash5/7). Empty for every other lesson, and when the aimap is
+    /// unreadable. The lineup is the lesson's, not a leg's: it stands at
+    /// its posts for the whole session.
+    pub police: mm2_game::PoliceRoster,
 }
 
 /// Resolve a Crash Course `EventRef` into its lesson legs and
@@ -265,12 +272,21 @@ pub fn lesson_race_setup(
     let lesson = mm2_content::crash_lesson(vfs, &catalog, event);
     let legs = mm2_content::lesson_legs(&catalog, &lesson, difficulty)?;
     let run = mm2_game::LessonRun::new(legs.len())?;
-    let aimap = match mm2_content::event_aimap(vfs, event, difficulty) {
-        Ok((aimap, _)) => Some(aimap),
-        Err(mm2_content::RosterBuildError::NoAimapRecord) => None,
+    let (aimap, police) = match mm2_content::event_aimap(vfs, event, difficulty) {
+        Ok((aimap, picked)) => {
+            let police = mm2_content::lesson_police_roster(event, difficulty, &aimap, &picked)
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "lesson police roster failed to build — no police");
+                    mm2_game::PoliceRoster::default()
+                });
+            (Some(aimap), police)
+        }
+        Err(mm2_content::RosterBuildError::NoAimapRecord) => {
+            (None, mm2_game::PoliceRoster::default())
+        }
         Err(e) => {
             warn!(error = %e, "lesson aimap unreadable — city ambient defaults apply");
-            None
+            (None, mm2_game::PoliceRoster::default())
         }
     };
     Ok(LessonSetup {
@@ -284,6 +300,7 @@ pub fn lesson_race_setup(
         rewards: mm2_content::reward_table(&catalog),
         availability: mm2_content::availability_table(&catalog),
         aimap,
+        police,
     })
 }
 
@@ -292,7 +309,8 @@ pub fn lesson_race_setup(
 /// [`EventSetup`] shape carrying leg 0's definition and the lesson's
 /// stable key, plus the [`LessonDriver`](crate::lesson::LessonDriver)
 /// that swaps in the later legs. A lesson fields no authored
-/// opponents/police and stamps no `crash<N>.pathset` event overlay
+/// opponents; its own `[Police]` lineup (cop-chase lessons, F21-B.18)
+/// rides as `police`, and it stamps no `crash<N>.pathset` event overlay
 /// (retail authors none; the `<object>_crash<N>` bridge/parked-car/
 /// ferry sets load through the object managers off the lesson's key
 /// stem). The lesson's own aimap rides along as `aimap`, so its
@@ -310,6 +328,7 @@ pub fn lesson_launch(
     let rewards = std::mem::take(&mut lesson.rewards);
     let availability = std::mem::take(&mut lesson.availability);
     let aimap = lesson.aimap.take();
+    let police = std::mem::take(&mut lesson.police);
     let driver = crate::lesson::LessonDriver::new(lesson);
     let definition = driver
         .current_leg()
@@ -321,7 +340,7 @@ pub fn lesson_launch(
         key: driver.key().clone(),
         pathsets: Vec::new(),
         roster: mm2_game::OpponentRoster::default(),
-        police: mm2_game::PoliceRoster::default(),
+        police,
         rewards,
         availability,
         aimap,
