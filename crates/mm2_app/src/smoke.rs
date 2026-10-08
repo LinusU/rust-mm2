@@ -141,6 +141,11 @@ pub enum Driver {
     /// production `VehicleInput` path, banking a per-stage
     /// drivetrain/engine-mix/clutch sample the record prints as `seq=`.
     Sequence,
+    /// The pursuit control (`--ram`, F25-C): full throttle steering at
+    /// the nearest other vehicle through the production `VehicleInput`
+    /// path — the driven car-to-car collision the straight `Hold`
+    /// driver cannot make on a side-by-side grid.
+    Ram,
 }
 
 impl Driver {
@@ -151,6 +156,7 @@ impl Driver {
             Self::Scripted => "scripted",
             Self::Parked => "parked",
             Self::Sequence => "sequence",
+            Self::Ram => "ram",
         }
     }
 }
@@ -339,6 +345,7 @@ fn add_lobby_client_systems(app: &mut App) {
                 crate::netdrive::send_drive_input
                     .after(crate::input::vehicle_input)
                     .after(crate::input::parked_drive)
+                    .after(crate::input::ram_drive)
                     .after(scripted::scripted_drive)
                     .after(crate::sequence::sequence_drive),
             ),
@@ -786,6 +793,14 @@ fn run_headless(
         .add_systems(
             Update,
             crate::texel_fx::apply_remote_texels.after(crate::netdrive::apply_snapshots),
+        )
+        // F25-C: `--ram`'s pursuit owns `VehicleInput` like the other
+        // evidence drivers — own slot, the main Update tuple is full.
+        .add_systems(
+            Update,
+            crate::input::ram_drive
+                .run_if(resource_exists::<crate::input::RamDrive>)
+                .after(crate::input::vehicle_input),
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
@@ -795,6 +810,9 @@ fn run_headless(
     }
     if driver == Driver::Sequence {
         app.insert_resource(crate::sequence::SequenceDrive::default());
+    }
+    if driver == Driver::Ram {
+        app.insert_resource(crate::input::RamDrive);
     }
     if let Some(profile) = profile {
         app.insert_resource(profile);

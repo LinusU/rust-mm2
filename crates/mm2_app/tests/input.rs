@@ -503,3 +503,69 @@ fn an_unfocused_window_ignores_the_pad_shift() {
         "the missed press never counted"
     );
 }
+
+/// F25-C's `--ram` pursuit law: a car facing −Z at the origin.
+mod ram {
+    use super::*;
+
+    fn input_at(speed: f32, target: Option<Vec3>) -> VehicleInput {
+        input::ram_input(&GlobalTransform::default(), speed, target)
+    }
+
+    #[test]
+    fn it_charges_a_target_it_can_turn_onto() {
+        // Dead ahead and far: full throttle, no steering.
+        let ahead = input_at(5.0, Some(Vec3::new(0.0, 0.0, -40.0)));
+        assert_eq!((ahead.throttle, ahead.steering), (1.0, 0.0));
+        // Ahead and to the right, past the stand-off: steers right.
+        let right = input_at(5.0, Some(Vec3::new(10.0, 0.0, -40.0)));
+        assert!(right.steering > 0.0, "{right:?}");
+        let left = input_at(5.0, Some(Vec3::new(-10.0, 0.0, -40.0)));
+        assert!(left.steering < 0.0, "{left:?}");
+    }
+
+    #[test]
+    fn it_opens_the_range_before_turning_onto_a_neighbour_beside_it() {
+        // A grid neighbour 4 m to the right is inside the stand-off and
+        // far off the nose: a full-lock orbit would miss it, so the
+        // car drives straight first.
+        let beside = input_at(5.0, Some(Vec3::new(4.0, 0.0, 0.0)));
+        assert_eq!((beside.throttle, beside.steering), (1.0, 0.0));
+        // Close but nearly ahead is a charge line — it keeps steering.
+        let near = input_at(5.0, Some(Vec3::new(1.5, 0.0, -6.0)));
+        assert!(near.steering > 0.0, "{near:?}");
+    }
+
+    #[test]
+    fn it_lifts_off_above_its_pace_and_drives_straight_alone() {
+        let fast = input_at(30.0, Some(Vec3::new(0.0, 0.0, -40.0)));
+        assert_eq!(fast.throttle, 0.0);
+        let alone = input_at(0.0, None);
+        assert_eq!((alone.throttle, alone.steering), (1.0, 0.0));
+    }
+
+    #[test]
+    fn it_is_neutral_outside_a_live_session() {
+        // The production system on a session still `Ready`: the car
+        // gets no throttle, whatever stands in front of it.
+        let mut session = Session::new();
+        session.begin(SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .add_systems(Update, input::ram_drive);
+        app.world_mut().spawn((
+            PlayerVehicle,
+            GlobalTransform::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            VehicleInput {
+                throttle: 1.0,
+                ..default()
+            },
+        ));
+        app.update();
+        let got = player_input(&mut app);
+        assert_eq!((got.throttle, got.steering), (0.0, 0.0));
+    }
+}

@@ -388,6 +388,14 @@ struct Cli {
     #[arg(long, conflicts_with = "bot")]
     parked: bool,
 
+    /// Pursuit control (F25-C): the player vehicle holds full throttle
+    /// and steers at the nearest other vehicle — a driven car-to-car
+    /// collision for multi-process runs, whose neighbours are `--parked`
+    /// victims. An evidence driver, not a gameplay feature. Works
+    /// windowed too.
+    #[arg(long, conflicts_with_all = ["bot", "parked", "seq"])]
+    ram: bool,
+
     /// Staged audio-sequence driver (F07-AC02): the player vehicle
     /// runs a scripted idle → accelerate → coast → brake → reverse
     /// program through the production input path, and the headless
@@ -1308,6 +1316,8 @@ fn main() {
             smoke::Driver::Scripted
         } else if cli.parked {
             smoke::Driver::Parked
+        } else if cli.ram {
+            smoke::Driver::Ram
         } else if cli.seq {
             smoke::Driver::Sequence
         } else {
@@ -1377,6 +1387,7 @@ fn main() {
         && cli.nav_route.is_none()
         && !cli.bot
         && !cli.parked
+        && !cli.ram
         && !cli.seq;
     if cli.menu && !menu_mode {
         warn!("--menu ignored: a session-shaping flag requested a direct launch");
@@ -1723,6 +1734,7 @@ fn main() {
             (
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
                 input::parked_drive.run_if(resource_exists::<input::ParkedDrive>),
+                input::ram_drive.run_if(resource_exists::<input::RamDrive>),
             )
                 .chain()
                 .after(input::vehicle_input)
@@ -2198,6 +2210,7 @@ fn main() {
                     netdrive::send_drive_input
                         .after(input::vehicle_input)
                         .after(input::parked_drive)
+                        .after(input::ram_drive)
                         .after(scripted::scripted_drive)
                         .after(sequence::sequence_drive),
                 ),
@@ -2306,6 +2319,9 @@ fn main() {
     if cli.parked {
         app.insert_resource(input::ParkedDrive);
     }
+    if cli.ram {
+        app.insert_resource(input::RamDrive);
+    }
     if cli.seq {
         app.insert_resource(sequence::SequenceDrive::default());
     }
@@ -2337,6 +2353,8 @@ fn main() {
             "bot"
         } else if cli.parked {
             "parked"
+        } else if cli.ram {
+            "ram"
         } else if cli.seq {
             "seq"
         } else {

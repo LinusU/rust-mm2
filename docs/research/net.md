@@ -1539,6 +1539,34 @@ wire actually moved rather than an in-process mailbox's contents.
   client records' `snap<x>` cells show the push watermark counted
   the stragglers the recipe produced.
 
+- **Driven-collision leg**
+  (`a_driven_collision_replicates_across_three_processes`, F25-C.1):
+  the host and one client sit `--parked` (victims) and the other
+  client runs the new `--ram` evidence driver (`input::ram_drive`:
+  full throttle capped at 11 m/s, steering at the nearest other
+  vehicle, driving straight first while a target is closer than 14 m
+  and more than 0.45 rad off the nose — a car at full lock otherwise
+  orbits a neighbour on the next 4 m grid seat without touching it).
+  Its pursuit inputs ride the wire like a human's, so the contact
+  happens in the authority's sim and in her predicted copy of the
+  world. A control run with the same trio all parked bounds what the
+  spawn landing alone produces. Measured over 8 consecutive runs of
+  the final recipe: control `imp0s` on the host and every
+  `impacts=0`; driven run host `imp1–3s`, alice `impacts=1–2`,
+  the uninvolved client applied the authority's rows every run
+  (`imp0s/2a` in the sampled record) and voiced them as remote
+  impacts. Asserted floors: the control moved
+  nothing; alice reached 5 m/s, recorded a local impact and the host
+  published at least one row; bob's client applied at least one row.
+  Not asserted, deliberately: *which* parked car is shoved (the
+  lobby's connect order picks the seats, so it varies), alice's own
+  applied count (a client replays authority rows only for seats it
+  does not predict), and any post-shove pose agreement — the record
+  carries only each process's own car, so cross-process pose
+  convergence after a collision is still unmeasured at process level.
+  Dev world, loopback, headless: no authored damage record binds
+  (`dsyn0`), no rendered observation.
+
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
 delay/jitter/loss matrix exists at both levels now — in-process (see

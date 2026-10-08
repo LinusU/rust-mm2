@@ -130,9 +130,7 @@ struct NetField {
     damage_synced: u64,
     #[allow(dead_code)]
     trailers_synced: u64,
-    #[allow(dead_code)]
     impacts_sent: u64,
-    #[allow(dead_code)]
     impacts_applied: u64,
     #[allow(dead_code)]
     breaks_detached: u64,
@@ -1384,4 +1382,91 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
     // The parked client never touched the gold: the one delivery is
     // the host seat's.
     assert!(cell("landed") > 0, "{rec}");
+}
+
+/// One lobby of three processes on the dev world where the host and
+/// bob sit parked (the victims) and alice either rams the nearest car
+/// (`alice_rams`) or sits parked too (the control). Returns the host's
+/// post-`quit` `net=` field and the two clients' mid-session records.
+fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField, String, String) {
+    let mut host_flags = host_args(install, 9000);
+    host_flags.push("--parked".into());
+    let mut host = Proc::spawn(MM2_EXE, &host_flags);
+    let addr = listening_addr(&host);
+
+    let mut alice_flags = join_args(install, addr, "alice", 1400);
+    alice_flags.push(if alice_rams { "--ram" } else { "--parked" }.into());
+    let mut bob_flags = join_args(install, addr, "bob", 1000);
+    bob_flags.push("--parked".into());
+    let alice = Proc::spawn(MM2_EXE, &alice_flags);
+    let bob = Proc::spawn(MM2_EXE, &bob_flags);
+    start_when_ready(&mut host, 2);
+
+    // Bob's cap is shorter so his record prints while alice is still
+    // connected, as in the other legs.
+    let bob_rec = bob.until("smoke=headless-physics");
+    let alice_rec = alice.until("smoke=headless-physics");
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    for _ in 0..2 {
+        host.until("event=left");
+    }
+    let host_net = quit_and_assert_host_drove(host);
+    (host_net, alice_rec, bob_rec)
+}
+
+/// F25-C's first collision leg at process level: three real `mm2`
+/// processes where one client *drives into* a parked neighbour, not
+/// just alongside it. Alice (`--ram`) streams her pursuit inputs up,
+/// the host's authority simulates the contact against the parked host
+/// and bob seats, and the resulting impact stream and displaced poses
+/// come back down. The control run parks alice too: the same grid,
+/// the same frame budgets, no driven contact — so every difference
+/// below is the collision's, not the spawn landing's.
+#[test]
+fn a_driven_collision_replicates_across_three_processes() {
+    let install = tempfile::tempdir().unwrap();
+    let (control_host, control_alice, control_bob) = run_collision_trio(install.path(), false);
+    let (host, alice, bob) = run_collision_trio(install.path(), true);
+    eprintln!(
+        "collision control host={control_host:?}\n alice={control_alice}\n bob={control_bob}"
+    );
+    eprintln!("collision ram host={host:?}\n alice={alice}\n bob={bob}");
+
+    for rec in [&control_alice, &control_bob, &alice, &bob] {
+        assert_eq!(field(rec, "status"), "pass", "{rec}");
+        assert_eq!(field(rec, "phase"), "playing", "{rec}");
+        assert_eq!(field(rec, "finite"), "true", "{rec}");
+    }
+    let local_impacts = |rec: &str| -> u64 { field(rec, "impacts").parse().unwrap() };
+    let peak = |rec: &str| -> f64 {
+        field(rec, "peak")
+            .strip_suffix("m/s")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no numeric peak= in {rec}"))
+    };
+
+    // The control: nobody drives, so nothing collides anywhere.
+    assert_eq!(control_host.impacts_sent, 0, "{control_host:?}");
+    assert_eq!(local_impacts(&control_alice), 0, "{control_alice}");
+    assert_eq!(local_impacts(&control_bob), 0, "{control_bob}");
+
+    // The driven run: alice's pursuit really drove (her own peak), the
+    // contact happened in her predicted sim and on the authority, and
+    // the authority's impact stream reached bob — a client that never
+    // touched its controls and learned of the collision from the wire
+    // alone. Alice's own rows are not asserted: a client replays the
+    // authority's rows only for seats it does not predict itself, so
+    // her applied count is legitimately 0 or more by timing.
+    assert!(peak(&alice) > 5.0, "alice never got up to speed: {alice}");
+    assert!(local_impacts(&alice) > 0, "{alice}");
+    assert!(
+        host.impacts_sent > 0,
+        "the authority published no impact for the collision: {host:?}"
+    );
+    let bob_net = net_field(&bob);
+    assert!(
+        bob_net.impacts_applied > 0,
+        "the replicated impact never reached the uninvolved client: {bob_net:?} / {bob}"
+    );
 }

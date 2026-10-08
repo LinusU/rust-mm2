@@ -5,6 +5,7 @@
 //! or the window has lost focus (so alt-tabbing away doesn't keep the
 //! throttle pinned).
 
+use avian3d::prelude::LinearVelocity;
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, RaceState, Session};
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
@@ -179,6 +180,92 @@ pub fn parked_drive(mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>)
             handbrake: 1.0,
             ..default()
         };
+    }
+}
+
+/// Presence enables the ramming driver: `--ram` inserts it, and
+/// [`ram_drive`] owns the player vehicle's [`VehicleInput`] while it
+/// exists — the same resource-gated contract as [`ParkedDrive`].
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct RamDrive;
+
+/// Steering gain of [`ram_drive`]: bearing radians → normalized lock.
+/// A target beside the car (±π/2) saturates the lock; one nearly ahead
+/// closes with a gentle correction.
+const RAM_STEER_GAIN: f32 = 2.0;
+
+/// Range (m) inside which [`ram_drive`] only steers once the target is
+/// within [`RAM_ALIGNED`] of the nose.
+const RAM_STANDOFF: f32 = 14.0;
+
+/// Pace (m/s) above which [`ram_drive`] lifts off the throttle: at the
+/// dev car's top speed its lock circle is too wide to return on.
+const RAM_SPEED: f32 = 11.0;
+
+/// Bearing (rad) off the nose that still counts as on a charge line.
+const RAM_ALIGNED: f32 = 0.45;
+
+/// The pursuit evidence driver (F25-C): full throttle, steering at the
+/// nearest other vehicle in the world — a real driven car-to-car
+/// collision through the production `VehicleInput` path (and, on a
+/// joined client, through the wire's input stream), which the straight
+/// `Hold` driver cannot provide on a side-by-side grid. Paired with
+/// `--parked` neighbours it gives a multi-process run a victim that
+/// holds still, so the authority's contact response and the replicated
+/// impact stream are the only thing that moves it. An evidence driver,
+/// not a gameplay feature. With no other vehicle it drives straight.
+pub fn ram_drive(
+    mut me: Query<(&GlobalTransform, &LinearVelocity, &mut VehicleInput), With<PlayerVehicle>>,
+    others: Query<&GlobalTransform, (With<Vehicle>, Without<PlayerVehicle>)>,
+    session: Res<Session>,
+    race: Option<Res<RaceState>>,
+) {
+    // The countdown lock holds for this driver as it does for the
+    // keyboard mapping (AC03): outside a live, unlocked session the car
+    // gets a neutral input rather than a launch.
+    let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
+    let driving = session.is_playing() && !race_locked;
+    for (at, vel, mut vi) in &mut me {
+        *vi = if driving {
+            let from = at.translation();
+            let nearest = others.iter().map(|t| t.translation()).min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            });
+            ram_input(at, vel.length(), nearest)
+        } else {
+            VehicleInput::default()
+        };
+    }
+}
+
+/// One frame of [`ram_drive`]'s law: the car at `at` moving `speed`
+/// m/s, pursuing `target` (none = drive straight).
+pub fn ram_input(at: &GlobalTransform, speed: f32, target: Option<Vec3>) -> VehicleInput {
+    let from = at.translation();
+    let steering = target.map_or(0.0, |to| {
+        // Forward is −Z at yaw 0 — the `Quat::from_rotation_y` frame
+        // `relative_bearing` is defined on.
+        let fwd = at.rotation() * Vec3::NEG_Z;
+        let yaw = (-fwd.x).atan2(-fwd.z);
+        let bearing = mm2_game::relative_bearing(yaw, from, to);
+        // A target close and off the nose cannot be turned onto — a
+        // car at full lock orbits a neighbour on the next grid seat
+        // without touching it — so open the range straight ahead first
+        // and charge once the run-up has put the target on a line the
+        // lock can take.
+        if from.distance(to) < RAM_STANDOFF && bearing.abs() > RAM_ALIGNED {
+            0.0
+        } else {
+            (bearing * RAM_STEER_GAIN).clamp(-1.0, 1.0)
+        }
+    });
+    VehicleInput {
+        // Lifting off above the pace keeps the turning circle small
+        // enough for the car to come back round to the target.
+        throttle: if speed > RAM_SPEED { 0.0 } else { 1.0 },
+        steering,
+        ..default()
     }
 }
 

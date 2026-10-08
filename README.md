@@ -196,6 +196,10 @@ cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --bot
 cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --parked
 #   --parked holds the handbrake all session — the stationary control
 #   leg: what the opponents do with no competing local driver.
+cargo run -- --mm2-path <dir> --dev-world --headless --ram --frames 600
+#   --ram holds throttle and steers at the nearest other vehicle (F25-C):
+#   a driven car-to-car collision for multi-process runs against
+#   --parked neighbours. An evidence driver; works windowed too.
 cargo run -- --mm2-path <dir> --dev-world --car vpbug --headless --seq --frames 2200
 #   --seq runs the staged idle → accelerate → coast → brake → reverse
 #   audio evidence program (F07-AC02): the record's seq= field reports
