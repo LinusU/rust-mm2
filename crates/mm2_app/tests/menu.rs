@@ -4021,6 +4021,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Steering sensitivity: 1.00x",
             "Invert stick steering: Off",
             "Mouse driving: Off",
+            "Auto reverse: On",
             "Reset to defaults",
             "Gamepad buttons",
             "In-game keys",
@@ -4035,7 +4036,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
     assert_eq!(alts[4].as_deref(), Some("Alt: -"));
     assert_eq!(alts[6].as_deref(), Some("Alt: -"), "shift down");
     assert_eq!(alts[7], None, "tuning rows have no alternate");
-    assert!(shell(&app).rows[13].enabled.is_err());
+    assert!(shell(&app).rows[14].enabled.is_err());
     // Esc leaves for the graphics screen with the Controls row focused.
     press(&mut app, KeyCode::Escape);
     assert_eq!(shell(&app).screen, menu::Screen::Options);
@@ -4077,7 +4078,7 @@ fn a_captured_key_rebinds_the_action_and_persists() {
     );
     assert_eq!(&ControlSettings::load(&path), live);
     // The reset row woke up; it restores the shipped map everywhere.
-    assert!(shell(&app).rows[13].enabled.is_ok());
+    assert!(shell(&app).rows[14].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(

@@ -335,6 +335,8 @@ pub enum Action {
     /// Flip the stick steering direction.
     ToggleInvertSteering,
     ToggleMouseDriving,
+    /// Flip auto reverse.
+    ToggleAutoReverse,
     /// Flip the transmission policy.
     ToggleTransmission,
     /// Put every driving control back to the shipped map.
@@ -1113,6 +1115,7 @@ impl MenuShell {
             | Action::CycleSensitivity
             | Action::ToggleInvertSteering
             | Action::ToggleMouseDriving
+            | Action::ToggleAutoReverse
             | Action::ToggleTransmission
             | Action::CycleCnrVariant
             | Action::CycleCnrGold
@@ -1357,6 +1360,9 @@ impl MenuShell {
             }
             Action::ToggleMouseDriving => {
                 self.tune_controls(data, ControlItem::MouseDriving, forward, effects);
+            }
+            Action::ToggleAutoReverse => {
+                self.tune_controls(data, ControlItem::AutoReverse, forward, effects);
             }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
@@ -2504,6 +2510,7 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
             ControlItem::InvertSteering => Action::ToggleInvertSteering,
             ControlItem::Transmission => Action::ToggleTransmission,
             ControlItem::MouseDriving => Action::ToggleMouseDriving,
+            ControlItem::AutoReverse => Action::ToggleAutoReverse,
             ControlItem::Reset => Action::ResetControls,
             ControlItem::Key { action, slot } => Action::RebindKey { action, slot },
         };

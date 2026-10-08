@@ -2263,8 +2263,16 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     assert!(live(&app).mouse_driving, "the mouse row turns driving on");
     assert_eq!(ControlSettings::load(&path), live(&app));
 
-    // Reset restores the shipped map and then disables itself.
     pause_focus_row(&mut app, 20);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(
+        !live(&app).auto_reverse,
+        "the auto reverse row turns it off"
+    );
+    assert_eq!(ControlSettings::load(&path), live(&app));
+
+    // Reset restores the shipped map and then disables itself.
+    pause_focus_row(&mut app, 21);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(live(&app), ControlSettings::default());
     assert_eq!(ControlSettings::load(&path), ControlSettings::default());
@@ -2313,8 +2321,8 @@ fn pause_gamepad_buttons_page_rebinds_by_listening_and_backs_out() {
     let capture = |a: &App| a.world().resource::<PauseMenu>().pad_capture;
 
     // The page hangs off the last row before Back: 7 actions x 2 slots
-    // and 7 tuning rows come first.
-    pause_focus_row(&mut app, 21);
+    // and 8 tuning rows come first.
+    pause_focus_row(&mut app, 22);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         app.world().resource::<PauseMenu>().page,
@@ -2378,7 +2386,7 @@ fn pause_gamepad_buttons_page_rebinds_by_listening_and_backs_out() {
     press_key(&mut app, KeyCode::Escape);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 21));
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 22));
     }
     press_key(&mut app, KeyCode::Escape);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
@@ -2402,8 +2410,8 @@ fn pause_in_game_keys_page_rebinds_and_backs_out() {
     let live = |a: &App| a.world().resource::<ControlSettings>().clone();
     let pause_status = |a: &App| a.world().resource::<PauseMenu>().status.clone();
 
-    // Past the 14 key rows, 7 tuning rows and the gamepad row.
-    pause_focus_row(&mut app, 22);
+    // Past the 14 key rows, 8 tuning rows and the gamepad row.
+    pause_focus_row(&mut app, 23);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         app.world().resource::<PauseMenu>().page,
@@ -2468,13 +2476,13 @@ fn pause_in_game_keys_page_rebinds_and_backs_out() {
     press_key(&mut app, KeyCode::Enter);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 22));
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 23));
     }
     press_key(&mut app, KeyCode::Enter);
     press_key(&mut app, KeyCode::Escape);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 22));
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 23));
     }
 }
 

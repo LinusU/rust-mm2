@@ -907,9 +907,10 @@ pub fn pause_present(
             ),
         };
         // The controls page has the most rows; 22 px no longer fits 720p
-        // once the mouse row joined it (19 rows became 20).
+        // once the mouse row joined it (19 rows became 20), and the auto
+        // reverse row (21) takes it down another point.
         let size = if pause.page == PausePage::Controls {
-            20.0
+            19.0
         } else {
             22.0
         };

@@ -353,6 +353,59 @@ impl TransmissionPolicy {
     }
 }
 
+/// Forward speed, m/s, at or below which a car counts as stopped for the
+/// auto-reverse policy — a little above the sim's own reverse engage
+/// speed (0.25) so the brake is already a handbrake when the sim would
+/// otherwise swap it for the reverse gear.
+const STOPPED_SPEED: f32 = 0.5;
+/// A brake axis at or below this is released (the sim's own engage level).
+const BRAKE_PRESSED: f32 = 0.05;
+
+/// Whether the driver's current brake press began while the car was still
+/// moving — the memory behind "auto reverse: off" (F23-A.7, DSN-98).
+///
+/// The sim reverses a car whenever the brake is held at a standstill. With
+/// auto reverse off, [`Self::apply`] turns a brake carried through the
+/// stop into a handbrake hold, so the car stops and stays; releasing the
+/// brake and pressing it again once stopped is the deliberate reverse.
+/// It rewrites the normalized input only, so the physics systems and the
+/// wire (which carries brake and handbrake, not a reverse flag) are
+/// unchanged and a predicted copy behaves like the authority.
+#[derive(Debug, Default)]
+pub struct BrakeCarry {
+    carried: bool,
+}
+
+impl BrakeCarry {
+    /// Forget the press (a pause, a countdown, a respawned car).
+    pub fn release(&mut self) {
+        self.carried = false;
+    }
+
+    /// Apply the policy for one frame. `forward_speed` is the car's
+    /// signed speed along its heading, or `None` for a car without sim
+    /// state (nothing to judge by, so the input passes untouched).
+    pub fn apply(
+        &mut self,
+        controls: &ControlSettings,
+        input: &mut VehicleInput,
+        speed: Option<f32>,
+    ) {
+        if controls.auto_reverse || input.brake <= BRAKE_PRESSED {
+            self.carried = false;
+            return;
+        }
+        let Some(speed) = speed else { return };
+        if speed > STOPPED_SPEED {
+            self.carried = true;
+        }
+        if self.carried && speed <= STOPPED_SPEED {
+            input.handbrake = input.handbrake.max(input.brake);
+            input.brake = 0.0;
+        }
+    }
+}
+
 /// The user's driving controls. `Default` is the shipped map.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ControlSettings {
@@ -374,6 +427,11 @@ pub struct ControlSettings {
     /// brakes. Off by default — the keys, and any pad, keep working
     /// either way.
     pub mouse_driving: bool,
+    /// Auto reverse (CTL-3, F23-A.7): on, holding the brake at a
+    /// standstill puts the car in reverse (the shipped behaviour); off,
+    /// a brake held *through* the stop only holds the car, and reverse
+    /// takes a fresh press once stopped (see [`BrakeCarry`]).
+    pub auto_reverse: bool,
     /// The gamepad's digital buttons (F23-A.4).
     pub pad: PadMap,
 }
@@ -388,6 +446,7 @@ impl Default for ControlSettings {
             invert_steering: false,
             transmission: TransmissionPolicy::Automatic,
             mouse_driving: false,
+            auto_reverse: true,
             pad: PadMap::default(),
         }
     }
@@ -680,6 +739,14 @@ impl ControlSettings {
         }
     }
 
+    /// These controls with auto reverse flipped.
+    pub fn toggled_auto_reverse(&self) -> Self {
+        Self {
+            auto_reverse: !self.auto_reverse,
+            ..self.clone()
+        }
+    }
+
     /// These controls with the stick inversion flipped.
     pub fn toggled_inversion(&self) -> Self {
         Self {
@@ -766,6 +833,10 @@ impl ControlSettings {
                 format!("Mouse driving: {}", on_off(self.mouse_driving)),
                 ControlItem::MouseDriving,
             ),
+            row(
+                format!("Auto reverse: {}", on_off(self.auto_reverse)),
+                ControlItem::AutoReverse,
+            ),
             ControlRow {
                 text: "Reset to defaults".to_string(),
                 item: ControlItem::Reset,
@@ -789,6 +860,7 @@ impl ControlSettings {
             ControlItem::InvertSteering => self.toggled_inversion(),
             ControlItem::Transmission => self.toggled_transmission(),
             ControlItem::MouseDriving => self.toggled_mouse_driving(),
+            ControlItem::AutoReverse => self.toggled_auto_reverse(),
             ControlItem::Reset => Self::default(),
             ControlItem::Key { .. } => return None,
         })
@@ -912,6 +984,7 @@ pub enum ControlItem {
     InvertSteering,
     Transmission,
     MouseDriving,
+    AutoReverse,
     Reset,
 }
 
@@ -953,6 +1026,7 @@ struct ControlsFile {
     invert_steering: Option<bool>,
     transmission: Option<String>,
     mouse_driving: Option<bool>,
+    auto_reverse: Option<bool>,
     /// Gamepad buttons by action name; `null` is a cleared action. Keyed
     /// by string so an action this build does not know is dropped on its
     /// own rather than failing the whole file (and the key bindings in it).
@@ -1080,6 +1154,7 @@ impl ControlSettings {
         );
         out.invert_steering = file.invert_steering.unwrap_or(d.invert_steering);
         out.mouse_driving = file.mouse_driving.unwrap_or(d.mouse_driving);
+        out.auto_reverse = file.auto_reverse.unwrap_or(d.auto_reverse);
         out.transmission = match file.transmission.as_deref() {
             None => d.transmission,
             Some("automatic") => TransmissionPolicy::Automatic,
@@ -1142,6 +1217,7 @@ impl ControlSettings {
             steer_sensitivity: Some(self.steer_sensitivity),
             invert_steering: Some(self.invert_steering),
             mouse_driving: Some(self.mouse_driving),
+            auto_reverse: Some(self.auto_reverse),
             pad: PadAction::ALL
                 .into_iter()
                 .map(|a| {
@@ -1547,18 +1623,19 @@ mod tests {
                 ControlItem::Sensitivity,
                 ControlItem::InvertSteering,
                 ControlItem::MouseDriving,
+                ControlItem::AutoReverse,
                 ControlItem::Reset,
             ]
         );
         assert_eq!(rows[1].text, "Stick deadzone: 5%");
         assert!(
-            rows[6].enabled.is_err(),
+            rows[7].enabled.is_err(),
             "reset is disabled at the shipped map"
         );
 
         let tuned = c.adjusted(ControlItem::InvertSteering, true).unwrap();
         assert!(tuned.invert_steering);
-        assert!(tuned.tuning_rows()[6].enabled.is_ok());
+        assert!(tuned.tuning_rows()[7].enabled.is_ok());
         assert_eq!(tuned.adjusted(ControlItem::Reset, true), Some(c.clone()));
         assert_eq!(
             c.adjusted(ControlItem::Sensitivity, true),
@@ -1700,6 +1777,135 @@ mod tests {
         let (c, issues) = ControlSettings::from_json(br#"{"steer_deadzone": 0.1}"#).unwrap();
         assert!(issues.is_empty(), "{issues:?}");
         assert!(!c.mouse_driving);
+    }
+
+    fn auto_reverse_off() -> ControlSettings {
+        ControlSettings {
+            auto_reverse: false,
+            ..ControlSettings::default()
+        }
+    }
+
+    fn brake(level: f32) -> VehicleInput {
+        VehicleInput {
+            brake: level,
+            ..VehicleInput::default()
+        }
+    }
+
+    #[test]
+    fn auto_reverse_is_on_and_leaves_the_brake_alone() {
+        let c = ControlSettings::default();
+        assert!(c.auto_reverse, "the shipped car reverses off the brake");
+        let mut carry = BrakeCarry::default();
+        for speed in [12.0, 0.3, 0.0, -2.0] {
+            let mut input = brake(1.0);
+            carry.apply(&c, &mut input, Some(speed));
+            assert_eq!((input.brake, input.handbrake), (1.0, 0.0), "at {speed}");
+        }
+    }
+
+    #[test]
+    fn a_brake_carried_through_the_stop_holds_instead_of_reversing() {
+        let c = auto_reverse_off();
+        let mut carry = BrakeCarry::default();
+        let mut moving = brake(0.8);
+        carry.apply(&c, &mut moving, Some(9.0));
+        assert_eq!(
+            (moving.brake, moving.handbrake),
+            (0.8, 0.0),
+            "still braking"
+        );
+        for speed in [0.4, 0.0, -0.1] {
+            let mut input = brake(0.8);
+            carry.apply(&c, &mut input, Some(speed));
+            assert_eq!(input.brake, 0.0, "no reverse pedal at {speed}");
+            assert_eq!(input.handbrake, 0.8, "held at {speed}");
+        }
+    }
+
+    #[test]
+    fn releasing_and_pressing_again_once_stopped_reverses() {
+        let c = auto_reverse_off();
+        let mut carry = BrakeCarry::default();
+        let mut moving = brake(1.0);
+        carry.apply(&c, &mut moving, Some(5.0));
+        let mut held = brake(1.0);
+        carry.apply(&c, &mut held, Some(0.0));
+        assert_eq!(held.brake, 0.0);
+
+        let mut released = VehicleInput::default();
+        carry.apply(&c, &mut released, Some(0.0));
+        assert_eq!(released.handbrake, 0.0, "letting go lets go");
+        let mut fresh = brake(1.0);
+        carry.apply(&c, &mut fresh, Some(0.0));
+        assert_eq!((fresh.brake, fresh.handbrake), (1.0, 0.0), "reverse pedal");
+        // ...and it stays the reverse pedal while the car backs away.
+        let mut backing = brake(1.0);
+        carry.apply(&c, &mut backing, Some(-3.0));
+        assert_eq!((backing.brake, backing.handbrake), (1.0, 0.0));
+    }
+
+    #[test]
+    fn the_stop_policy_keeps_a_stronger_handbrake_and_forgets_on_release() {
+        let c = auto_reverse_off();
+        let mut carry = BrakeCarry::default();
+        carry.apply(&c, &mut brake(1.0), Some(6.0));
+        let mut input = VehicleInput {
+            brake: 0.5,
+            handbrake: 1.0,
+            ..VehicleInput::default()
+        };
+        carry.apply(&c, &mut input, Some(0.0));
+        assert_eq!((input.brake, input.handbrake), (0.0, 1.0));
+
+        carry.release();
+        let mut after = brake(1.0);
+        carry.apply(&c, &mut after, Some(0.0));
+        assert_eq!(after.brake, 1.0, "a forgotten press is a fresh one");
+    }
+
+    #[test]
+    fn a_car_without_sim_state_passes_through() {
+        let c = auto_reverse_off();
+        let mut carry = BrakeCarry::default();
+        let mut input = brake(1.0);
+        carry.apply(&c, &mut input, None);
+        assert_eq!((input.brake, input.handbrake), (1.0, 0.0));
+    }
+
+    #[test]
+    fn auto_reverse_persists_and_an_older_file_keeps_it_on() {
+        let dir = std::env::temp_dir().join(format!("mm2-autorev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONTROLS_FILE);
+        auto_reverse_off().save(&path).unwrap();
+        assert!(!ControlSettings::load(&path).auto_reverse);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let (c, issues) = ControlSettings::from_json(br#"{"steer_deadzone": 0.1}"#).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(c.auto_reverse);
+    }
+
+    #[test]
+    fn the_auto_reverse_row_toggles_and_enables_reset() {
+        let c = ControlSettings::default();
+        let rows = c.tuning_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.item == ControlItem::AutoReverse)
+            .expect("an auto reverse row");
+        assert_eq!(row.text, "Auto reverse: On");
+        let off = c.adjusted(ControlItem::AutoReverse, true).unwrap();
+        assert!(!off.auto_reverse);
+        assert!(
+            off.tuning_rows()
+                .iter()
+                .any(|r| r.text == "Auto reverse: Off")
+        );
+        assert!(off.tuning_rows().last().unwrap().enabled.is_ok());
+        assert_eq!(off.adjusted(ControlItem::Reset, true), Some(c));
     }
 
     #[test]

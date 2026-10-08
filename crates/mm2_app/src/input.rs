@@ -12,7 +12,9 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
 use crate::contracts::ImpactFilter;
-use crate::controls::{ControlSettings, DriveAction, MouseDrive, SLOTS, bound_keys, pad_button};
+use crate::controls::{
+    BrakeCarry, ControlSettings, DriveAction, MouseDrive, SLOTS, bound_keys, pad_button,
+};
 use crate::manual_gear::ManualGear;
 use crate::pad_map::PadAction;
 use crate::session::{self, SpawnPoint};
@@ -390,6 +392,7 @@ pub fn vehicle_input(
     gamepads: Query<&Gamepad>,
     mut vehicles: Query<DrivenCar, With<PlayerVehicle>>,
     mut manual: Local<ManualGear>,
+    mut brake_carry: Local<BrakeCarry>,
     cam_mode: Res<CameraMode>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
@@ -414,6 +417,7 @@ pub fn vehicle_input(
         // from whatever the car is in, so a shift key pressed meanwhile
         // never counts.
         manual.release();
+        brake_carry.release();
         for (_, mut vi, _, _) in &mut vehicles {
             *vi = VehicleInput::default();
         }
@@ -447,6 +451,7 @@ pub fn vehicle_input(
 
     for (car, mut vi, state, vehicle) in &mut vehicles {
         *vi = input;
+        brake_carry.apply(controls, &mut vi, state.map(|s| s.forward_speed));
         if let (true, Some(state), Some(vehicle)) = (manual_box, state, vehicle) {
             vi.forced_gear = Some(manual.command(
                 car,

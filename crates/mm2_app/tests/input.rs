@@ -476,6 +476,100 @@ fn a_pause_releases_a_held_mouse_button_and_resume_restores_it() {
     );
 }
 
+/// Put the player car's forward speed where the test wants it.
+fn set_forward_speed(app: &mut App, speed: f32) {
+    use mm2_vehicle::VehicleState;
+
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&mut VehicleState, With<PlayerVehicle>>();
+    q.single_mut(app.world_mut()).unwrap().forward_speed = speed;
+}
+
+/// F23-A.7 (CTL-3's Auto Reverse): off, a brake held through the stop
+/// holds the car with the handbrake instead of handing the sim a reverse
+/// pedal; letting go and pressing again at a standstill reverses. On (the
+/// shipped default) the same hold reaches the sim as a plain brake.
+#[test]
+fn auto_reverse_off_needs_a_fresh_press_to_reverse() {
+    use mm2_app::controls::ControlSettings;
+
+    let run = |auto_reverse: bool| {
+        let mut app = drive_app(CameraMode::Chase);
+        spawn_geared_player(&mut app, 0);
+        let mut controls = ControlSettings::default();
+        controls.auto_reverse = auto_reverse;
+        app.insert_resource(controls);
+        app
+    };
+    let hold = |app: &mut App, down: bool| {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        if down {
+            keys.press(KeyCode::KeyS);
+        } else {
+            keys.release(KeyCode::KeyS);
+        }
+    };
+
+    let mut app = run(false);
+    hold(&mut app, true);
+    set_forward_speed(&mut app, 9.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.brake, vi.handbrake), (1.0, 0.0), "braking while moving");
+
+    set_forward_speed(&mut app, 0.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.brake, vi.handbrake), (0.0, 1.0), "held at the stop");
+
+    hold(&mut app, false);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.brake, vi.handbrake), (0.0, 0.0), "released");
+
+    hold(&mut app, true);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.brake, vi.handbrake),
+        (1.0, 0.0),
+        "a fresh press reverses"
+    );
+
+    // A pause forgets the press: after it the held key is a fresh one.
+    hold(&mut app, false);
+    set_forward_speed(&mut app, 9.0);
+    hold(&mut app, true);
+    app.update();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.update();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    set_forward_speed(&mut app, 0.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.brake, vi.handbrake),
+        (1.0, 0.0),
+        "resumed press is fresh"
+    );
+
+    let mut app = run(true);
+    hold(&mut app, true);
+    set_forward_speed(&mut app, 9.0);
+    app.update();
+    set_forward_speed(&mut app, 0.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.brake, vi.handbrake), (1.0, 0.0), "auto reverse on");
+}
+
 /// A player car with a real config and gearbox state, in `gear`.
 fn spawn_geared_player(app: &mut App, gear: usize) {
     use mm2_vehicle::{Vehicle, VehicleConfig, VehicleState};
