@@ -117,6 +117,17 @@ helpers (`ambient_type`, `vehicle_rule`, `is_connected`, `FLAG_*` /
 cross-checks room refs against the same-stem PSDL, and `--strict` exits
 nonzero on missing expected files or any issue.
 
+## Tram curve storage (F28-A, measured 2026-10-08)
+
+On all 21 retail `sf.bai` roads that carry trams (one curve per side),
+the right-side tram curve sits at `+x` of the section frame and is stored
+**end→start**, the left-side curve sits at `−x` and is stored
+**start→end** — against the lane curves' "right with the sections"
+convention above, though the lane curves' own per-curve storage order is
+likewise an authoring artefact. `Bai::tram_curve` therefore orients a
+tram curve by geometry (first vertex nearer the section the leg starts
+from) rather than trusting side or storage order.
+
 ## Lane direction and the navigation graph (F09-B.1)
 
 Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):

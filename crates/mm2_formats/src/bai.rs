@@ -279,6 +279,61 @@ pub struct TramTerminus {
     pub road: usize,
 }
 
+/// One leg of a tram line: a road driven along its sections (`forward`)
+/// or against them, on the tram curve of the side that direction uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TramLeg {
+    /// Index into [`Bai::roads`].
+    pub road: usize,
+    /// `true` drives with the sections (the right-side tram curve),
+    /// `false` against them (the left-side curve).
+    pub forward: bool,
+}
+
+/// What a cable car does on reaching the end of a [`TramLeg`], per the
+/// executable's next-road rule ([`Bai::tram_hop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TramHop {
+    /// Another tram road continues the line.
+    Onward(TramLeg),
+    /// The line ends here: the same road, the other way.
+    TurnAround(TramLeg),
+    /// The original has no next road: three or five-plus tram roads
+    /// meet here, or the road is not wired into its intersection.
+    Stuck,
+}
+
+/// The legs one cable car drives, in order, as [`Bai::tram_circuit`]
+/// follows the next-road rule from its start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TramCircuit {
+    /// The legs from the start leg on.
+    pub legs: Vec<TramLeg>,
+    /// Whether the last leg hops back onto the first — a closed loop of
+    /// legs the car repeats. `false` when the car is [`TramHop::Stuck`]
+    /// (or the walk hit [`Bai::tram_circuit`]'s bound).
+    pub closed: bool,
+}
+
+/// Every cable car a map's tram network gets, grouped by circuit —
+/// [`Bai::tram_plan`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TramPlan {
+    /// Tram-line termini ([`Bai::tram_termini`]): one cable car each in
+    /// the original.
+    pub termini: usize,
+    /// The distinct closed circuits those cars drive. The cars at the
+    /// two ends of one line share a circuit.
+    pub circuits: Vec<TramCircuit>,
+    /// One `(circuit, leg)` per car that has a circuit: the index into
+    /// [`TramPlan::circuits`] and the leg of it the car starts on.
+    pub cars: Vec<(usize, usize)>,
+    /// Termini with no drivable curve away from them.
+    pub no_start: usize,
+    /// Termini whose walk never closes, so the car has no circuit.
+    pub stranded: usize,
+}
+
 /// A parsed BAI file.
 #[derive(Debug, Clone)]
 pub struct Bai {
@@ -576,6 +631,177 @@ impl Bai {
             .iter()
             .filter(|r| (r.left.tram_count > 0) != (r.right.tram_count > 0))
             .count()
+    }
+
+    /// The leg a cable car starts on at `terminus`: away from the
+    /// intersection, so forward when the road starts there. `None` when
+    /// the road is missing or has no tram curve for that direction.
+    ///
+    /// Recovered from the init that creates the cars (`0x54a200`): a road
+    /// whose start-end intersection is this one is tested and created
+    /// with direction `+1`, otherwise `-1`.
+    pub fn tram_start(&self, terminus: TramTerminus) -> Option<TramLeg> {
+        let road = self.roads.get(terminus.road)?;
+        let leg = TramLeg {
+            road: terminus.road,
+            forward: road.start.intersection as usize == terminus.intersection,
+        };
+        self.tram_curve(leg).map(|_| leg)
+    }
+
+    /// The tram curve `leg` drives, in travel order. The executable reads
+    /// one tram-curve pointer per side, so only the first curve of a side
+    /// counts. `None` when the road is missing, has no tram curve on the
+    /// side, or has no sections to orient it by.
+    ///
+    /// Which side a direction uses is a **choice**, not a read: the car
+    /// driving with the sections takes the right-side curve and the one
+    /// driving against them the left, so cable cars keep to the right as
+    /// every other San Francisco vehicle does. The file's storage order
+    /// does not say — on all 21 retail tram roads the right curve is
+    /// stored end-to-start and the left start-to-end (the opposite of
+    /// the lane curves), so a curve is oriented here by the road's
+    /// geometry: its first vertex is the one nearer the section the leg
+    /// starts from. A road's two curves are a couple of metres apart, so
+    /// the choice moves a car sideways, never onto a different road.
+    pub fn tram_curve(&self, leg: TramLeg) -> Option<Vec<[f32; 3]>> {
+        let road = self.roads.get(leg.road)?;
+        let side = if leg.forward { &road.right } else { &road.left };
+        let mut points = side.tram_vertices.first()?.clone();
+        let (first, last) = (road.sections.first()?, road.sections.last()?);
+        let (from, to) = if leg.forward {
+            (first.origin, last.origin)
+        } else {
+            (last.origin, first.origin)
+        };
+        let dist = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).hypot(a[2] - b[2]);
+        let (head, tail) = (*points.first()?, *points.last()?);
+        if points.len() < 2 {
+            return None;
+        }
+        if dist(head, from) + dist(tail, to) > dist(head, to) + dist(tail, from) {
+            points.reverse();
+        }
+        Some(points)
+    }
+
+    /// Where a cable car goes on reaching the far end of `leg`.
+    ///
+    /// Ported from `0x53fcb0`: at the intersection the leg arrives at, count
+    /// the listed roads whose forward tram curve exists (the executable
+    /// tests that one side for every road). One — this road alone — turns
+    /// the car round onto the same road the other way. Two continue onto
+    /// the other, found by walking the list on from this road's own slot.
+    /// Four go straight across, the second tram road past this one. Any
+    /// other count leaves the car with no next road.
+    pub fn tram_hop(&self, leg: TramLeg) -> TramHop {
+        let Some(road) = self.roads.get(leg.road) else {
+            return TramHop::Stuck;
+        };
+        let end = if leg.forward { &road.end } else { &road.start };
+        let Some(intersection) = self.intersections.get(end.intersection as usize) else {
+            return TramHop::Stuck;
+        };
+        let slots = &intersection.roads;
+        let n = slots.len();
+        let own = end.intersection_road_index as usize;
+        let carries = |slot: usize| {
+            slots
+                .get(slot)
+                .and_then(|&r| self.roads.get(r as usize))
+                .is_some_and(|r| r.right.tram_count > 0)
+        };
+        let count = (0..n).filter(|&s| carries(s)).count();
+        let nth_after_own = |nth: usize| {
+            (1..=n)
+                .map(|k| (own + k) % n.max(1))
+                .filter(|&s| carries(s))
+                .nth(nth - 1)
+        };
+        let slot = match count {
+            1 => {
+                return TramHop::TurnAround(TramLeg {
+                    road: leg.road,
+                    forward: !leg.forward,
+                });
+            }
+            2 if own < n => nth_after_own(1),
+            4 if own < n => nth_after_own(2),
+            _ => None,
+        };
+        let Some(next) = slot.map(|s| slots[s] as usize) else {
+            return TramHop::Stuck;
+        };
+        let forward = self.roads[next].start.intersection == end.intersection;
+        TramHop::Onward(TramLeg {
+            road: next,
+            forward,
+        })
+    }
+
+    /// Every leg one cable car drives from `start`, following
+    /// [`Bai::tram_hop`] until the walk comes back to `start` (a closed
+    /// loop: out to the far terminus, round, and home again), runs out
+    /// of road (no next road, or no tram curve to drive it), or exceeds twice the road count (a bound, so a malformed
+    /// file cannot spin).
+    pub fn tram_circuit(&self, start: TramLeg) -> TramCircuit {
+        let bound = self.roads.len() * 2 + 2;
+        let mut legs = vec![start];
+        let mut at = start;
+        while legs.len() <= bound {
+            let (TramHop::Onward(next) | TramHop::TurnAround(next)) = self.tram_hop(at) else {
+                break;
+            };
+            if self.tram_curve(next).is_none() {
+                // The next road has no curve to drive that way.
+                break;
+            }
+            if next == start {
+                return TramCircuit { legs, closed: true };
+            }
+            legs.push(next);
+            at = next;
+        }
+        TramCircuit {
+            legs,
+            closed: false,
+        }
+    }
+
+    /// The cars a map's tram network gets and the circuits they drive:
+    /// each terminus' start leg ([`Bai::tram_start`]) walked by the
+    /// next-road rule ([`Bai::tram_circuit`]). A terminus whose start leg
+    /// already lies on an earlier circuit is the other end of that line
+    /// and joins it. Termini the original would leave without a route are
+    /// counted, not dropped.
+    pub fn tram_plan(&self) -> TramPlan {
+        let termini = self.tram_termini();
+        let mut plan = TramPlan {
+            termini: termini.len(),
+            ..TramPlan::default()
+        };
+        for terminus in termini {
+            let Some(start) = self.tram_start(terminus) else {
+                plan.no_start += 1;
+                continue;
+            };
+            let known =
+                plan.circuits.iter().enumerate().find_map(|(ci, c)| {
+                    c.legs.iter().position(|&l| l == start).map(|leg| (ci, leg))
+                });
+            if let Some(car) = known {
+                plan.cars.push(car);
+                continue;
+            }
+            let circuit = self.tram_circuit(start);
+            if !circuit.closed {
+                plan.stranded += 1;
+                continue;
+            }
+            plan.cars.push((plan.circuits.len(), 0));
+            plan.circuits.push(circuit);
+        }
+        plan
     }
 
     /// Check internal cross-reference integrity: ids, references between
@@ -1189,6 +1415,166 @@ mod tests {
             2,
             "the ghost reference is skipped, not counted"
         );
+    }
+
+    /// `chain(n)` rewired as a tram line: road `k` runs from intersection
+    /// `k` to `k + 1` along the x axis, and carries one tram curve per
+    /// side — stored the way retail stores them, the right curve end to
+    /// start and the left start to end, the left a metre to the side.
+    fn tram_line(n: u32) -> Bai {
+        let mut b = chain(n);
+        for (k, road) in b.roads.iter_mut().enumerate() {
+            let x = k as f32 * 10.0;
+            road.start.intersection = k as u32;
+            road.start.intersection_road_index = u32::from(k > 0);
+            road.end.intersection = k as u32 + 1;
+            road.end.intersection_road_index = 0;
+            let mut sections = vec![road.sections[0].clone(), road.sections[0].clone()];
+            sections[0].origin = [x, 0.0, 0.0];
+            sections[1].origin = [x + 10.0, 0.0, 0.0];
+            road.sections = sections;
+            road.right.tram_count = 1;
+            road.right.tram_vertices = vec![vec![[x + 10.0, 0.0, 0.0], [x, 0.0, 0.0]]];
+            road.left.tram_count = 1;
+            road.left.tram_vertices = vec![vec![[x, 0.0, 1.0], [x + 10.0, 0.0, 1.0]]];
+        }
+        b
+    }
+
+    const fn leg(road: usize, forward: bool) -> TramLeg {
+        TramLeg { road, forward }
+    }
+
+    #[test]
+    fn a_car_starts_on_the_terminus_road_heading_away() {
+        let b = tram_line(3);
+        let termini = b.tram_termini();
+        assert_eq!(b.tram_start(termini[0]), Some(leg(0, true)));
+        assert_eq!(b.tram_start(termini[1]), Some(leg(2, false)));
+    }
+
+    #[test]
+    fn a_leg_drives_the_curve_of_its_direction_in_travel_order() {
+        let b = tram_line(2);
+        assert_eq!(
+            b.tram_curve(leg(1, true)),
+            Some(vec![[10.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
+        );
+        // Against the sections: the left-side curve, last point first —
+        // whatever order the file stored either curve in.
+        assert_eq!(
+            b.tram_curve(leg(1, false)),
+            Some(vec![[20.0, 0.0, 1.0], [10.0, 0.0, 1.0]])
+        );
+        assert_eq!(b.tram_curve(leg(9, true)), None);
+        let mut b = b;
+        b.roads[1].left.tram_vertices.clear();
+        assert_eq!(b.tram_curve(leg(1, false)), None);
+        assert_eq!(b.tram_start(b.tram_termini()[1]), None, "no curve to drive");
+    }
+
+    #[test]
+    fn a_line_end_turns_the_car_round_and_a_midline_stop_continues() {
+        let b = tram_line(3);
+        assert_eq!(b.tram_hop(leg(0, true)), TramHop::Onward(leg(1, true)));
+        assert_eq!(b.tram_hop(leg(1, true)), TramHop::Onward(leg(2, true)));
+        assert_eq!(b.tram_hop(leg(2, true)), TramHop::TurnAround(leg(2, false)));
+        assert_eq!(b.tram_hop(leg(2, false)), TramHop::Onward(leg(1, false)));
+        assert_eq!(b.tram_hop(leg(0, false)), TramHop::TurnAround(leg(0, true)));
+    }
+
+    #[test]
+    fn a_cable_car_drives_out_turns_and_comes_home() {
+        let b = tram_line(3);
+        let circuit = b.tram_circuit(leg(0, true));
+        assert!(circuit.closed);
+        assert_eq!(
+            circuit.legs,
+            vec![
+                leg(0, true),
+                leg(1, true),
+                leg(2, true),
+                leg(2, false),
+                leg(1, false),
+                leg(0, false),
+            ]
+        );
+        // The car from the other end runs the same circuit from its own start.
+        let other = b.tram_circuit(leg(2, false));
+        assert!(other.closed);
+        assert_eq!(other.legs.len(), 6);
+        assert_eq!(other.legs[0], leg(2, false));
+    }
+
+    #[test]
+    fn the_roads_beyond_a_tramless_one_are_not_part_of_the_line() {
+        let mut b = tram_line(3);
+        b.roads[2].right.tram_count = 0;
+        b.roads[2].left.tram_count = 0;
+        // Intersection 2 now sees only road 1, so the line ends there.
+        assert_eq!(b.tram_hop(leg(1, true)), TramHop::TurnAround(leg(1, false)));
+        assert_eq!(b.tram_circuit(leg(0, true)).legs.len(), 4);
+    }
+
+    #[test]
+    fn a_three_way_tram_junction_leaves_the_car_stuck() {
+        let mut b = tram_line(2);
+        // Roads 0 and 1 plus a third tram listing at intersection 1.
+        b.intersections[1].roads = vec![0, 1, 1];
+        assert_eq!(b.tram_hop(leg(0, true)), TramHop::Stuck);
+        let circuit = b.tram_circuit(leg(0, true));
+        assert!(!circuit.closed);
+        assert_eq!(circuit.legs, vec![leg(0, true)]);
+    }
+
+    #[test]
+    fn a_four_way_tram_crossing_goes_straight_across() {
+        // Four tram roads meeting at intersection 0, listed in order
+        // 0, 1, 2, 3; each ends there.
+        let mut b = tram_line(4);
+        b.intersections[0].roads = vec![0, 1, 2, 3];
+        for (slot, r) in b.roads.iter_mut().enumerate() {
+            r.end.intersection = 0;
+            r.end.intersection_road_index = slot as u32;
+            r.start.intersection = slot as u32 + 1;
+        }
+        // From road 1 (slot 1) the second tram road on is slot 3.
+        assert_eq!(b.tram_hop(leg(1, true)), TramHop::Onward(leg(3, false)));
+        assert_eq!(b.tram_hop(leg(3, true)), TramHop::Onward(leg(1, false)));
+        assert_eq!(b.tram_hop(leg(0, true)), TramHop::Onward(leg(2, false)));
+    }
+
+    #[test]
+    fn a_road_not_wired_into_its_intersection_is_stuck() {
+        let mut b = tram_line(2);
+        b.roads[0].end.intersection_road_index = END_FILL;
+        b.roads[1].start.intersection = 99;
+        assert_eq!(b.tram_hop(leg(0, true)), TramHop::Stuck);
+        assert_eq!(b.tram_hop(leg(1, false)), TramHop::Stuck);
+        assert_eq!(b.tram_hop(leg(9, true)), TramHop::Stuck);
+    }
+
+    #[test]
+    fn the_two_cars_of_a_line_share_a_circuit_and_a_stranded_one_has_none() {
+        let b = tram_line(3);
+        let plan = b.tram_plan();
+        assert_eq!((plan.termini, plan.no_start, plan.stranded), (2, 0, 0));
+        assert_eq!(plan.circuits.len(), 1);
+        assert_eq!(plan.cars, vec![(0, 0), (0, 3)]);
+
+        let mut b = tram_line(3);
+        b.intersections[1].roads = vec![0, 1, 1];
+        let plan = b.tram_plan();
+        assert_eq!(plan.circuits.len(), 0);
+        assert_eq!(plan.stranded, 2, "both ends are stuck at the junction");
+
+        let mut b = tram_line(3);
+        b.roads[2].left.tram_vertices.clear();
+        let plan = b.tram_plan();
+        assert_eq!(plan.no_start, 1);
+        assert_eq!(plan.stranded, 1, "the near car's loop needs the left curve");
+
+        assert_eq!(chain(2).tram_plan(), TramPlan::default());
     }
 
     #[test]
