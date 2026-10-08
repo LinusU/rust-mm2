@@ -1,3 +1,13 @@
+# Last iteration — F28-C.2: a water/out-of-bounds rescue cannot manufacture event completion (iteration 21 of the recovery run)
+
+Selection: the F28-C.1 review passed with no blockers and left AC04 (water/boundary recovery follows the session/race policy and cannot manufacture event completion) with no evidence at all. Recovery (F05-B.5) and the swept-gate race driver each had their own tests, and `race.rs` pins a plain `ResetVehicle`, but nothing ran the *recovery* resolvers together with `advance_race`.
+Change: tests only, `mm2_app/tests/recovery.rs` (+3 tests, +3 helpers; no production change). The recovery harness gains the production race driver (`advance_race` + `reanchor_teleported_participants`) over a one-gate checkpoint event (the gate is the finish). `drowning_across_a_gate_does_not_clear_it_on_the_way_home`: the car is carried unswept onto the deep-water slab beyond the gate, drowns, is rescued back across the gate; zero gates cleared, still racing, no result — and a real crossing afterwards does finish (positive control). `falling_out_of_the_world_past_a_gate_does_not_finish_the_event`: same through the out-of-bounds leg with a tall gate. `a_rescue_keeps_the_gates_already_earned`: a driven gate stays cleared across a drowning and the unvisited second gate is not credited.
+Mutation: removing `reanchor_teleported_participants` from the harness fails both gate-crossing tests (the rescue hop then sweeps the gate). Restored.
+Gates (foreground): fmt --check pass; clippy --locked --workspace --all-targets --all-features -D warnings rc 0; `cargo test --locked --workspace` rc 0, 56 result blocks ok.
+Status: implemented candidate, not independently checked. Synthetic slab/ground and a synthetic gate, not retail geometry; the rescue policy is the designed one (original water/OOB rules stay UNK-13). Advances F28-AC04 (the no-manufactured-completion leg). Open on F28: AC04 retail city boundaries / `.water` rooms against real routes, AC01 inventory of the other special actors, AC05 restart phase test, AC06 coverage report.
+
+---
+
 # Last iteration — F28-C.1: moving scenery is continuous and carries its riders (iteration 20 of the recovery run)
 
 Selection: the last five iterations were all F26-C test pins (reviewed, no blockers); F28 had no acceptance evidence at all for its moving-collider criteria (AC02 route traversal with no teleport discontinuity, AC03 physically stable contact with a moving collider) although `drive_movers` has shipped with only pure-`mm2_game` follower tests. AC05 (late join/restart phase) is already covered by `worldclock`.

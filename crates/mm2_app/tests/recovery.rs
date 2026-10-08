@@ -1080,3 +1080,179 @@ fn an_out_of_bounds_fall_recovers_once_whatever_the_step_parity() {
         assert_eq!(report(&app).recovered, 1, "drop {drop}");
     }
 }
+
+// ---- AC04 (F28): a rescue cannot manufacture event completion -------
+
+/// `recovery_app` for an event session with one gate — the race's only
+/// checkpoint, so crossing it finishes — standing between the dry
+/// anchor (x = 0) and wherever the car is washed or dropped. The
+/// production race driver runs beside the recovery pair; the car is
+/// released and anchored before the function returns.
+fn gated_recovery_app(gate_x: f32, gate_height: f32) -> (App, Entity) {
+    use mm2_app::race::{advance_race, reanchor_teleported_participants};
+    use mm2_game::{
+        Checkpoint, CheckpointRule, EventParams, EventRef, EventTableKind, RaceDefinition,
+        RaceProgress, RaceStarted, RaceState, ResultLedger, SessionMode,
+    };
+
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "london".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    };
+    let (mut app, car, _object) = recovery_app_with(config, Vec3::new(0.0, 1.2, 0.0));
+    let def = RaceDefinition {
+        checkpoints: vec![Checkpoint {
+            center: Vec3::new(gate_x, 0.0, 0.0),
+            radius: 15.0,
+            height: gate_height,
+            heading_deg: -90.0,
+            require_direction: false,
+        }],
+        finish: None,
+        rule: CheckpointRule::AnyOrder,
+        laps: 1,
+        time_limit_ticks: None,
+        params: EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    };
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .insert_resource(RaceState::new(def.clone(), generation));
+    app.world_mut().init_resource::<ResultLedger>();
+    app.add_message::<RaceStarted>();
+    app.add_systems(
+        FixedLast,
+        (reanchor_teleported_participants, advance_race).chain(),
+    );
+    app.world_mut()
+        .entity_mut(car)
+        .insert(RaceProgress::new(&def));
+    run(&mut app, 4); // countdown 0 → Running, the car Racing and anchored
+    (app, car)
+}
+
+/// The gate's standing after a rescue: how many gates the car holds,
+/// whether it still races and how many results were minted.
+fn standing(app: &App, car: Entity) -> (usize, bool, usize) {
+    use mm2_game::{ParticipantState, RaceProgress, ResultLedger};
+    let progress = app.world().get::<RaceProgress>(car).unwrap();
+    (
+        progress.cleared_count(),
+        matches!(progress.state, ParticipantState::Racing),
+        app.world().resource::<ResultLedger>().len(),
+    )
+}
+
+/// Carry the car to `to` without sweeping the ground between — a
+/// disclosed teleport (a ferry deck, a cutscene), the one way to stand
+/// on the far side of a gate without driving through it.
+fn carry_unswept(app: &mut App, car: Entity, to: Vec3) {
+    app.world_mut()
+        .get_mut::<mm2_game::RaceProgress>(car)
+        .unwrap()
+        .break_segment();
+    teleport(app, car, to);
+}
+
+#[test]
+fn drowning_across_a_gate_does_not_clear_it_on_the_way_home() {
+    // The gate spans x 15..45 between the anchor and the Thames slab; a
+    // car drowned at x = 60 is rescued back across it.
+    let (mut app, car) = gated_recovery_app(30.0, 8.0);
+    assert_eq!(
+        standing(&app, car),
+        (0, true, 0),
+        "released, nothing cleared"
+    );
+
+    carry_unswept(&mut app, car, Vec3::new(WATER_AT.x, 1.0, WATER_AT.z));
+    run(&mut app, 80);
+    assert_eq!(report(&app).submerged, 1);
+    assert_eq!(report(&app).recovered, 1, "the rescue ran");
+    assert!(
+        position(&app, car).x.abs() < 2.0,
+        "and landed at the anchor"
+    );
+    run(&mut app, 30);
+    assert_eq!(
+        standing(&app, car),
+        (0, true, 0),
+        "the rescue's hop back over the gate neither clears it nor finishes the event"
+    );
+
+    // Control: the gate is live — driving through it still finishes.
+    teleport(&mut app, car, Vec3::new(30.0, 1.2, 0.0));
+    run(&mut app, 4);
+    assert_eq!(
+        standing(&app, car).2,
+        1,
+        "a real crossing records the result"
+    );
+}
+
+#[test]
+fn falling_out_of_the_world_past_a_gate_does_not_finish_the_event() {
+    // The gate stands tall between the anchor and the edge the car
+    // falls from, so the rescue's path crosses it at any height.
+    let (mut app, car) = gated_recovery_app(300.0, 400.0);
+    carry_unswept(&mut app, car, Vec3::new(500.0, 5.0, 0.0));
+    run(&mut app, 150);
+    assert_eq!(report(&app).out_of_bounds, 1);
+    assert_eq!(report(&app).recovered, 1, "the rescue ran");
+    assert!(
+        position(&app, car).x.abs() < 2.0,
+        "and landed at the anchor"
+    );
+    run(&mut app, 30);
+    assert_eq!(
+        standing(&app, car),
+        (0, true, 0),
+        "the fall's rescue neither clears the gate nor finishes the event"
+    );
+
+    teleport(&mut app, car, Vec3::new(300.0, 1.2, 0.0));
+    run(&mut app, 4);
+    assert_eq!(standing(&app, car).2, 1, "driving it still finishes");
+}
+
+#[test]
+fn a_rescue_keeps_the_gates_already_earned() {
+    // Clear gate 0 by driving, then drown beyond it: the rescue neither
+    // un-clears it nor finishes anything that was not driven.
+    let (mut app, car) = gated_recovery_app(30.0, 8.0);
+    // A second gate on the far side keeps the event open after gate 0.
+    {
+        use mm2_game::{Checkpoint, RaceProgress, RaceState};
+        let far = Checkpoint {
+            center: Vec3::new(-30.0, 0.0, 0.0),
+            radius: 15.0,
+            height: 8.0,
+            heading_deg: -90.0,
+            require_direction: false,
+        };
+        let mut race = app.world_mut().resource_mut::<RaceState>();
+        race.definition.checkpoints.push(far);
+        let def = race.definition.clone();
+        let mut fresh = RaceProgress::new(&def);
+        fresh.state = mm2_game::ParticipantState::Racing; // released already
+        *app.world_mut().get_mut::<RaceProgress>(car).unwrap() = fresh;
+    }
+    run(&mut app, 2);
+    teleport(&mut app, car, Vec3::new(30.0, 1.2, 0.0)); // swept: gate 0 clears
+    run(&mut app, 4);
+    assert_eq!(standing(&app, car), (1, true, 0), "one of two gates driven");
+
+    carry_unswept(&mut app, car, Vec3::new(WATER_AT.x, 1.0, WATER_AT.z));
+    run(&mut app, 100);
+    assert_eq!(report(&app).recovered, 1);
+    assert_eq!(
+        standing(&app, car),
+        (1, true, 0),
+        "the earned gate stays, the unvisited one is not credited"
+    );
+}
