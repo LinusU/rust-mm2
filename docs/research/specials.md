@@ -174,6 +174,19 @@ the session clock.
   reach 15 m/s, stop 0.3 m short of the line on red and go on green; a
   screenshot shows the model on the rails facing its direction of travel.
 
+Height (operator report 7 item 3): the car's origin rides on the curve,
+with the base of its bound on the rail (`rest_lift`, ~0 m on retail).
+Measured on retail: a probe raycast from 3 m above the curve down onto
+the carriageway at 10 m steps along both SF circuits (495 samples) found
+the curve at the road surface (median gap 0.0 m), and `va_cablecar_f`'s
+mesh (`BODY_H` y 0.0014..3.29) and bound (`.bnd` y −0.002..3.32) both
+start at the floor. The earlier rule lifted the body by the bound
+record's `CG.y` (1.645 m, the centre of mass — half the height) as if
+the mesh were centred on `CG`, as measured for banger props; this model
+is not, so the car floated 1.6 m high. The ferry mover applies the same
+`CG.y` lift (`movers.rs`) and has not been re-measured against its
+model.
+
 Obstacles beyond other cable cars (iteration 21): the sensor reads "any
 other AI vehicle … within a 30 m × 2 m probe ahead", so ambient cars are
 obstacles by the original's own rule. The port also counts every

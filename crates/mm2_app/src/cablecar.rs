@@ -47,7 +47,6 @@ use mm2_game::{
     JunctionGate, Player, SessionAuthority, SessionConfig, SessionEntity, SessionPhase,
 };
 
-use crate::banger::BangerDefs;
 use crate::city::{MovableModels, v3};
 use crate::movers::{BodyQuery, pose_body, spawn_body};
 use crate::traffic::{AmbientCar, AmbientTraffic, RoadObstacle, fields_ambient_traffic};
@@ -99,7 +98,8 @@ pub struct CableCar {
     pub circuit: usize,
     /// Its speed controller and place on the circuit.
     pub motion: CableMotion,
-    /// Height added to the curve (`CG.y` of the model's bound record).
+    /// Height added to the curve so the bound's base rests on it
+    /// ([`rest_lift`]).
     pub lift: f32,
     /// How far ahead of the model's origin its front is, m.
     pub nose: f32,
@@ -195,6 +195,27 @@ pub fn plan_cable_cars(
     (circuits, starts)
 }
 
+/// How far above its curve point the car's origin rides so the base of
+/// its bound rests on the rail.
+///
+/// The tram curve is the road-surface datum (measured on retail: the
+/// median height of the curve over the carriageway under it is 0.0 m,
+/// docs/research/specials.md) and `va_cablecar_f` is authored with its
+/// origin at the floor — mesh and bound both span y 0..3.3 — so the
+/// body rides at the curve with no offset. The bound record's `CG.y`
+/// (1.645, half the height) is the centre of mass, not an offset: lifting
+/// by it held the car 1.6 m above the rails. `base_y` is the bound's
+/// lowest point in model space; a model with no bound rides at its origin.
+fn rest_lift(base_y: Option<f32>) -> f32 {
+    base_y
+        .filter(|y| y.is_finite())
+        .map_or(0.0, |y| (-y).clamp(-REST_LIFT_LIMIT, REST_LIFT_LIMIT))
+}
+
+/// The most the bound's base may sit off the model origin before the
+/// number is treated as garbage and ignored, m.
+const REST_LIFT_LIMIT: f32 = 3.0;
+
 /// Spawn the city's cable cars, session-owned. `eligible` is
 /// [`fields_cable_cars`] (see the module notes).
 #[allow(clippy::too_many_arguments)] // Bevy asset stores have to be threaded separately
@@ -242,10 +263,12 @@ pub fn spawn_cable_cars(
         report.missing_textures = models.finish(commands, owner).len();
         return report;
     };
-    let lift = BangerDefs::new(vfs)
-        .get(CABLE_CAR_MODEL)
-        .map(|d| d.cg[1])
-        .unwrap_or(0.0);
+    let lift = rest_lift(
+        model
+            .collider
+            .as_ref()
+            .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).min.y),
+    );
     let nose = model
         .collider
         .as_ref()
@@ -407,5 +430,22 @@ pub fn drive_cable_cars(
             (p1 + lift, mover_rotation(d1)),
             dt,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_car_rides_so_the_base_of_its_bound_rests_on_the_rail() {
+        // The retail tram: bound from y 0.0014 up — origin at the floor.
+        assert!(rest_lift(Some(0.0013837814)).abs() < 0.01);
+        // A bound centred on its origin would need lifting by half its height.
+        assert_eq!(rest_lift(Some(-1.5)), 1.5);
+        // No bound, or a nonsense one: ride at the origin / ignore the offset.
+        assert_eq!(rest_lift(None), 0.0);
+        assert_eq!(rest_lift(Some(f32::NAN)), 0.0);
+        assert_eq!(rest_lift(Some(1e9)), -REST_LIFT_LIMIT);
     }
 }

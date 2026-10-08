@@ -604,6 +604,11 @@ fn spawn_into_world(vfs: &Vfs, city: &str, eligible: bool) -> (CableReport, usiz
             "half-width {}",
             car.half_width
         );
+        // Measured on the retail bound: the tram is authored with its
+        // origin at the floor (bound y 0.0014..3.32), so it rides on the
+        // curve — not `CG.y` (1.645) above it, which hung it over the
+        // rails (operator report 7 item 3).
+        assert!(car.lift.abs() < 0.05, "lift {}", car.lift);
     }
     let circuits = world.resource::<CableCircuits>().0.len();
     (report, cars, circuits)

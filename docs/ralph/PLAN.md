@@ -3203,7 +3203,7 @@ for item 1, a measured run) shows it fixed.
      additive blending, a glow texture) and bind them the way the
      original does. The other glow parts (`HLIGHT`/`BLIGHT`) go through
      `car_visual.rs`, so check whether they share the defect.
-3. **Cable cars hover above the tracks**
+3. **[implemented, candidate — iteration 3 of the new run; see LAST_ITERATION]** **Cable cars hover above the tracks**
    (`2-cable-car-hovering-sf.webp`, sf, `--cam=-1117.3,80.9,-175.5,90,-4`).
    - The car floats well above the rails.
    - Establish the model's authored origin and bound offset and the route
