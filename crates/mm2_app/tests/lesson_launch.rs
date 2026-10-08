@@ -3,7 +3,8 @@
 //! `LessonDriver` rides with it, a restart rebuilds the driver on
 //! leg 0, and a lesson that cannot build fails the session instead of
 //! falling back to a plain race. Synthetic `race/london/` install; no
-//! original data.
+//! original data, except the opt-in `MM2_RETAIL` sweeps at the end
+//! (launch, and retry-rebuilds-the-same-world on the real city worlds).
 
 use std::path::Path;
 use std::time::Duration;
@@ -19,7 +20,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     EventRef, EventTableKind, ImpactEvent, LessonPhase, Mm2Vfs, ParticipantState, PlayerId,
     PlayerVehicle, RaceProgress, RaceStarted, RaceState, ResultId, ResultLedger, Session,
-    SessionConfig, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
+    SessionConfig, SessionEntity, SessionMode, SessionPhase, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -397,6 +399,9 @@ fn every_retail_lesson_launches_at_both_difficulties() {
                 let mut vfs = Vfs::new();
                 mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
                 let config = SessionConfig {
+                    world: WorldMode::City {
+                        psdl: format!("city/{city}.psdl"),
+                    },
                     mode: SessionMode::Event(event_ref.clone()),
                     difficulty,
                     ..SessionConfig::default()
@@ -422,4 +427,128 @@ fn every_retail_lesson_launches_at_both_difficulties() {
     eprintln!("retail lessons: expected {expected}, launched {launched}");
     assert!(failures.is_empty(), "{failures:?}");
     assert_eq!(expected, launched);
+}
+
+/// Every session-owned entity, bucketed by its `Name` (unnamed ones
+/// share one bucket) with the generation stamp read off the marker.
+fn session_census(app: &mut App) -> (std::collections::BTreeMap<String, usize>, Vec<u64>) {
+    let mut by_name = std::collections::BTreeMap::new();
+    let mut generations = std::collections::BTreeSet::new();
+    let mut query = app.world_mut().query::<(&SessionEntity, Option<&Name>)>();
+    for (owner, name) in query.iter(app.world()) {
+        let key = name.map_or("<unnamed>".to_owned(), |n| {
+            // Strip a trailing index so `prop 12` and `prop 13` share a bucket.
+            n.as_str()
+                .trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ' || c == '#' || c == '_')
+                .to_owned()
+        });
+        *by_name.entry(key).or_insert(0) += 1;
+        generations.insert(owner.0);
+    }
+    (by_name, generations.into_iter().collect())
+}
+
+/// F21-AC05 on original data: retrying a lesson (the session restart)
+/// rebuilds the same world — the session-owned entity census after the
+/// retry equals the first launch's, nothing from the previous
+/// generation survives, and the sequencer is back on leg 0 with a
+/// fresh attempt. Every Crash Course row of both cities is checked.
+#[test]
+fn a_retried_retail_lesson_rebuilds_the_same_world() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::Difficulty;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail lesson retry sweep NOT run");
+        return;
+    };
+    let mut expected = 0;
+    let mut checked = 0;
+    let mut total_owned = 0;
+    let mut failures = Vec::new();
+    for city in ["london", "sf"] {
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        let rows: Vec<EventRef> = catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == EventTableKind::CrashCourse)
+            .map(|e| e.event_ref.clone())
+            .collect();
+        assert!(!rows.is_empty(), "{city}: no Crash Course rows enumerated");
+        for event_ref in rows {
+            for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+                expected += 1;
+                let label = format!("{city} crash:{} {difficulty:?}", event_ref.index);
+                let mut vfs = Vfs::new();
+                mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+                let config = SessionConfig {
+                    world: WorldMode::City {
+                        psdl: format!("city/{city}.psdl"),
+                    },
+                    mode: SessionMode::Event(event_ref.clone()),
+                    difficulty,
+                    ..SessionConfig::default()
+                };
+                let mut app = event_app(config, vfs);
+                app.update();
+                if phase(&app) != SessionPhase::Countdown {
+                    failures.push(format!("{label}: first launch phase {:?}", phase(&app)));
+                    continue;
+                }
+                let (first, first_gens) = session_census(&mut app);
+                total_owned += first.values().sum::<usize>();
+                // Clear leg 0 so the retry has a counter to reset.
+                app.world_mut().resource_mut::<LessonDriver>().observe(
+                    &ParticipantState::Finished {
+                        race_ticks: 100,
+                        result: ResultId {
+                            generation: 1,
+                            participant: PlayerId(0),
+                            event: None,
+                            sequence: 0,
+                        },
+                    },
+                );
+                app.world_mut().resource_mut::<SessionControl>().restart = true;
+                let mut reached = false;
+                for _ in 0..40 {
+                    app.update();
+                    if phase(&app) == SessionPhase::Countdown
+                        && app.world().resource::<Session>().generation() == 2
+                    {
+                        reached = true;
+                        break;
+                    }
+                }
+                if !reached {
+                    failures.push(format!("{label}: restart never returned to Countdown"));
+                    continue;
+                }
+                let (second, second_gens) = session_census(&mut app);
+                let driver = app.world().resource::<LessonDriver>();
+                if driver.run().phase() != (LessonPhase::Running { leg: 0 })
+                    || driver.run().attempt() != 1
+                {
+                    failures.push(format!("{label}: sequencer not fresh on leg 0"));
+                }
+                if first_gens.len() != 1 || second_gens.len() != 1 || first_gens == second_gens {
+                    failures.push(format!(
+                        "{label}: generations {first_gens:?} -> {second_gens:?}"
+                    ));
+                }
+                if first != second {
+                    failures.push(format!("{label}: census {first:?} -> {second:?}"));
+                }
+                checked += 1;
+            }
+        }
+    }
+    eprintln!(
+        "retail lesson retries: expected {expected}, checked {checked}, \
+         {total_owned} session-owned entities compared"
+    );
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(expected, checked);
 }
