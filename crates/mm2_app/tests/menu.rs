@@ -4022,6 +4022,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Invert stick steering: Off",
             "Reset to defaults",
             "Gamepad buttons",
+            "In-game keys",
         ]
     );
     let alts: Vec<Option<String>> = shell(&app)
@@ -4076,6 +4077,112 @@ fn a_captured_key_rebinds_the_action_and_persists() {
     assert_eq!(&ControlSettings::load(&path), live);
     // The reset row woke up; it restores the shipped map everywhere.
     assert!(shell(&app).rows[12].enabled.is_ok());
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<ControlSettings>(),
+        &ControlSettings::default()
+    );
+    assert_eq!(ControlSettings::load(&path), ControlSettings::default());
+}
+
+/// F23-A.5: the Controls screen's last row opens the in-game keys, one
+/// row per in-session action with its alternate beside it. They rebind
+/// through the driving keys' capture: a key another action owns is
+/// refused naming it (driving or in-game alike), the fixed pause-map key
+/// is refused, a free key binds, applies live and persists, and X never
+/// clears an action's last key.
+#[test]
+fn the_in_game_keys_screen_rebinds_through_the_same_capture() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = menu_app(tmp.path(), None);
+    let path = open_controls(&mut app, dir.path());
+    focus_row(&mut app, "In-game keys");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).screen, menu::Screen::GameKeys);
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(
+        rows,
+        [
+            "Change camera: KeyC",
+            "Cockpit view: KeyV",
+            "Rear-view mirror: Backspace",
+            "Reset vehicle: KeyR",
+            "Horn / siren: Enter",
+            "Map view: Tab",
+            "Map zoom: KeyE",
+            "Map orientation: KeyF",
+            "Driving HUD: KeyH",
+            "Opponent indicators: KeyI",
+            "Previous target: KeyZ",
+            "Next target: KeyX",
+            "Headlights: KeyL",
+        ]
+    );
+    assert!(
+        shell(&app)
+            .rows
+            .iter()
+            .all(|r| r.side.as_ref().is_some_and(|s| s.text == "Alt: -"))
+    );
+
+    focus_row(&mut app, "Change camera");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).capture, Some((DriveAction::Camera, 0)));
+    // A driving key, another in-game key and the fixed pause-map key are
+    // refused with the reason, and the screen keeps listening.
+    for (key, reason) in [
+        (KeyCode::KeyW, "Accelerate"),
+        (KeyCode::KeyV, "Cockpit view"),
+        (KeyCode::KeyQ, "in-game control"),
+    ] {
+        press(&mut app, key);
+        assert!(shell(&app).capture.is_some(), "{key:?}");
+        let status = shell(&app).status.clone().unwrap();
+        assert!(status.contains(reason), "{key:?}: {status}");
+    }
+    assert!(
+        app.world()
+            .get_resource::<ControlSettings>()
+            .is_none_or(|c| *c == ControlSettings::default()),
+        "the refusals changed nothing"
+    );
+    assert!(!path.exists(), "and saved nothing");
+    press(&mut app, KeyCode::KeyU);
+    assert_eq!(shell(&app).capture, None);
+    assert_eq!(shell(&app).rows[0].text, "Change camera: KeyU");
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("Change camera is now KeyU")
+    );
+    let live = app.world().resource::<ControlSettings>();
+    assert_eq!(live.key_at(DriveAction::Camera, 0), Some(KeyCode::KeyU));
+    assert_eq!(&ControlSettings::load(&path), live);
+
+    // The freed C is a driving key candidate now; X cannot clear the
+    // only key of an action.
+    focus_row(&mut app, "Headlights");
+    press(&mut app, KeyCode::KeyX);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("at least one key"),
+        "{:?}",
+        shell(&app).status
+    );
+    assert_eq!(
+        app.world()
+            .resource::<ControlSettings>()
+            .key_at(DriveAction::Headlights, 0),
+        Some(KeyCode::KeyL)
+    );
+
+    // Esc leaves for the Controls screen, whose reset restores them.
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Controls);
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(
@@ -4331,8 +4438,18 @@ fn capture_refuses_bad_keys_keeps_listening_and_cancels_on_escape() {
         status.contains("KeyS") && status.contains("Brake / reverse"),
         "{status}"
     );
-    // Reserved (camera C) and unbindable (F1) keys likewise.
+    // Another action's in-game key names its owner too.
     press(&mut app, KeyCode::KeyC);
+    assert!(shell(&app).capture.is_some());
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("Change camera")
+    );
+    // Reserved (the pause map's Q) and unbindable (F1) keys likewise.
+    press(&mut app, KeyCode::KeyQ);
     assert!(
         shell(&app)
             .status

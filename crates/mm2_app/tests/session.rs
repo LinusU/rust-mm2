@@ -2209,9 +2209,12 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     // keeps listening, and nothing changes or is saved.
     let before = live(&app);
     press_key(&mut app, KeyCode::Enter);
-    press_key(&mut app, KeyCode::KeyR);
+    press_key(&mut app, KeyCode::KeyQ);
     assert!(app.world().resource::<PauseMenu>().capture.is_some());
     assert!(pause_status(&app).unwrap().contains("in-game control"));
+    press_key(&mut app, KeyCode::KeyR);
+    assert!(app.world().resource::<PauseMenu>().capture.is_some());
+    assert!(pause_status(&app).unwrap().contains("Reset vehicle"));
     press_key(&mut app, KeyCode::KeyS);
     assert!(app.world().resource::<PauseMenu>().capture.is_some());
     assert!(pause_status(&app).unwrap().contains("Brake / reverse"));
@@ -2375,6 +2378,100 @@ fn pause_gamepad_buttons_page_rebinds_by_listening_and_backs_out() {
     }
     press_key(&mut app, KeyCode::Escape);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
+}
+
+/// F23-A.5 from inside a session: the Controls page's `In-game keys` row
+/// opens a page of the in-session actions, one row each (Left/Right pick the primary or alternate slot). It listens
+/// like the driving rows — a key another action owns is refused naming
+/// it, a free one binds, applies live and is saved — and Esc steps back
+/// onto the row that opened it.
+#[test]
+fn pause_in_game_keys_page_rebinds_and_backs_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = controls_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(ControlSettings::default())
+        .insert_resource(ControlsSave(Some(path.clone())));
+    app.update();
+    open_pause_controls(&mut app);
+    let live = |a: &App| a.world().resource::<ControlSettings>().clone();
+    let pause_status = |a: &App| a.world().resource::<PauseMenu>().status.clone();
+
+    // Past the 14 key rows, 6 tuning rows and the gamepad row.
+    pause_focus_row(&mut app, 21);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().page,
+        PausePage::GameKeys
+    );
+
+    // One row per action; Enter edits the bracketed slot.
+    {
+        let rows = app.world().resource::<PauseMenu>();
+        assert!(!rows.alt);
+    }
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().capture,
+        Some((DriveAction::Camera, 0))
+    );
+    press_key(&mut app, KeyCode::KeyW);
+    assert!(app.world().resource::<PauseMenu>().capture.is_some());
+    assert!(pause_status(&app).unwrap().contains("Accelerate"));
+    assert_eq!(live(&app), ControlSettings::default());
+    press_key(&mut app, KeyCode::KeyU);
+    assert_eq!(app.world().resource::<PauseMenu>().capture, None);
+    assert_eq!(
+        live(&app).key_at(DriveAction::Camera, 0),
+        Some(KeyCode::KeyU)
+    );
+    assert_eq!(ControlSettings::load(&path), live(&app));
+    assert_eq!(
+        pause_status(&app).as_deref(),
+        Some("Change camera is now KeyU")
+    );
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+
+    // Right switches the page to the alternate slots: it binds and
+    // clears; Left returns to the primaries, whose last key stays.
+    press_key(&mut app, KeyCode::ArrowRight);
+    assert!(app.world().resource::<PauseMenu>().alt);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().capture,
+        Some((DriveAction::Camera, 1))
+    );
+    press_key(&mut app, KeyCode::KeyJ);
+    assert_eq!(
+        live(&app).key_at(DriveAction::Camera, 1),
+        Some(KeyCode::KeyJ)
+    );
+    press_key(&mut app, KeyCode::KeyX);
+    assert_eq!(live(&app).key_at(DriveAction::Camera, 1), None);
+    press_key(&mut app, KeyCode::ArrowLeft);
+    assert!(!app.world().resource::<PauseMenu>().alt);
+    press_key(&mut app, KeyCode::KeyX);
+    assert_eq!(
+        live(&app).key_at(DriveAction::Camera, 0),
+        Some(KeyCode::KeyU),
+        "the last key stays"
+    );
+
+    // The last row is Back; Esc does the same. Both land on the row that
+    // opened the page.
+    pause_focus_row(&mut app, 13);
+    press_key(&mut app, KeyCode::Enter);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 21));
+    }
+    press_key(&mut app, KeyCode::Enter);
+    press_key(&mut app, KeyCode::Escape);
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert_eq!((pause.page, pause.focus), (PausePage::Controls, 21));
+    }
 }
 
 /// A rig with no `ControlSettings` (a bare harness) leaves the Driving

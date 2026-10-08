@@ -12,7 +12,7 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
 use crate::contracts::ImpactFilter;
-use crate::controls::{ControlSettings, pad_button};
+use crate::controls::{ControlSettings, DriveAction, SLOTS, bound_keys, pad_button};
 use crate::manual_gear::ManualGear;
 use crate::pad_map::PadAction;
 use crate::session::{self, SpawnPoint};
@@ -86,21 +86,36 @@ pub fn window_minimized(window: &Window) -> bool {
     window.resolution.physical_width() == 0 || window.resolution.physical_height() == 0
 }
 
-/// One in-session control on either device: the documented key OR its
-/// designed [`pad`] binding — inert while a window is unfocused (the
-/// pad's edges would otherwise fire where the key's never could).
-/// Menus keep their own pad row, so these only ever fire where the
-/// matching system already gates the key — the pad adds a finger,
-/// never a new context.
+/// One in-session control on either device: a key bound to `action` OR
+/// its [`DriveAction::pad_twin`] button — inert while a window is
+/// unfocused (the pad's edges would otherwise fire where the key's never
+/// could). Menus keep their own pad row, so these only ever fire where
+/// the matching system already gates the key — the pad adds a finger,
+/// never a new context. `controls` is `None` in a harness app that never
+/// inserted the settings, which reads the shipped keys and buttons.
 pub fn control_just_pressed(
     keys: &ButtonInput<KeyCode>,
     pads: &Query<&Gamepad>,
     windows: &Query<&Window>,
-    key: KeyCode,
+    controls: Option<&ControlSettings>,
+    action: DriveAction,
+) -> bool {
+    let button = action.pad_twin().and_then(|a| pad_button(controls, a));
+    bound_just_pressed(keys, pads, windows, bound_keys(controls, action), button)
+}
+
+/// [`control_just_pressed`] with the key slots and pad button already
+/// resolved, for a control that adjusts either (the nav-target buttons
+/// yielding to the shift buttons).
+pub fn bound_just_pressed(
+    keys: &ButtonInput<KeyCode>,
+    pads: &Query<&Gamepad>,
+    windows: &Query<&Window>,
+    bound: [Option<KeyCode>; SLOTS],
     button: Option<GamepadButton>,
 ) -> bool {
     windows_focused(windows)
-        && (keys.just_pressed(key)
+        && (bound.into_iter().flatten().any(|k| keys.just_pressed(k))
             || button.is_some_and(|b| pads.iter().any(|p| p.just_pressed(b))))
 }
 
@@ -470,8 +485,8 @@ pub fn reset_input(
             &keys,
             &pads,
             &windows,
-            KeyCode::KeyR,
-            pad_button(controls.as_deref(), PadAction::Reset),
+            controls.as_deref(),
+            DriveAction::Reset,
         )
     {
         return;

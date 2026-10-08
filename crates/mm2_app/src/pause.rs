@@ -108,6 +108,10 @@ enum PauseAction {
     ResetPad,
     /// Leave the gamepad-buttons page for the controls page.
     ClosePadButtons,
+    /// Open the in-game keys page.
+    OpenGameKeys,
+    /// Leave the in-game keys page for the controls page.
+    CloseGameKeys,
 }
 
 /// Which page of the pause overlay is showing.
@@ -122,6 +126,8 @@ pub enum PausePage {
     Controls,
     /// Rebindable gamepad buttons.
     PadButtons,
+    /// Rebindable in-session keys (camera, mirror, map, reset...).
+    GameKeys,
 }
 
 /// One pause-menu row.
@@ -135,12 +141,14 @@ struct PauseRow {
 /// the menu; without one it exits the process. `page` selects the rows;
 /// `settings` is `None` in an app that has none (a bare test rig), which
 /// leaves the Options row disabled with its reason, and `controls` is
-/// `None` likewise for the Driving controls row.
+/// `None` likewise for the Driving controls row. `alt` picks the slot the
+/// in-game keys page edits (see [`PauseMenu::alt`]).
 fn pause_rows(
     has_menu: bool,
     page: PausePage,
     settings: Option<GraphicsSettings>,
     controls: Option<&ControlSettings>,
+    alt: bool,
 ) -> Vec<PauseRow> {
     let row = |text: String, enabled: Result<PauseAction, String>| PauseRow { text, enabled };
     match page {
@@ -193,15 +201,7 @@ fn pause_rows(
         PausePage::Controls => {
             let c = controls.cloned().unwrap_or_default();
             let mut rows = Vec::new();
-            for action in DriveAction::ALL {
-                for slot in 0..SLOTS {
-                    let name = if slot == 0 { "" } else { " (alt)" };
-                    rows.push(row(
-                        format!("{}{name}: {}", action.label(), c.slot_label(action, slot)),
-                        Ok(PauseAction::Rebind(action, slot)),
-                    ));
-                }
-            }
+            rows.extend(key_rows(&c, &DriveAction::DRIVING));
             rows.extend(c.tuning_rows().into_iter().map(|r| {
                 let action = match r.item {
                     ControlItem::Key { action, slot } => PauseAction::Rebind(action, slot),
@@ -213,7 +213,29 @@ fn pause_rows(
                 "Gamepad buttons".into(),
                 Ok(PauseAction::OpenPadButtons),
             ));
+            rows.push(row("In-game keys".into(), Ok(PauseAction::OpenGameKeys)));
             rows.push(row("Back".into(), Ok(PauseAction::CloseControls)));
+            return rows;
+        }
+        PausePage::GameKeys => {
+            let c = controls.cloned().unwrap_or_default();
+            // One row per action — both slots in the text, the one Enter
+            // edits in brackets — so the page fits the window (27 slot
+            // rows did not).
+            let slot = usize::from(alt);
+            let mut rows: Vec<PauseRow> = DriveAction::IN_GAME
+                .into_iter()
+                .map(|action| {
+                    let (first, second) = (c.slot_label(action, 0), c.slot_label(action, 1));
+                    let text = if alt {
+                        format!("{}: {first}  [alt: {second}]", action.label())
+                    } else {
+                        format!("{}: [{first}]  alt: {second}", action.label())
+                    };
+                    row(text, Ok(PauseAction::Rebind(action, slot)))
+                })
+                .collect();
+            rows.push(row("Back".into(), Ok(PauseAction::CloseGameKeys)));
             return rows;
         }
         PausePage::PadButtons => {
@@ -252,6 +274,21 @@ fn pause_rows(
     ]
 }
 
+/// One row per key slot of each of `actions`.
+fn key_rows(c: &ControlSettings, actions: &[DriveAction]) -> Vec<PauseRow> {
+    let mut rows = Vec::new();
+    for &action in actions {
+        for slot in 0..SLOTS {
+            let name = if slot == 0 { "" } else { " (alt)" };
+            rows.push(PauseRow {
+                text: format!("{}{name}: {}", action.label(), c.slot_label(action, slot)),
+                enabled: Ok(PauseAction::Rebind(action, slot)),
+            });
+        }
+    }
+    rows
+}
+
 /// Index of the `Options` row in the pause rows — where focus returns
 /// when the graphics page closes.
 const OPTIONS_ROW: usize = 2;
@@ -263,7 +300,13 @@ const CONTROLS_ROW: usize = 6 + AudioLevel::ALL.len() + 1;
 /// key slot and tuning row) — where focus returns when the pad page
 /// closes.
 fn pad_row_index() -> usize {
-    DriveAction::ALL.len() * SLOTS + ControlSettings::default().tuning_rows().len()
+    DriveAction::DRIVING.len() * SLOTS + ControlSettings::default().tuning_rows().len()
+}
+
+/// Index of the `In-game keys` row on the controls page — the row after
+/// the gamepad buttons.
+fn game_keys_row_index() -> usize {
+    pad_row_index() + 1
 }
 
 /// The pause overlay's presentation state — focus, a status line and a
@@ -283,6 +326,10 @@ pub struct PauseMenu {
     /// The gamepad-buttons page is waiting for the pad button to bind to
     /// this action; the pad twin of [`Self::capture`] (never both).
     pub pad_capture: Option<PadAction>,
+    /// The in-game keys page edits each action's alternate key rather
+    /// than its primary (Left/Right switch it; one row per action keeps
+    /// the page inside the window).
+    pub alt: bool,
     /// Set by `pause_input` whenever the state changed; cleared by
     /// `pause_present` after redrawing.
     dirty: bool,
@@ -299,6 +346,7 @@ impl Default for PauseMenu {
             page: PausePage::Pause,
             capture: None,
             pad_capture: None,
+            alt: false,
             dirty: true,
             pad_axis: 0.0,
         }
@@ -460,6 +508,7 @@ pub fn pause_input(
             pause.page,
             graphics.settings.as_deref().copied(),
             graphics.controls.as_deref(),
+            pause.alt,
         );
         match cmd {
             MenuCommand::Up => pause.focus = pause.focus.saturating_sub(1),
@@ -484,6 +533,10 @@ pub fn pause_input(
                     }
                     PauseAction::ClosePadButtons => {
                         open_page(&mut pause, PausePage::Controls, pad_row_index());
+                    }
+                    PauseAction::OpenGameKeys => open_page(&mut pause, PausePage::GameKeys, 0),
+                    PauseAction::CloseGameKeys => {
+                        open_page(&mut pause, PausePage::Controls, game_keys_row_index());
                     }
                     PauseAction::RebindPad(action) => {
                         pause.pad_capture = Some(*action);
@@ -528,6 +581,9 @@ pub fn pause_input(
             },
             // Left/Right step a settings value either way; everywhere
             // else they do nothing.
+            MenuCommand::Left | MenuCommand::Right if pause.page == PausePage::GameKeys => {
+                pause.alt = cmd == MenuCommand::Right;
+            }
             MenuCommand::Left | MenuCommand::Right => {
                 if let Some(Ok(action)) = rows.get(pause.focus).map(|r| &r.enabled) {
                     adopt(
@@ -549,6 +605,9 @@ pub fn pause_input(
                 _ => {}
             },
             MenuCommand::Back => match pause.page {
+                PausePage::GameKeys => {
+                    open_page(&mut pause, PausePage::Controls, game_keys_row_index());
+                }
                 PausePage::PadButtons => {
                     open_page(&mut pause, PausePage::Controls, pad_row_index());
                 }
@@ -574,6 +633,7 @@ pub fn pause_input(
 /// Show `page` with focus on `focus` and a clean status line.
 fn open_page(pause: &mut PauseMenu, page: PausePage, focus: usize) {
     pause.page = page;
+    pause.alt = false;
     pause.focus = focus;
     pause.status = None;
     pause.capture = None;
@@ -812,6 +872,7 @@ pub fn pause_present(
         PausePage::Options => "Graphics and audio options",
         PausePage::Controls => "Driving controls",
         PausePage::PadButtons => "Gamepad buttons",
+        PausePage::GameKeys => "In-game keys",
     };
     lines.push((title.to_string(), 34.0, Color::srgb(0.95, 0.9, 0.6)));
     lines.push((String::new(), 8.0, Color::NONE));
@@ -820,6 +881,7 @@ pub fn pause_present(
         pause.page,
         view.settings.as_deref().copied(),
         view.controls.as_deref(),
+        pause.alt,
     )
     .iter()
     .enumerate()
@@ -857,7 +919,10 @@ pub fn pause_present(
         ) {
             (PausePage::PadButtons, true) => "Press the new button | Esc or Start cancels",
             (PausePage::PadButtons, false) => "Up/Down move | Enter rebind | X clear | Esc back",
-            (PausePage::Controls, true) => "Press the new key | Esc cancels",
+            (PausePage::Controls | PausePage::GameKeys, true) => "Press the new key | Esc cancels",
+            (PausePage::GameKeys, false) => {
+                "Up/Down move | Left/Right primary or alt | Enter rebind | X clear | Esc back"
+            }
             (PausePage::Controls, false) => {
                 "Up/Down move | Enter rebind | Left/Right change | X clear | Esc back"
             }

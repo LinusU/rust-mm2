@@ -656,10 +656,10 @@ pub fn hudmap_input(
     controls: Option<Res<crate::controls::ControlSettings>>,
     map: Option<ResMut<HudMap>>,
 ) {
-    use crate::controls::pad_button;
+    use crate::controls::DriveAction;
     use crate::input::control_just_pressed;
-    use crate::pad_map::PadAction;
-    let button = |action| pad_button(controls.as_deref(), action);
+    let pressed =
+        |action| control_just_pressed(&keys, &pads, &windows, controls.as_deref(), action);
     let Some(mut map) = map else { return };
     if map.is_stale(session.generation()) {
         return;
@@ -673,33 +673,13 @@ pub fn hudmap_input(
     let free_cam = *cam_mode == CameraMode::Free;
     match *session.phase() {
         SessionPhase::Playing => {
-            if control_just_pressed(
-                &keys,
-                &pads,
-                &windows,
-                KeyCode::Tab,
-                button(PadAction::MapView),
-            ) {
+            if pressed(DriveAction::MapView) {
                 map.cycle_view();
             }
-            if !free_cam
-                && control_just_pressed(
-                    &keys,
-                    &pads,
-                    &windows,
-                    KeyCode::KeyE,
-                    button(PadAction::MapZoom),
-                )
-            {
+            if !free_cam && pressed(DriveAction::MapZoom) {
                 map.toggle_zoom();
             }
-            if control_just_pressed(
-                &keys,
-                &pads,
-                &windows,
-                KeyCode::KeyF,
-                button(PadAction::MapRotate),
-            ) {
+            if pressed(DriveAction::MapRotate) {
                 map.toggle_orientation();
             }
             if !free_cam

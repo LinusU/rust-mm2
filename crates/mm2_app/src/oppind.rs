@@ -192,8 +192,8 @@ pub fn indicator_input(
         &keys,
         &pads,
         &windows,
-        KeyCode::KeyI,
-        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Indicators),
+        controls.as_deref(),
+        crate::controls::DriveAction::Indicators,
     ) {
         indicators.0 = !indicators.0;
     }

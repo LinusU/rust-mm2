@@ -55,9 +55,11 @@
 //!   for the next key ([`MenuShell::capture`]), conflicts and reserved
 //!   keys are refused with the reason, X clears a key, and stick
 //!   deadzone/sensitivity/inversion cycle in place — all saved to
-//!   `controls.json` on every change. Its last row opens
+//!   `controls.json` on every change. Its last two rows open
 //!   [`Screen::PadButtons`], where each pad action's button rebinds by
-//!   listening for the next pad button ([`MenuShell::pad_capture`]). The original's other audio rows
+//!   listening for the next pad button ([`MenuShell::pad_capture`]), and
+//!   [`Screen::GameKeys`], where the camera, mirror, map, reset... keys
+//!   rebind through the same key capture. The original's other audio rows
 //!   (on/off toggles, device, stereo, quality, balance) are still open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
@@ -214,6 +216,9 @@ pub enum Screen {
     /// The gamepad's digital buttons: one row per pad action, rebound by
     /// listening for the next pad button.
     PadButtons,
+    /// The in-session keys (camera, mirror, map, reset...): two slots per
+    /// action like [`Self::Controls`], rebound by the same key capture.
+    GameKeys,
     /// Condition options for a cruise or a customization-unlocked
     /// event (UI-2, RACE-3/RACE-4). `conditions`/`densities` are the
     /// working picks Left/Right adjusts in place; the `seed_*` fields
@@ -1021,7 +1026,7 @@ impl MenuShell {
                 // Only profile rows are deletable and key slots
                 // clearable; anything else is a no-op so the key is
                 // safe everywhere else.
-                if self.screen == Screen::Controls {
+                if matches!(self.screen, Screen::Controls | Screen::GameKeys) {
                     if let Some(Action::RebindKey { action, slot }) =
                         self.focused_row().map(|r| r.action.clone())
                     {
@@ -1992,6 +1997,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::Options => options_screen_rows(data),
         Screen::Controls => controls_screen_rows(data),
         Screen::PadButtons => pad_screen_rows(data),
+        Screen::GameKeys => key_rows(&data.controls, &DriveAction::IN_GAME),
         Screen::Garage => garage_rows(shell, data, vfs),
         Screen::Paints { car } => paint_rows(shell, data, vfs, car),
         Screen::Profiles => profile_rows(shell, data),
@@ -2484,27 +2490,7 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
         won: None,
         side: side.map(Box::new),
     };
-    let mut rows: Vec<Row> = DriveAction::ALL
-        .into_iter()
-        .map(|action| {
-            let slot_row = |slot: usize| {
-                let name = if slot == 0 { "" } else { "Alt: " };
-                row(
-                    format!("{name}{}", c.slot_label(action, slot)),
-                    Ok(()),
-                    Action::RebindKey { action, slot },
-                    None,
-                )
-            };
-            let alt = (SLOTS > 1).then(|| slot_row(1));
-            row(
-                format!("{}: {}", action.label(), c.slot_label(action, 0)),
-                Ok(()),
-                Action::RebindKey { action, slot: 0 },
-                alt,
-            )
-        })
-        .collect();
+    let mut rows = key_rows(c, &DriveAction::DRIVING);
     rows.extend(c.tuning_rows().into_iter().map(|r| {
         let action = match r.item {
             ControlItem::SteerDeadzone => Action::CycleSteerDeadzone,
@@ -2523,7 +2509,43 @@ fn controls_screen_rows(data: &MenuData) -> Vec<Row> {
         Action::Push(Screen::PadButtons),
         None,
     ));
+    rows.push(row(
+        "In-game keys".to_string(),
+        Ok(()),
+        Action::Push(Screen::GameKeys),
+        None,
+    ));
     rows
+}
+
+/// One row per action: its primary key, with the alternate beside it.
+fn key_rows(c: &ControlSettings, actions: &[DriveAction]) -> Vec<Row> {
+    let row = |text: String, action: Action, side: Option<Row>| Row {
+        text,
+        enabled: Ok(()),
+        action,
+        won: None,
+        side: side.map(Box::new),
+    };
+    actions
+        .iter()
+        .map(|&action| {
+            let slot_row = |slot: usize| {
+                let name = if slot == 0 { "" } else { "Alt: " };
+                row(
+                    format!("{name}{}", c.slot_label(action, slot)),
+                    Action::RebindKey { action, slot },
+                    None,
+                )
+            };
+            let alt = (SLOTS > 1).then(|| slot_row(1));
+            row(
+                format!("{}: {}", action.label(), c.slot_label(action, 0)),
+                Action::RebindKey { action, slot: 0 },
+                alt,
+            )
+        })
+        .collect()
 }
 
 /// The gamepad-buttons screen: one row per pad action showing its
@@ -3323,6 +3345,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::Options => "Graphics and audio options".to_string(),
         Screen::Controls => "Driving controls - X clears a key".to_string(),
         Screen::PadButtons => "Gamepad buttons - X clears a button".to_string(),
+        Screen::GameKeys => "In-game keys - X clears a key".to_string(),
         Screen::Customize { target, .. } => match target {
             CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),
             CustomizeTarget::Event { stem, .. } => format!("Race options - {stem}"),

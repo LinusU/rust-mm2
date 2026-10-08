@@ -565,27 +565,30 @@ pub fn nav_target_input(
     controls: Option<Res<crate::controls::ControlSettings>>,
     mut players: Query<(&Position, &RaceProgress, &mut TargetSelection)>,
 ) {
-    use crate::controls::pad_button;
-    use crate::input::control_just_pressed;
-    use crate::pad_map::PadAction;
+    use crate::controls::{DriveAction, bound_keys, pad_button};
+    use crate::input::bound_just_pressed;
     // A manual gearbox takes its shift buttons (the shoulders, as
     // shipped; F23-A.3), so a target button sitting on one yields to
     // the shift while the pad is shifting and only the key cycles then.
     let pad_shifting = controls
         .as_deref()
         .is_some_and(|c| c.pad_shifts(session.authority_role().is_authority()));
-    let pressed = |key: KeyCode, action| {
-        let button = pad_button(controls.as_deref(), action).filter(|b| {
-            !(pad_shifting
-                && controls
-                    .as_deref()
-                    .is_some_and(|c| c.pad.is_shift_button(*b)))
-        });
-        control_just_pressed(&keys, &pads, &windows, key, button)
+    let pressed = |action: DriveAction| {
+        let button = action
+            .pad_twin()
+            .and_then(|a| pad_button(controls.as_deref(), a))
+            .filter(|b| {
+                !(pad_shifting
+                    && controls
+                        .as_deref()
+                        .is_some_and(|c| c.pad.is_shift_button(*b)))
+            });
+        let bound = bound_keys(controls.as_deref(), action);
+        bound_just_pressed(&keys, &pads, &windows, bound, button)
     };
-    let dir = if pressed(KeyCode::KeyX, PadAction::TargetNext) {
+    let dir = if pressed(DriveAction::TargetNext) {
         1
-    } else if pressed(KeyCode::KeyZ, PadAction::TargetPrev) {
+    } else if pressed(DriveAction::TargetPrev) {
         -1
     } else {
         return;

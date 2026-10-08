@@ -83,8 +83,8 @@ pub fn hud_input(
         &keys,
         &pads,
         &windows,
-        KeyCode::KeyH,
-        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Hud),
+        controls.as_deref(),
+        crate::controls::DriveAction::Hud,
     ) {
         hud.0 = !hud.0;
     }

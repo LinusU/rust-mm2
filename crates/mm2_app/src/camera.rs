@@ -427,27 +427,15 @@ pub fn toggle_camera(
     mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
-    use crate::controls::pad_button;
-    use crate::pad_map::PadAction;
-    let button = |action| pad_button(controls.as_deref(), action);
-    let next = if control_just_pressed(
-        &keys,
-        &pads,
-        &windows,
-        KeyCode::KeyC,
-        button(PadAction::Camera),
-    ) {
+    use crate::controls::DriveAction;
+    let pressed =
+        |action| control_just_pressed(&keys, &pads, &windows, controls.as_deref(), action);
+    let next = if pressed(DriveAction::Camera) {
         match next_available(*mode, &cams) {
             Some(m) => m,
             None => return,
         }
-    } else if control_just_pressed(
-        &keys,
-        &pads,
-        &windows,
-        KeyCode::KeyV,
-        button(PadAction::Cockpit),
-    ) {
+    } else if pressed(DriveAction::Cockpit) {
         match *mode {
             CameraMode::Cockpit => CameraMode::Chase,
             _ if have_mode(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
@@ -832,8 +820,8 @@ pub fn mirror_input(
         &keys,
         &pads,
         &windows,
-        KeyCode::Backspace,
-        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Mirror),
+        controls.as_deref(),
+        crate::controls::DriveAction::Mirror,
     ) {
         mirror.0 = !mirror.0;
     }

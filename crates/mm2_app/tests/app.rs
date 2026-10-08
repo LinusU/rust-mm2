@@ -21,6 +21,7 @@ mod dash;
 mod device_transitions;
 mod environment;
 mod event;
+mod game_keys;
 mod hud;
 mod hudmap;
 mod huge_texture;

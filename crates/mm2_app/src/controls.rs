@@ -9,11 +9,13 @@
 //! `D`/`→` steer, `Space` handbrake, a 0.05 stick/trigger deadzone — so
 //! nobody's controls change until they ask them to.
 //!
-//! Scope, on purpose: the five *driving* actions. The in-session
-//! function keys (camera, mirror, map, reset…) stay on their documented
-//! keys; [`RESERVED_KEYS`] keeps a driving action from being bound over
-//! one of them. Menu navigation keeps its own keys. The main menu's and
-//! the pause overlay's Controls pages rebind through
+//! Scope: the seven *driving* actions ([`DriveAction::DRIVING`]) and the
+//! thirteen in-session controls ([`DriveAction::IN_GAME`] — camera,
+//! mirror, map, reset…, F23-A.5) share one key namespace: a key belongs
+//! to one action, so a driving key can never also fire a camera and the
+//! refusal names the owner. [`RESERVED_KEYS`] holds the one key that is
+//! not rebindable (the pause map). Menu navigation keeps its own keys.
+//! The main menu's and the pause overlay's Controls pages rebind through
 //! [`ControlSettings::with_key`]; the pad's digital buttons live in
 //! [`ControlSettings::pad`] (see [`crate::pad_map`]).
 //!
@@ -48,7 +50,8 @@ pub fn controls_path(root: &Path) -> PathBuf {
 /// How many keys one action can hold (a primary and an alternate).
 pub const SLOTS: usize = 2;
 
-/// A rebindable driving action.
+/// A rebindable key action: one of the [`Self::DRIVING`] controls or an
+/// [`Self::IN_GAME`] one. (The name predates the in-game ones.)
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DriveAction {
@@ -61,11 +64,31 @@ pub enum DriveAction {
     ShiftUp,
     /// Next gear down — answers only under [`TransmissionPolicy::Manual`].
     ShiftDown,
+    /// Change camera (chase / bumper / ... — the next available view).
+    Camera,
+    Cockpit,
+    /// Rear-view mirror.
+    Mirror,
+    /// Reset the vehicle to its spawn.
+    Reset,
+    /// Horn, or the siren on an emergency vehicle.
+    Horn,
+    MapView,
+    MapZoom,
+    MapRotate,
+    /// Driving HUD on/off.
+    Hud,
+    /// Opponent indicators on/off.
+    Indicators,
+    TargetPrev,
+    TargetNext,
+    Headlights,
 }
 
 impl DriveAction {
-    /// Every action, in the order a rebinding screen lists them.
-    pub const ALL: [Self; 7] = [
+    /// The controls that drive the car, in the order a rebinding screen
+    /// lists them.
+    pub const DRIVING: [Self; 7] = [
         Self::Throttle,
         Self::Brake,
         Self::SteerLeft,
@@ -74,6 +97,67 @@ impl DriveAction {
         Self::ShiftUp,
         Self::ShiftDown,
     ];
+
+    /// The in-session controls that do not drive the car.
+    pub const IN_GAME: [Self; 13] = [
+        Self::Camera,
+        Self::Cockpit,
+        Self::Mirror,
+        Self::Reset,
+        Self::Horn,
+        Self::MapView,
+        Self::MapZoom,
+        Self::MapRotate,
+        Self::Hud,
+        Self::Indicators,
+        Self::TargetPrev,
+        Self::TargetNext,
+        Self::Headlights,
+    ];
+
+    /// Every action: [`Self::DRIVING`] then [`Self::IN_GAME`].
+    pub const ALL: [Self; 20] = [
+        Self::Throttle,
+        Self::Brake,
+        Self::SteerLeft,
+        Self::SteerRight,
+        Self::Handbrake,
+        Self::ShiftUp,
+        Self::ShiftDown,
+        Self::Camera,
+        Self::Cockpit,
+        Self::Mirror,
+        Self::Reset,
+        Self::Horn,
+        Self::MapView,
+        Self::MapZoom,
+        Self::MapRotate,
+        Self::Hud,
+        Self::Indicators,
+        Self::TargetPrev,
+        Self::TargetNext,
+        Self::Headlights,
+    ];
+
+    /// The pad button action that does the same job, for the controls the
+    /// gamepad shares (everything but the headlights).
+    pub fn pad_twin(self) -> Option<PadAction> {
+        Some(match self {
+            Self::Camera => PadAction::Camera,
+            Self::Cockpit => PadAction::Cockpit,
+            Self::Mirror => PadAction::Mirror,
+            Self::Reset => PadAction::Reset,
+            Self::Horn => PadAction::Horn,
+            Self::MapView => PadAction::MapView,
+            Self::MapZoom => PadAction::MapZoom,
+            Self::MapRotate => PadAction::MapRotate,
+            Self::Hud => PadAction::Hud,
+            Self::Indicators => PadAction::Indicators,
+            Self::TargetPrev => PadAction::TargetPrev,
+            Self::TargetNext => PadAction::TargetNext,
+            _ => return None,
+        })
+    }
 
     /// The row label.
     pub fn label(self) -> &'static str {
@@ -85,6 +169,19 @@ impl DriveAction {
             Self::Handbrake => "Handbrake",
             Self::ShiftUp => "Shift up (manual)",
             Self::ShiftDown => "Shift down (manual)",
+            Self::Camera => "Change camera",
+            Self::Cockpit => "Cockpit view",
+            Self::Mirror => "Rear-view mirror",
+            Self::Reset => "Reset vehicle",
+            Self::Horn => "Horn / siren",
+            Self::MapView => "Map view",
+            Self::MapZoom => "Map zoom",
+            Self::MapRotate => "Map orientation",
+            Self::Hud => "Driving HUD",
+            Self::Indicators => "Opponent indicators",
+            Self::TargetPrev => "Previous target",
+            Self::TargetNext => "Next target",
+            Self::Headlights => "Headlights",
         }
     }
 
@@ -104,14 +201,28 @@ impl DriveAction {
             // the nav-arrow keys, so the shifts get free letters.
             Self::ShiftUp => [Some(KeyCode::KeyG), None],
             Self::ShiftDown => [Some(KeyCode::KeyB), None],
+            Self::Camera => [Some(KeyCode::KeyC), None],
+            Self::Cockpit => [Some(KeyCode::KeyV), None],
+            Self::Mirror => [Some(KeyCode::Backspace), None],
+            Self::Reset => [Some(KeyCode::KeyR), None],
+            Self::Horn => [Some(KeyCode::Enter), None],
+            Self::MapView => [Some(KeyCode::Tab), None],
+            Self::MapZoom => [Some(KeyCode::KeyE), None],
+            Self::MapRotate => [Some(KeyCode::KeyF), None],
+            Self::Hud => [Some(KeyCode::KeyH), None],
+            Self::Indicators => [Some(KeyCode::KeyI), None],
+            Self::TargetPrev => [Some(KeyCode::KeyZ), None],
+            Self::TargetNext => [Some(KeyCode::KeyX), None],
+            Self::Headlights => [Some(KeyCode::KeyL), None],
         }
     }
 }
 
-/// Every key a driving action may be bound to, with the name the file
-/// stores. Modifiers other than `Shift`, function keys, `Enter`,
-/// `Escape`, `Tab`, `Backspace` and the numpad are left out: the app's
-/// own fixed controls use them.
+/// Every key an action may be bound to, with the name the file stores.
+/// Modifiers other than `Shift`, function keys, `Escape` and the numpad
+/// are left out: the app's own fixed controls use them. `Enter`, `Tab`
+/// and `Backspace` are here because the shipped horn, map-view and mirror
+/// keys are those.
 pub const BINDABLE: &[(&str, KeyCode)] = &[
     ("KeyA", KeyCode::KeyA),
     ("KeyB", KeyCode::KeyB),
@@ -154,27 +265,16 @@ pub const BINDABLE: &[(&str, KeyCode)] = &[
     ("ArrowLeft", KeyCode::ArrowLeft),
     ("ArrowRight", KeyCode::ArrowRight),
     ("Space", KeyCode::Space),
+    ("Enter", KeyCode::Enter),
+    ("Tab", KeyCode::Tab),
+    ("Backspace", KeyCode::Backspace),
     ("ShiftLeft", KeyCode::ShiftLeft),
     ("ShiftRight", KeyCode::ShiftRight),
 ];
 
-/// Bindable keys the in-session controls already own: camera `C`, cockpit
-/// `V`, reset `R`, map zoom `E` / rotate `F`, HUD `H`, indicators `I`,
-/// nav-target `Z`/`X`, pause map `Q`, headlights `L`. A driving action
-/// bound to one would fire the car and the control together.
-pub const RESERVED_KEYS: &[KeyCode] = &[
-    KeyCode::KeyC,
-    KeyCode::KeyV,
-    KeyCode::KeyR,
-    KeyCode::KeyE,
-    KeyCode::KeyF,
-    KeyCode::KeyH,
-    KeyCode::KeyI,
-    KeyCode::KeyZ,
-    KeyCode::KeyX,
-    KeyCode::KeyQ,
-    KeyCode::KeyL,
-];
+/// Bindable keys no action may take: `Q`, which opens (and closes) the
+/// full-screen pause map and has no rebindable twin yet.
+pub const RESERVED_KEYS: &[KeyCode] = &[KeyCode::KeyQ];
 
 /// The file/UI name of a bindable key, `None` for any other key.
 pub fn key_name(key: KeyCode) -> Option<&'static str> {
@@ -206,7 +306,7 @@ pub enum BindError {
 impl fmt::Display for BindError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotBindable => write!(f, "that key cannot be used for driving"),
+            Self::NotBindable => write!(f, "that key cannot be used in the game"),
             Self::Reserved => write!(f, "that key is used by an in-game control"),
             Self::Conflict(a) => write!(f, "already bound to {}", a.label()),
             Self::AlreadyBound => write!(f, "already this action's other key"),
@@ -646,6 +746,18 @@ pub fn pad_button(controls: Option<&ControlSettings>, action: PadAction) -> Opti
     match controls {
         Some(c) => c.pad.button(action),
         None => Some(action.default_button()),
+    }
+}
+
+/// The keys `action` answers to under `controls` (primary first), or its
+/// shipped keys for a harness app that never inserted the settings.
+pub fn bound_keys(
+    controls: Option<&ControlSettings>,
+    action: DriveAction,
+) -> [Option<KeyCode>; SLOTS] {
+    match controls {
+        Some(c) => c.bindings[action.index()],
+        None => action.default_keys(),
     }
 }
 
@@ -1089,7 +1201,7 @@ mod tests {
         }
         for key in [
             KeyCode::Escape,
-            KeyCode::Enter,
+            KeyCode::Delete,
             KeyCode::F1,
             KeyCode::Numpad4,
         ] {
@@ -1246,7 +1358,7 @@ mod tests {
         let (c, issues) = ControlSettings::from_json(
             br#"{"bindings":{
                 "throttle":["Nope"],
-                "brake":["KeyR"],
+                "brake":["KeyQ"],
                 "steer_left":[],
                 "steer_right":["KeyJ","KeyK","KeyN"],
                 "handbrake":["KeyB","KeyB"]},
@@ -1342,9 +1454,15 @@ mod tests {
             .unwrap_err();
         assert!(refused.contains("Brake / reverse") && refused.contains("Esc cancels"));
         let reserved = c
-            .with_key(DriveAction::Throttle, 0, KeyCode::KeyR)
+            .with_key(DriveAction::Throttle, 0, KeyCode::KeyQ)
             .unwrap_err();
         assert!(reserved.contains("in-game control"));
+        // A key the shipped map gives an in-game control names its owner
+        // rather than reading as reserved.
+        let owned = c
+            .with_key(DriveAction::Throttle, 0, KeyCode::KeyR)
+            .unwrap_err();
+        assert!(owned.contains("Reset vehicle"), "{owned}");
 
         let (cleared, line) = c.without_key(DriveAction::Throttle, 1).unwrap();
         assert_eq!(cleared.key_at(DriveAction::Throttle, 1), None);
@@ -1529,5 +1647,133 @@ mod tests {
         let mut c = ControlSettings::default();
         c.pad.unbind(PadAction::Camera).unwrap();
         assert_eq!(pad_button(Some(&c), PadAction::Camera), None);
+    }
+
+    #[test]
+    fn the_action_lists_agree_and_the_shipped_keys_do_not_clash() {
+        let joined: Vec<DriveAction> = DriveAction::DRIVING
+            .into_iter()
+            .chain(DriveAction::IN_GAME)
+            .collect();
+        assert_eq!(joined, DriveAction::ALL);
+        let d = ControlSettings::default();
+        assert!(d.conflicts().is_empty(), "{:?}", d.conflicts());
+        for action in DriveAction::ALL {
+            assert!(d.key_at(action, 0).is_some(), "{action:?} ships a key");
+            for key in d.keys(action) {
+                assert!(
+                    key_name(key).is_some(),
+                    "{action:?} ships an unbindable key"
+                );
+                assert!(
+                    !RESERVED_KEYS.contains(&key),
+                    "{action:?} ships a reserved key"
+                );
+            }
+        }
+        // The pad twins carry the same labels, so a player sees one name
+        // for a control on both pages.
+        for action in DriveAction::IN_GAME {
+            match action.pad_twin() {
+                Some(twin) => assert_eq!(action.label(), twin.label()),
+                None => assert_eq!(action, DriveAction::Headlights),
+            }
+        }
+    }
+
+    #[test]
+    fn an_in_game_key_rebinds_and_the_old_key_is_freed() {
+        let mut c = ControlSettings::default();
+        c.rebind(DriveAction::Camera, 0, KeyCode::KeyU).unwrap();
+        assert_eq!(c.key_at(DriveAction::Camera, 0), Some(KeyCode::KeyU));
+        // C is free again, and a driving action can take it.
+        c.rebind(DriveAction::Handbrake, 1, KeyCode::KeyC).unwrap();
+        // Tab, Enter and Backspace are bindable now that they ship bound.
+        c.rebind(DriveAction::Camera, 1, KeyCode::Backspace)
+            .unwrap_err();
+        c.unbind(DriveAction::Mirror, 0).unwrap_err();
+        c.rebind(DriveAction::Mirror, 1, KeyCode::KeyM).unwrap();
+        c.unbind(DriveAction::Mirror, 0).unwrap();
+        c.rebind(DriveAction::Camera, 1, KeyCode::Backspace)
+            .unwrap();
+        assert!(c.conflicts().is_empty());
+    }
+
+    #[test]
+    fn a_key_in_use_names_its_owner_whichever_side_asks() {
+        let c = ControlSettings::default();
+        assert_eq!(
+            c.check_bind(DriveAction::Camera, 1, KeyCode::KeyW),
+            Err(BindError::Conflict(DriveAction::Throttle))
+        );
+        assert_eq!(
+            c.check_bind(DriveAction::Throttle, 0, KeyCode::KeyC),
+            Err(BindError::Conflict(DriveAction::Camera))
+        );
+        assert_eq!(
+            c.check_bind(DriveAction::Handbrake, 1, KeyCode::Enter),
+            Err(BindError::Conflict(DriveAction::Horn))
+        );
+        // The pause map's key stays fixed for every action.
+        for action in DriveAction::ALL {
+            assert_eq!(
+                c.check_bind(action, 1, KeyCode::KeyQ),
+                Err(BindError::Reserved)
+            );
+        }
+        let msg = c
+            .with_key(DriveAction::Camera, 1, KeyCode::KeyW)
+            .unwrap_err();
+        assert!(msg.contains("Accelerate"), "{msg}");
+    }
+
+    #[test]
+    fn in_game_keys_persist_and_an_older_file_keeps_the_shipped_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = controls_path(dir.path());
+        let mut c = ControlSettings::default();
+        c.rebind(DriveAction::Camera, 0, KeyCode::KeyU).unwrap();
+        c.rebind(DriveAction::Horn, 1, KeyCode::KeyJ).unwrap();
+        c.rebind(DriveAction::Headlights, 0, KeyCode::Digit1)
+            .unwrap();
+        c.save(&path).unwrap();
+        assert_eq!(ControlSettings::load(&path), c);
+
+        let (older, issues) =
+            ControlSettings::from_json(br#"{"bindings":{"throttle":["KeyU"]}}"#).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(older.key_at(DriveAction::Camera, 0), Some(KeyCode::KeyC));
+        assert_eq!(
+            older.key_at(DriveAction::Mirror, 0),
+            Some(KeyCode::Backspace)
+        );
+    }
+
+    #[test]
+    fn a_file_binding_an_in_game_key_twice_resets_the_whole_key_set() {
+        let (c, issues) =
+            ControlSettings::from_json(br#"{"bindings":{"camera":["KeyW"],"throttle":["KeyW"]}}"#)
+                .unwrap();
+        assert_eq!(c, ControlSettings::default());
+        assert!(issues.iter().any(|i| i.contains("KeyW is bound to both")));
+        // An in-game action cannot be handed the reserved key, either.
+        let (c, issues) =
+            ControlSettings::from_json(br#"{"bindings":{"camera":["KeyQ"]}}"#).unwrap();
+        assert_eq!(c.key_at(DriveAction::Camera, 0), Some(KeyCode::KeyC));
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn a_harness_without_settings_gets_the_shipped_in_game_keys() {
+        assert_eq!(
+            bound_keys(None, DriveAction::Camera),
+            [Some(KeyCode::KeyC), None]
+        );
+        let mut c = ControlSettings::default();
+        c.rebind(DriveAction::Camera, 0, KeyCode::KeyU).unwrap();
+        assert_eq!(
+            bound_keys(Some(&c), DriveAction::Camera),
+            [Some(KeyCode::KeyU), None]
+        );
     }
 }

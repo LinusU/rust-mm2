@@ -2077,8 +2077,8 @@ pub fn send_reset_request(
             &keys,
             &pads,
             &windows,
-            KeyCode::KeyR,
-            crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Reset),
+            controls.as_deref(),
+            crate::controls::DriveAction::Reset,
         )
     {
         return;

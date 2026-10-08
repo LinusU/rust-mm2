@@ -111,7 +111,7 @@ pub const RECORDS: [CapabilityRecord; 11] = [
     CapabilityRecord {
         capability: Capability::KeyRebinding,
         status: Status::SyntheticOnly,
-        note: "main-menu and pause Controls pages persist controls.json; driven by synthetic key events",
+        note: "driving and in-game keys rebind on the main-menu and pause Controls pages and persist in controls.json; driven by synthetic key events",
     },
     CapabilityRecord {
         capability: Capability::GamepadDriving,

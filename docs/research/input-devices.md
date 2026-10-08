@@ -22,7 +22,7 @@ the command that reproduced it — not editing a note.
 ## Capabilities
 
 - keyboard driving: synthetic only — bound keys drive the normalized input; no real keyboard session recorded
-- key rebinding: synthetic only — main-menu and pause Controls pages persist controls.json; driven by synthetic key events
+- key rebinding: synthetic only — driving and in-game keys rebind on the main-menu and pause Controls pages and persist in controls.json; driven by synthetic key events
 - gamepad driving: synthetic only — stick, triggers and South through the deadzone/sensitivity map; any physical pad is untested
 - gamepad menus: synthetic only — D-pad, stick edges, South/East/West/Start over every connected pad; synthetic events only
 - gamepad hot-plug: synthetic only — connection and disconnection events clear and restore driving; no physical unplug performed

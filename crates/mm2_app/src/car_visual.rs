@@ -561,9 +561,27 @@ pub fn update_wheel_visuals(
     }
 }
 
-/// Toggle headlight glows (`L`).
-pub fn toggle_headlights(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<HeadlightsOn>) {
-    if keys.just_pressed(KeyCode::KeyL) {
+/// Toggle headlight glows (`L` as shipped, rebindable). Live phases only,
+/// like the other in-session toggles: a paused rebinding page listening
+/// for the new key must not also flip the lamps.
+pub fn toggle_headlights(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    windows: Query<&Window>,
+    session: Res<mm2_game::Session>,
+    controls: Option<Res<crate::controls::ControlSettings>>,
+    mut on: ResMut<HeadlightsOn>,
+) {
+    if matches!(
+        session.phase(),
+        mm2_game::SessionPhase::Playing | mm2_game::SessionPhase::Countdown
+    ) && crate::input::control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        controls.as_deref(),
+        crate::controls::DriveAction::Headlights,
+    ) {
         on.0 = !on.0;
     }
 }

@@ -1555,8 +1555,8 @@ pub fn horn_input(
         &keys,
         &pads,
         &windows,
-        KeyCode::Enter,
-        crate::controls::pad_button(controls.as_deref(), crate::pad_map::PadAction::Horn),
+        controls.as_deref(),
+        crate::controls::DriveAction::Horn,
     ) && session.is_playing()
     {
         requests.write(HornRequest);
