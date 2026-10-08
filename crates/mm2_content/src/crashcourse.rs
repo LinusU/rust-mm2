@@ -145,6 +145,59 @@ impl LessonObjective {
     }
 }
 
+/// How well a lesson's *distinctive* pass/fail rule is evidenced
+/// (F21-AC06's four-way split; the gate-run baseline every leg shares
+/// is not a family rule). Ordered weakest first, so a multi-leg exam
+/// takes the `min` of its legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuleEvidence {
+    /// No family evaluator exists: the leg passes on the designed
+    /// gate-run baseline (DSN-72/DSN-74) and the original rule is not
+    /// recovered (UNK-35).
+    Unresolved,
+    /// An evaluator exists and its positive/negative tests use
+    /// self-authored synthetic data only.
+    SyntheticOnly,
+    /// An evaluator exists and its rule is recovered from the
+    /// supplied installation, binary or a documented observation.
+    OriginalVerified,
+}
+
+impl RuleEvidence {
+    /// Audit label (`"unresolved"`, `"synthetic-only"`,
+    /// `"original-verified"`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unresolved => "unresolved",
+            Self::SyntheticOnly => "synthetic-only",
+            Self::OriginalVerified => "original-verified",
+        }
+    }
+}
+
+impl LessonObjective {
+    /// Evidence level of this family's pass/fail rule. **Every family
+    /// is `Unresolved` today**: no `Event`-code evaluator has been
+    /// written because no rule (cornering speed, follow distance, stop,
+    /// jump landing, cop-chase outcome, ...) has been recovered
+    /// (UNK-35). The match is exhaustive on purpose — landing the first
+    /// evaluator must change a named arm here, which is what moves the
+    /// coverage report.
+    pub fn rule_evidence(&self) -> RuleEvidence {
+        match self {
+            Self::Jump
+            | Self::Follow
+            | Self::CopChase
+            | Self::Corner
+            | Self::CrossTraffic
+            | Self::Maneuver
+            | Self::Stop
+            | Self::Map
+            | Self::Unknown(_) => RuleEvidence::Unresolved,
+        }
+    }
+}
+
 /// One `crash<N>data{,_p}.csv` row: the sub-event a lesson runs.
 #[derive(Debug, Clone)]
 pub struct LessonSubEvent {
@@ -580,4 +633,24 @@ impl CourseCatalog {
 /// The basename of a record's logical path.
 fn record_basename(record: &EventRecord) -> &str {
     record.logical.rsplit('/').next().unwrap_or(&record.logical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_objective_family_claims_a_recovered_rule_yet() {
+        // UNK-35: when the first evaluator lands, this must change with
+        // it — the coverage report's original-verified count follows.
+        for code in [0, 2, 3, 4, 5, 7, 8, 9, 1, 6, 42] {
+            assert_eq!(
+                LessonObjective::from_code(code).rule_evidence(),
+                RuleEvidence::Unresolved,
+                "code {code}"
+            );
+        }
+        assert!(RuleEvidence::Unresolved < RuleEvidence::SyntheticOnly);
+        assert!(RuleEvidence::SyntheticOnly < RuleEvidence::OriginalVerified);
+    }
 }

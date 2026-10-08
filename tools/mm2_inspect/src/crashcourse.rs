@@ -19,9 +19,10 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_content::{
-    CourseCatalog, CrashLesson, EventCatalog, LessonTableRole, VehicleCatalog, lesson_legs,
+    CourseCatalog, CrashLesson, EventCatalog, LessonTableRole, RuleEvidence, VehicleCatalog,
+    lesson_legs,
 };
-use mm2_game::Difficulty;
+use mm2_game::{Difficulty, lesson_speech_table};
 
 use crate::build_vfs;
 
@@ -213,6 +214,127 @@ fn print_legs(catalog: &EventCatalog, lesson: &CrashLesson) -> Vec<String> {
     failures
 }
 
+/// One lesson's coverage row (F21-AC06): what the production path
+/// builds and fields for it, kept apart from how well its distinctive
+/// rule is evidenced.
+#[derive(Debug)]
+struct LessonCoverage {
+    stem: String,
+    /// Legs built per difficulty (Amateur, Professional); `Err` is the
+    /// named build failure.
+    legs: [Result<usize, String>; 2],
+    /// Distinct objective families across every built leg.
+    families: BTreeSet<String>,
+    /// Weakest rule evidence across every built leg; a lesson with no
+    /// built leg is `Unresolved`.
+    rule: RuleEvidence,
+    /// Wired `[Opponent]` lead cars whose route resolved, per difficulty.
+    lead_cars: [usize; 2],
+    /// Wired `[Police]` spawn rows, per difficulty.
+    police: [usize; 2],
+    /// The school's instructor cue table resolves through the VFS.
+    instructor: bool,
+}
+
+impl LessonCoverage {
+    /// Both difficulties build every leg — playable on the designed
+    /// gate-run baseline, which is not the lesson's own rule.
+    fn playable(&self) -> bool {
+        self.legs.iter().all(|l| l.is_ok())
+    }
+}
+
+fn lesson_coverage(
+    vfs: &Vfs,
+    catalog: &EventCatalog,
+    city: &str,
+    lesson: &CrashLesson,
+) -> LessonCoverage {
+    let mut families = BTreeSet::new();
+    let mut rule: Option<RuleEvidence> = None;
+    let mut build = |difficulty| {
+        lesson_legs(catalog, lesson, difficulty)
+            .map(|legs| {
+                for leg in &legs {
+                    families.insert(leg.objective.label());
+                    let e = leg.objective.rule_evidence();
+                    rule = Some(rule.map_or(e, |r| r.min(e)));
+                }
+                legs.len()
+            })
+            .map_err(|e| e.to_string())
+    };
+    let legs = [build(Difficulty::Amateur), build(Difficulty::Professional)];
+    let wired = |i: usize| lesson.wiring[i].as_ref();
+    LessonCoverage {
+        stem: lesson.stem.clone(),
+        legs,
+        families,
+        rule: rule.unwrap_or(RuleEvidence::Unresolved),
+        lead_cars: [0, 1].map(|i| {
+            wired(i).map_or(0, |w| {
+                w.opponents.iter().filter(|o| o.resolved.is_some()).count()
+            })
+        }),
+        police: [0, 1].map(|i| wired(i).map_or(0, |w| w.police)),
+        instructor: lesson_speech_table(city, lesson.event_ref.index)
+            .is_some_and(|t| vfs.resolve(&t).is_some()),
+    }
+}
+
+/// Print the per-lesson coverage matrix and the four-way summary the
+/// F21-AC06 asks for. The denominator is every cataloged lesson —
+/// unbuildable ones count as not playable, never dropped.
+fn print_coverage(city: &str, rows: &[LessonCoverage]) {
+    println!(
+        "  coverage ({city}) — playable = both difficulties build every leg (designed gate-run baseline)"
+    );
+    for r in rows {
+        let legs = |l: &Result<usize, String>| match l {
+            Ok(n) => format!("{n}"),
+            Err(_) => "FAIL".into(),
+        };
+        println!(
+            "    {:<8} playable={:<3} legs am/pro={}/{} rule={:<12} families={} lead am/pro={}/{} police am/pro={}/{} instructor={}",
+            r.stem,
+            if r.playable() { "yes" } else { "no" },
+            legs(&r.legs[0]),
+            legs(&r.legs[1]),
+            r.rule.label(),
+            r.families.iter().cloned().collect::<Vec<_>>().join("+"),
+            r.lead_cars[0],
+            r.lead_cars[1],
+            r.police[0],
+            r.police[1],
+            if r.instructor { "yes" } else { "no" },
+        );
+    }
+    let count = |e: RuleEvidence| rows.iter().filter(|r| r.rule == e).count();
+    let mut families: std::collections::BTreeMap<&str, usize> = Default::default();
+    for r in rows {
+        for f in &r.families {
+            *families.entry(f.as_str()).or_default() += 1;
+        }
+    }
+    println!(
+        "  coverage summary ({city}): {} lessons — {} playable on the gate-run baseline, {} not playable; distinctive rule: {} original-verified, {} synthetic-only, {} unresolved",
+        rows.len(),
+        rows.iter().filter(|r| r.playable()).count(),
+        rows.iter().filter(|r| !r.playable()).count(),
+        count(RuleEvidence::OriginalVerified),
+        count(RuleEvidence::SyntheticOnly),
+        count(RuleEvidence::Unresolved),
+    );
+    println!(
+        "  lessons per objective family ({city}): {}",
+        families
+            .iter()
+            .map(|(f, n)| format!("{f} {n}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+}
+
 /// Scan one city into a [`CourseCatalog`] and collect the wired
 /// vehicle ids for the catalog cross-check.
 fn report_city(
@@ -254,7 +376,9 @@ pub fn run(
     for city in crate::race_cities(&vfs, city) {
         let (catalog, course, unresolved) = report_city(&vfs, &city, &vehicle_ids);
         println!("== crash course: {} ==", course.city);
+        let mut coverage = Vec::new();
         for lesson in &course.lessons {
+            coverage.push(lesson_coverage(&vfs, &catalog, &city, lesson));
             print_lesson(lesson);
             failures.extend(
                 print_legs(&catalog, lesson)
@@ -275,6 +399,7 @@ pub fn run(
             course.lessons.len() - ready,
             course.remaining_extras.len(),
         );
+        print_coverage(&city, &coverage);
         for u in &unresolved {
             println!("  issue: wired vehicle {u} is not in the vehicle catalog");
             failures.push(format!(
@@ -404,5 +529,43 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("no crash-course lessons"))
         );
+    }
+
+    #[test]
+    fn coverage_keeps_a_playable_lesson_apart_from_its_unrecovered_rule() {
+        let d = synthetic_install("vpbug");
+        write(d.path(), "aud/spchdata/ccl/ccl0.csv", "x\n");
+        let vfs = vfs_of(d.path());
+        let ids = crate::event::vehicle_ids(&vfs);
+        let (catalog, course, _) = report_city(&vfs, "london", &ids);
+        let c = lesson_coverage(&vfs, &catalog, "london", &course.lessons[0]);
+        assert!(c.playable(), "{c:?}");
+        assert_eq!(c.legs[0], Ok(1));
+        assert_eq!(c.legs[1], Ok(1));
+        assert_eq!(c.families.iter().collect::<Vec<_>>(), ["follow"]);
+        assert_eq!(c.rule, RuleEvidence::Unresolved);
+        // The Amateur aimap wires the lead car, the Professional one none.
+        assert_eq!(c.lead_cars, [1, 0]);
+        assert_eq!(c.police, [0, 0]);
+        assert!(c.instructor);
+    }
+
+    #[test]
+    fn coverage_counts_an_unbuildable_lesson_and_a_missing_instructor_table() {
+        let d = synthetic_install("vpbug");
+        write(
+            d.path(),
+            "race/london/follow.csv",
+            "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n1,2,3,4,15,0,0,0,\n",
+        );
+        let vfs = vfs_of(d.path());
+        let ids = crate::event::vehicle_ids(&vfs);
+        let (catalog, course, _) = report_city(&vfs, "london", &ids);
+        let c = lesson_coverage(&vfs, &catalog, "london", &course.lessons[0]);
+        assert!(!c.playable());
+        assert!(c.legs.iter().all(|l| l.is_err()), "{c:?}");
+        assert!(c.families.is_empty());
+        assert_eq!(c.rule, RuleEvidence::Unresolved);
+        assert!(!c.instructor);
     }
 }

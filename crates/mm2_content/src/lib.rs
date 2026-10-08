@@ -50,7 +50,7 @@ pub use convert::{
 };
 pub use crashcourse::{
     AimapWiring, CourseCatalog, CrashLesson, LessonObjective, LessonStage, LessonSubEvent,
-    LessonTable, LessonTableRole, WiredOpponent, crash_lesson, required_vehicle,
+    LessonTable, LessonTableRole, RuleEvidence, WiredOpponent, crash_lesson, required_vehicle,
 };
 pub use damage::{DamageAudit, RecordCheck, VehicleDamageAssets};
 pub use events::{
