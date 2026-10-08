@@ -98,7 +98,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F25 networked driving | active | loopback, impairment matrix measured | sub-epoch drift, full input-replay prediction, LAN/Internet scope, rejoin |
 | F26 shared world/races | active | synthetic + loopback | late-joiner bulk ledger, spectator/race-ends-during-late-join, two-process breakdown leg |
 | F27 Cops & Robbers | active | synthetic + loopback | what knocks gold loose, pickup radius, respawn, disconnect/out-of-bounds (UNK-10) — stock variants each need status (AC06) |
-| F28 city specials | active | retail-data | rest of the city-specific actor/boundary map; late-join phase (F26) |
+| F28 city specials | active | retail-data | `mm2-inspect specials` report landed; cable car unresolved (UNK-44); late-join phase (F26) |
 | F29 modding | active | synthetic | **consumer coverage audit still owed** (AC01 spans car texture, handling, prop, audio cue) |
 | F30 performance/packaging | active | local measurement | release-profile baseline for named scenes; memory/draw-call/voice/bandwidth columns; packaging step, real OS layouts |
 | F31 final audit | A.1 this doc; B/C queued | — | everything above |

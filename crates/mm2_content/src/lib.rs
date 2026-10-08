@@ -59,8 +59,8 @@ pub use events::{
 };
 pub use expect::{
     EXPECTED_AMBIENTS, EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES,
-    EXPECTED_PEDS, EXPECTED_RACE_CITIES, ExpectedEvent, PED_REQUIRED_EXTS, PrimaryRecord,
-    expected_events,
+    EXPECTED_PEDS, EXPECTED_RACE_CITIES, EXPECTED_SPECIAL_PATHSETS, ExpectedEvent,
+    PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
 };
 pub use garage::{garage_table, scan_garage};
 pub use lesson_def::{LessonBuildError, LessonLeg, lesson_legs};

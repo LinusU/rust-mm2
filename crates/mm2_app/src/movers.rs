@@ -14,6 +14,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_formats::pathset::Pathset;
+pub use mm2_game::movers::MoverFamily;
 use mm2_game::movers::{
     FERRY_SPEED, PathFollower, TRAIN_CARS, TrainMotion, mover_rotation, sailboat_speed,
 };
@@ -25,37 +26,6 @@ use crate::banger::BangerDefs;
 use crate::city::{MovableModel, MovableModels, v3};
 use crate::layers::GameLayer;
 use crate::object_sound::{ObjectSound, load_object_audio};
-
-/// The three manager families.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MoverFamily {
-    /// `<city>_sailboat` — tugs, water taxis, sailboards, ducks.
-    Sailboat,
-    /// `<city>_ferry` — car ferries.
-    Ferry,
-    /// `<city>_train` — Underground cars.
-    Train,
-}
-
-impl MoverFamily {
-    /// The object name in the pathset file name.
-    pub fn object(self) -> &'static str {
-        match self {
-            Self::Sailboat => "sailboat",
-            Self::Ferry => "ferry",
-            Self::Train => "train",
-        }
-    }
-
-    /// The model a path whose name names no geometry gets.
-    pub fn default_model(self) -> &'static str {
-        match self {
-            Self::Sailboat => "giz_sailboat01_f",
-            Self::Ferry => "giz_carferry01_f",
-            Self::Train => "va_ug_l",
-        }
-    }
-}
 
 /// A boat or ferry following its path.
 #[derive(Component, Debug, Clone)]

@@ -231,6 +231,37 @@ pub fn mover_rotation(dir: Vec3) -> Quat {
     Quat::from_mat3(&bevy::math::Mat3::from_cols(x, y, z))
 }
 
+/// The three manager families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoverFamily {
+    /// `<city>_sailboat` — tugs, water taxis, sailboards, ducks.
+    Sailboat,
+    /// `<city>_ferry` — car ferries.
+    Ferry,
+    /// `<city>_train` — Underground cars.
+    Train,
+}
+
+impl MoverFamily {
+    /// The object name in the pathset file name.
+    pub fn object(self) -> &'static str {
+        match self {
+            Self::Sailboat => "sailboat",
+            Self::Ferry => "ferry",
+            Self::Train => "train",
+        }
+    }
+
+    /// The model a path whose name names no geometry gets.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Sailboat => "giz_sailboat01_f",
+            Self::Ferry => "giz_carferry01_f",
+            Self::Train => "va_ug_l",
+        }
+    }
+}
+
 /// A sailboat's speed from its path spacing and a uniform draw in
 /// `0..1` (the original's `rand` float).
 pub fn sailboat_speed(spacing: f32, draw: f32) -> f32 {

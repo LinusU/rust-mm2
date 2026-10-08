@@ -19,6 +19,23 @@ pub const EXPECTED_CITIES: &[&str] = &["london", "sf"];
 /// exist without an authored event roster.
 pub const EXPECTED_RACE_CITIES: &[&str] = &["london", "sf"];
 
+/// The per-city special-object pathsets a retail install ships as the
+/// city default, `(city, object)` → `race/<city>/<city>_<object>.pathset`
+/// (F28-A). A city simply lacking one is authored, not missing: San
+/// Francisco has no Underground, so it has no `train` row. Event overlays
+/// (`<city>_<object>_<event stem>.pathset`) are discovered, not listed.
+pub const EXPECTED_SPECIAL_PATHSETS: &[(&str, &str)] = &[
+    ("london", "bridge"),
+    ("london", "sailboat"),
+    ("london", "ferry"),
+    ("london", "train"),
+    ("london", "parkedcar"),
+    ("sf", "bridge"),
+    ("sf", "sailboat"),
+    ("sf", "ferry"),
+    ("sf", "parkedcar"),
+];
+
 /// Ambient-traffic vehicles: `tune/vehicle/<id>.aivehicledata` plus
 /// `geometry/<id>.pkg` and `bound/<id>_bound.bnd` — the shared pool both
 /// stock cities' `[Ambient Types/Density]` tables draw from (F10-A.1).

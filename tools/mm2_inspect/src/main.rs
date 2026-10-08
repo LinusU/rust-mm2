@@ -27,6 +27,7 @@ mod event;
 mod inventory;
 mod peds;
 mod placement;
+mod specials;
 
 /// Extensions the texture pipeline tries, in preference order — the same
 /// order `mm2_app` uses.
@@ -293,6 +294,25 @@ enum Command {
         /// event, an unresolved filename link, a missing/empty
         /// difficulty table, an aimap error, a dead `.opp` wire, or a
         /// wired vehicle id outside the vehicle catalog.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// City special-content coverage (F28-A): per city, every
+    /// `race/<city>/<city>_{bridge,sailboat,ferry,train,parkedcar}`
+    /// pathset (default and event overlays) parsed with the production
+    /// parser and its models resolved as the managers resolve them,
+    /// the `.water` record, the BAI rail curves, and the actors that
+    /// have no runtime yet (the cable car), listed as unresolved.
+    Specials {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every stock city plus
+        /// any discovered `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on a missing expected default pathset, a parse
+        /// failure, an unresolvable model, or a missing/unreadable
+        /// water or BAI record. Unresolved actors are listed, not failed.
         #[arg(long)]
         strict: bool,
     },
@@ -729,6 +749,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Command::CrashCourse { dir, city, strict } => {
             crashcourse::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Specials { dir, city, strict } => {
+            specials::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Cnr { dir, city, strict } => {
             cnr::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
