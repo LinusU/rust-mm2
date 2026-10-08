@@ -429,6 +429,73 @@ fn every_retail_lesson_launches_at_both_difficulties() {
     assert_eq!(expected, launched);
 }
 
+/// F21-AC05, vehicle half: a retry hands back a fresh car, not the
+/// wrecked one. After the player drives off, spins and shifts up, the
+/// restart despawns that body and the lesson relaunches a new one on
+/// leg 0's start pose — at rest, in first gear, idling.
+#[test]
+fn a_retried_lesson_restores_the_vehicle_to_its_start_state() {
+    let tmp = lesson_install();
+    let mut app = event_app(lesson_config(1), vfs_of(tmp.path()));
+    app.update();
+    let first_car = car(&mut app);
+    let start = app.world().get::<Transform>(first_car).unwrap().translation;
+    let start_rot = app.world().get::<Transform>(first_car).unwrap().rotation;
+
+    // Wreck the first attempt: far away, fast, tumbling, geared up.
+    {
+        let mut entity = app.world_mut().entity_mut(first_car);
+        entity.get_mut::<Transform>().unwrap().translation = Vec3::new(300.0, 4.0, -120.0);
+        *entity.get_mut::<LinearVelocity>().unwrap() = LinearVelocity(Vec3::new(30.0, 5.0, 8.0));
+        *entity.get_mut::<AngularVelocity>().unwrap() = AngularVelocity(Vec3::new(2.0, 3.0, 1.0));
+        let mut state = entity.get_mut::<mm2_vehicle::VehicleState>().unwrap();
+        state.gear = 3;
+        state.rpm = 6500.0;
+        state.forward_speed = 30.0;
+        state.upended_for = 4.0;
+    }
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..20 {
+        app.update();
+        if phase(&app) == SessionPhase::Countdown
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Countdown");
+
+    let second_car = car(&mut app);
+    assert_ne!(first_car, second_car, "the wrecked body is gone");
+    let world = app.world();
+    let at = world.get::<Transform>(second_car).unwrap();
+    assert!(
+        at.translation.distance(start) < 0.05,
+        "retry pose {:?} vs first launch {start:?}",
+        at.translation
+    );
+    assert!(at.rotation.angle_between(start_rot) < 0.01);
+    assert!(world.get::<LinearVelocity>(second_car).unwrap().0.length() < 0.1);
+    assert!(world.get::<AngularVelocity>(second_car).unwrap().0.length() < 0.1);
+    let state = world.get::<mm2_vehicle::VehicleState>(second_car).unwrap();
+    assert_eq!(state.gear, 0);
+    assert_eq!(state.upended_for, 0.0);
+    assert!(state.forward_speed.abs() < 0.1);
+    assert!(state.rpm < 2500.0, "idling, not {} rpm", state.rpm);
+    assert_eq!(
+        world.get::<RaceProgress>(second_car).unwrap().state,
+        ParticipantState::AwaitingStart,
+        "the new body has no carried-over race progress"
+    );
+    // Exactly one player car survives the turnover.
+    let mut players = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>();
+    assert_eq!(players.iter(app.world()).count(), 1);
+}
+
 /// Every session-owned entity, bucketed by its `Name` (unnamed ones
 /// share one bucket) with the generation stamp read off the marker.
 fn session_census(app: &mut App) -> (std::collections::BTreeMap<String, usize>, Vec<u64>) {

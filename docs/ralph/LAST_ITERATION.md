@@ -1,3 +1,12 @@
+# Last iteration — F21-B.14: a retried lesson restores the vehicle to its start state (iteration 2 of the new run)
+
+Selection: the F21-B.13 checkpoint (`752a516`) passed gates and review; no failing gate to repair. F21-B's open list named "vehicle-state restore on retry" (F21-AC05, vehicle half); B.13 covered only the world census. No production change — this is evidence on the existing restart path.
+Change: `tests/lesson_launch.rs::a_retried_lesson_restores_the_vehicle_to_its_start_state` (synthetic `race/london/` install, crash1 two-leg exam, runs in public CI): wreck the first attempt (teleport 300 m away, linear/angular velocity, gear 3, 6500 rpm, forward speed, `upended_for`), request the session restart, and on generation 2 require a different player entity, pose within 5 cm / 0.01 rad of the first launch's, linear and angular velocity ~0, `VehicleState` back to gear 0 / idle rpm / no upended timer, `RaceProgress::AwaitingStart`, and exactly one `PlayerVehicle`.
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` pass; `cargo test --locked --workspace` rc 0, 58 result blocks ok, 0 failed.
+Status: implemented candidate, not independently checked. Limits: the synthetic harness spawns the car with `SelectedCar.def = None`, so no `VehicleDamage` component exists — damage/health reset on retry is NOT covered here (needs a stock-vehicle harness, open); no mutation check against production (the test passed on first run, so it records existing behaviour, not a fix); first-launch pose is taken as "the start state", not independently compared with the lesson's authored start row. Still open for F21-B: damage reset on retry, instruction/voice flow, family evaluators (UNK-35), lead cars/cops, lesson-only reward credit. F21-B and F21-C stay open.
+
+---
+
 # Last iteration — F21-B.13: a retried lesson rebuilds the same world, on the real city worlds (iteration 1 of the new run)
 
 Selection: the F21-B.12 checkpoint (`ac12f3d`) passed gates and review; no failing gate to repair. F21-B listed "retry-restores-objects test on a city world" as open (F21-AC05 evidence). No production change was needed — this slice is evidence.
