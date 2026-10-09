@@ -1415,8 +1415,12 @@ when this ran inline). The status line reads `joining <addr>…`, a second
 dial leaves the field open with `cannot join <addr>: <why>` (a dial thread that
 dies without answering reads `the dial ended without an answer`); hosting or
 joining while a lobby is up is refused. `Esc` out of the field during a dial
-does not cancel it — the thread is bounded and a successful answer still
-adopts the lobby. `menu_watch` keeps the shell closed while the
+cancels it (`MenuDial::cancel`; the status reads `cancelled joining <addr>`):
+the next poll answers `MenuJoinError::Cancelled` whatever the thread found,
+the resource goes, and a host that answers afterwards finds its link dropped
+with the receiver (the dial thread itself stays bounded by the handshake
+timeout), so a lobby the player left is never adopted. Loopback only, tested
+with a gated relay. `menu_watch` keeps the shell closed while the
 link exists (the lobby owns `Enter`=ready, `Esc`=leave; a `Cancel` returns the
 joiner to that lobby, not the menu). `net::close_menu_join` removes the link and
 its resources once `drive_lobby` has queued the exit it would otherwise write as

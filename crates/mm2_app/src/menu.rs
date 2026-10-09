@@ -3161,6 +3161,8 @@ pub fn menu_dial(
             shell.active = false;
         }
         Ok(_) => warn!(peer = %addr, "menu dial answered outside the menu; dropped"),
+        // The player backed out; `menu_input` already said so.
+        Err(crate::net::MenuJoinError::Cancelled) => {}
         Err(e) => {
             warn!(error = %e, peer = %addr, "menu could not join a lobby");
             shell.status = Some(format!("cannot join {addr}: {e}"));
@@ -3318,7 +3320,22 @@ pub fn menu_input(
         }
     }
     for cmd in cmds {
-        for effect in shell.apply(cmd, &mut data, &vfs.0) {
+        // Backing out of the address field abandons the join it started:
+        // a host that answers afterwards must not pull the player into a
+        // lobby they left. `apply` pops the screen; the status says why.
+        let cancelling =
+            cmd == MenuCommand::Back && matches!(shell.screen, Screen::JoinLobby { .. });
+        let abandoned = if cancelling && let Some(dial) = target.dialing.as_deref() {
+            dial.cancel();
+            Some(format!("cancelled joining {}", dial.addr()))
+        } else {
+            None
+        };
+        let effects = shell.apply(cmd, &mut data, &vfs.0);
+        if abandoned.is_some() {
+            shell.status = abandoned;
+        }
+        for effect in effects {
             match effect {
                 MenuEffect::Launch { .. } | MenuEffect::Host { .. } | MenuEffect::Join { .. }
                     if target.dialing.is_some() =>

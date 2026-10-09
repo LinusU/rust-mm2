@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1910,6 +1911,9 @@ pub enum MenuJoinError {
     /// The dial thread ended without reporting (it panicked).
     #[error("the dial ended without an answer")]
     Lost,
+    /// The player backed out of the address field before the host answered.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// What a menu join sends once the socket is up: the handshake `Hello`
@@ -1966,6 +1970,7 @@ fn dial_menu_join(addr: SocketAddr, plan: JoinPlan) -> Result<LobbyLink, MenuJoi
 pub struct MenuDial {
     addr: SocketAddr,
     answer: Mutex<Receiver<Result<LobbyLink, MenuJoinError>>>,
+    cancelled: AtomicBool,
 }
 
 impl MenuDial {
@@ -1974,10 +1979,23 @@ impl MenuDial {
         self.addr
     }
 
+    /// Abandon the dial: the next [`poll`](Self::poll) answers
+    /// [`MenuJoinError::Cancelled`]. The thread stays bounded by the
+    /// handshake timeout; its late answer is dropped with the resource.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, AtomicOrdering::Release);
+    }
+
     /// The dial's answer once it has landed, `None` while it is still
     /// in flight. A dial thread that died without answering is
     /// [`MenuJoinError::Lost`], not an eternal wait.
     pub fn poll(&self) -> Option<Result<LobbyLink, MenuJoinError>> {
+        // A cancelled dial answers `Cancelled` whatever the thread found,
+        // so a host that replies after the player left the field is never
+        // adopted; removing the resource then drops the late link.
+        if self.cancelled.load(AtomicOrdering::Acquire) {
+            return Some(Err(MenuJoinError::Cancelled));
+        }
         let rx = self.answer.lock().ok()?;
         match rx.try_recv() {
             Ok(answer) => Some(answer),
@@ -2008,6 +2026,7 @@ pub fn begin_menu_dial(
     Ok(MenuDial {
         addr,
         answer: Mutex::new(rx),
+        cancelled: AtomicBool::new(false),
     })
 }
 

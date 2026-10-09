@@ -4152,12 +4152,6 @@ fn a_client_joins_the_lobby_the_menu_opened() {
     );
 }
 
-/// F27-C: the menu joins a lobby another menu opened. The *Join lobby*
-/// row is a text field that refuses what is not an address and names an
-/// unreachable one; a real address dials the lobby with the install's own
-/// fingerprint, the shell steps aside for the lobby surface, the joiner's
-/// `Enter` readies it, the host's `Enter` starts the match for both, and
-/// `Esc` after the match leaves the lobby and returns the menu saying so.
 /// Step a menu app until the join it started has answered. The dial runs
 /// on its own thread, so this waits on the clock, not a frame count.
 fn settle_dial(app: &mut App) {
@@ -4241,6 +4235,184 @@ fn a_silent_host_does_not_freeze_the_menu_join() {
     );
 }
 
+/// Backing out of the address field abandons a join in flight: the dial is
+/// gone at once, the status says so, the menu is usable again, and the
+/// peer's later hang-up changes nothing the player can see.
+#[test]
+fn escaping_the_address_field_cancels_the_join_in_flight() {
+    use mm2_app::net::{LobbyLink, MenuDial};
+
+    let tmp = install();
+    let mut client = menu_app(tmp.path(), None);
+    client.update();
+
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    let (held, _) = silent.accept().unwrap();
+    assert!(client.world().get_resource::<MenuDial>().is_some());
+
+    press(&mut client, KeyCode::Escape);
+    settle_dial(&mut client);
+    assert!(client.world().get_resource::<MenuDial>().is_none());
+    assert!(
+        !matches!(shell(&client).screen, menu::Screen::JoinLobby { .. }),
+        "Esc leaves the field"
+    );
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("cancelled joining")),
+        "{:?}",
+        shell(&client).status
+    );
+
+    // The abandoned handshake giving up later does not resurface as an
+    // error, and the menu takes a new join straight away.
+    drop(held);
+    for _ in 0..20 {
+        client.update();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(client.world().get_resource::<LobbyLink>().is_none());
+    assert!(shell(&client).active);
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("cancelled joining")),
+        "{:?}",
+        shell(&client).status
+    );
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        client.world().get_resource::<MenuDial>().is_some(),
+        "a cancelled dial must not hold the next one off: {:?}",
+        shell(&client).status
+    );
+}
+
+/// A host that answers only after the player has backed out must not pull
+/// them into its lobby: the late handshake completes on the host's side
+/// (a gated relay holds the dial open until the player has pressed Esc),
+/// but the joiner's menu never adopts it, and the host sees it hang up.
+#[test]
+fn a_host_that_answers_after_escape_is_not_adopted() {
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::{HostLink, LobbyLink, MenuDial};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let mut host = menu_app(tmp.path(), None);
+    add_host_systems(&mut host, never_capturing);
+    let mut client = menu_app(tmp.path(), None);
+    host.update();
+    client.update();
+    activate_row(&mut host, "Cops & Robbers");
+    activate_row(&mut host, "testcity");
+    activate_row(&mut host, "Host lobby");
+    let real = host.world().resource::<HostLink>().addr();
+
+    // The relay accepts at once and reaches the host only when told to.
+    // It counts what the host sends back and notes when both ends are gone.
+    let relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let (open, gate) = std::sync::mpsc::channel::<()>();
+    let answered = Arc::new(AtomicUsize::new(0));
+    let hung_up = Arc::new(AtomicBool::new(false));
+    let pump = {
+        let (answered, hung_up) = (answered.clone(), hung_up.clone());
+        std::thread::spawn(move || {
+            let (down, _) = relay.accept().unwrap();
+            gate.recv().unwrap();
+            let up = std::net::TcpStream::connect(real).unwrap();
+            let copy = |mut from: std::net::TcpStream,
+                        mut to: std::net::TcpStream,
+                        count: Option<Arc<AtomicUsize>>| {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = from.read(&mut buf) {
+                    if n == 0 || to.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    if let Some(count) = &count {
+                        count.fetch_add(n, Ordering::SeqCst);
+                    }
+                }
+                let _ = to.shutdown(std::net::Shutdown::Both);
+            };
+            let (d2, u2) = (down.try_clone().unwrap(), up.try_clone().unwrap());
+            let back = std::thread::spawn(move || copy(u2, d2, Some(answered)));
+            copy(down, up, None);
+            let _ = back.join();
+            hung_up.store(true, Ordering::SeqCst);
+        })
+    };
+
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &relay_addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    assert!(client.world().get_resource::<MenuDial>().is_some());
+    press(&mut client, KeyCode::Escape);
+    open.send(()).unwrap();
+
+    // The handshake now completes behind the player's back: the host's
+    // answer crosses the relay, which proves the late reply really came.
+    let step = |host: &mut App, client: &mut App| {
+        host.update();
+        client.update();
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while answered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relayed handshake never got an answer from the host"
+        );
+        step(&mut host, &mut client);
+    }
+    for _ in 0..30 {
+        step(&mut host, &mut client);
+    }
+    assert!(
+        client.world().get_resource::<LobbyLink>().is_none(),
+        "a join the player cancelled was adopted"
+    );
+    assert!(client.world().get_resource::<MenuDial>().is_none());
+    assert!(shell(&client).active, "the menu keeps the screen");
+
+    // Dropping the late link closes its socket, which the relay sees.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !hung_up.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned link was never closed"
+        );
+        step(&mut host, &mut client);
+    }
+    pump.join().unwrap();
+}
+
+/// F27-C: the menu joins a lobby another menu opened. The *Join lobby*
+/// row is a text field that refuses what is not an address and names an
+/// unreachable one; a real address dials the lobby with the install's own
+/// fingerprint, the shell steps aside for the lobby surface, the joiner's
+/// `Enter` readies it, the host's `Enter` starts the match for both, and
+/// `Esc` after the match leaves the lobby and returns the menu saying so.
 #[test]
 fn the_menu_joins_a_lobby_another_menu_opened() {
     use mm2_app::lobby_systems::{add_client_systems, add_host_systems};
