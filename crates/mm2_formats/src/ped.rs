@@ -1950,8 +1950,18 @@ fn parse_mtl<'a>(
     for (ln, text) in lines.by_ref() {
         let mut t = text.split_whitespace();
         let Some(tag) = t.next() else { continue };
-        let int =
-            |t: &mut std::str::SplitWhitespace<'_>| t.next().and_then(|s| s.parse::<i64>().ok());
+        // A count that does not parse is a diagnostic and reads as absent,
+        // never a silent `0`.
+        let mut int = |t: &mut std::str::SplitWhitespace<'_>| {
+            let v = t.next().and_then(|s| s.parse::<i64>().ok());
+            if v.is_none() {
+                diagnostics.push(TableDiagnostic {
+                    line: ln,
+                    message: format!("material {:?}: {tag} expects an integer", mtl.name),
+                });
+            }
+            v
+        };
         match tag {
             "}" => return mtl,
             "adjuncts:" => mtl.adjuncts = int(&mut t),
@@ -1959,9 +1969,10 @@ fn parse_mtl<'a>(
             "primitives:" => mtl.primitives = int(&mut t),
             "textures:" => mtl.textures = int(&mut t),
             "texture:" => {
-                let idx = int(&mut t).unwrap_or(0);
-                let name = t.next().unwrap_or("").to_string();
-                mtl.texture_names.push((idx, name));
+                if let Some(idx) = int(&mut t) {
+                    let name = t.next().unwrap_or("").to_string();
+                    mtl.texture_names.push((idx, name));
+                }
             }
             "illum:" => mtl.illum = t.next().map(str::to_string),
             key @ ("ambient:" | "diffuse:" | "specular:") => {
@@ -1971,12 +1982,12 @@ fn parse_mtl<'a>(
                     "diffuse:" => &mut mtl.diffuse,
                     _ => &mut mtl.specular,
                 };
-                if f.len() == 3 {
+                if f.len() == 3 && f.iter().all(|v| v.is_finite()) {
                     *slot = Some([f[0], f[1], f[2]]);
                 } else {
                     diagnostics.push(TableDiagnostic {
                         line: ln,
-                        message: format!("material {:?}: {key} expects 3 floats", mtl.name),
+                        message: format!("material {:?}: {key} expects 3 finite floats", mtl.name),
                     });
                 }
             }
@@ -2415,6 +2426,20 @@ mtxn 2 1
         assert_eq!(m.adjuncts[0].matrix, None);
         assert!(m.diagnostics.is_empty());
         assert!(m.validate().is_empty(), "{:?}", m.validate());
+    }
+
+    /// A non-numeric material count, texture index or non-finite colour is
+    /// a diagnostic, never a silent `0`/`NaN` (authored-number audit).
+    #[test]
+    fn mod_material_fields_diagnose_unparsable_numbers() {
+        let m = PedMod::parse(
+            "version: 1.09\nmtl M {\n adjuncts: many\n texture: x skin\n ambient: nan 0 0\n}\n",
+        )
+        .unwrap();
+        assert_eq!(m.materials[0].adjuncts, None);
+        assert!(m.materials[0].texture_names.is_empty());
+        assert_eq!(m.materials[0].ambient, None);
+        assert_eq!(m.diagnostics.len(), 3, "{:?}", m.diagnostics);
     }
 
     #[test]

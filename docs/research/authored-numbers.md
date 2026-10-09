@@ -330,8 +330,8 @@ fov: p.camera_fov.unwrap_or(60.0).to_radians(),                            // da
 
 Resolved by task OPR-5.4; kept so the outcomes stay findable.
 
-* **S1. `crates/mm2_game/src/effects.rs:1116** — `let want = blast_due + spew_due;` where `blast_due` comes from authored `InitialBlast` (`req_i64`) and `spew_due` from authored `SpewRate` (`req_f32`). `InitialBlast 9223372036854775807` gives `blast_due ≈ 9.2e18`; a `SpewRate` large enough to saturate `spew_due` to `usize::MAX` overflows the sum. Needs *both* fields hostile at once, so not an accidental-corruption path. Everything downstream (`want.min(room)`, `room -= emit`) is correctly bounded.
-* **S2. `crates/mm2_game/src/props.rs:597** — `reached[rid as usize]` is validated against `psdl.rooms.len()` but indexes `psdl.prop_rules`. In bounds today only because `Psdl::parse` fills `prop_rules` with `n_rooms` entries and `rooms` with `n_rooms - 1` (`crates/mm2_formats/src/psdl.rs:226-241`). I could not construct an authored file that breaks it, and the next line correctly uses `.get()`. A fragility note, not a defect.
+* **S1 — resolved (task #1122).** `blast_due.saturating_add(spew_due)` and a saturating `dropped` counter; test `wheel_ptx_survives_hostile_blast_and_spew_counts`. Original note: `crates/mm2_game/src/effects.rs:1116** — `let want = blast_due + spew_due;` where `blast_due` comes from authored `InitialBlast` (`req_i64`) and `spew_due` from authored `SpewRate` (`req_f32`). `InitialBlast 9223372036854775807` gives `blast_due ≈ 9.2e18`; a `SpewRate` large enough to saturate `spew_due` to `usize::MAX` overflows the sum. Needs *both* fields hostile at once, so not an accidental-corruption path. Everything downstream (`want.min(room)`, `room -= emit`) is correctly bounded.
+* **S2 — resolved (task #1122).** `reached` is now written through `get_mut`, so a `prop_rules` table shorter than the room list cannot index out of range; test `a_rule_table_shorter_than_the_rooms_is_not_indexed_past`. Original note: `crates/mm2_game/src/props.rs:597** — `reached[rid as usize]` is validated against `psdl.rooms.len()` but indexes `psdl.prop_rules`. In bounds today only because `Psdl::parse` fills `prop_rules` with `n_rooms` entries and `rooms` with `n_rooms - 1` (`crates/mm2_formats/src/psdl.rs:226-241`). I could not construct an authored file that breaks it, and the next line correctly uses `.get()`. A fragility note, not a defect.
 * **S3. `reanchor_pose_with_progress` / scripted `supported` raycast — resolved.** Avian's behaviour is now established: `SpatialQuery::cast_ray` with a NaN or infinite origin **panics** (`obvhs-0.3.3/src/ray.rs:49`, `assert!(origin.is_finite())`), pinned by `avian_asserts_a_finite_ray_origin` / `…_an_infinite_ray_origin` (`mm2_app` `tests/nonfinite_ray.rs`). The walk itself was already guarded: it returns the input pose when the pose or any route point is non-finite and never calls `blocked` with a non-finite candidate (`reanchor_pose_with_progress` tests in `tests/opponents.rs`). The residual hole was its caller: a non-finite input pose is handed back and then reaches `seat_on_static_ground`'s ray. Fixed at the shared producer: `seat_on_static_ground` returns `None` for a non-finite position, yaw or centre of mass, and `SupportProbe::holds_up` for a non-finite centre of mass (`recovery::nonfinite_tests::a_non_finite_landing_has_no_ground`). Other `cast_ray` origins audited: `camera.rs` (origin and `Dir3::new(seg)` — a non-finite `look` makes `seg` non-finite, which `Dir3::new` rejects), `police.rs::line_clear` (same `Dir3::new` gate), `audio.rs` (already `.filter(p.is_finite())`) are guarded by construction; `pedestrian.rs` line-up, `traffic.rs` drape and `opponents.rs` wall feelers gained an explicit finite-origin check. The one spatial-query site that is *not* a ray — `banger.rs` `activate_bangers`, which calls `shape_intersections` — needs no guard: it builds an AABB and traverses, so a non-finite striker pose yields an empty hit list (`avian_shape_intersections_tolerate_a_non_finite_pose` pins that).
 * **S4. `traffic.rs` `size_collider` — proven guarded.** `AiVehicleData::parse` rejects a non-finite `Size` and `CG` (`req_finite_vec3`; `aivehicledata_rejects_non_finite_scalars`). The remaining shape is finite-but-degenerate or overflowing (`0`, negative, `f32::MAX`): `Collider::convex_hull` returns `None` and the cuboid fallback is used, no panic (`traffic::size_collider_tests`).
 * **S5. `city.rs` `choose_spawn` — fixed.** The PSDL reader does not validate vertex or `bounds_center` floats. `choose_spawn` now skips non-finite midpoints / road centroids, measures from the origin when `bounds_center` is non-finite, and returns the skipped count; `import_city` warns and records it as `non-finite-spawn-source` in the city report's `unsupported` map (`city::tests::non_finite_spawn_sources_are_skipped_and_counted`).
@@ -439,6 +439,48 @@ than finding 1) verified guarded.
 `:2453-2454` are guarded by `peak.max(1)` / `v.is_empty()`; `placement.rs:150/162/
 477-481/618`, `bind.rs:494`, `crashcourse.rs:227`, `event.rs:553`, `audio.rs:216-217`
 (`duration_secs` guards `byte_rate == 0`) and `inventory.rs` verified guarded.
+
+---
+
+## Closing pass (task #1122)
+
+1. **Shared helper module — rejected, with reason.** The existing guards
+   (`flipbook_span`, `int_cell` ×2, `req_finite_f32`, `drawable_fov`,
+   `checked_count`, `usable_f32`) each bind to their own failure channel — a
+   `VehResult` error, a `TableDiagnostic` push, an `Option` that makes the
+   caller skip the row — and to a domain bound (`MAX_GEARS`, `(0, 180)`°,
+   `USABLE_BOUND`). The one piece they share is a one-line std call
+   (`checked_sub`, `is_finite`, `try_from`), so a common module would only wrap
+   std and still need a per-site error mapping, while forcing `mm2_game`/`mm2_app`
+   sites to depend on a parser-crate utility for it. Each is covered by its own
+   malformed-input test instead.
+2. **S1 and S2 — resolved** (see the Speculative list).
+3. **F19-A.4 pedestrian pass — done** over `mm2_formats::ped`, `mm2_game::ped`
+   and `mm2_inspect::peds`. Findings, both fixed with tests:
+   * `tools/mm2_inspect/src/peds.rs` `dive_chain`: `last.saturating_sub(first) + 1`
+     on `u32` overflowed for a window ending at `u32::MAX`; now computed in `u64`
+     (`a_dive_chain_survives_an_unbounded_window`).
+   * `mm2_formats::ped::parse_mtl` claimed "malformed records degrade to
+     diagnostics" but a non-integer `adjuncts:`/`packets:`/`primitives:`/`textures:`
+     count read as absent and a non-integer `texture:` index as `0`, both silently,
+     and `ambient:`/`diffuse:`/`specular:` accepted `nan`. All three now push a
+     `TableDiagnostic` and the row is unused
+     (`mod_material_fields_diagnose_unparsable_numbers`).
+   Checked and sound: `PedAnim::parse` (`checked_mul` + cap), `PedAnim::frame`,
+   `PedRig::sample` (width gate, finite clamp), `PedAnimator::tick` (bounded by
+   the state count; a non-finite cursor samples frame 0), `locomotion_speed`,
+   `authored_window_frame`, `matrix_bucket`, `PedMod::validate`'s `repeat_n`
+   (only reached once the partition sums to the vert/normal count), `PedSkin`
+   corner/triangle assembly (every index goes through `resource_index`; packet and
+   material ranges are clamped to the data), and `deform`.
+4. **"Degrades malformed input to diagnostics" claims re-checked** for the
+   `unwrap_or(0)`/`unwrap_or_default` sites in `spchdata`, `cardata` (each goes
+   through `int_cell`, which records the diagnostic) and `ped` (the packet header
+   already diagnoses; the `mtl` fields above did not and now do). Not
+   re-verified by feeding every claiming parser hostile input; the remainder
+   (`waypoints`, `aimap`, `opp`, `fog`, `rewards`, `racedata`, `music`,
+   `proprules`, `crashdata`) show no silent numeric defaulting in a grep of
+   non-test code.
 
 ## Not in this defect class, noted in passing
 

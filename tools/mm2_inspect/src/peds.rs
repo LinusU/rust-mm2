@@ -662,7 +662,8 @@ pub fn dive_chain(animator: &mm2_game::ped::PedAnimator, from: &str) -> Option<D
         if st.x_distance != 0.0 {
             out.lateral = st.x_offset + st.x_distance;
         }
-        let frames = st.last_frame.saturating_sub(st.first_frame) + 1;
+        // u64: a window ending at `u32::MAX` must not overflow the `+ 1`.
+        let frames = u64::from(st.last_frame.saturating_sub(st.first_frame)) + 1;
         out.seconds += frames as f32 / mm2_game::ped::PED_STATE_FPS;
         if st.name == "STAND" {
             out.reaches_stand = true;
@@ -1234,5 +1235,20 @@ mtxn 1 1 1
         let c = dive_chain(&stuck, "ANTIC_RDIVE").unwrap();
         assert!(!c.reaches_stand);
         assert!((c.lateral + 2.2).abs() < 1e-5);
+    }
+
+    /// A state window authored out to `u32::MAX` must not overflow the
+    /// chain's frame count (authored-number audit, F19-A.4 pass).
+    #[test]
+    fn a_dive_chain_survives_an_unbounded_window() {
+        let states = PedStates::parse(
+            "# h\nSTAND,a,1,4,0,0,0,0,STAND\n\
+             ANTIC_LDIVE,a,1,4294967295,0,0,0,2.2,STAND\n",
+        )
+        .unwrap();
+        let animator = mm2_game::ped::PedAnimator::new(&states, "STAND", 30.0).unwrap();
+        let c = dive_chain(&animator, "ANTIC_LDIVE").unwrap();
+        assert!(c.reaches_stand);
+        assert!(c.seconds.is_finite() && c.seconds > 1.0e6);
     }
 }
