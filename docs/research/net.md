@@ -1372,6 +1372,26 @@ locally (the roster entry keeps `pick: None`, so the host spawns no body for
 that seat — no mismatch to teleport, but also no mirrored car); the client is
 told via `VehicleRefused` and shows it as a lobby notice.
 
+**A contested pickup and a dropped carrier over the wire (F27-AC02/AC03, in-process
+evidence).** `network::net_app::two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_carrier_frees_it`:
+a hosted dev-world session with two raw wire peers (remote seats, wire ids 1
+and 2) and the production `cnr_host_step` / `reconcile_gold_load` /
+`publish_cnr` systems over a synthetic 3-player FFA (250 kg load). Both cars are
+placed equidistant inside the pickup radius on the same step: exactly one
+`Picked` event (the lower id, per `resolve_pickups`), the score sums to one
+award, only the winner's body gains the load, the load does not stack over
+further steps, and *both* peers decode the same single carrier off their
+sockets. Then the carrier's TCP connection drops (no `Leave`): its seat is
+retired, the gold drops with `DropCause::Disconnected` at the car's last
+position, the peer still in reach recovers it (`Picked{recovered: true}`, one
+event), the load moves to that car rather than stacking, the leaver's points
+stay on the board (`connected=false`), and the remaining peer decodes the new
+carrier. Mutation-checked (reversing the tie-break, and skipping `game.leave`,
+each fail it); 6/6 repeat runs. Not shown: cars *driven* into reach (the placed
+`Position` stands in for physics, so a contested steal by ramming, a wreck
+drop, and the process-level three-process version stay open), packet loss on
+the contest, a rendered match.
+
 **A menu-hosted Cops & Robbers lobby (F27-C, implementation choice).** The main
 menu's `Cops & Robbers` options screen gains a `Host lobby` row beside
 `Start match`: `MenuEffect::Host` carries the same resolved config and car as
