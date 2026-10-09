@@ -44,7 +44,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
     BREAKDOWN_SECONDS, DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict,
-    DisabledOutcome, ImpactEvent, ImpairmentPolicy, ObjectId, ObjectIdentity, Player,
+    DisabledOutcome, ImpactEvent, ImpactId, ImpairmentPolicy, ObjectId, ObjectIdentity, Player,
     PlayerControl, RaceState, Session, VehicleBreakdown, VehicleBreaks, VehicleDamage,
     VehicleStuck, disabled_outcome,
 };
@@ -78,6 +78,11 @@ pub struct DamageReport {
     /// Impairment episodes cleared — the factor returned to 1.0
     /// through a repair (never counted on despawn or teardown).
     pub restored: u64,
+    /// Episodes in which an engine went fully dead (factor 0) — a
+    /// Blitz/Checkpoint breakdown, on the authority from its own
+    /// episode and on a predicted client from the wire's destroyed
+    /// byte. A limp that deepens into a wreck counts once more.
+    pub dead: u64,
 }
 
 impl DamageReport {
@@ -188,6 +193,63 @@ pub fn apply_impact_damage(
             }
         }
     }
+}
+
+/// Fixed-step, authority only: `--wreck-at` destroys one car once the
+/// session clock reaches the flag's tick — the local car, or the seat
+/// `--wreck-seat` names — and emits the [`DamageEvent`] an impact would,
+/// so the wreck takes the production [`resolve_disabled`] arm for that
+/// participant (a remote human's breakdown on the host included). The
+/// evidence knob for a multi-process breakdown leg: nothing has to be
+/// driven into a wall, and the outcome under test is the one real
+/// destruction takes. One-shot; waits for its target to exist (a seat
+/// that has not joined yet is not a miss) and is inert on a predicted
+/// client, whose damage is the host's to decide.
+pub fn dev_wreck_at(
+    session: Res<Session>,
+    mut cars: Query<(
+        &ObjectIdentity,
+        &mut VehicleDamage,
+        Option<&Player>,
+        Option<&crate::netdrive::NetPlayer>,
+    )>,
+    mut report: ResMut<DamageReport>,
+    mut writer: MessageWriter<DamageEvent>,
+    mut fired: Local<bool>,
+) {
+    if *fired || !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let Some((at, seat)) = session
+        .config()
+        .and_then(|c| c.dev.wreck_at.map(|at| (at, c.dev.wreck_seat)))
+    else {
+        return;
+    };
+    if session.tick() < at {
+        return;
+    }
+    let Some((id, mut damage, ..)) = cars.iter_mut().find(|(_, _, player, net)| match seat {
+        Some(seat) => net.is_some_and(|n| n.0 == seat),
+        None => player.is_some_and(|p| p.control == PlayerControl::Local),
+    }) else {
+        return;
+    };
+    *fired = true;
+    if damage.wreck() == DamageVerdict::Rejected {
+        return;
+    }
+    report.applied += 1;
+    report.disabled += 1;
+    writer.write(DamageEvent {
+        object: id.0,
+        generation: session.generation(),
+        tick: session.tick(),
+        impact: ImpactId(0),
+        severity: damage.total(),
+        total: damage.total(),
+        tier: damage.condition(),
+    });
 }
 
 /// Fixed-step: enforce the session's disabled outcome on every
@@ -449,7 +511,10 @@ pub fn resolve_breakdown(
         texel.reset(entity);
         commands.entity(entity).remove::<VehicleBreakdown>();
         report.recovered += 1;
-        info!("player vehicle repaired after its breakdown");
+        info!(
+            tick = session.tick(),
+            "player vehicle repaired after its breakdown"
+        );
     }
 }
 
@@ -527,12 +592,14 @@ pub fn sync_impairment(
                     commands.entity(entity).remove::<EngineImpairment>();
                     report.restored += 1;
                 } else {
+                    report.dead += u64::from(factor <= 0.0 && imp.0 > 0.0);
                     imp.0 = factor;
                 }
             }
             None if factor < 1.0 => {
                 commands.entity(entity).insert(EngineImpairment(factor));
                 report.impaired += 1;
+                report.dead += u64::from(factor <= 0.0);
             }
             None => {}
         }

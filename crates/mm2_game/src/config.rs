@@ -696,6 +696,18 @@ pub struct DevOverrides {
     /// session-legal parameter). One-shot; like `finish`/`restart` it
     /// changes the run's course, so it IS in `record_eligibility`.
     pub reset_at: Option<u64>,
+    /// `--wreck-at`: destroy a car through the damage pipeline once the
+    /// session clock reaches the given fixed-step count — the local
+    /// car, or the one `wreck_seat` names. Authority-only (a predicted
+    /// client's damage is the host's to decide) and one-shot; how a
+    /// multi-process leg proves the breakdown policy without a driven
+    /// pile-up (evidence/diagnostic runs — never a session-legal
+    /// parameter). It changes the run's course, so it IS in
+    /// `record_eligibility`.
+    pub wreck_at: Option<u64>,
+    /// `--wreck-seat`: the wire seat (`NetPlayer` id, the host is 0)
+    /// `wreck_at` destroys. `None` wrecks the local car.
+    pub wreck_seat: Option<u16>,
     /// Optional evidence-driver speed ceiling in m/s; never changes vehicle handling.
     pub bot_speed: Option<f32>,
     /// Explicit `.opp` evidence guide for the scripted player; no opponent is spawned.

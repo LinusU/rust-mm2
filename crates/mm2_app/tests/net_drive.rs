@@ -1599,6 +1599,124 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
     assert!(cell("landed") > 0, "{rec}");
 }
 
+/// The cell after a record field's `key` inside a `,`-separated value
+/// whose cells read `<n><suffix>` (`imp=1i/1r/1d` → `imp_cells("imp")`
+/// gives `[1, 1, 1]`); empty when the record has no such field.
+fn imp_cells(line: &str, key: &str) -> Vec<u64> {
+    line.split_whitespace()
+        .find_map(|t| t.strip_prefix(&format!("{key}=")))
+        .map(|v| v.split('/').map(leading_u64).collect())
+        .unwrap_or_default()
+}
+
+/// The `tick=<n>` field of a tracing line, with the formatter's colour
+/// escapes stripped (they sit between a field's name and its `=`).
+fn log_tick(line: &str) -> u64 {
+    let mut plain = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    let at = plain
+        .find("tick=")
+        .unwrap_or_else(|| panic!("no tick= in {plain}"));
+    leading_u64(&plain[at + "tick=".len()..])
+}
+
+/// Report 6 follow-up 1's two-process leg: a remote human's wreck in a
+/// Checkpoint race costs them the same five dead seconds the host's own
+/// driver pays, and the client's own seat shows it. The host runs
+/// retail sf `checkpoint:0` with `--wreck-at` aimed at the client's
+/// wire seat (1), so the destruction takes the production arm for a
+/// remote participant on the authority; the parked client runs until
+/// its own engine has been repaired (`--until-repaired`, bounded by a
+/// wall-clock deadline) and must have seen a *dead* engine episode in
+/// between, derived from the damage byte at the destruction bound. The
+/// host's own record must show the wreck resolved as a breakdown (one
+/// repair, no instant reset) and its own driver untouched.
+///
+/// Skipped without the operator's install (`MM2_RETAIL=<dir>`). What it
+/// is not: a driven wreck (the destruction is the `--wreck-at` knob's),
+/// an impaired link, a rendered smoke plume, or a second client.
+#[test]
+fn a_remote_drivers_breakdown_crosses_two_processes() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(
+        [
+            "--event",
+            "checkpoint:0",
+            "--wreck-at",
+            "900",
+            "--wreck-seat",
+            "1",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let mut client_args = join_args(&retail, addr, "alice", 25_000);
+    client_args
+        .extend(["--parked", "--until-repaired", "1", "--deadline", "150"].map(String::from));
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+
+    let bound = Duration::from_secs(150 + 60);
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    // The host's own log names the episode it ran on the remote seat
+    // (its post-`quit` record is read after teardown, so it carries no
+    // damage counters — the C&R legs read the log the same way).
+    let destroyed = host.until_within("remote vehicle destroyed", bound);
+    let repaired = host.until_within("repaired after its breakdown", bound);
+    host.cmd("quit");
+    let host_rec = host.until_within("smoke=headless-physics", bound);
+    eprintln!("host   {destroyed}\nhost   {repaired}\nhost   {host_rec}\nclient {rec}");
+
+    // The client ended on its condition, not the frame ceiling, and its
+    // own engine went dead and came back.
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&rec, "stop"), "repaired", "{rec}");
+    let imp = imp_cells(&rec, "imp");
+    assert_eq!(
+        imp.len(),
+        3,
+        "no dead-engine episode in the client's record: {rec}"
+    );
+    assert_eq!(imp[2], 1, "exactly one dead episode on the own seat: {rec}");
+    assert!(imp[1] >= 1, "the authority's repair lifted it: {rec}");
+    assert!(
+        net_field(&rec).damage_synced > 0,
+        "the damage byte rode the snap stream: {rec}"
+    );
+
+    // The authority paid the remote seat's breakdown through the
+    // production arm: the wreck landed at the flag's tick and the
+    // repair came BREAKDOWN_SECONDS (5 s × 120 Hz) later, in place —
+    // not an instant reset, which would have logged no such episode.
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+    let (down, up) = (log_tick(&destroyed), log_tick(&repaired));
+    assert!(down >= 900, "the wreck fired before its tick: {destroyed}");
+    assert!(
+        (595..=610).contains(&(up - down)),
+        "the dead interval was {} ticks, not five seconds: {destroyed} / {repaired}",
+        up - down
+    );
+}
+
 /// One lobby of three processes on the dev world where the host and
 /// bob sit parked (the victims) and alice either rams the nearest car
 /// (`alice_rams`) or sits parked too (the control). Returns the host's

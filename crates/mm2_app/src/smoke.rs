@@ -173,6 +173,10 @@ pub struct StopWhen {
     /// Stop once this process has observed this many authority resets
     /// (`net=` `rst<n>`).
     pub resets_observed: Option<u64>,
+    /// Stop once this many engine impairment episodes have been
+    /// repaired here (`imp=` `<n>r`) — a client waiting out the
+    /// authority's breakdown and repair.
+    pub repaired: Option<u64>,
     /// Stop once a remote copy this process held is gone — a peer left
     /// the session. Armed by the first remote copy appearing.
     pub peer_left: bool,
@@ -190,6 +194,7 @@ impl StopWhen {
     pub fn is_armed(&self) -> bool {
         self.impacts_applied.is_some()
             || self.resets_observed.is_some()
+            || self.repaired.is_some()
             || self.peer_left
             || self.deadline.is_some()
     }
@@ -219,6 +224,7 @@ impl RunBudget {
 enum StopReason {
     Impacts,
     Resets,
+    Repaired,
     PeerLeft,
     Deadline,
 }
@@ -228,6 +234,7 @@ impl StopReason {
         match self {
             Self::Impacts => "impacts",
             Self::Resets => "resets",
+            Self::Repaired => "repaired",
             Self::PeerLeft => "peer-left",
             Self::Deadline => "deadline",
         }
@@ -262,6 +269,13 @@ impl StopWatch {
             && r.resets >= want
         {
             return Some(StopReason::Resets);
+        }
+        if let Some(want) = self.stop.repaired
+            && world
+                .get_resource::<damage::DamageReport>()
+                .is_some_and(|d| d.restored >= want)
+        {
+            return Some(StopReason::Repaired);
         }
         if self.stop.peer_left
             && let Some(r) = report
@@ -495,7 +509,7 @@ fn run_headless(
         // begins; the record derives it at the end and reports
         // "lobby" when none ever did.
         RunSource::Lobby(link) => ("lobby".to_string(), link.dev.clone()),
-        RunSource::Host(link) => ("lobby".to_string(), link.config().dev.clone()),
+        RunSource::Host(link) => ("lobby".to_string(), link.dev.clone()),
     };
     let record = |world: &str, status: SmokeStatus, detail: String| SmokeRecord {
         kind: KIND_HEADLESS_PHYSICS,
@@ -626,7 +640,7 @@ fn run_headless(
                 contracts::collect_impacts,
                 // F05-B.1: impact→damage apply + disabled outcome — the
                 // headless record's `dmg=` field reads the report.
-                damage::apply_impact_damage,
+                (damage::apply_impact_damage, damage::dev_wreck_at).chain(),
                 // F05-B.9: texel splats off the same stream — the
                 // headless record's `txl=` field reads the report.
                 crate::texel_fx::apply_texel_damage,
@@ -2101,7 +2115,10 @@ fn run_headless(
     let imp_detail = world_ecs
         .get_resource::<damage::DamageReport>()
         .filter(|r| r.impaired + r.restored > 0)
-        .map(|r| format!(" imp={}i/{}r", r.impaired, r.restored))
+        .map(|r| match r.dead {
+            0 => format!(" imp={}i/{}r", r.impaired, r.restored),
+            dead => format!(" imp={}i/{}r/{}d", r.impaired, r.restored, dead),
+        })
         .unwrap_or_default();
     // F05-B.8 spark evidence: bursts/emitted/expired counts. Same
     // presence rule — an impact-free run stays bit-identical.
@@ -2748,6 +2765,26 @@ mod tests {
         );
         assert_eq!(watch.fired(&seen(0)), None);
         assert_eq!(watch.fired(&seen(1)), Some(StopReason::Resets));
+    }
+
+    #[test]
+    fn a_stop_on_repairs_fires_once_an_impairment_was_lifted() {
+        let stop = StopWhen {
+            repaired: Some(1),
+            ..default()
+        };
+        assert!(stop.is_armed());
+        let mut watch = StopWatch::new(stop);
+        let mut world = World::new();
+        world.insert_resource(damage::DamageReport {
+            impaired: 1,
+            dead: 1,
+            ..default()
+        });
+        // Dead but not yet repaired: the breakdown is still running.
+        assert_eq!(watch.fired(&world), None);
+        world.resource_mut::<damage::DamageReport>().restored = 1;
+        assert_eq!(watch.fired(&world), Some(StopReason::Repaired));
     }
 
     #[test]

@@ -613,6 +613,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("bot-route"))
     } else if dev.reset_at.is_some() {
         Err(Ineligible::DevOverride("reset-at"))
+    } else if dev.wreck_at.is_some() {
+        Err(Ineligible::DevOverride("wreck-at"))
     } else {
         Ok(())
     }

@@ -50,8 +50,11 @@ read it before choosing within F25-B.**
 **Iteration 1 of the new run landed report 6 follow-up 1's policy and
 in-process legs (remote humans pay the Blitz/Checkpoint breakdown; a
 predicted client derives it from the damage byte at the bound; byte 255
-now means destroyed only) — implemented, candidate; its two-process
-leg and follow-ups 2–3 remain open (see `LAST_ITERATION.md`).**
+now means destroyed only) — implemented, candidate; iteration 11 added
+its two-process leg (`--wreck-at`/`--wreck-seat`, `--until-repaired`,
+`net_drive::a_remote_drivers_breakdown_crosses_two_processes`, retail
+london checkpoint, 3/3) — implemented, candidate; follow-ups 2–3 remain
+open (see `LAST_ITERATION.md`).**
 
 **Next selected slice: the F25-B remainder (the impact-event leg
 landed this iteration — protocol v10 `Snap.impacts` replicates the

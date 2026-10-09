@@ -451,6 +451,13 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
         Err(Ineligible::DevOverride("reset-at"))
     );
     config.dev.reset_at = None;
+    // A dev-scheduled wreck destroys a car the driver did not.
+    config.dev.wreck_at = Some(600);
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("wreck-at"))
+    );
+    config.dev.wreck_at = None;
     // `--cam-cycle-at` is render-only like `--cockpit`/`--far`: it
     // re-aims a camera and cannot change the run's outcome.
     config.dev.cam_cycle_at = Some(600);

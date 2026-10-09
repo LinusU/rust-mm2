@@ -1708,6 +1708,35 @@ wire actually moved rather than an in-process mailbox's contents.
   (the reset returns well inside `DEV_RESET_RETRY`) held under CPU
   contention too. Not covered: other recipes, a trailer rig reset,
   reset-while-moving divergence; loopback, dev world.
+- **A remote driver's breakdown across processes (report 6 follow-up
+  1, new-run iteration 11).** The policy and its in-process legs
+  landed earlier (remote humans pay the Blitz/Checkpoint breakdown;
+  a predicted client derives the dead engine from damage byte 255).
+  The process leg needed a race session and a way to destroy a car
+  without driving into a wall: `--wreck-at <tick> [--wreck-seat <id>]`
+  (a quarantined `DevOverrides` pair, record-ineligible) destroys the
+  local car, or the car on a wire seat, through the production damage
+  pipeline on the authority (`damage::dev_wreck_at` writes the
+  `DamageEvent` an impact would, so `resolve_disabled` takes the
+  mode's real arm); inert on a predicted client. A hosting launch's
+  own `--wreck-at`/`--wreck-seat` are now split off the advertised config
+  (`HostLink::dev`, stamped back at `Started`) instead of refusing to
+  host — the wire still never carries them, and every other override
+  (a physics pin like `--traction`) still refuses to host. `--until-repaired <n>`
+  ends a client on its condition (`stop=repaired`), and the record's
+  `imp=` cell gains a `/<n>d` count of dead-engine episodes.
+  `net_drive::a_remote_drivers_breakdown_crosses_two_processes`
+  (`MM2_RETAIL`-gated; retail london `checkpoint:0`, host `--wreck-at
+  900 --wreck-seat 1`, parked client): the client's record reads
+  `stop=repaired`, `imp=1i/1r/1d` (one dead episode on its own seat,
+  lifted by the authority's repair), `dsyn` > 0 and (observed, not asserted) `ptx` emitting
+  smoke while down; the host's log shows `remote vehicle destroyed` at
+  tick 900 and `repaired after its breakdown` at tick 1499 — 599 ticks,
+  the 5 s breakdown (asserted 595–610), not an instant reset. 3/3
+  passes (~7.5 s each). Not covered: the host driver's own breakdown
+  as seen by a client copy (the copy's smoke is the same damage byte,
+  unasserted), a second client watching the copy, an impaired link, a
+  driven wreck (the destruction is the knob's), nothing rendered.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded

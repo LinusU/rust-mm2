@@ -91,7 +91,7 @@ fn damage_app(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
             FixedLast,
             (
                 contracts::collect_impacts,
-                damage::apply_impact_damage,
+                (damage::apply_impact_damage, damage::dev_wreck_at).chain(),
                 damage::resolve_disabled,
                 damage::resolve_breakdown,
                 damage::sync_impairment,
@@ -971,4 +971,115 @@ fn a_roof_drop_damages_through_the_real_pipeline() {
         "the authored floor was crossed: {}",
         damage.total()
     );
+}
+
+/// A hosted Blitz with a second human's car on wire seat 1, and the
+/// host's own car (seat 0) — the shape `--wreck-seat` picks from.
+fn hosted_blitz_with_seat_one(wreck_seat: Option<u16>) -> (App, Entity, Entity) {
+    let mut hosted = event_config(EventTableKind::Blitz);
+    hosted.authority = SessionAuthority::Host;
+    hosted.dev.wreck_at = Some(2);
+    hosted.dev.wreck_seat = wreck_seat;
+    let (mut app, car, _object) = damage_app(hosted, Vec3::new(0.0, 1.2, 0.0));
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_app::netdrive::NetPlayer(0));
+    let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let remote_pos = Vec3::new(10.0, 1.2, 5.0);
+    let remote = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(remote_object),
+            Player {
+                id: remote_player,
+                control: PlayerControl::Remote,
+            },
+            mm2_app::netdrive::NetPlayer(1),
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleDamage::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(remote_pos),
+            Transform::from_translation(remote_pos),
+        ))
+        .id();
+    (app, car, remote)
+}
+
+#[test]
+fn wreck_at_destroys_the_named_remote_seat_and_it_breaks_down() {
+    let (mut app, car, remote) = hosted_blitz_with_seat_one(Some(1));
+    // Settle the remote car's baseline like `damage_app` does for the
+    // local one, then let the clock reach the flag's tick.
+    for _ in 0..4 {
+        app.update();
+    }
+    assert!(
+        app.world().get::<VehicleBreakdown>(remote).is_some(),
+        "the named seat broke down through the production outcome"
+    );
+    assert_eq!(
+        app.world().get::<EngineImpairment>(remote).map(|i| i.0),
+        Some(0.0)
+    );
+    assert!(
+        app.world().get::<VehicleBreakdown>(car).is_none(),
+        "the host's own car was not the target"
+    );
+    assert_eq!(report(&app).dead, 1, "one dead-engine episode");
+
+    // The repair comes five seconds later and the flag does not fire
+    // again: one wreck, one repair.
+    for _ in 0..360 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_none());
+    assert!(app.world().get::<EngineImpairment>(remote).is_none());
+    assert_eq!(report(&app).dead, 1);
+    assert_eq!(report(&app).restored, 1);
+    assert_eq!(report(&app).recovered, 1);
+}
+
+#[test]
+fn wreck_at_without_a_seat_wrecks_the_local_car() {
+    let (mut app, car, remote) = hosted_blitz_with_seat_one(None);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(car).is_some());
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_none());
+}
+
+#[test]
+fn wreck_at_waits_for_a_seat_that_has_not_joined() {
+    let (mut app, car, remote) = hosted_blitz_with_seat_one(Some(7));
+    for _ in 0..30 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(car).is_none());
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_none());
+    assert_eq!(report(&app).dead, 0);
+    // The seat arriving later is wrecked then, not skipped.
+    app.world_mut()
+        .entity_mut(remote)
+        .insert(mm2_app::netdrive::NetPlayer(7));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_some());
+}
+
+#[test]
+fn wreck_at_is_inert_on_a_predicted_client() {
+    let mut joined = event_config(EventTableKind::Blitz);
+    joined.authority = SessionAuthority::Remote;
+    joined.dev.wreck_at = Some(2);
+    let (mut app, car, _object) = damage_app(joined, Vec3::new(0.0, 1.2, 0.0));
+    for _ in 0..30 {
+        app.update();
+    }
+    assert_eq!(app.world().get::<VehicleDamage>(car).unwrap().total(), 0.0);
+    assert_eq!(report(&app).applied, 0);
 }

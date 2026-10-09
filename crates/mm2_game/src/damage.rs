@@ -407,6 +407,16 @@ impl VehicleDamage {
         self.state.apply(severity, &self.spec)
     }
 
+    /// Destroy the vehicle outright, bypassing the impact watermark —
+    /// the `--wreck-at` evidence knob's one write (never an impact: no
+    /// [`ImpactId`] exists for it, and the watermark stays where the
+    /// real stream left it so later real hits still apply).
+    pub fn wreck(&mut self) -> DamageVerdict {
+        let lethal =
+            self.spec.max_damage.max(0.0) * 2.0 + self.spec.impact_threshold.max(0.0) + 1.0;
+        self.state.apply(lethal, &self.spec)
+    }
+
     /// Advance the authored regeneration channel (`regenerate_rate`
     /// per second). Whether regeneration runs at all is mode policy —
     /// DMG-4 heals only non-carriers in C&R.

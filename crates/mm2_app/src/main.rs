@@ -327,6 +327,23 @@ struct Cli {
     #[arg(long, value_name = "ticks")]
     reset_at: Option<u64>,
 
+    /// Destroy a car through the damage pipeline once the session
+    /// clock reaches `ticks` fixed steps: the local car, or the one
+    /// `--wreck-seat` names. It takes the mode's real disabled outcome
+    /// (a Blitz/Checkpoint breakdown, a Cruise reset, ...), so a
+    /// multi-process leg can watch a remote human's wreck without
+    /// driving into a wall. Authority only (inert on a `--join`
+    /// client; the host decides damage); the run is record-ineligible.
+    /// One-shot.
+    #[arg(long, value_name = "ticks")]
+    wreck_at: Option<u64>,
+
+    /// With `--wreck-at`: wreck the car on this wire seat (the host is
+    /// 0, joined clients take roster ids from 1) instead of the local
+    /// one.
+    #[arg(long, value_name = "id", requires = "wreck_at")]
+    wreck_seat: Option<u16>,
+
     /// Advance the documented `C` view chain once when the session
     /// clock reaches `ticks` fixed steps — how a
     /// `--frames`/`--screenshot` capture inspects a mid-drive camera
@@ -380,6 +397,13 @@ struct Cli {
     /// `stop=resets`.
     #[arg(long, value_name = "n", requires = "headless")]
     until_resets: Option<u64>,
+
+    /// End a `--headless` run once `n` engine impairment episodes on
+    /// this process have been repaired (the record's `imp=` `<n>r`: on a
+    /// predicted client, the authority repairing the wire's damage
+    /// byte). The record prints `stop=repaired`.
+    #[arg(long, value_name = "n", requires = "headless")]
+    until_repaired: Option<u64>,
 
     /// End a `--headless` run once a remote copy it held is gone — a
     /// peer left the session. The record prints `stop=peer-left`.
@@ -1166,6 +1190,8 @@ fn main() {
             restart: cli.restart,
             restart_at: cli.restart_at,
             reset_at: cli.reset_at,
+            wreck_at: cli.wreck_at,
+            wreck_seat: cli.wreck_seat,
             bot_speed: cli.bot_speed,
             bot_route: cli.bot_route.clone(),
             no_pvs: cli.no_pvs,
@@ -1366,6 +1392,7 @@ fn main() {
             stop: smoke::StopWhen {
                 impacts_applied: cli.until_impacts,
                 resets_observed: cli.until_resets,
+                repaired: cli.until_repaired,
                 peer_left: cli.until_peer_left,
                 peer_left_after_impacts: cli.with_impacts,
                 deadline: cli.deadline.map(Duration::from_secs),
@@ -1387,7 +1414,7 @@ fn main() {
                     "{}",
                     record(
                         smoke::SmokeStatus::Fail,
-                        "--until-impacts/--until-resets/--until-peer-left/--deadline need --join or --host: \
+                        "--until-impacts/--until-resets/--until-repaired/--until-peer-left/--deadline need --join or --host: \
                          a single-process run only counts --frames"
                             .into(),
                     )
@@ -1664,7 +1691,9 @@ fn main() {
             // F05-B.1: damage accumulates off the deduplicated impact
             // stream (apply → outcome) — independent consumers of the
             // solver's edge stream like the bangers below.
-            damage::apply_impact_damage,
+            // `--wreck-at` follows the apply so its destruction reaches
+            // the outcome in the same pass.
+            (damage::apply_impact_damage, damage::dev_wreck_at).chain(),
             // F05-B.9: the same deduplicated stream feeds each rig's
             // `ImpactsTable`→`ApplyDamage` — the skin splats the tick
             // the hit lands — the headless record's `txl=` field.

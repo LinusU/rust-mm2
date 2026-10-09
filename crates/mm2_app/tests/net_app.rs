@@ -1021,6 +1021,43 @@ fn a_hosted_start_begins_the_session_for_everyone() {
     assert!(app.should_exit().is_none());
 }
 
+/// A hosting launch's authority-local dev overrides (`--wreck-at`,
+/// `--wreck-seat`) stay local: the lobby opens and advertises the clean
+/// config (they never ride the wire), and the host seat's session
+/// carries them once `Start` lands. Any other override still refuses to
+/// host — a physics pin cannot be agreed by peers.
+#[test]
+fn a_hosts_dev_overrides_stay_local_and_reach_its_own_session() {
+    let install = tempfile::tempdir().unwrap();
+    let mut config = dev_cruise();
+    config.dev.wreck_at = Some(900);
+    config.dev.wreck_seat = Some(1);
+    let (link, vfs, fp) = host_link(install.path(), &config);
+    assert_eq!(
+        link.dev, config.dev,
+        "the link keeps the launch's overrides"
+    );
+    assert_eq!(
+        link.config().dev,
+        mm2_game::DevOverrides::default(),
+        "the advertised config carries none"
+    );
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    until_wire(&mut peer, |m| matches!(m, Message::Start { .. }));
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    let session = app.world().resource::<Session>();
+    assert_eq!(session.config().unwrap().dev, config.dev);
+}
+
 /// `start` against an unready peer is the lobby gate's verdict: a
 /// `StartRefused` surfaces as a lobby notice — nothing mints, nothing
 /// begins, and the lobby keeps running.

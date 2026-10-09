@@ -1264,6 +1264,21 @@ pub fn describe_host_event(event: &HostEvent) -> String {
     }
 }
 
+/// Split the overrides an authority may keep to itself off `dev`,
+/// leaving the rest for [`advertise`] to refuse. Only the authority's
+/// own replicated state qualifies: `--wreck-at` destroys a car the
+/// host simulates and the damage byte carries the result to every
+/// peer, so nothing a client predicts depends on it. A physics pin
+/// (`--traction`, `--spawn`, ...) is the opposite — peers could never
+/// agree on it — and stays refused.
+fn host_local_dev(dev: &mut DevOverrides) -> DevOverrides {
+    DevOverrides {
+        wreck_at: dev.wreck_at.take(),
+        wreck_seat: dev.wreck_seat.take(),
+        ..DevOverrides::default()
+    }
+}
+
 /// The app's handle on a hosted lobby. Dropping it is the operator's
 /// `quit` — `Drop` runs [`leave`](Self::leave), which cancels a live
 /// session before the sockets close.
@@ -1278,7 +1293,14 @@ pub struct HostLink {
     commands_tx: Sender<HostCommand>,
     /// The session this lobby advertises and the host seat plays —
     /// stamped `Host` authority at `open`; `Started` begins a clone.
+    /// Carries no developer overrides — those never ride the wire.
     config: SessionConfig,
+    /// The host-local dev overrides this launch may keep
+    /// ([`host_local_dev`]: `--wreck-at`/`--wreck-seat`), split off the
+    /// advertised config at `open` and stamped back onto the host
+    /// seat's own session at `Started`. Peers never see them; every
+    /// other override still refuses to host (see [`advertise`]).
+    pub dev: DevOverrides,
     /// What was advertised — `lobby.advertised`'s seed and the
     /// `listening=` record's summary.
     ad: SessionAdvertisement,
@@ -1320,6 +1342,7 @@ impl HostLink {
     ) -> Result<Self, HostOpenError> {
         let mut config = config.clone();
         config.authority = SessionAuthority::Host;
+        let dev = host_local_dev(&mut config.dev);
         let ad = advertise(&config)?;
         let late_join = late_join_policy(&config.mode);
         let host = Host::listen(
@@ -1342,6 +1365,7 @@ impl HostLink {
             commands_rx: Mutex::new(commands_rx),
             commands_tx,
             config,
+            dev,
             ad,
             late_join,
             driver,
@@ -1712,14 +1736,16 @@ fn host_started(
     if link.leaving {
         return;
     }
+    let mut config = link.config.clone();
+    config.dev = link.dev.clone();
     if *session.phase() == SessionPhase::Menu {
-        if let Err(e) = begin_wired(session, control, link.config.clone(), generation) {
+        if let Err(e) = begin_wired(session, control, config, generation) {
             lobby.notice = Some(format!("hosted session could not begin: {e}"));
             link.cancel_sent = true;
             let _ = link.ctl.cancel();
         }
     } else {
-        lobby.pending_start = Some((generation, link.config.clone()));
+        lobby.pending_start = Some((generation, config));
         control.quit = true;
     }
 }
