@@ -1631,28 +1631,28 @@ fn log_tick(line: &str) -> u64 {
     leading_u64(&plain[at + "tick=".len()..])
 }
 
-/// Report 6 follow-up 1's two-process leg: a remote human's wreck in a
-/// Checkpoint race costs them the same five dead seconds the host's own
-/// driver pays, and the client's own seat shows it. The host runs
-/// retail sf `checkpoint:0` with `--wreck-at` aimed at the client's
-/// wire seat (1), so the destruction takes the production arm for a
-/// remote participant on the authority; the parked client runs until
-/// its own engine has been repaired (`--until-repaired`, bounded by a
-/// wall-clock deadline) and must have seen a *dead* engine episode in
-/// between, derived from the damage byte at the destruction bound. The
-/// host's own record must show the wreck resolved as a breakdown (one
-/// repair, no instant reset) and its own driver untouched.
-///
-/// Skipped without the operator's install (`MM2_RETAIL=<dir>`). What it
-/// is not: a driven wreck (the destruction is the `--wreck-at` knob's),
-/// an impaired link, a rendered smoke plume, or a second client.
-#[test]
-fn a_remote_drivers_breakdown_crosses_two_processes() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
-        eprintln!("skipped: MM2_RETAIL is not set");
-        return;
-    };
-    let mut host_args = host_args(&retail, 40_000);
+/// What a breakdown run leaves to assert on: the client's record, the
+/// host's two log lines naming the episode it ran on the remote seat
+/// (its post-`quit` record carries no damage counters, so the C&R legs
+/// read the log the same way), the host's record, and — through a relay
+/// — the proxy's final up/down counters.
+struct BreakdownRun {
+    client: String,
+    destroyed: String,
+    repaired: String,
+    host: String,
+    link: Option<(LinkStats, LinkStats)>,
+}
+
+/// One breakdown run: the host runs retail sf `checkpoint:0` with
+/// `--wreck-at` aimed at the client's wire seat (1), so the destruction
+/// takes the production arm for a remote participant on the authority;
+/// the parked client runs until its own engine has been repaired
+/// (`--until-repaired`, bounded by a wall-clock deadline). With
+/// `impair` the client reaches the host through a seeded
+/// [`ImpairProxy`] armed on both directions once `Start` crossed clean.
+fn run_breakdown(retail: &std::path::Path, impair: Option<Impair>) -> BreakdownRun {
+    let mut host_args = host_args(retail, 40_000);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(
         [
@@ -1668,29 +1668,52 @@ fn a_remote_drivers_breakdown_crosses_two_processes() {
     );
     let mut host = Proc::spawn(MM2_EXE, &host_args);
     let addr = listening_addr(&host);
-    let mut client_args = join_args(&retail, addr, "alice", 25_000);
+    let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xB4EA).unwrap());
+    let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
+    let mut client_args = join_args(retail, join_addr, "alice", 25_000);
     client_args
         .extend(["--parked", "--until-repaired", "1", "--deadline", "150"].map(String::from));
     let client = Proc::spawn(MM2_EXE, &client_args);
     start_when_ready(&mut host, 1);
+    if let (Some(proxy), Some(impair)) = (&proxy, impair) {
+        // `Start` rides Down: let the clean lane deliver it first.
+        std::thread::sleep(Duration::from_millis(400));
+        proxy.set(LinkDir::Up, impair);
+        proxy.set(LinkDir::Down, impair);
+    }
 
     let bound = Duration::from_secs(150 + 60);
     let rec = client.until_within("smoke=headless-physics", bound);
     assert!(client.wait().success(), "the client did not exit cleanly");
-    // The host's own log names the episode it ran on the remote seat
-    // (its post-`quit` record is read after teardown, so it carries no
-    // damage counters — the C&R legs read the log the same way).
     let destroyed = host.until_within("remote vehicle destroyed", bound);
     let repaired = host.until_within("repaired after its breakdown", bound);
     host.cmd("quit");
     let host_rec = host.until_within("smoke=headless-physics", bound);
     eprintln!("host   {destroyed}\nhost   {repaired}\nhost   {host_rec}\nclient {rec}");
+    let link = proxy
+        .as_ref()
+        .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));
+    BreakdownRun {
+        client: rec,
+        destroyed,
+        repaired,
+        host: host_rec,
+        link,
+    }
+}
 
-    // The client ended on its condition, not the frame ceiling, and its
-    // own engine went dead and came back.
-    assert_eq!(field(&rec, "status"), "pass", "{rec}");
-    assert_eq!(field(&rec, "stop"), "repaired", "{rec}");
-    let imp = imp_cells(&rec, "imp");
+/// What a remote driver's breakdown must show whatever the link: the
+/// client ended on its condition, not the frame ceiling, its own engine
+/// went dead exactly once and came back, and the authority paid the
+/// remote seat's breakdown through the production arm — the wreck
+/// landed at the flag's tick and the repair came `BREAKDOWN_SECONDS`
+/// (5 s × 120 Hz) later, in place; an instant reset would have logged
+/// no such episode.
+fn assert_breakdown(run: &BreakdownRun) {
+    let (rec, host_rec) = (&run.client, &run.host);
+    assert_eq!(field(rec, "status"), "pass", "{rec}");
+    assert_eq!(field(rec, "stop"), "repaired", "{rec}");
+    let imp = imp_cells(rec, "imp");
     assert_eq!(
         imp.len(),
         3,
@@ -1699,22 +1722,83 @@ fn a_remote_drivers_breakdown_crosses_two_processes() {
     assert_eq!(imp[2], 1, "exactly one dead episode on the own seat: {rec}");
     assert!(imp[1] >= 1, "the authority's repair lifted it: {rec}");
     assert!(
-        net_field(&rec).damage_synced > 0,
+        net_field(rec).damage_synced > 0,
         "the damage byte rode the snap stream: {rec}"
     );
 
-    // The authority paid the remote seat's breakdown through the
-    // production arm: the wreck landed at the flag's tick and the
-    // repair came BREAKDOWN_SECONDS (5 s × 120 Hz) later, in place —
-    // not an instant reset, which would have logged no such episode.
-    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
-    let (down, up) = (log_tick(&destroyed), log_tick(&repaired));
-    assert!(down >= 900, "the wreck fired before its tick: {destroyed}");
+    assert_eq!(field(host_rec, "status"), "pass", "{host_rec}");
+    let (down, up) = (log_tick(&run.destroyed), log_tick(&run.repaired));
+    assert!(
+        down >= 900,
+        "the wreck fired before its tick: {}",
+        run.destroyed
+    );
     assert!(
         (595..=610).contains(&(up - down)),
-        "the dead interval was {} ticks, not five seconds: {destroyed} / {repaired}",
-        up - down
+        "the dead interval was {} ticks, not five seconds: {} / {}",
+        up - down,
+        run.destroyed,
+        run.repaired
     );
+}
+
+/// Report 6 follow-up 1's two-process leg: a remote human's wreck in a
+/// Checkpoint race costs them the same five dead seconds the host's own
+/// driver pays, and the client's own seat shows it — a *dead* engine
+/// episode in between, derived from the damage byte at the destruction
+/// bound. The host's own record must show the wreck resolved as a
+/// breakdown (one repair, no instant reset).
+///
+/// Skipped without the operator's install (`MM2_RETAIL=<dir>`). What it
+/// is not: a driven wreck (the destruction is the `--wreck-at` knob's),
+/// a rendered smoke plume, or a second client.
+#[test]
+fn a_remote_drivers_breakdown_crosses_two_processes() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    assert_breakdown(&run_breakdown(&retail, None));
+}
+
+/// The same breakdown on a bad link (F25-B follow-up 1 × AC03): the
+/// client reaches the host through the matrix's lossy recipe (30 %
+/// loss, duplication, reordering, latency, both directions) from just
+/// after `Start`. The destruction is the authority's and the damage
+/// byte rides every snap, so what must hold is the clean leg's
+/// outcome: the authority still pays exactly five dead seconds, and
+/// the client — whose snaps arrive late, twice, out of order or not at
+/// all — still sees one dead episode and its repair, never a second
+/// one from a stale pre-repair frame.
+///
+/// Skipped without `MM2_RETAIL`. Loopback scope; the destruction is the
+/// knob's and nothing is rendered.
+#[test]
+fn a_remote_drivers_breakdown_survives_an_impaired_link() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let run = run_breakdown(&retail, Some(recipe));
+    // The recipe really bit while the breakdown played out.
+    let (up, down) = run
+        .link
+        .expect("the impaired run reports its proxy counters");
+    for (dir, stats) in [("up", up), ("down", down)] {
+        assert!(stats.frames_in > 0, "{dir} carried nothing: {stats:?}");
+        assert!(
+            stats.dropped + stats.duplicated + stats.reordered > 0,
+            "{dir} saw no impairment: {stats:?}"
+        );
+    }
+    assert_breakdown(&run);
 }
 
 /// One lobby of three processes on the dev world where the host and

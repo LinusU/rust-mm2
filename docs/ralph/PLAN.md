@@ -53,8 +53,11 @@ predicted client derives it from the damage byte at the bound; byte 255
 now means destroyed only) — implemented, candidate; iteration 11 added
 its two-process leg (`--wreck-at`/`--wreck-seat`, `--until-repaired`,
 `net_drive::a_remote_drivers_breakdown_crosses_two_processes`, retail
-london checkpoint, 3/3) — implemented, candidate; follow-ups 2–3 remain
-open (see `LAST_ITERATION.md`).**
+london checkpoint, 3/3) — implemented, candidate; iteration 12 reran it
+on the impaired recipe (`a_remote_drivers_breakdown_survives_an_impaired_link`,
+3/3) — implemented, candidate; follow-up 2 is landed (`cd7ad71`,
+DSN-11) and follow-up 3 (F26-A world actors) remains open (see
+`LAST_ITERATION.md`).**
 
 **Next selected slice: the F25-B remainder (the impact-event leg
 landed this iteration — protocol v10 `Snap.impacts` replicates the

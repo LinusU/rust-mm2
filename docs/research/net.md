@@ -1735,8 +1735,16 @@ wire actually moved rather than an in-process mailbox's contents.
   the 5 s breakdown (asserted 595–610), not an instant reset. 3/3
   passes (~7.5 s each). Not covered: the host driver's own breakdown
   as seen by a client copy (the copy's smoke is the same damage byte,
-  unasserted), a second client watching the copy, an impaired link, a
-  driven wreck (the destruction is the knob's), nothing rendered.
+  unasserted), a second client watching the copy, a driven wreck (the
+  destruction is the knob's), nothing rendered.
+  `a_remote_drivers_breakdown_survives_an_impaired_link` reruns the same
+  run through a seeded `ImpairProxy` (30 % loss, 10 % duplication, 10 %
+  reorder, 40 ± 30 ms, both directions, armed 400 ms after `Start`;
+  both directions assert the recipe bit). Same assertions: the host's
+  interval is still 599 ticks and the client still records exactly one
+  dead episode (`imp=1i/1r/1d`) — a stale or duplicated pre-repair snap
+  never opened a second one (the push watermark drops it). 3/3 passes
+  (~4 s each), loopback only.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
