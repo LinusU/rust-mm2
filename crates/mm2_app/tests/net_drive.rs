@@ -29,6 +29,13 @@ use support::Proc;
 
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 
+/// The host's `--frames` cap, only a ceiling: every leg ends the host
+/// with `quit`. A host that reaches its cap stops draining lobby events
+/// (no further `event=left`), and a slow link or loaded runner makes
+/// the clients take longer while the host keeps counting frames, so the
+/// cap must sit well past any bounded wait rather than race it.
+const HOST_FRAME_CEILING: u32 = 500_000;
+
 /// The in-app host's flags: a dev-world cruise lobby, headless, playing
 /// seat 0 once `start` fires. `frames` must outlast every client's
 /// budget — a host that exits first drops the sockets and the clients'
@@ -358,7 +365,7 @@ fn run_reset_pair(
     install: &std::path::Path,
     impair: Option<Impair>,
 ) -> (String, String, String, Option<(LinkStats, LinkStats)>) {
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install, 9000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install, HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
     let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC04).unwrap());
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
@@ -1074,7 +1081,7 @@ fn run_matrix_cell(
     install: &std::path::Path,
     cell: &MatrixCell,
 ) -> (LinkStats, LinkStats, NetField, NetField) {
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install, 9000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install, HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
     let proxy = ImpairProxy::loopback_seeded(addr, 0xAC03).unwrap();
 
@@ -2323,7 +2330,7 @@ fn a_remote_drivers_breakdown_survives_an_impaired_link() {
 /// (`alice_rams`) or sits parked too (the control). Returns the host's
 /// post-`quit` `net=` field and the two clients' mid-session records.
 fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField, String, String) {
-    let mut host_flags = host_args(install, 9000);
+    let mut host_flags = host_args(install, HOST_FRAME_CEILING);
     host_flags.push("--parked".into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
@@ -2483,7 +2490,7 @@ fn run_shove_trio(
     // Each lifecycle step is waited on for an observed line, bounded and
     // named in the failure (a loaded runner is slow, not wrong).
     const STEP: Duration = Duration::from_secs(60);
-    let mut host_flags = host_args(install, 9000);
+    let mut host_flags = host_args(install, HOST_FRAME_CEILING);
     host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
