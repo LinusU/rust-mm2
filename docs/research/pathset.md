@@ -250,3 +250,57 @@ files (the events are not loadable yet, F21), `circuitx`/`slalom`/
 `*_test`/`ramp` dev files, and `city/phys/`, `bak/` dev sets. Which
 pathsets the original loads per session and whether the stamping
 micro-rules match its output remain unverified (UNK-12/UNK-20).
+
+## Flagged-stamp visual review (operator report 2 item 2, closed 2026-10-09)
+
+The F03-C.1 placement audit flagged a small residual set for a human
+look: 2 `sp_tree1_s` at divided-road median tapers (london rooms
+937/952), 2 `sp_stackboxes_4_l` in a London `RoadWithSidewalks` band
+(room 570), and 5 crosswalk stamps. WLD-33 (strip stamper recovered
+from `Midtown2.exe`) and F03-C.2/C.3 changed placement since, so the
+audit was re-run on retail and every residual member captured with
+`--cam … --frames 90 --screenshot`. All classify **authored**; no
+stamp-rule defect was found and no rule changed.
+
+- **Divided-road trees — authored median planting.** The original
+  in-road stamps at rooms 937/952 no longer appear (the WLD-33
+  stamper no longer caps a strip with its final vertex). The residual
+  tree findings are swept *footprint* hits only — london `props.pathset`
+  paths 11/46/51 (7 stamps, rooms 880/935/953) and sf path 10 (4
+  stamps, room 740), all kind-2 `LineStrip` rows at 15–16 m spacing,
+  stamped at the authored positions. Captures (`--city {london,sf}`,
+  e.g. `--cam=601,14,-296,0,-20` room 935, `--cam=269,16,-598,0,-22`
+  room 880, `--cam=-300,22,-145,0,-20` sf room 740): the trunks stand
+  on the grass `DividedRoad` median; only the canopies cross the
+  carriageway edge (dy +1.6…+2.5 m is the canopy-height band, depth
+  0.4…0.8 m). Street trees over a median, not trees in the road.
+- **London `sp_stackboxes_4_l` room 570 — authored market-lane
+  dressing.** Still listed as in-road (depth 1.2/1.8 m), but
+  `props.pathset` paths 33 and 71 are kind-0 rows — one prop per
+  authored vertex, so the positions are verbatim authored points and
+  no expansion policy can move them; path 71 deliberately carries two
+  vertices ~0.6 m apart ((1088.80, 4.85, −533.84) and (1089.15, 4.85,
+  −534.35)) to double the pile. Capture (`--cam=1097,6,-527,49,-10`):
+  crate stacks mid-lane in a narrow cobbled market lane with raised
+  stone footways and bollards — delivery crates in a service lane,
+  plausible authored dressing exactly where retail stamps them. The
+  other `sp_stackboxes_4_l` in-road stamps (9 of 11) land on
+  `RoadNoSidewalks` pedestrianised streets (the class operator report
+  2 already settled as authored); the two remaining findings are a
+  `RoadFan` plaza stamp and a kerb-edge `RoadWithSidewalks` stamp
+  whose body reaches 0.51 m past the line.
+- **Crosswalk stamps — resolved by WLD-33; one ramp-gore overhang.**
+  In-road `Crosswalk` stamps are now **0 in both cities** (the
+  recovered stamper dropped the row-end double stamp that produced
+  the original 5). The only crosswalk-region finding left anywhere is
+  a sf swept-footprint hit — `props.pathset` path 92:3 `sp_wrongwayfw`
+  at (−902.68, 41.33, 1435.54), room 965, depth 0.20 m, dy +1.97 m.
+  Capture (`--city sf --cam=-898,43,1444,20,-6`): a wrong-way sign on
+  a freeway-ramp gore whose board overhangs the zebra edge by 20 cm
+  at sign height. Authored.
+
+Evidence level: rendered capture on retail content (captures kept
+outside the repo under the workspace `target/`; the `--cam` values
+above reproduce each one). The audit keeps listing these stamps —
+they are measured findings for review, and this review settles their
+classification; nothing was deleted by position.
