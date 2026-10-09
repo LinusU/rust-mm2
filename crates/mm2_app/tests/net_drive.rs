@@ -2438,7 +2438,14 @@ fn run_shove_trio(
     let addr = listening_addr(&host);
     let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC02).unwrap());
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
-    let mut alice_flags = join_args(install, join_addr, "alice", alice_frames);
+    // Bob's frames set when the record is taken; alice's are only a
+    // ceiling well past them, since the 90 s deadline is what bounds her.
+    let mut alice_flags = join_args(
+        install,
+        join_addr,
+        "alice",
+        alice_frames.max(bob_frames * 4),
+    );
     alice_flags.push("--parked".into());
     // Alice's record must be taken while bob is still a seat she holds
     // and after he has printed: end her run when bob leaves (her frame
