@@ -386,3 +386,45 @@ fn malformed_table_is_a_table_error_not_a_panic() {
     assert!(race_table.error.is_some());
     assert_eq!(cat.events.len(), 1); // the blitz row still catalogs
 }
+
+/// Retail (F16-AC05): every authored reward row of both stock cities
+/// becomes a rule — none is dropped into a diagnostic — and the rules
+/// include the Crash Course links; every granted vehicle/paint lands
+/// on a garage row (`MM2_RETAIL=<dir>`).
+#[test]
+fn retail_every_authored_reward_row_becomes_a_rule() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+
+    let mut crash_rules = 0;
+    for city in ["sf", "london"] {
+        let cat = EventCatalog::scan(&vfs, city);
+        let table = mm2_content::reward_table(&cat);
+        let authored: usize =
+            cat.events.iter().map(|e| e.rewards.len()).sum::<usize>() + cat.milestone_rewards.len();
+        assert!(authored > 0, "{city}: no authored reward rows were read");
+        assert!(
+            table.diagnostics.is_empty(),
+            "{city}: {:?}",
+            table.diagnostics
+        );
+        assert_eq!(
+            table.per_event.len() + table.milestones.len(),
+            authored,
+            "{city}: every authored row must be accounted for"
+        );
+        crash_rules += table
+            .per_event
+            .iter()
+            .filter(|(k, _)| k.table == EventTableKind::CrashCourse)
+            .count();
+    }
+    assert!(crash_rules > 0, "no Crash Course reward link was read");
+
+    let garage = mm2_content::scan_garage(&vfs);
+    assert!(garage.diagnostics.is_empty(), "{:?}", garage.diagnostics);
+}
