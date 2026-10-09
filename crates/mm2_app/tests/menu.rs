@@ -325,6 +325,12 @@ fn circuit_install() -> tempfile::TempDir {
 /// A headless app wired like the binary's menu mode: parked session,
 /// the menu resources and the production session/menu systems, minus
 /// the window.
+/// The binary's `capturing` condition for an app that is not taking a
+/// screenshot: the lobby sets run unfrozen.
+fn never_capturing() -> bool {
+    false
+}
+
 fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
     menu_app_with(dir, MenuData::new(store, false, None))
 }
@@ -3908,7 +3914,8 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
 /// lobby down and returns the menu with nothing networked left behind.
 #[test]
 fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
-    use mm2_app::net::{HostLink, LobbyState, close_menu_host, drive_host, host_input};
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::{HostLink, LobbyState};
     use mm2_game::SessionAuthority;
 
     let tmp = install();
@@ -3921,15 +3928,7 @@ fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
         format!("{WAYPOINTS}{body}"),
     );
     let mut app = menu_app(tmp.path(), None);
-    app.add_systems(
-        Update,
-        (
-            host_input,
-            drive_host.after(session::drive_session),
-            close_menu_host.after(drive_host),
-        )
-            .run_if(resource_exists::<HostLink>),
-    );
+    add_host_systems(&mut app, never_capturing);
     app.update();
     activate_row(&mut app, "Cops & Robbers");
     activate_row(&mut app, "testcity");
@@ -4001,7 +4000,8 @@ fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
 /// `Cancel`, then a closed link once the host stops hosting.
 #[test]
 fn a_client_joins_the_lobby_the_menu_opened() {
-    use mm2_app::net::{HostLink, LobbyState, close_menu_host, drive_host, host_input};
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::{HostLink, LobbyState};
     use mm2_net::{Client, Message};
 
     let tmp = install();
@@ -4031,15 +4031,7 @@ fn a_client_joins_the_lobby_the_menu_opened() {
         .unwrap()
         .hash;
     let mut app = menu_app(tmp.path(), None);
-    app.add_systems(
-        Update,
-        (
-            host_input,
-            drive_host.after(session::drive_session),
-            close_menu_host.after(drive_host),
-        )
-            .run_if(resource_exists::<HostLink>),
-    );
+    add_host_systems(&mut app, never_capturing);
     app.update();
     activate_row(&mut app, "Cops & Robbers");
     activate_row(&mut app, "testcity");
@@ -4167,10 +4159,8 @@ fn a_client_joins_the_lobby_the_menu_opened() {
 /// `Esc` after the match leaves the lobby and returns the menu saying so.
 #[test]
 fn the_menu_joins_a_lobby_another_menu_opened() {
-    use mm2_app::net::{
-        HostLink, LobbyLink, LobbyState, close_menu_host, close_menu_join, drive_host, drive_lobby,
-        host_input, lobby_input,
-    };
+    use mm2_app::lobby_systems::{add_client_systems, add_host_systems};
+    use mm2_app::net::{HostLink, LobbyLink, LobbyState};
     use mm2_app::netdrive::RemoteSnaps;
     use mm2_game::SessionAuthority;
 
@@ -4203,25 +4193,13 @@ fn the_menu_joins_a_lobby_another_menu_opened() {
     }
 
     let mut host = menu_app(tmp.path(), None);
-    host.add_systems(
-        Update,
-        (
-            host_input,
-            drive_host.after(session::drive_session),
-            close_menu_host.after(drive_host),
-        )
-            .run_if(resource_exists::<HostLink>),
-    );
+    add_host_systems(&mut host, never_capturing);
     let mut client = menu_app(tmp.path(), None);
-    client.add_systems(
-        Update,
-        (
-            lobby_input,
-            drive_lobby.after(session::drive_session),
-            close_menu_join.after(drive_lobby),
-        )
-            .run_if(resource_exists::<LobbyLink>),
-    );
+    // The messages the binary registers for the replicas the set applies.
+    client.add_message::<mm2_app::netdrive::RemoteImpact>();
+    client.add_message::<mm2_game::BangerStateChanged>();
+    client.add_message::<mm2_game::RaceStarted>();
+    add_client_systems(&mut client, never_capturing);
     host.update();
     client.update();
 

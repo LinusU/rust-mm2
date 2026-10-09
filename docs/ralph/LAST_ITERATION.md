@@ -1,17 +1,15 @@
-# Last iteration — the menu joins a lobby (iteration 21 of the new run)
+# Last iteration — the menu tests run the production lobby schedule (iteration 22 of the new run)
 
-Selection: iteration 20 (`37e3aef`) passed gates and review; operator report 7 items 1–11 are all landed as candidates. The menu could host a Cops & Robbers lobby but only `--join` could enter one, so the in-game flow had no client half. Picked the F27-C / F24-B "real lobby menu surface" gap: a menu `Join lobby`. (A bot-navigation fix remains open but has no new evidence to act on.)
+Selection: iteration 21 (`96f742d`) passed gates and review. Its review's first verification gap: the menu-join test registered only `lobby_input`/`drive_lobby`/`close_menu_join`, so the rest of `add_client_systems` in menu mode (reconcile/apply/send systems) was checked by source reading only. Picked closing that gap for both the client and host sets (F27-C / F24-B).
 
 Changes (candidate, not independently checked):
-- `menu.rs`: root row `Join lobby` → `Screen::JoinLobby { addr }`, a text field like `NewProfile` (ASCII graphic, ≤64 chars). `Enter` parses a `SocketAddr` (else status `type an address like 192.168.1.20:7777`), emitting `MenuEffect::Join { addr, vehicle }`. `menu_input` runs `net::open_menu_join`; failure → `cannot join <addr>: <why>` on the open field; hosting/joining while a lobby is up is refused. `menu_watch` holds the shell closed while a `LobbyLink` exists and shows `SessionNote::lobby` on reopen. `menu_graphics.rs` draws the field and hint.
-- `net.rs`: `open_menu_join` (the `--join` fingerprint handshake and pick offer), `adopt_menu_join`, `spawn_lobby_text` (shared with `main`), `close_menu_join` (after `drive_lobby` queues the exit and the session is at `Menu`; despawns the text, removes link/state/snaps/seq/report, leaves the reason in `SessionNote::lobby`). `lobby_input` ignores the frame the link was added.
-- `main.rs`: client systems moved into `add_client_systems`, gated `run_if(resource_exists::<LobbyLink>)`, registered for `--join` and menu apps (`close_menu_join` added); `--join` behaviour otherwise unchanged.
-- `session.rs`: `SessionNote::lobby`.
-- Test `menu::the_menu_joins_a_lobby_another_menu_opened`: two in-process menu apps; bad address and closed port refused on the field; a real join is rostered with its pick, offered the match, refused while unready, readied by `Enter`, then both reach `Playing` under the host's generation (joiner `Remote`); host quit returns the joiner to its lobby; `Esc` leaves and the menu returns with `left the lobby`. Passed 3/3. Mutation: dropping the joined hold in `menu_watch` fails it.
-- Docs: `docs/research/net.md` (menu-joined lobby paragraph), PLAN F27-C slice 7.
+- New `mm2_app::lobby_systems` with `add_client_systems`/`add_host_systems`, moved from `main.rs` (the `capturing` freeze condition is a parameter). `main.rs` calls them; behaviour for `--join`/`--host` unchanged.
+- The three menu lobby tests (`the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes`, `a_client_joins_the_lobby_the_menu_opened`, `the_menu_joins_a_lobby_another_menu_opened`) now register the full production sets (the join test also registers the `RemoteImpact`/`BangerStateChanged`/`RaceStarted` messages the binary registers).
+- **Defect found by that:** with the full host set, `Esc` out of a menu-hosted lobby panicked (`publish_snapshots`: `Res<HostLink>` missing, `track_reset_epochs`: `ResMut<NetDriveReport>` missing). `close_menu_*` remove the link/resources by deferred commands which a sync point applied mid-schedule, before other lobby systems ran. Fix: every lobby system is in `HostedLobby`/`JoinedLobby`, and the close systems run `.after` that set. Before: host test failed on the first run (system names obtained with `--features bevy/debug`); after: passes.
+- Docs: `docs/research/net.md`, PLAN F27-C slice 8.
 
-Not shown: two OS processes joined through the menu rows, a driving menu-joined client, a rendered capture of the field/lobby text, retail data. The dial blocks a frame up to `HANDSHAKE_TIMEOUT` (10 s) on a silent peer; unreachable/mismatched lobbies answer at once. Bot-navigation findings and a second driven client / steal remain open.
+Not shown: two OS processes joined through the menu rows, a driven menu-joined client, rendered capture, retail data.
 
-Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`, retail legs skip).
+Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`).
 
 Status: implemented candidate; not independently checked.

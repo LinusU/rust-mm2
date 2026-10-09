@@ -1414,8 +1414,9 @@ joiner to that lobby, not the menu). `net::close_menu_join` removes the link and
 its resources once `drive_lobby` has queued the exit it would otherwise write as
 `AppExit` (our own `Leave`, or a lost host) and the session is back at
 `Menu`; the reason rides `SessionNote::lobby` to the reopened shell's status
-line. The client systems moved out of `main` into `add_client_systems`, now
-registered for `--join` and for any menu app and gated
+line. The client systems moved out of `main` into `lobby_systems::add_client_systems`
+(and the host's into `add_host_systems`, so the menu tests run the binary's own
+schedule), now registered for `--join` and for any menu app and gated
 `run_if(resource_exists::<LobbyLink>)`. Test: `app::menu::
 the_menu_joins_a_lobby_another_menu_opened` — two in-process menu apps, one
 hosting the other joining through the row (bad address, closed port, then the
@@ -1427,6 +1428,8 @@ saying `left the lobby`; mutation-checked against `menu_watch`'s hold. Not
 shown: two OS processes through the menu rows, a driving joiner in a
 menu-joined session, a rendered capture of the address field or lobby text,
 retail data.
+
+**Close ordering (found by running the production schedule).** `close_menu_host`/`close_menu_join` remove the link and its companion resources by deferred commands, and a sync point can apply those mid-schedule, so lobby systems not yet run that frame panicked on `Res<HostLink>`/`ResMut<NetDriveReport>` (`Esc` out of a menu-hosted lobby). Both closes now run `.after` a `HostedLobby`/`JoinedLobby` system set holding every other system of the lobby.
 
 ## Rematch within one lobby (F26-B.1, no wire change)
 
