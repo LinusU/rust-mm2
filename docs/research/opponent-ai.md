@@ -180,14 +180,18 @@ brake inside 2.5 m.
 | 2 off the road network | steer straight at the target, gain 1.33, clamped ±0.75 |
 | 3 stopped | steer at the finish point, brake 1 |
 
-- **Into backup**: the car's stuck detector (`vehCar+0xcc`, state at
-  `+0x18`) raises stuck (2). The detector class whose update sits in
-  the AI code (`0x56f820`, vtable around `0x5b4c4c`) does so once the
-  car has held more than 0.75 of its throttle cap with steering under
-  0.5 (`0x56f7b0`) inside a small radius past a time threshold. State
-  0 or 2 then zeroes the car's linear and angular momentum and switches
-  to backup. Which `vehStuck` fields feed that class's thresholds is
-  not recovered.
+- **Into backup**: the car's own `vehStuck` (`vehCar+0xcc`, state at
+  `+0x18`) raises stuck (2). A collision arms it (callback `0x4cb340` →
+  `0x4d60b0`); the AI overrides its thresholds at init (`TimeThresh`
+  0.5 s, police 0.75 s; `PosThresh` 1 m; `Rotation` 0), and it reaches
+  state 2 when the car is still within 1 m of the impact past that time
+  with throttle above 0.75 of its cap and |steer| > 0.5 (`0x4d60f0`).
+  State 0 or 2 then zeroes the car's linear and angular momentum and
+  switches to backup. The second detector, whose update sits in the AI
+  code (`0x56f820`, |steer| < 0.5), does **not** back up: it forces full
+  right lock and full throttle and yaws the car in place at 1 rad/s.
+  (Corrected 2026-10-08 from a full read of `vehStuck::Update`
+  `0x4d6130`; see `docs/research/vehicle-physics/06-ai-input.md`.)
 - **Totalled** (damage past its maximum): inputs zero, linear momentum
   × 0.95 every frame; on a circuit the car is reset after 5 s
   (`0x42c440`), elsewhere it stays out.
@@ -208,7 +212,7 @@ momentum — the integrator (`0x478050`) derives velocity from them.
 | `0x55b2db` | leaving backup aligned: the car's matrix is rotated by the remaining bearing (≤ 0.1 rad) |
 | `0x56f9d2` | while stuck: the car's matrix is rotated in place at a rate from the stuck record |
 | `0x55a785` | totalled: linear momentum × 0.95 per frame |
-| `0x55b14e` | each frame: `CarFrictionHandling` (`carsim+0x153c`) set to 2.0 or 1.0 from bit `0x8000` of the car instance's flags; it rescales the wheel's ground-material factor below 1 (`0x4d2ffb`) — off-road surfaces only. What the flag means is unrecovered |
+| `0x55b14e` | each frame: `CarFrictionHandling` (`carsim+0x153c`) set to 2.0 or 1.0 from bit `0x8000` of the car instance's flags — set in `CollideInstances` (`0x469610`) on a car touching the **player** that physics step, cleared for every mover at the start of `dgPhysManager::Update` (`0x46894a`). The wheel divides surface friction below 1 by it (`0x4d2ffb`), and tarmac is 0.9, so an opponent in contact with the player has **half its grip** on ordinary road |
 
 ## Finishing: the route, not the checkpoints
 
@@ -239,10 +243,11 @@ player-dependent behaviour is the collision level of detail above.
 ## Confidence
 
 - Everything in the tables and formulas: **verified_original**.
-- Not recovered: the exact point spacing of `0x561890`, the scoring
-  details of the detour search beyond "shortest unblocked", the
-  stuck-detector field layout (which `vehStuck` field is the rotation
-  rate), and the meaning of the `CarFrictionHandling` flag.
+- Not recovered: the exact point spacing of `0x561890` and the scoring
+  details of the detour search beyond "shortest unblocked". The
+  stuck-detector layout and the meaning of the `CarFrictionHandling`
+  flag are now recovered (above, and
+  `docs/research/vehicle-physics/04-chassis-and-assists.md`).
 
 ## Port status
 
