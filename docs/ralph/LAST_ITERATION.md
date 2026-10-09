@@ -1,15 +1,19 @@
-# Last iteration — menu-hosted Cops & Robbers lobby (iteration 19 of the new run)
+# Last iteration — a client joins the menu-hosted lobby (iteration 20 of the new run)
 
-Selection: iteration 18 (`b5dc910`) passed gates and review with no blocking findings. The plan's queued F27-C item that does not depend on the open bot-navigation findings is "a menu-hosted lobby offer": the main menu had no multiplayer path at all (`Multiplayer` row disabled, hosting only via `--host`), so the Cops & Robbers options screen could start a local match but never a hosted one.
+Selection: iteration 19 (`992144a`) passed gates and review. Operator report 7 items 1–11 are all landed as candidates, so the plan's next ready F27-C work applies. The reviewer's first verification gap was that no test had a client join a menu-hosted lobby; the previous handoff listed the same gap. This slice closes it at synthetic-integration level.
 
 Changes (candidate, not independently checked):
-- `menu.rs`: `Action::HostCnr` / row `Host lobby` on `Screen::CnrOptions`; `MenuEffect::Host` (the `Launch` payload, produced by running the same `launch` resolution); `menu_input` opens the lobby, sets the car like a launch, hides the shell; `menu_watch` keeps the shell closed while a non-leaving `HostLink` exists (`LiveSettings` carries the link to stay under the argument lint).
-- `net.rs`: `open_menu_host` (validate, `check_session`, gameplay fingerprint, catalog pick validator, fresh seed), `adopt_menu_host`, `spawn_host_text`, `close_menu_host` (removes link + lobby resources + text once leaving at `Menu` under a menu), `MenuHostBind`; `host_input` ignores the key press that opened the lobby (`is_added`).
-- `main.rs`: the host systems moved into `add_host_systems`, registered for `--host` and for menu apps, gated `run_if(resource_exists::<HostLink>)`; `--menu-bind` (loopback:0 default, conflicts with `--host`; `--bind` stays a `--host` flag).
-- Tests: `app::menu::the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes` (mutation-checked: dropping the `menu_watch` guard fails it); existing C&R menu test row list updated; `mm2_host_flag_gates_are_named_exits` gains `--host --menu-bind`. Docs: net.md paragraph, PLAN F27-C slice 5.
+- `crates/mm2_app/tests/menu.rs`: `a_client_joins_the_lobby_the_menu_opened`. A raw `mm2_net::Client` joins the loopback listener `Host lobby` opened, using the install's own gameplay fingerprint. It checks:
+  - it receives the `cops & robbers` session ad and a roster naming it;
+  - the host's `LobbyState` rosters it;
+  - `Enter` with the joiner unready is refused (`bob is not ready`) and the session stays at `Menu`;
+  - after `SetVehicle("vpt")` and `SetReady`, `Enter` reaches `Playing` and the client reads `Start` with the host's generation and the same session;
+  - the host's quit gives the client `Cancel{generation}`, and `Esc` removes the `HostLink`.
+  The waits are bounded by a 10 s wall-clock deadline (the lobby loop is its own thread), not by frame counts.
+- No production code changed. PLAN F27-C slice 6 added.
 
-Not shown: a client joining a menu-hosted lobby (the machinery is `--host`'s and covered elsewhere), a windowed/rendered capture of the host text, a roster screen, in-menu rematch options. Bot-navigation findings (walled first legs, junction stalls, elevated sites) and a second driven client / steal remain open.
+Not shown: a second `mm2` process joining a menu-hosted lobby (net_drive), a client driving in that session, a rendered capture of the host text, a roster screen, in-menu rematch options, retail data. Bot-navigation findings (walled first legs, junction stalls, elevated sites) and a second driven client / steal remain open.
 
-Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`, so retail legs skip).
+Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`, retail legs skip). The new test passed 3/3 in isolation.
 
 Status: implemented candidate; not independently checked.

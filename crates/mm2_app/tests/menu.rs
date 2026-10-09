@@ -3992,6 +3992,173 @@ fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
     assert!(shell(&app).active, "the menu returns once the lobby closes");
 }
 
+/// F27-C: a second player joins the lobby the menu opened. The raw wire
+/// client dials the loopback listener with the install's own gameplay
+/// fingerprint, is told the Cops & Robbers session the menu picked, lands
+/// on the host's roster, and hears `Start` — carrying the same
+/// self-contained session — when the host presses `Enter`. A client that
+/// still holds the lobby open when the host's match ends sees the host's
+/// `Cancel`, then a closed link once the host stops hosting.
+#[test]
+fn a_client_joins_the_lobby_the_menu_opened() {
+    use mm2_app::net::{HostLink, LobbyState, close_menu_host, drive_host, host_input};
+    use mm2_net::{Client, Message};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    // The lobby's loop runs on its own thread, so each wait is bounded by
+    // the clock rather than by a count of frames that finish in microseconds.
+    fn wait_until(app: &mut App, mut pred: impl FnMut(&mut App) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            app.update();
+            if pred(app) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    let fp = mm2_content::fingerprint::gameplay(&vfs_of(tmp.path()))
+        .unwrap()
+        .hash;
+    let mut app = menu_app(tmp.path(), None);
+    app.add_systems(
+        Update,
+        (
+            host_input,
+            drive_host.after(session::drive_session),
+            close_menu_host.after(drive_host),
+        )
+            .run_if(resource_exists::<HostLink>),
+    );
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Host lobby");
+    let addr = app.world().resource::<HostLink>().addr();
+
+    // The handshake and the host's offer arrive without the host app
+    // stepping: the listener has its own thread.
+    let mut client = Client::join(
+        addr,
+        &mm2_net::hello("menu-test".to_string(), "bob".to_string(), fp),
+    )
+    .expect("the menu-hosted lobby accepts a matching install");
+    client
+        .set_timeout(Some(Duration::from_secs(10)))
+        .expect("bound the waits");
+    let mut offered = None;
+    let mut rostered = false;
+    while offered.is_none() || !rostered {
+        match client.recv().expect("the lobby speaks first") {
+            Message::Session(ad) => offered = Some(ad),
+            Message::Roster { players } => {
+                rostered = players
+                    .iter()
+                    .any(|p| p.player_id == client.player_id() && p.driver == "bob");
+            }
+            other => panic!("unexpected lobby traffic before the start: {other:?}"),
+        }
+    }
+    assert!(
+        offered.unwrap().summary.contains("cops & robbers"),
+        "the client is offered the match the menu picked"
+    );
+
+    // The host's own surface counts the newcomer.
+    assert!(
+        wait_until(&mut app, |a| a
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.driver == "bob")),
+        "the host never rostered the joiner"
+    );
+
+    // The lobby's own gate holds the start while the joiner is not ready.
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        wait_until(&mut app, |a| a
+            .world()
+            .resource::<LobbyState>()
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("bob is not ready"))),
+        "an unready joiner must refuse the start: {:?}",
+        app.world().resource::<LobbyState>().notice
+    );
+    assert_eq!(phase(&app), SessionPhase::Menu);
+
+    // Once the joiner is ready, `Enter` starts the match and it hears so.
+    client.set_vehicle("vpt", 0).unwrap();
+    client.set_ready(true).unwrap();
+    assert!(
+        wait_until(&mut app, |a| a
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.driver == "bob" && e.ready && e.pick.is_some())),
+        "the host never saw the joiner ready with a pick: {:?}",
+        app.world().resource::<LobbyState>().roster
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(wait_until(&mut app, |a| phase(a) == SessionPhase::Playing));
+    let generation = app.world().resource::<Session>().generation();
+    let started = loop {
+        match client.recv().expect("the start reaches the joiner") {
+            Message::Start {
+                generation,
+                session,
+                ..
+            } => break (generation, session),
+            Message::Roster { .. } | Message::Snap { .. } => continue,
+            other => panic!("unexpected traffic before the start: {other:?}"),
+        }
+    };
+    assert_eq!(started.0, generation, "both ends run the host's generation");
+    assert!(started.1.summary.contains("cops & robbers"));
+
+    // The host's match ends and its lobby closes: the joiner is told the
+    // session is over, then the link closes.
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(wait_until(&mut app, |a| phase(a) == SessionPhase::Menu));
+    let mut cancelled = false;
+    loop {
+        match client.recv() {
+            Ok(Message::Cancel { generation: g }) => {
+                assert_eq!(g, generation);
+                cancelled = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(cancelled, "the joiner heard the match end");
+    press(&mut app, KeyCode::Escape);
+    assert!(wait_until(&mut app, |a| a
+        .world()
+        .get_resource::<HostLink>()
+        .is_none()));
+    assert!(
+        std::iter::from_fn(|| client.recv().ok())
+            .take(100)
+            .all(|m| matches!(m, Message::Roster { .. } | Message::Cancel { .. })),
+        "nothing but lobby housekeeping follows"
+    );
+}
+
 /// F27-B.4c (rematch leg): a decided single-seat match opens the
 /// match-over screen instead of idling on a frozen HUD, and its *Play
 /// again* row begins a fresh generation with a fresh match — the same
