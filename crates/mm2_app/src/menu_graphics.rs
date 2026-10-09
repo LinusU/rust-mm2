@@ -542,6 +542,9 @@ fn draw_rows(body: &mut ChildSpawnerCommands, shell: &MenuShell, garage: bool) {
         if let Screen::NewProfile { name } = &shell.screen {
             label(p, format!("  Name: {name}_"), 24.0, Color::WHITE);
         }
+        if let Screen::JoinLobby { addr } = &shell.screen {
+            label(p, format!("  Host: {addr}_"), 24.0, Color::WHITE);
+        }
         let count = shell.rows.len();
         let start = shell.focus.saturating_sub(7).min(count.saturating_sub(9));
         for (index, row) in shell.rows.iter().enumerate().skip(start).take(9) {
@@ -1005,6 +1008,8 @@ fn draw_navigation(parent: &mut ChildSpawnerCommands, screen: &Screen) {
         });
     let hint = if matches!(screen, Screen::NewProfile { .. }) {
         "Type a name | Enter create | Esc cancel"
+    } else if matches!(screen, Screen::JoinLobby { .. }) {
+        "Type host:port | Enter join | Esc cancel"
     } else {
         "UP / DOWN  Browse     LEFT / RIGHT  Adjust / Options     ENTER  Select     ESC / Right click  Back"
     };

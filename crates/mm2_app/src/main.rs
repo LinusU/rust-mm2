@@ -2254,91 +2254,23 @@ fn main() {
                     .chain(),
             );
     }
+    let joining_from_cli = lobby.is_some();
     if let Some(link) = lobby {
         // A joined lobby owns `Menu`-time surface and exit: the pump
         // thread blocks on the socket while `drive_lobby` drains what
-        // it queued each update — after `drive_session` so a `Cancel`
-        // quit that reached `Menu` this frame can settle the lobby's
-        // follow-ups immediately. `LobbyText` is the minimal surface
-        // until a real lobby menu exists.
+        // it queued each update (see `add_client_systems`).
+        // `LobbyText` is the minimal surface until a real lobby menu
+        // exists.
         app.insert_resource(link)
             .init_resource::<net::LobbyState>()
             .init_resource::<netdrive::RemoteSnaps>()
             .init_resource::<netdrive::InputSeq>()
-            .init_resource::<netdrive::NetDriveReport>()
-            .add_systems(
-                Update,
-                (
-                    // Frozen during a capture like every other input —
-                    // a `--join --frames` screenshot must be
-                    // reproducible.
-                    net::lobby_input.run_if(not(capturing)),
-                    net::drive_lobby.after(session::drive_session),
-                    net::drive_lobby_text,
-                    // F25-A: the roster/host-pick drives remote
-                    // participant spawning; the newest drained snapshot
-                    // feeds their lerp. Both run after the drain sees
-                    // this frame's wire state. The apply runs after the
-                    // reconcile so its `NetPlayer` stamps and remote
-                    // spawns — deferred inserts — are visible the same
-                    // update they land: a snap held through the session
-                    // load then applies whole rather than skipping the
-                    // local seat's rows (its v14 terminal edge
-                    // included) on the frame they become receivable.
-                    netdrive::reconcile_remote_players.after(net::drive_lobby),
-                    netdrive::apply_snapshots
-                        .after(net::drive_lobby)
-                        .after(netdrive::reconcile_remote_players),
-                    netdrive::drive_remote_lerp,
-                    // F26-A: the host's knocked/broken/settled props
-                    // fold into the client's own stamped world.
-                    mm2_app::worldprops::apply_props.after(net::drive_lobby),
-                    // F26-A: the host's ambient cars — the copies a
-                    // `Remote` city Cruise session poses.
-                    mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
-                    // F26-A: the host's world clock — the timed
-                    // scenery re-seeks to it on a Cruise client too.
-                    mm2_app::worldclock::apply_world_clock.after(net::drive_lobby),
-                    // F27-B.3: the host's Cops & Robbers match — the
-                    // replica the HUD and markers read (idle until a
-                    // match frame arrives).
-                    mm2_app::cnrnet::apply_cnr.after(net::drive_lobby),
-                    // F27-B.4c: the host's decided match ends this
-                    // client's `Playing` into the match-over screen.
-                    mm2_app::cnr::end_replicated_match.after(mm2_app::cnrnet::apply_cnr),
-                    // F25-B: `R` under a predicted session asks the
-                    // authority for the reset `reset_input` is gated
-                    // against — the granted answer arrives as the
-                    // own-seat epoch snap.
-                    netdrive::send_reset_request,
-                    // `--reset-at` is the scheduled `R`: the same ask.
-                    netdrive::send_dev_reset_request,
-                    // The wire sample reads the settled `VehicleInput`
-                    // — after the keyboard mapping and every scripted
-                    // owner that can overwrite it.
-                    netdrive::send_drive_input
-                        .after(input::vehicle_input)
-                        .after(input::parked_drive)
-                        .after(input::ram_drive)
-                        .after(scripted::scripted_drive)
-                        .after(sequence::sequence_drive),
-                ),
-            );
-        app.world_mut().spawn((
-            net::LobbyText,
-            Text::new(""),
-            TextFont {
-                font_size: bevy::text::FontSize::Px(14.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                left: Val::Px(12.0),
-                ..default()
-            },
-        ));
+            .init_resource::<netdrive::NetDriveReport>();
+        net::spawn_lobby_text(&mut app.world_mut().commands());
+        app.world_mut().flush();
+    }
+    if joining_from_cli || menu_mode {
+        add_client_systems(&mut app);
     }
     let hosting_from_cli = host_link.is_some();
     if let Some(link) = host_link {
@@ -2447,6 +2379,72 @@ fn main() {
     if let AppExit::Error(code) = exit {
         std::process::exit(code.get() as i32);
     }
+}
+
+/// The joined lobby's per-update systems. Registered for a `--join`
+/// launch and for the menu (whose *Join lobby* row opens a link at run
+/// time); every one only runs while a [`net::LobbyLink`] exists.
+fn add_client_systems(app: &mut App) {
+    app.add_systems(
+        Update,
+        (
+            // Frozen during a capture like every other input —
+            // a `--join --frames` screenshot must be
+            // reproducible.
+            net::lobby_input.run_if(not(capturing)),
+            net::drive_lobby.after(session::drive_session),
+            net::drive_lobby_text,
+            net::close_menu_join.after(net::drive_lobby),
+            // F25-A: the roster/host-pick drives remote
+            // participant spawning; the newest drained snapshot
+            // feeds their lerp. Both run after the drain sees
+            // this frame's wire state. The apply runs after the
+            // reconcile so its `NetPlayer` stamps and remote
+            // spawns — deferred inserts — are visible the same
+            // update they land: a snap held through the session
+            // load then applies whole rather than skipping the
+            // local seat's rows (its v14 terminal edge
+            // included) on the frame they become receivable.
+            netdrive::reconcile_remote_players.after(net::drive_lobby),
+            netdrive::apply_snapshots
+                .after(net::drive_lobby)
+                .after(netdrive::reconcile_remote_players),
+            netdrive::drive_remote_lerp,
+            // F26-A: the host's knocked/broken/settled props
+            // fold into the client's own stamped world.
+            mm2_app::worldprops::apply_props.after(net::drive_lobby),
+            // F26-A: the host's ambient cars — the copies a
+            // `Remote` city Cruise session poses.
+            mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
+            // F26-A: the host's world clock — the timed
+            // scenery re-seeks to it on a Cruise client too.
+            mm2_app::worldclock::apply_world_clock.after(net::drive_lobby),
+            // F27-B.3: the host's Cops & Robbers match — the
+            // replica the HUD and markers read (idle until a
+            // match frame arrives).
+            mm2_app::cnrnet::apply_cnr.after(net::drive_lobby),
+            // F27-B.4c: the host's decided match ends this
+            // client's `Playing` into the match-over screen.
+            mm2_app::cnr::end_replicated_match.after(mm2_app::cnrnet::apply_cnr),
+            // F25-B: `R` under a predicted session asks the
+            // authority for the reset `reset_input` is gated
+            // against — the granted answer arrives as the
+            // own-seat epoch snap.
+            netdrive::send_reset_request,
+            // `--reset-at` is the scheduled `R`: the same ask.
+            netdrive::send_dev_reset_request,
+            // The wire sample reads the settled `VehicleInput`
+            // — after the keyboard mapping and every scripted
+            // owner that can overwrite it.
+            netdrive::send_drive_input
+                .after(input::vehicle_input)
+                .after(input::parked_drive)
+                .after(input::ram_drive)
+                .after(scripted::scripted_drive)
+                .after(sequence::sequence_drive),
+        )
+            .run_if(resource_exists::<net::LobbyLink>),
+    );
 }
 
 /// The hosted lobby's per-update systems. Registered for a `--host`

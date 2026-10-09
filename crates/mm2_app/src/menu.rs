@@ -26,7 +26,8 @@
 //!   [`MenuCommand`]s so every effect still executes in `menu_input`.
 //! - [`Screen::NewProfile`] is a text field rather than a row list:
 //!   `menu_input` routes `KeyboardInput.text` into it so driver names
-//!   are typed, not auto-generated.
+//!   are typed, not auto-generated. [`Screen::JoinLobby`] is the same
+//!   kind of field for the address of a hosted lobby.
 //! - [`Screen::Records`] is the bound driver's race-records view
 //!   (DRV-5's first leg): the persisted per-event finishes/best
 //!   results with city and race-type filters; an enabled record row
@@ -93,6 +94,10 @@ use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 use crate::settings::{AudioLevel, GraphicsSettings, RunOverrides};
 
+/// Longest address the join screen accepts — an IPv6 literal with a
+/// zone and port stays well inside it.
+const MAX_ADDR_CHARS: usize = 64;
+
 /// One user intent. Keyboard, gamepad, mouse and tests all produce
 /// these — the model never reads devices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +125,8 @@ pub enum MenuCommand {
     /// Focus a row's side entry by row index — the mouse hover path
     /// over a side cell. Rows without one ignore it.
     FocusSide(usize),
-    /// Append a character to a text field — only [`Screen::NewProfile`]
-    /// accepts text today. Production input feeds this from
+    /// Append a character to a text field — [`Screen::NewProfile`] and
+    /// [`Screen::JoinLobby`] accept text. Production input feeds this from
     /// `KeyboardInput.text` so layout, Shift and dead keys resolve to
     /// the character the OS intended.
     Type(char),
@@ -193,6 +198,13 @@ pub enum Screen {
     NewProfile {
         /// The name being typed.
         name: String,
+    },
+    /// Address-entry step for joining a hosted lobby — a text field like
+    /// [`Screen::NewProfile`]. `addr` is the edit buffer (`host:port`);
+    /// Enter dials it, Esc cancels.
+    JoinLobby {
+        /// The address being typed.
+        addr: String,
     },
     /// The bound driver's persisted race records (DRV-5's first leg).
     /// `city`/`table` are the active filters — `None` means "all";
@@ -459,6 +471,14 @@ pub enum MenuEffect {
         car: Option<Box<VehicleDef>>,
         /// Paint index driven.
         paint: usize,
+    },
+    /// Join the lobby listening at `addr` with the pending vehicle pick;
+    /// the host's own `Start` begins the session for everyone.
+    Join {
+        /// The address typed on the join screen, already parsed.
+        addr: std::net::SocketAddr,
+        /// The pick offered to the roster.
+        vehicle: VehicleSelection,
     },
     /// Insert `ActiveProfile` for this slot.
     Bind(Box<ActiveProfile>),
@@ -959,6 +979,42 @@ impl MenuShell {
                         self.create_profile(data, name, &mut effects);
                     }
                 }
+                _ => {}
+            }
+            self.dirty = true;
+            return effects;
+        }
+        // The address-entry screen is the same kind of text field; Enter
+        // dials the typed address instead of creating anything.
+        if let Screen::JoinLobby { addr } = &mut self.screen {
+            match cmd {
+                MenuCommand::Type(c) => {
+                    if !c.is_ascii_graphic() {
+                        self.status = Some("addresses use ASCII characters only".into());
+                    } else if addr.chars().count() >= MAX_ADDR_CHARS {
+                        self.status =
+                            Some(format!("addresses are at most {MAX_ADDR_CHARS} characters"));
+                    } else {
+                        addr.push(c);
+                        self.status = None;
+                    }
+                }
+                MenuCommand::Erase => {
+                    addr.pop();
+                    self.status = None;
+                }
+                MenuCommand::Back => {
+                    self.pop();
+                }
+                MenuCommand::Activate => match addr.trim().parse::<std::net::SocketAddr>() {
+                    Ok(addr) => effects.push(MenuEffect::Join {
+                        addr,
+                        vehicle: self.vehicle.clone(),
+                    }),
+                    Err(_) => {
+                        self.status = Some("type an address like 192.168.1.20:7777".into());
+                    }
+                },
                 _ => {}
             }
             self.dirty = true;
@@ -2050,7 +2106,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::Profiles => profile_rows(shell, data),
         // A text field, not a row list — the buffer lives on the
         // screen and `menu_present` draws it.
-        Screen::NewProfile { .. } => Vec::new(),
+        Screen::NewProfile { .. } | Screen::JoinLobby { .. } => Vec::new(),
         Screen::ConfirmDelete { id, label } => vec![
             Row {
                 text: format!("Delete {label} - this cannot be undone"),
@@ -2108,6 +2164,19 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 Ok(())
             },
             action: Action::Push(Screen::CnrCity),
+            won: None,
+            side: None,
+        },
+        Row {
+            text: "Join lobby".into(),
+            enabled: if data.cities.is_empty() {
+                Err("no city data - pass --mm2-path <install>".to_string())
+            } else {
+                Ok(())
+            },
+            action: Action::Push(Screen::JoinLobby {
+                addr: String::new(),
+            }),
             won: None,
             side: None,
         },
@@ -2995,6 +3064,8 @@ pub struct LiveSettings<'w> {
     controls: Option<Res<'w, ControlSettings>>,
     /// The lobby a menu row opened, if one is up.
     hosted: Option<Res<'w, crate::net::HostLink>>,
+    /// The lobby a menu row joined, if one is up.
+    joined: Option<Res<'w, crate::net::LobbyLink>>,
 }
 
 /// Keep the shell's `active` flag honest: open exactly while the
@@ -3027,7 +3098,8 @@ pub fn menu_watch(
     // A lobby the menu opened owns the screen (its status line and
     // `Enter`/`Esc`) until it comes down — `close_menu_host` removes the
     // link and the menu returns.
-    let hosting = live.hosted.as_ref().is_some_and(|link| !link.leaving());
+    // A joined lobby holds it until `close_menu_join` has taken it down.
+    let hosting = live.hosted.as_ref().is_some_and(|link| !link.leaving()) || live.joined.is_some();
     match session.phase() {
         SessionPhase::Menu if !control.restart && !hosting => {
             if !shell.active {
@@ -3050,6 +3122,11 @@ pub fn menu_watch(
                 {
                     shell.status = Some(format!("load failed: {reason}"));
                 }
+                if let Some(note) = note.as_mut()
+                    && let Some(why) = note.lobby.take()
+                {
+                    shell.status = Some(why);
+                }
             }
         }
         _ => shell.active = false,
@@ -3069,6 +3146,9 @@ pub struct MenuTarget<'w, 's> {
     bind: Option<Res<'w, crate::net::MenuHostBind>>,
     /// Present while a lobby is up — a second one is refused.
     hosted: Option<Res<'w, crate::net::HostLink>>,
+    /// Present while a joined lobby is up — hosting or joining another
+    /// is refused.
+    joined: Option<Res<'w, crate::net::LobbyLink>>,
 }
 
 /// Map keyboard + gamepad into [`MenuCommand`]s, run them through
@@ -3098,7 +3178,10 @@ pub fn menu_input(
     // here — drain them first so all commands execute through the one
     // `apply` + effect loop.
     let mut cmds: Vec<MenuCommand> = std::mem::take(&mut shell.pending);
-    let name_entry = matches!(shell.screen, Screen::NewProfile { .. });
+    let name_entry = matches!(
+        shell.screen,
+        Screen::NewProfile { .. } | Screen::JoinLobby { .. }
+    );
     let capturing = shell.capture.is_some();
     let pad_capturing = shell.pad_capture.is_some();
     // The stream is drained every frame — on other screens typed text
@@ -3215,7 +3298,7 @@ pub fn menu_input(
                     }
                 }
                 MenuEffect::Host { config, car, paint } => {
-                    if target.hosted.is_some() {
+                    if target.hosted.is_some() || target.joined.is_some() {
                         shell.status = Some("a lobby is already open".into());
                         continue;
                     }
@@ -3239,6 +3322,28 @@ pub fn menu_input(
                         Err(e) => {
                             warn!(error = %e, "menu could not open a lobby");
                             shell.status = Some(format!("cannot host: {e}"));
+                        }
+                    }
+                }
+                MenuEffect::Join { addr, vehicle } => {
+                    if target.hosted.is_some() || target.joined.is_some() {
+                        shell.status = Some("a lobby is already open".into());
+                        continue;
+                    }
+                    let driver = data
+                        .bound
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "player".to_string());
+                    match crate::net::open_menu_join(&vfs.0, addr, driver, data.has_mods, &vehicle)
+                    {
+                        Ok(link) => {
+                            crate::net::adopt_menu_join(&mut target.commands, link);
+                            shell.active = false;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, peer = %addr, "menu could not join a lobby");
+                            shell.status = Some(format!("cannot join {addr}: {e}"));
                         }
                     }
                 }
@@ -3428,6 +3533,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::Profiles => "Driver profiles - X deletes".to_string(),
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
         Screen::NewProfile { .. } => "New driver".to_string(),
+        Screen::JoinLobby { .. } => "Join a lobby".to_string(),
         Screen::Records { .. } => "Race records".to_string(),
         Screen::Options => "Graphics and audio options".to_string(),
         Screen::Controls => "Driving controls - X clears a key".to_string(),

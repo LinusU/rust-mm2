@@ -134,6 +134,10 @@ pub struct SessionControl {
 pub struct SessionNote {
     /// The failed session's reason, if it ended in `Failed`.
     pub failure: Option<String>,
+    /// Why a lobby the menu joined has come down (`left the lobby`, or
+    /// the host was lost) — `close_menu_join` writes it, `menu_watch`
+    /// shows it verbatim on the reopened shell.
+    pub lobby: Option<String>,
 }
 
 /// Run condition: the session is in `Loading` — gates

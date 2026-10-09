@@ -1394,8 +1394,39 @@ the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes` (synthetic
 install: row → listener on loopback advertising `cops & robbers` → `Enter`
 reaches `Playing` with `Host` authority and a `CnrHost` → quit → `Esc` removes
 the link and the menu returns); mutation-checked against `menu_watch`. Not
-shown: a client joining a menu-hosted lobby (the machinery is `--host`'s,
-covered by `net_app`/`net_drive`), a rendered capture of the host text.
+shown: a rendered capture of the host text (a client joining a menu-hosted
+lobby is covered below and by `a_client_joins_the_lobby_the_menu_opened`).
+
+**A menu-joined lobby (F27-C, implementation choice).** The root menu gains
+`Join lobby`, opening `Screen::JoinLobby` — a text field like the new-driver
+screen (ASCII graphic characters, 64 at most). `Enter` parses the buffer as a
+`SocketAddr` (a non-address names the expected shape and stays on the field);
+`MenuEffect::Join` carries it with the pending vehicle pick and `menu_input`
+runs `net::open_menu_join` — the gameplay fingerprint handshake `--join` runs
+(bounded by `HANDSHAKE_TIMEOUT`, so a silent peer can stall one frame for up to
+10 s; an unreachable or mismatched lobby answers at once) and the pick offered
+at join — then `net::adopt_menu_join` inserts the `LobbyLink`, `LobbyState`,
+`RemoteSnaps`, `InputSeq`, `NetDriveReport` and the `LobbyText` line. A refused
+dial leaves the field open with `cannot join <addr>: <why>`; hosting or joining
+while a lobby is up is refused. `menu_watch` keeps the shell closed while the
+link exists (the lobby owns `Enter`=ready, `Esc`=leave; a `Cancel` returns the
+joiner to that lobby, not the menu). `net::close_menu_join` removes the link and
+its resources once `drive_lobby` has queued the exit it would otherwise write as
+`AppExit` (our own `Leave`, or a lost host) and the session is back at
+`Menu`; the reason rides `SessionNote::lobby` to the reopened shell's status
+line. The client systems moved out of `main` into `add_client_systems`, now
+registered for `--join` and for any menu app and gated
+`run_if(resource_exists::<LobbyLink>)`. Test: `app::menu::
+the_menu_joins_a_lobby_another_menu_opened` — two in-process menu apps, one
+hosting the other joining through the row (bad address, closed port, then the
+host's loopback listener): rostered with its pick and offered the match,
+refused while unready, `Enter` readies it, the host's `Enter` takes both to
+`Playing` under the host's generation (`Remote` authority on the joiner), the
+host's quit returns the joiner to its lobby, `Esc` leaves and the menu returns
+saying `left the lobby`; mutation-checked against `menu_watch`'s hold. Not
+shown: two OS processes through the menu rows, a driving joiner in a
+menu-joined session, a rendered capture of the address field or lobby text,
+retail data.
 
 ## Rematch within one lobby (F26-B.1, no wire change)
 

@@ -4159,6 +4159,231 @@ fn a_client_joins_the_lobby_the_menu_opened() {
     );
 }
 
+/// F27-C: the menu joins a lobby another menu opened. The *Join lobby*
+/// row is a text field that refuses what is not an address and names an
+/// unreachable one; a real address dials the lobby with the install's own
+/// fingerprint, the shell steps aside for the lobby surface, the joiner's
+/// `Enter` readies it, the host's `Enter` starts the match for both, and
+/// `Esc` after the match leaves the lobby and returns the menu saying so.
+#[test]
+fn the_menu_joins_a_lobby_another_menu_opened() {
+    use mm2_app::net::{
+        HostLink, LobbyLink, LobbyState, close_menu_host, close_menu_join, drive_host, drive_lobby,
+        host_input, lobby_input,
+    };
+    use mm2_app::netdrive::RemoteSnaps;
+    use mm2_game::SessionAuthority;
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    // Both lobbies' loops run on their own threads, so each wait steps both
+    // apps against the clock rather than a count of instant frames.
+    fn wait_until(
+        host: &mut App,
+        client: &mut App,
+        mut pred: impl FnMut(&mut App, &mut App) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            host.update();
+            client.update();
+            if pred(host, client) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    let mut host = menu_app(tmp.path(), None);
+    host.add_systems(
+        Update,
+        (
+            host_input,
+            drive_host.after(session::drive_session),
+            close_menu_host.after(drive_host),
+        )
+            .run_if(resource_exists::<HostLink>),
+    );
+    let mut client = menu_app(tmp.path(), None);
+    client.add_systems(
+        Update,
+        (
+            lobby_input,
+            drive_lobby.after(session::drive_session),
+            close_menu_join.after(drive_lobby),
+        )
+            .run_if(resource_exists::<LobbyLink>),
+    );
+    host.update();
+    client.update();
+
+    // The address field refuses what cannot be dialled, and says why.
+    activate_row(&mut client, "Join lobby");
+    assert!(matches!(
+        shell(&client).screen,
+        menu::Screen::JoinLobby { .. }
+    ));
+    type_text(&mut client, "not an address");
+    press(&mut client, KeyCode::Enter);
+    assert!(client.world().get_resource::<LobbyLink>().is_none());
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("address like")),
+        "{:?}",
+        shell(&client).status
+    );
+    for _ in 0.."not an address".len() {
+        erase(&mut client);
+    }
+    // A closed port is a named failure on the same screen, never a session.
+    let dead = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap()
+    };
+    type_text(&mut client, &dead.to_string());
+    press(&mut client, KeyCode::Enter);
+    assert!(client.world().get_resource::<LobbyLink>().is_none());
+    assert!(shell(&client).active, "a failed dial leaves the field open");
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("cannot join")),
+        "{:?}",
+        shell(&client).status
+    );
+    for _ in 0..dead.to_string().len() {
+        erase(&mut client);
+    }
+
+    // The host opens a lobby; the client dials it.
+    activate_row(&mut host, "Cops & Robbers");
+    activate_row(&mut host, "testcity");
+    activate_row(&mut host, "Host lobby");
+    let addr = host.world().resource::<HostLink>().addr();
+    type_text(&mut client, &addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        client.world().get_resource::<LobbyLink>().is_some(),
+        "{:?}",
+        shell(&client).status
+    );
+    assert!(!shell(&client).active, "the lobby owns the joiner's screen");
+    assert!(
+        wait_until(&mut host, &mut client, |h, _| h
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.driver == "player" && e.pick.is_some())),
+        "the host never rostered the joiner with its pick: {:?}",
+        host.world().resource::<LobbyState>().roster
+    );
+    assert!(
+        wait_until(&mut host, &mut client, |_, c| c
+            .world()
+            .resource::<LobbyState>()
+            .advertised
+            .as_ref()
+            .is_some_and(|ad| ad.summary.contains("cops & robbers"))),
+        "the joiner was never offered the match"
+    );
+
+    // Unready joiner: the host's gate holds the start. Ready: it goes.
+    press(&mut host, KeyCode::Enter);
+    assert!(
+        wait_until(&mut host, &mut client, |h, _| h
+            .world()
+            .resource::<LobbyState>()
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("is not ready"))),
+        "{:?}",
+        host.world().resource::<LobbyState>().notice
+    );
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        wait_until(&mut host, &mut client, |h, _| h
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.driver == "player" && e.ready)),
+        "the joiner's Enter never readied it"
+    );
+    press(&mut host, KeyCode::Enter);
+    assert!(
+        wait_until(&mut host, &mut client, |h, c| phase(h)
+            == SessionPhase::Playing
+            && phase(c) == SessionPhase::Playing),
+        "host {:?}, joiner {:?}",
+        phase(&host),
+        phase(&client)
+    );
+    let config = client
+        .world()
+        .resource::<Session>()
+        .config()
+        .cloned()
+        .unwrap();
+    assert!(matches!(config.mode, SessionMode::CopsAndRobbers(_)));
+    assert_eq!(config.authority, SessionAuthority::Remote);
+    assert_eq!(
+        client.world().resource::<Session>().wire_generation(),
+        host.world().resource::<Session>().generation(),
+        "both ends run the host's generation"
+    );
+    assert!(!shell(&client).active);
+
+    // The host's match ends: the joiner is back in the lobby, not the menu.
+    host.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        wait_until(&mut host, &mut client, |h, c| phase(h)
+            == SessionPhase::Menu
+            && phase(c) == SessionPhase::Menu),
+        "host {:?}, joiner {:?}",
+        phase(&host),
+        phase(&client)
+    );
+    for _ in 0..5 {
+        host.update();
+        client.update();
+    }
+    assert!(client.world().get_resource::<LobbyLink>().is_some());
+    assert!(
+        !shell(&client).active,
+        "the joined lobby still owns the screen"
+    );
+
+    // `Esc` leaves: the link and everything beside it go, the menu returns.
+    press(&mut client, KeyCode::Escape);
+    assert!(
+        wait_until(&mut host, &mut client, |_, c| c
+            .world()
+            .get_resource::<LobbyLink>()
+            .is_none()),
+        "the left lobby was never taken down"
+    );
+    assert!(client.world().get_resource::<LobbyState>().is_none());
+    assert!(client.world().get_resource::<RemoteSnaps>().is_none());
+    client.update();
+    assert!(
+        shell(&client).active,
+        "the menu returns once the lobby is left"
+    );
+    assert_eq!(shell(&client).status.as_deref(), Some("left the lobby"));
+}
+
 /// F27-B.4c (rematch leg): a decided single-seat match opens the
 /// match-over screen instead of idling on a frozen HUD, and its *Play
 /// again* row begins a fresh generation with a fresh match — the same

@@ -857,7 +857,8 @@ pub fn lobby_input(
     lobby: Res<LobbyState>,
     mut link: ResMut<LobbyLink>,
 ) {
-    if *session.phase() != SessionPhase::Menu || link.leaving() || link.closed {
+    // A lobby the menu joined this frame ignores the keypress that did it.
+    if *session.phase() != SessionPhase::Menu || link.leaving() || link.closed || link.is_added() {
         return;
     }
     if keys.just_pressed(KeyCode::Escape) {
@@ -1892,6 +1893,121 @@ pub fn close_menu_host(
     commands.remove_resource::<LobbyState>();
     commands.remove_resource::<crate::netdrive::NetDriveReport>();
     commands.remove_resource::<crate::netdrive::WireStall>();
+}
+
+/// Why a menu could not join the lobby at an address.
+#[derive(Debug, thiserror::Error)]
+pub enum MenuJoinError {
+    /// Fingerprinting the content for the handshake failed.
+    #[error("fingerprinting content: {0}")]
+    Fingerprint(String),
+    /// The driver name or car pick cannot travel on the wire.
+    #[error("{0}")]
+    Pick(String),
+    /// The dial or handshake failed (unreachable, refused, mismatched).
+    #[error("{0}")]
+    Join(#[from] NetError),
+}
+
+/// Join the lobby at `addr` for the menu's *Join lobby* row: the same
+/// fingerprint-bound handshake `--join` runs, then the menu's vehicle
+/// pick offered to the roster. A refused or unreachable lobby is a named
+/// error for the menu's status line, never a silent local session. The
+/// handshake is bounded by `HANDSHAKE_TIMEOUT`.
+pub fn open_menu_join(
+    vfs: &Vfs,
+    addr: SocketAddr,
+    driver: String,
+    mods_active: bool,
+    vehicle: &VehicleSelection,
+) -> Result<LobbyLink, MenuJoinError> {
+    if driver.len() > mm2_net::MAX_STRING {
+        return Err(MenuJoinError::Pick(format!(
+            "driver name is {} bytes; the wire bound is {}",
+            driver.len(),
+            mm2_net::MAX_STRING
+        )));
+    }
+    let pick = encode_pick(vehicle).map_err(|e| MenuJoinError::Pick(e.to_string()))?;
+    let fingerprint = mm2_content::fingerprint::gameplay(vfs)
+        .map_err(|e| MenuJoinError::Fingerprint(e.to_string()))?;
+    let hello = mm2_net::hello(crate::smoke::COMMIT.to_string(), driver, fingerprint.hash);
+    let link = LobbyLink::join(addr, &hello, mods_active, DevOverrides::default())?;
+    // Offer the pick at once, as `--join` does: the roster shows what we
+    // will drive and the host's catalog gate confirms it can spawn.
+    let _ = link.ctl().set_vehicle(&pick.vehicle, pick.paint);
+    Ok(link)
+}
+
+/// Hand a menu-joined lobby to the app: the link plus the resources the
+/// client systems read beside it (removed again by [`close_menu_join`])
+/// and the status line that is the lobby's surface.
+pub fn adopt_menu_join(commands: &mut Commands, link: LobbyLink) {
+    commands.insert_resource(link);
+    commands.init_resource::<LobbyState>();
+    commands.init_resource::<crate::netdrive::RemoteSnaps>();
+    commands.init_resource::<crate::netdrive::InputSeq>();
+    commands.init_resource::<crate::netdrive::NetDriveReport>();
+    spawn_lobby_text(commands);
+}
+
+/// Spawn the joined lobby's status line ([`LobbyText`]).
+pub fn spawn_lobby_text(commands: &mut Commands) {
+    commands.spawn((
+        LobbyText,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+/// Close a menu-joined lobby once it has ended (`Esc`, or a lost host):
+/// at `Menu`, with `drive_lobby` having queued the exit it would
+/// otherwise write as `AppExit` and nothing left to start, the link and
+/// everything that existed only for it go, and `menu_watch` reopens the
+/// shell carrying why. Only acts under a [`MenuShell`] — a `--join` app
+/// has no menu to return to and exits through [`drive_lobby`] instead.
+#[allow(clippy::too_many_arguments)] // the resources a joined lobby owns, by name
+pub fn close_menu_join(
+    mut commands: Commands,
+    mut lobby: ResMut<LobbyState>,
+    session: Res<Session>,
+    menu: Option<Res<MenuShell>>,
+    note: Option<ResMut<crate::session::SessionNote>>,
+    texts: Query<Entity, With<LobbyText>>,
+) {
+    let (Some(_), Some(mut note)) = (menu, note) else {
+        return;
+    };
+    if lobby.pending_exit.is_none()
+        || lobby.pending_start.is_some()
+        || *session.phase() != SessionPhase::Menu
+    {
+        return;
+    }
+    note.lobby = Some(
+        lobby
+            .notice
+            .take()
+            .unwrap_or_else(|| "left the lobby".to_string()),
+    );
+    for text in &texts {
+        commands.entity(text).despawn();
+    }
+    commands.remove_resource::<LobbyLink>();
+    commands.remove_resource::<LobbyState>();
+    commands.remove_resource::<crate::netdrive::RemoteSnaps>();
+    commands.remove_resource::<crate::netdrive::InputSeq>();
+    commands.remove_resource::<crate::netdrive::NetDriveReport>();
 }
 
 /// The windowed host lobby's keyboard surface — `Enter` requests the
