@@ -160,7 +160,11 @@ fn an_unreachable_address_fails_the_join() {
 #[test]
 fn a_lone_headless_run_refuses_wire_stop_conditions() {
     let install = tempfile::tempdir().unwrap();
-    for flag in [["--until-impacts", "1"], ["--deadline", "5"]] {
+    for flag in [
+        ["--until-impacts", "1"],
+        ["--until-resets", "1"],
+        ["--deadline", "5"],
+    ] {
         let out = std::process::Command::new(MM2_EXE)
             .args(["--mm2-path", install.path().to_str().unwrap()])
             .args(["--dev-world", "--headless", "--frames", "5"])

@@ -170,6 +170,9 @@ pub struct StopWhen {
     /// Stop once this process has applied this many replicated impact
     /// rows (`net=` `imp…s/<n>a`).
     pub impacts_applied: Option<u64>,
+    /// Stop once this process has observed this many authority resets
+    /// (`net=` `rst<n>`).
+    pub resets_observed: Option<u64>,
     /// Stop once a remote copy this process held is gone — a peer left
     /// the session. Armed by the first remote copy appearing.
     pub peer_left: bool,
@@ -185,7 +188,10 @@ pub struct StopWhen {
 impl StopWhen {
     /// Whether any condition is armed.
     pub fn is_armed(&self) -> bool {
-        self.impacts_applied.is_some() || self.peer_left || self.deadline.is_some()
+        self.impacts_applied.is_some()
+            || self.resets_observed.is_some()
+            || self.peer_left
+            || self.deadline.is_some()
     }
 }
 
@@ -212,6 +218,7 @@ impl RunBudget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopReason {
     Impacts,
+    Resets,
     PeerLeft,
     Deadline,
 }
@@ -220,6 +227,7 @@ impl StopReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::Impacts => "impacts",
+            Self::Resets => "resets",
             Self::PeerLeft => "peer-left",
             Self::Deadline => "deadline",
         }
@@ -249,6 +257,11 @@ impl StopWatch {
             && r.impacts_applied >= want
         {
             return Some(StopReason::Impacts);
+        }
+        if let (Some(want), Some(r)) = (self.stop.resets_observed, report)
+            && r.resets >= want
+        {
+            return Some(StopReason::Resets);
         }
         if self.stop.peer_left
             && let Some(r) = report
@@ -452,6 +465,7 @@ fn add_lobby_client_systems(app: &mut App) {
                 // F25-B: `R` asks the authority under a
                 // predicted session — same wiring as the app.
                 crate::netdrive::send_reset_request,
+                crate::netdrive::send_dev_reset_request,
                 crate::netdrive::send_drive_input
                     .after(crate::input::vehicle_input)
                     .after(crate::input::parked_drive)
@@ -1319,7 +1333,10 @@ fn run_headless(
     // — a dev world mounts the authored `materials` pair when the
     // install carries one, so the `_default` block's sound class can
     // resolve there), and `fix`, the times the predicted own seat sat at
-    // rest apart from the authority's copy long enough to be reseated.
+    // rest apart from the authority's copy long enough to be reseated,
+    // with `rst`, the authority resets observed (host: landings that
+    // bumped a wire epoch; client: epoch-declared teleports applied),
+    // printed only once non-zero so a reset-free record is unchanged.
     // Absent without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
@@ -1353,7 +1370,11 @@ fn run_headless(
                 r.surfaces_sent,
                 r.surfaces_applied,
                 r.own_settles
-            )
+            ) + &if r.resets > 0 {
+                format!(",rst{}", r.resets)
+            } else {
+                String::new()
+            }
         })
         .unwrap_or_default();
     // F26-A world-prop evidence: `props=` names this process's own
@@ -2704,6 +2725,29 @@ mod tests {
         let mut idle = StopWatch::new(StopWhen::default());
         assert!(!StopWhen::default().is_armed());
         assert_eq!(idle.fired(&applied(99)), None);
+    }
+
+    #[test]
+    fn a_stop_on_resets_fires_once_enough_were_observed() {
+        let mut watch = StopWatch::new(StopWhen {
+            resets_observed: Some(1),
+            ..default()
+        });
+        let seen = |n| {
+            world_with(crate::netdrive::NetDriveReport {
+                resets: n,
+                ..default()
+            })
+        };
+        assert!(
+            StopWhen {
+                resets_observed: Some(1),
+                ..default()
+            }
+            .is_armed()
+        );
+        assert_eq!(watch.fired(&seen(0)), None);
+        assert_eq!(watch.fired(&seen(1)), Some(StopReason::Resets));
     }
 
     #[test]

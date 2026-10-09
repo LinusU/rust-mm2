@@ -147,6 +147,11 @@ struct NetField {
     surfaces_sent: u64,
     surfaces_applied: u64,
     own_settles: u64,
+    requests_sent: u64,
+    requests_granted: u64,
+    requests_dropped: u64,
+    /// The trailing `rst<n>` cell, printed only once non-zero.
+    resets: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -169,6 +174,10 @@ fn net_field(line: &str) -> NetField {
     let prog = cells(parts[10], "prog");
     let surf = cells(parts[12], "surf");
     let own_settles = leading_u64(parts[13].strip_prefix("fix").unwrap());
+    let req = cells(parts[3], "req");
+    let resets = parts
+        .get(14)
+        .map_or(0, |p| leading_u64(p.strip_prefix("rst").unwrap()));
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -190,6 +199,10 @@ fn net_field(line: &str) -> NetField {
         surfaces_sent: surf[0],
         surfaces_applied: surf[1],
         own_settles,
+        requests_sent: req[0],
+        requests_granted: req[1],
+        requests_dropped: req[2],
+        resets,
     }
 }
 
@@ -332,6 +345,104 @@ fn two_mm2_processes_drive_one_session_over_loopback() {
     }
 
     quit_and_assert_host_drove(host);
+}
+
+/// F25-C's reset leg at process level: a joined client run with
+/// `--reset-at` asks the host for a reset over the real socket (the
+/// wire form of the `R` key — it never teleports itself), the host
+/// grants exactly that one ask to exactly that seat, and the epoch
+/// declaration comes back on the `Snap` stream so the client applies
+/// it to its own seat. The other client, run without the flag, asks
+/// nothing, and the host drops nothing.
+#[test]
+fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+    let addr = listening_addr(&host);
+
+    // Alice runs until her own reset has come back, bob until alice
+    // has left (frames are only the ceiling), each bounded by a
+    // wall-clock deadline.
+    let mut alice_args = join_args(install.path(), addr, "alice", 6000);
+    alice_args.extend(
+        [
+            "--reset-at",
+            "1200",
+            "--until-resets",
+            "1",
+            "--deadline",
+            "90",
+        ]
+        .map(String::from),
+    );
+    let alice = Proc::spawn(MM2_EXE, &alice_args);
+    let mut bob_args = join_args(install.path(), addr, "bob", 6000);
+    bob_args.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
+    let bob = Proc::spawn(MM2_EXE, &bob_args);
+    start_when_ready(&mut host, 2);
+
+    let bound = Duration::from_secs(90 + 60);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    assert_eq!(field(&bob_rec, "stop"), "peer-left", "{bob_rec}");
+    // Whether bob also saw alice's copy teleport (`rst`) is a race with
+    // her leaving, so it is reported, not asserted.
+    let bob_net = assert_client_drove(&bob_rec, 1);
+    assert_eq!(
+        bob_net.requests_sent, 0,
+        "the control client asked nothing: {bob_rec}"
+    );
+
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    assert_eq!(field(&alice_rec, "stop"), "resets", "{alice_rec}");
+    // Not `assert_client_drove`: that one wants `moved > 0`, and the
+    // reset is exactly what puts alice back at zero.
+    assert_eq!(field(&alice_rec, "status"), "pass", "{alice_rec}");
+    assert_eq!(field(&alice_rec, "phase"), "playing", "{alice_rec}");
+    let alice_net = net_field(&alice_rec);
+    assert!(
+        alice_net.inputs_sent > 0 && alice_net.snaps_applied > 0,
+        "alice streamed inputs and applied snapshots: {alice_rec}"
+    );
+    assert_eq!(
+        alice_net.requests_sent, 1,
+        "--reset-at asked once, not once per update: {alice_rec}"
+    );
+    assert!(
+        alice_net.resets >= 1,
+        "the granted reset came back as an epoch snap the client applied: {alice_rec}"
+    );
+    // The reset really moved her: she drove far (`travel=` is the
+    // distance covered) and ended back on her grid slot (`moved=` is
+    // the distance from where she started, `0m` once reseated).
+    let travel: f64 = field(&alice_rec, "travel")
+        .strip_suffix('m')
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(travel > 50.0, "alice drove before the reset: {alice_rec}");
+    assert!(
+        moved_m(&alice_rec) < 5.0,
+        "the granted reset put alice back on her slot: {alice_rec}"
+    );
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    for _ in 0..2 {
+        assert!(host.until("event=left").contains("cause=quit"));
+    }
+
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+    let host_net = net_field(&host_rec);
+    assert_eq!(
+        (host_net.requests_granted, host_net.requests_dropped),
+        (1, 0),
+        "the host granted alice's one ask and dropped nothing: {host_rec}"
+    );
+    assert!(
+        host_net.resets >= 1,
+        "the grant bumped the seat's wire epoch on the host: {host_rec}"
+    );
+    assert!(host.wait().success(), "mm2 --host did not exit cleanly");
 }
 
 /// F26-AC05's rematch leg at process level: one lobby, two sessions.

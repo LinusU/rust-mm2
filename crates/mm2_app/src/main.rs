@@ -321,7 +321,9 @@ struct Cli {
     /// steps — the scheduled form of the `R` reset key for
     /// `--frames`/`--screenshot` captures where live input is frozen
     /// (diagnostic aid for the reset-transition camera leg; the run
-    /// is record-ineligible). One-shot.
+    /// is record-ineligible). One-shot. On a `--join` client the
+    /// teleport is the host's to grant, so the flag sends the same
+    /// `ResetRequest` the `R` key does.
     #[arg(long, value_name = "ticks")]
     reset_at: Option<u64>,
 
@@ -371,6 +373,13 @@ struct Cli {
     /// count is not a clock. The record prints `stop=impacts`.
     #[arg(long, value_name = "n", requires = "headless")]
     until_impacts: Option<u64>,
+
+    /// End a `--headless` run once this process has observed `n`
+    /// authority resets (`net=` `rst<n>`: on a client, epoch-declared
+    /// teleports applied to its own seat or a copy). The record prints
+    /// `stop=resets`.
+    #[arg(long, value_name = "n", requires = "headless")]
+    until_resets: Option<u64>,
 
     /// End a `--headless` run once a remote copy it held is gone — a
     /// peer left the session. The record prints `stop=peer-left`.
@@ -1356,6 +1365,7 @@ fn main() {
             frames: cli.frames.unwrap_or(600),
             stop: smoke::StopWhen {
                 impacts_applied: cli.until_impacts,
+                resets_observed: cli.until_resets,
                 peer_left: cli.until_peer_left,
                 peer_left_after_impacts: cli.with_impacts,
                 deadline: cli.deadline.map(Duration::from_secs),
@@ -1377,7 +1387,7 @@ fn main() {
                     "{}",
                     record(
                         smoke::SmokeStatus::Fail,
-                        "--until-impacts/--until-peer-left/--deadline need --join or --host: \
+                        "--until-impacts/--until-resets/--until-peer-left/--deadline need --join or --host: \
                          a single-process run only counts --frames"
                             .into(),
                     )
@@ -2265,6 +2275,8 @@ fn main() {
                     // against — the granted answer arrives as the
                     // own-seat epoch snap.
                     netdrive::send_reset_request,
+                    // `--reset-at` is the scheduled `R`: the same ask.
+                    netdrive::send_dev_reset_request,
                     // The wire sample reads the settled `VehicleInput`
                     // — after the keyboard mapping and every scripted
                     // owner that can overwrite it.

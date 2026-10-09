@@ -2096,6 +2096,33 @@ pub fn send_reset_request(
     }
 }
 
+/// Client-side (F25-C): `--reset-at TICK` under a predicted (`Remote`)
+/// session. The flag is the scheduled form of the `R` key, and on an
+/// authority `session::dev_reset_at` teleports the car; here a local
+/// teleport would be the unannounced self-teleport the key's gate
+/// forbids, so the flag does what the key does — asks the authority,
+/// once, when the session clock reaches the tick. This is what lets a
+/// headless process leg exercise the wire reset (request up, epoch
+/// snap down) without a keyboard; the run stays record-ineligible
+/// (`record_eligibility` names `reset-at`).
+pub fn send_dev_reset_request(
+    link: Res<LobbyLink>,
+    session: Res<Session>,
+    mut report: ResMut<NetDriveReport>,
+    mut fired: Local<bool>,
+) {
+    if *fired || session.authority_role().is_authority() || link.closed || link.leaving() {
+        return;
+    }
+    let at = session.config().and_then(|c| c.dev.reset_at);
+    if session.is_playing() && at.is_some_and(|at| session.tick() >= at) {
+        *fired = true;
+        if link.ctl().request_reset(session.wire_generation()).is_ok() {
+            report.requests_sent += 1;
+        }
+    }
+}
+
 /// Per-seat grant ledger for [`apply_reset_requests`] — the instant each
 /// wire id's last request was honored. Scoped to the session generation:
 /// a `Cancel`/`Start` cycle clears every debt.

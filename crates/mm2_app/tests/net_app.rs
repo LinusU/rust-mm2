@@ -216,6 +216,7 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
                 netdrive::send_reset_request,
+                netdrive::send_dev_reset_request,
                 netdrive::send_drive_input,
             ),
         );
@@ -6501,6 +6502,108 @@ fn r_under_a_remote_session_asks_the_authority() {
             .requests_sent,
         1
     );
+
+    host.shutdown();
+}
+
+/// One fixed-step tick of the session clock — the production system, run
+/// by hand because the harness has no fixed schedule.
+fn step_session_clock(app: &mut App) {
+    app.world_mut()
+        .run_system_cached(mm2_game::advance_session_tick)
+        .unwrap();
+}
+
+/// F25-C: `--reset-at` under a `Remote` session is the scheduled `R` —
+/// the predicted car never teleports itself (`dev_reset_at` stays
+/// inert), the flag instead asks the authority once, when the session
+/// clock reaches the tick, with a request minted against the running
+/// generation and keyed to our slot. Before the tick it asks nothing.
+#[test]
+fn reset_at_under_a_remote_session_asks_the_authority_once() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides {
+            reset_at: Some(40),
+            ..DevOverrides::default()
+        },
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.update();
+    let sent = |app: &App| {
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_sent
+    };
+    assert_eq!(
+        app.world()
+            .resource::<Session>()
+            .config()
+            .unwrap()
+            .dev
+            .reset_at,
+        Some(40),
+        "the client's flag reached the accepted config"
+    );
+    assert!(
+        app.world().resource::<Session>().tick() < 40,
+        "the control leg starts before the tick"
+    );
+    assert_eq!(sent(&app), 0, "nothing is asked before the tick");
+
+    // Walk the session clock to the tick (the harness has no fixed
+    // step, so advance it the way the production tick system does).
+    while app.world().resource::<Session>().tick() < 40 {
+        step_session_clock(&mut app);
+    }
+    app.update();
+    assert_eq!(sent(&app), 1, "the scheduled reset asked the authority");
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let requests = host.remote_inputs().drain_resets();
+        if let Some(&(player, requested)) = requests.first() {
+            assert_eq!(player, our_id, "the ask is keyed to our slot");
+            assert_eq!(requested, generation, "the ask rides this session");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the host mailbox never saw the scheduled reset request"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // One-shot: the clock staying past the tick asks nothing more.
+    for _ in 0..5 {
+        step_session_clock(&mut app);
+        app.update();
+    }
+    assert_eq!(sent(&app), 1, "--reset-at is one ask, not one per update");
 
     host.shutdown();
 }

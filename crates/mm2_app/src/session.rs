@@ -583,7 +583,8 @@ pub fn reseat_towed_trailers(
 /// config — where the scheduled teleport would be the same
 /// unannounced self-teleport the key's gate forbids (a pose the
 /// host's copy can never learn, with the local `ResetEpoch` never
-/// bumped), so the writer stays inert there.
+/// bumped), so the writer stays inert there and
+/// `netdrive::send_dev_reset_request` asks the authority instead.
 pub fn dev_reset_at(
     session: Res<Session>,
     spawn: Res<SpawnPoint>,

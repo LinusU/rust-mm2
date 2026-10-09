@@ -1652,6 +1652,30 @@ wire actually moved rather than an in-process mailbox's contents.
   isolation. Loopback, dev world, one recipe; the other seven cells
   are not run against a collision.
 
+- **Reset across processes (F25-C.4).** `--reset-at` was inert under a
+  `Remote` session (a local teleport is the unannounced self-teleport
+  the `R` gate forbids). `netdrive::send_dev_reset_request` now makes
+  the flag the scheduled `R`: once the session clock reaches the tick
+  the client sends one `ResetRequest` for the running generation. New
+  smoke cell: the `net=` record's trailing `rst<n>` (authority resets
+  observed; printed only once non-zero) and `--until-resets <n>`, a
+  `--headless` stop condition (`stop=resets`) beside `--until-impacts`.
+  `a_scheduled_reset_crosses_two_processes_and_comes_back` (host +
+  alice `--reset-at 1200 --until-resets 1` + bob `--until-peer-left`,
+  all bounded by `--deadline 90`, no frame budget): alice drove
+  ≈158 m, sent exactly one ask (`req1s`), the host granted exactly one
+  and dropped none (`req…1g/0d`, `rst≥1`), and alice's own seat came
+  back on her grid slot (`moved<5 m` after `travel>50 m`) from the
+  epoch snap; bob asked nothing. Whether bob also counts alice's copy
+  teleport (`rst`) is a race with her leaving — one full-suite run saw
+  it, one did not — so it is reported, not asserted. 3/3 isolated
+  passes. In-process twin `net_app::reset_at_under_a_remote_
+  session_asks_the_authority_once` (before the tick nothing is asked,
+  at it one ask keyed to our slot and generation, never a second).
+  Not covered: a reset under an impaired link, a trailer rig reset at
+  process level (the dev car tows nothing), the reset-while-moving
+  divergence window; loopback, dev world.
+
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
 delay/jitter/loss matrix exists at both levels now — in-process (see
