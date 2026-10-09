@@ -5330,3 +5330,115 @@ fn every_voice_kind_has_a_bus_and_the_world_sounds_share_one() {
         assert_eq!(kind.bus(), bus, "{kind:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// F07-C: offline mix evidence (AC05) — the computed engine mix rendered to
+// PCM and measured, no output device involved.
+// ---------------------------------------------------------------------------
+
+/// A 16-bit mono sine RIFF/WAVE: `cycles` periods over `frames` frames,
+/// so a pitch change moves the measurable zero-crossing rate.
+fn sine_wav(rate: u32, frames: usize, cycles: usize) -> Vec<u8> {
+    let mut wav = pcm_wav(rate, frames);
+    for (i, b) in wav[44..].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let s = (i as f32 / frames as f32 * cycles as f32 * std::f32::consts::TAU).sin();
+        *b = ((s * 20000.0) as i16).to_le_bytes();
+    }
+    wav
+}
+
+fn rms(s: &[f32]) -> f32 {
+    (s.iter().map(|x| x * x).sum::<f32>() / s.len().max(1) as f32).sqrt()
+}
+
+fn zero_crossings(s: &[f32]) -> usize {
+    s.windows(2)
+        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+        .count()
+}
+
+/// Render the app's live engine voices, one second at 22.05 kHz.
+fn render_engine_mix(app: &mut App) -> Vec<f32> {
+    let handles: Vec<_> = app
+        .world_mut()
+        .query::<(&EngineVoice, &AudioPlayer<PcmAudio>)>()
+        .iter(app.world())
+        .map(|(v, p)| (v.mix.volume, v.mix.speed, p.0.clone()))
+        .collect();
+    let waves = app.world().resource::<Assets<PcmAudio>>();
+    let voices: Vec<_> = handles
+        .iter()
+        .map(|(volume, speed, h)| audio::OfflineVoice {
+            clip: waves.get(h).expect("engine clip decoded"),
+            volume: *volume,
+            speed: *speed,
+        })
+        .collect();
+    audio::mix_offline(&voices, 22050, 1.0)
+}
+
+#[test]
+fn the_offline_engine_mix_is_audible_and_follows_rpm() {
+    let tmp = tempfile::tempdir().unwrap();
+    for stem in ["eidle", "edrive", "emid", "ehigh"] {
+        write(
+            tmp.path(),
+            &format!("aud/aud22/engines/{stem}.22k.wav"),
+            &sine_wav(22050, 2205, 100),
+        );
+    }
+    let mut app = engine_app(tmp.path(), ENGINE_ROWS);
+    app.update();
+    let idle = render_engine_mix(&mut app);
+
+    let car = player(&mut app);
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().rpm = 6000.0;
+    app.update();
+    let revved = render_engine_mix(&mut app);
+
+    assert!(rms(&idle) > 0.05, "idle mix audible: rms {}", rms(&idle));
+    assert!(
+        rms(&revved) > 0.05,
+        "revved mix audible: rms {}",
+        rms(&revved)
+    );
+    assert!(
+        zero_crossings(&revved) > zero_crossings(&idle) * 3 / 2,
+        "pitch rises with rpm: {} -> {}",
+        zero_crossings(&idle),
+        zero_crossings(&revved)
+    );
+
+    // Persist the recording for listening, under the build dir.
+    if let Ok(target) = std::env::var("CARGO_TARGET_DIR") {
+        let dir = Path::new(&target).join("captures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut both = idle;
+        both.extend(revved);
+        std::fs::write(
+            dir.join("f07-engine-idle-to-6000rpm.wav"),
+            audio::encode_wav_mono16(&both, 22050),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_silent_or_unusable_mix_renders_silence() {
+    let clip = decode_wave(&sine_wav(22050, 100, 5)).unwrap();
+    for (volume, speed) in [(0.0, 1.0), (1.0, 0.0), (1.0, f32::NAN), (f32::NAN, 1.0)] {
+        let out = audio::mix_offline(
+            &[audio::OfflineVoice {
+                clip: &clip,
+                volume,
+                speed,
+            }],
+            22050,
+            0.1,
+        );
+        assert!(out.iter().all(|s| *s == 0.0), "vol {volume} speed {speed}");
+    }
+    let wav = audio::encode_wav_mono16(&[0.5, -2.0], 22050);
+    assert_eq!(wav.len(), 48);
+    assert_eq!(decode_wave(&wav).unwrap().samples.len(), 2);
+}

@@ -191,6 +191,19 @@ stage. The program is an implementation/evidence choice — it makes no
 original-behavior claim, and headless `0s` still reports no output
 device (F07-AC05 stays open).
 
+F07-C adds the offline-mix evidence for F07-AC05: `mm2_app::audio::mix_offline`
+renders looping voices (clip, computed volume, computed speed — the state
+`engine_drive` writes onto each `EngineVoice`) to mono PCM with no output
+device, and `encode_wav_mono16` writes it as a listenable WAV. The
+`the_offline_engine_mix_is_audible_and_follows_rpm` test drives the production
+engine rig from idle to 6000 rpm over synthetic sine banks, asserts the mix is
+non-silent and that its zero-crossing rate (pitch) rises, and saves the
+recording to `$CARGO_TARGET_DIR/captures/`. This is synthetic-fixture evidence
+of the computed mix, not rodio's resampler and not a retail-sample listen:
+AC05's device/listened leg stays open. AC03/AC04/AC06 negative and teardown
+scenarios were already covered by the F07-B tests (brake-at-rest/airborne,
+scrape voice bound, teardown sweeps).
+
 F18-B.3 adds the precipitation ambience consumer: when the shared
 `effective_conditions` pick names a precipitation spec (the same
 `Weather::precipitation` binding the particle rig reads — `rainy` →

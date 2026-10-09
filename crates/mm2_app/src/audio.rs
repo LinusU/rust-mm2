@@ -3700,3 +3700,69 @@ pub fn sync_audio_pause(
         }
     }
 }
+
+/// One looping voice for [`mix_offline`]: a decoded clip plus the
+/// computed mixer state (gain and speed) the production drive systems
+/// wrote onto the voice component.
+pub struct OfflineVoice<'a> {
+    /// The clip; multi-channel clips are averaged to mono.
+    pub clip: &'a PcmAudio,
+    /// Linear gain.
+    pub volume: f32,
+    /// Playback speed multiplier (pitch).
+    pub speed: f32,
+}
+
+/// Render looping voices to mono f32 samples at `rate` for `secs`
+/// seconds — the offline mix F07-AC05 measures when no output device
+/// is attached. Nearest-frame resampling with wrap-around looping; it
+/// mirrors what the device mixer is handed (clip, volume, speed), not
+/// rodio's resampler, so it evidences the computed mix is audible, not
+/// the device path. Non-finite or non-positive speeds and non-finite
+/// gains are skipped as silent; the output is bounded by `rate * secs`
+/// frames capped at ten minutes.
+pub fn mix_offline(voices: &[OfflineVoice], rate: u32, secs: f32) -> Vec<f32> {
+    let frames = (f64::from(rate) * f64::from(secs.clamp(0.0, 600.0))) as usize;
+    let mut out = vec![0.0f32; frames];
+    for v in voices {
+        let ch = usize::from(v.clip.channels.get());
+        let n = v.clip.frames();
+        if n == 0 || !v.volume.is_finite() || !v.speed.is_finite() || v.speed <= 0.0 {
+            continue;
+        }
+        let step = f64::from(v.clip.sample_rate.get()) / f64::from(rate) * f64::from(v.speed);
+        let mut pos = 0.0f64;
+        for o in out.iter_mut() {
+            let f = (pos as usize) % n;
+            let base = f * ch;
+            let s: f32 = v.clip.samples[base..base + ch].iter().sum::<f32>() / ch as f32;
+            *o += s * v.volume;
+            pos += step;
+        }
+    }
+    out
+}
+
+/// Encode mono samples as a 16-bit PCM RIFF/WAVE (clamped), so a
+/// recorded mix can be listened to.
+pub fn encode_wav_mono16(samples: &[f32], rate: u32) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
