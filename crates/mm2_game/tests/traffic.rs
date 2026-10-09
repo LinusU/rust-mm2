@@ -561,6 +561,50 @@ fn plan_skips_non_finite_lane_geometry() {
     );
 }
 
+/// Non-finite road scalars and centre-line frames (outside the lane
+/// curves) make the road unusable: a diagnostic, no vehicle arc, no
+/// spawn — and an intersection with a non-finite centre is reported.
+#[test]
+fn plan_skips_roads_with_non_finite_scalars_and_frames() {
+    let mut b = bai(vec![
+        road_x(0, 0.0, 0),
+        road_x(1, 20.0, 0),
+        road_x(2, 40.0, 0),
+    ]);
+    b.roads[1].half_width = f32::NAN;
+    b.roads[2].sections[0].origin[0] = f32::INFINITY;
+    let build = NavGraph::build(&b);
+    for (road, field) in [(1, "half_width"), (2, "section origin")] {
+        assert!(
+            build
+                .issues
+                .contains(&NavIssue::NonFiniteRoad { road, field }),
+            "missing road {road} {field}: {:?}",
+            build.issues
+        );
+    }
+    let r = roster(&[("va_a", 1.0)]);
+    let plan = plan_ambient(
+        &build.graph,
+        &NavOverrides::default(),
+        &r,
+        5,
+        1.0,
+        &[CLEAR],
+        &SpawnPolicy {
+            max_active: 12,
+            ..SpawnPolicy::default()
+        },
+    );
+    assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
+    assert!(plan.spawns.iter().all(|s| s.lane.road == 0));
+    assert!(
+        plan.spawns
+            .iter()
+            .all(|s| s.sample.position.iter().all(|c| c.is_finite()))
+    );
+}
+
 #[test]
 fn nav_rng_next_f32_stays_in_unit_range() {
     let mut rng = NavRng::new(0);

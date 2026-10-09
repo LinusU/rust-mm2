@@ -123,6 +123,10 @@ pub struct RoadSection {
     pub tangent: [f32; 3],
 }
 
+fn finite3(v: &[f32; 3]) -> bool {
+    v.iter().all(|c| c.is_finite())
+}
+
 /// Per-side lane/rail/sidewalk curves of a road.
 #[derive(Debug, Clone)]
 pub struct RoadSide {
@@ -240,6 +244,57 @@ pub struct Road {
     pub end: RoadEnd,
     /// Start-of-road junction.
     pub start: RoadEnd,
+}
+
+impl Road {
+    /// The first non-finite float on the road outside its lane
+    /// vertices (which [`BaiIssue::NonFiniteCurveVertex`] covers):
+    /// widths, speed, centre-line frames, end signal heads and the
+    /// per-curve distance rows. `None` when every one is finite.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        if !self.half_width.is_finite() {
+            return Some("half_width");
+        }
+        if !self.base_speed.is_finite() {
+            return Some("base_speed");
+        }
+        for s in &self.sections {
+            if !s.distance.is_finite() {
+                return Some("section distance");
+            }
+            for (name, v) in [
+                ("section origin", &s.origin),
+                ("section x_axis", &s.x_axis),
+                ("section y_axis", &s.y_axis),
+                ("section z_axis", &s.z_axis),
+                ("section tangent", &s.tangent),
+            ] {
+                if !finite3(v) {
+                    return Some(name);
+                }
+            }
+        }
+        for side in [&self.right, &self.left] {
+            if side.lane_distances.iter().flatten().any(|d| !d.is_finite()) {
+                return Some("lane distance");
+            }
+            if side.edge_distances.iter().any(|d| !d.is_finite()) {
+                return Some("edge distance");
+            }
+            if !side.sidewalk_inner.iter().all(finite3) || !side.sidewalk_outer.iter().all(finite3)
+            {
+                return Some("sidewalk edge");
+            }
+        }
+        None
+    }
+}
+
+impl Intersection {
+    /// `"center"` when the centre point is not finite.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        (!finite3(&self.center)).then_some("center")
+    }
 }
 
 /// An intersection: a PSDL room plus the roads meeting there.
@@ -387,6 +442,18 @@ pub enum BaiIssue {
         /// Section count.
         sections: usize,
     },
+    /// A road or intersection carries a non-finite scalar or vector
+    /// outside the lane curves (see [`Road::non_finite_field`] and
+    /// [`Intersection::non_finite_field`]). Raw f32 bits are untrusted;
+    /// consumers treat the row as unusable.
+    NonFiniteField {
+        /// `"road"` or `"intersection"`.
+        subject: &'static str,
+        /// Index in [`Bai::roads`] / [`Bai::intersections`].
+        index: usize,
+        /// The first offending field.
+        field: &'static str,
+    },
     /// A lane/sidewalk/rail curve carries a non-finite vertex
     /// coordinate — raw f32 bits are untrusted, and such a curve cannot
     /// be length-measured or sampled. One issue per curve, at the first
@@ -499,6 +566,11 @@ impl fmt::Display for BaiIssue {
                 f,
                 "road {road} {side} {kind} curve {curve}: non-finite vertex {vertex}"
             ),
+            BaiIssue::NonFiniteField {
+                subject,
+                index,
+                field,
+            } => write!(f, "{subject} {index}: {field} is not finite"),
             BaiIssue::ZeroRoomReference { subject, index } => {
                 write!(
                     f,
@@ -858,6 +930,13 @@ impl Bai {
                     }
                 }
             }
+            if let Some(field) = road.non_finite_field() {
+                issues.push(BaiIssue::NonFiniteField {
+                    subject: "road",
+                    index: ri,
+                    field,
+                });
+            }
             if road.sections.len() < 2 {
                 issues.push(BaiIssue::TooFewSections {
                     road: ri,
@@ -911,6 +990,13 @@ impl Bai {
         }
 
         for (ii, int) in self.intersections.iter().enumerate() {
+            if let Some(field) = int.non_finite_field() {
+                issues.push(BaiIssue::NonFiniteField {
+                    subject: "intersection",
+                    index: ii,
+                    field,
+                });
+            }
             if int.room == 0 {
                 issues.push(BaiIssue::ZeroRoomReference {
                     subject: "intersection",
@@ -1734,6 +1820,34 @@ mod tests {
                 .any(|i| matches!(i, BaiIssue::DanglingIntersectionRoad { road: 7, .. })),
             "{issues:?}"
         );
+    }
+
+    #[test]
+    fn validate_flags_non_finite_road_and_intersection_fields() {
+        let mut bai = Bai::parse(&two_road_fixture()).unwrap();
+        assert!(
+            !bai.validate()
+                .iter()
+                .any(|i| matches!(i, BaiIssue::NonFiniteField { .. }))
+        );
+        bai.roads[0].half_width = f32::NAN;
+        bai.roads[1].sections[1].origin[2] = f32::INFINITY;
+        bai.intersections[0].center[1] = f32::NAN;
+        let issues = bai.validate();
+        for (subject, index, field) in [
+            ("road", 0, "half_width"),
+            ("road", 1, "section origin"),
+            ("intersection", 0, "center"),
+        ] {
+            assert!(
+                issues.contains(&BaiIssue::NonFiniteField {
+                    subject,
+                    index,
+                    field
+                }),
+                "missing {subject} {index} {field}: {issues:?}"
+            );
+        }
     }
 
     #[test]

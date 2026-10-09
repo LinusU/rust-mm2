@@ -404,6 +404,23 @@ pub enum NavIssue {
         /// Index among curves of the same kind on that side.
         index: usize,
     },
+    /// A road carries a non-finite float outside its lane curves
+    /// (width, speed, centre-line frames, distance rows). The road is
+    /// unusable: it gets no vehicle arc, so nothing routes or spawns
+    /// on it; its curves stay queryable.
+    NonFiniteRoad {
+        /// BAI road index.
+        road: usize,
+        /// First offending field (`Road::non_finite_field`).
+        field: &'static str,
+    },
+    /// An intersection's centre point is not finite. It stays in the
+    /// graph; consumers that need a centre derive one from the arc
+    /// ends instead.
+    NonFiniteIntersection {
+        /// BAI intersection index.
+        intersection: usize,
+    },
     /// A curve carries a non-finite vertex or length — raw BAI floats
     /// are untrusted, and a NaN/`inf` here would otherwise poison every
     /// sampled position. Vehicle curves drop out of their arc; other
@@ -476,6 +493,12 @@ impl fmt::Display for NavIssue {
                 f,
                 "road {road} {side} {kind:?} lane {index}: non-finite curve data"
             ),
+            NavIssue::NonFiniteRoad { road, field } => {
+                write!(f, "road {road}: {field} is not finite; no vehicle arcs")
+            }
+            NavIssue::NonFiniteIntersection { intersection } => {
+                write!(f, "intersection {intersection}: centre is not finite")
+            }
             NavIssue::LaneDistancesRecomputed {
                 road,
                 side,
@@ -955,6 +978,10 @@ impl NavGraph {
                 }
             }
 
+            let unusable = road.non_finite_field();
+            if let Some(field) = unusable {
+                issues.push(NavIssue::NonFiniteRoad { road: ri, field });
+            }
             let mut road_arcs = [None, None];
             // Right-side curves travel with the sections; left-side
             // curves travel against them. London's left-hand driving is
@@ -1066,11 +1093,12 @@ impl NavGraph {
                 // Vehicles are routable only where the authored ambient
                 // types allow them; an undocumented code is left
                 // routable — `Bai::validate` already reports it.
-                let vehicles_allowed = !honour_ambient
-                    || !matches!(
-                        bside.ambient_type(),
-                        Some(AmbientType::PedestriansOnly) | Some(AmbientType::Disabled)
-                    );
+                let vehicles_allowed = unusable.is_none()
+                    && (!honour_ambient
+                        || !matches!(
+                            bside.ambient_type(),
+                            Some(AmbientType::PedestriansOnly) | Some(AmbientType::Disabled)
+                        ));
                 if vehicles_allowed && !vehicle_lanes.is_empty() {
                     // Inner→outer order by measured lateral offset:
                     // right side ascending (+x is driver's right), left
@@ -1250,6 +1278,11 @@ impl NavGraph {
             grid.insert(i as u32, lo, hi);
         }
 
+        for (ii, i) in bai.intersections.iter().enumerate() {
+            if i.non_finite_field().is_some() {
+                issues.push(NavIssue::NonFiniteIntersection { intersection: ii });
+            }
+        }
         let intersections = bai
             .intersections
             .iter()
