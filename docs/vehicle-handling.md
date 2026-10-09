@@ -17,6 +17,15 @@ cargo run -p mm2_inspect -- car <install> vpbug --json | jq .conversion
 What follows is the shape of the mapping and, more usefully, the reasoning
 behind the adaptations.
 
+The original game's own vehicle model — 19.6 m/s² gravity, the
+stick–slip tyre, the drivetrain spin integration, the aero rotational
+damping, the gyro assists, the input ramps — is recovered in full in
+[research/vehicle-physics/](research/vehicle-physics/README.md), with a
+comparison against this implementation in
+[09-differences-from-rust-mm2.md](research/vehicle-physics/09-differences-from-rust-mm2.md).
+Where this document calls an original mechanism unrecovered or
+designed, check there first.
+
 ## Conventions
 
 - Vehicle space is an **identity** map of MM2 coordinates: both use `-Z`
@@ -366,8 +375,10 @@ vehicle carries `Drift`, `Spin180` and `Reverse180` rates (and on 17 of
 21 records, `Pitch`/`Roll`, all authored 0.0). `VehicleConfig.gyro`
 carries the record verbatim; `None` means no record and no assist.
 
-The consumption is a designed reading — the original's `Update()` is
-unrecovered (UNK-13; see `docs/research/damage.md` and DSN-22).
+The consumption is a designed reading (DSN-22). The original's
+`Update()` is now recovered and works differently — yaw *torques*
+proportional to steering and the driven wheels' spin, not a latched
+rate (`research/vehicle-physics/04-chassis-and-assists.md`, PHY-10).
 Handbrake plus steering while travelling latches a spin that holds the
 yaw rate *at least* at the authored rate for as long as the inputs are
 held — a tap spins partway, a held one completes ~180°, `Reverse180`

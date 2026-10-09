@@ -75,6 +75,11 @@ the build artefacts and the git stash stack are shared:
   are deliberate. Read it before changing `mm2_content::convert` or the
   assists; `mm2-inspect handling <install>` audits the whole roster and
   is how claims about handling get checked.
+- [docs/research/vehicle-physics/](docs/research/vehicle-physics/README.md)
+  — the original game's vehicle physics and input handling, recovered
+  from `Midtown2.exe`: time step, rigid body, tyres, suspension,
+  drivetrain, assists, human and AI inputs, a port-ready recipe. Read
+  it before changing how a car drives.
 - [docs/original-rules.md](docs/original-rules.md) — the original-rules
   ledger: every known retail-game rule classified verified_original /
   documented / inferred / designed / unknown with sources. Read it
