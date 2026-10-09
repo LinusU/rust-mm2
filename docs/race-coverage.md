@@ -1001,7 +1001,7 @@ record: `status=pass`, `finite=true`, the `opps=` rows equal the
 `opp=` spawned count in distinct roster slots (F15-AC01 — the authored
 lineup; the authored vehicle is the same for every slot of these rows,
 `vpbug` in sf and `vpcoop` in london, so *distinct vehicle models* is
-not evidenced), at least one opponent earning gates (AC02, checkpoint
+not evidenced), at least one opponent crossing a gate trigger (route-derived `d` clears excluded; AC02, checkpoint
 course and circuit, through the swept triggers), and no stationary spell
 over 1500 frames (AC03; the longest observed was 900, the DSN-14
 re-anchor budget). Observed 2026-10-10 (hold driver, Amateur, Apple M1):

@@ -54,6 +54,8 @@ struct Row {
     vehicle: String,
     cleared: usize,
     stuck: u32,
+    /// Gates credited by route position, not a trigger crossing.
+    route: usize,
 }
 
 fn rows(record: &str) -> Vec<Row> {
@@ -66,11 +68,14 @@ fn rows(record: &str) -> Vec<Row> {
             let vehicle = parts.next().expect("vehicle").to_string();
             let mut cleared = None;
             let mut stuck = 0;
+            let mut route = 0;
             for p in parts {
                 if let Some(n) = p.strip_suffix('c') {
                     cleared = n.parse().ok();
                 } else if let Some(n) = p.strip_suffix('w') {
                     stuck = n.parse().expect("stuck frames");
+                } else if let Some(n) = p.strip_suffix('d') {
+                    route = n.parse().expect("route clears");
                 }
             }
             Row {
@@ -78,6 +83,7 @@ fn rows(record: &str) -> Vec<Row> {
                 vehicle,
                 cleared: cleared.unwrap_or_else(|| panic!("row lacks `<n>c`: {row}")),
                 stuck,
+                route,
             }
         })
         .collect()
@@ -110,14 +116,15 @@ fn retail_events_race_the_authored_lineup_finitely_with_bounded_stuck_spells() {
         assert!(spawned > 0, "{leg}: no opponents spawned:\n{record}");
         assert_eq!(rows.len(), spawned, "{leg}: {record}");
         let mut slots: Vec<usize> = rows.iter().map(|r| r.slot).collect();
+        slots.sort_unstable();
         slots.dedup();
         assert_eq!(slots.len(), spawned, "{leg}: duplicate slots:\n{record}");
         assert!(rows.iter().all(|r| !r.vehicle.is_empty()), "{leg}");
 
         // AC02: opponents earn gates through the real triggers.
         assert!(
-            rows.iter().any(|r| r.cleared > 0),
-            "{leg}: no opponent cleared a gate:\n{record}"
+            rows.iter().any(|r| r.cleared > r.route),
+            "{leg}: no opponent crossed a gate trigger (route clears excluded):\n{record}"
         );
 
         // AC03: no opponent sits stationary past the recovery bound.
