@@ -164,7 +164,9 @@ pub struct EventRecord {
     /// Which event this record belongs to.
     pub key: EventKey,
     /// Times the event's authoritative result stream produced a
-    /// `Finished` outcome for this profile.
+    /// `Finished` outcome for this profile — a plain count (nothing is
+    /// derived from it beyond display), so a hostile/edited profile
+    /// pinned at `u32::MAX` saturates it rather than overflowing.
     pub finishes: u32,
     /// Best (lowest) recorded finish in race ticks.
     pub best_race_ticks: Option<u64>,
@@ -190,7 +192,12 @@ impl EventRecord {
     /// Professional). Idempotency is the caller's (the `ResultLedger`
     /// dedups by `ResultId`, spec req 3).
     pub fn record_finish(&mut self, race_ticks: u64, place: Option<u32>, difficulty: Difficulty) {
-        self.finishes += 1;
+        // `finishes` is persisted, so a hand-edited profile can arrive
+        // pinned at `u32::MAX`; as a plain counter it saturates there
+        // (documented on the field) instead of panicking under
+        // `overflow-checks` or wrapping back to 0. The best time/place
+        // below are unaffected — they only ever decrease.
+        self.finishes = self.finishes.saturating_add(1);
         self.best_race_ticks = Some(
             self.best_race_ticks
                 .map_or(race_ticks, |best| best.min(race_ticks)),
@@ -498,6 +505,13 @@ impl std::error::Error for ProfileError {
     }
 }
 
+/// The diagnostic for an id space with no free `driver-<n>` suffix left
+/// — reached from the surviving files' highest suffix or from the
+/// on-disk high-water mark, whichever is larger.
+fn id_space_exhausted() -> ProfileError {
+    ProfileError::Invalid("profile id space exhausted".to_string())
+}
+
 /// A directory of versioned profile files. The root is the caller's
 /// choice — [`default_root`](Self::default_root) supplies the
 /// OS-appropriate user data location; tests supply a temp dir.
@@ -628,16 +642,22 @@ impl ProfileStore {
     /// save wastes a suffix, while the opposite order could hand out
     /// a live id twice.
     fn allocate_id(&self) -> Result<u64, ProfileError> {
-        let floor = self
+        // A surviving `driver-<u64::MAX>` leaves no free suffix: the
+        // `max + 1` that would name the floor wraps (panic under
+        // `overflow-checks`, wrap to 0 without them — handing out a
+        // live id again), so the exhausted id space is reported the
+        // same way the mark's own `+ 1` reports it below.
+        let floor = match self
             .existing_ids()?
             .iter()
             .filter_map(ProfileId::suffix)
             .max()
-            .map_or(0, |max| max + 1);
+        {
+            Some(max) => max.checked_add(1).ok_or_else(id_space_exhausted)?,
+            None => 0,
+        };
         let next = self.next_id_mark()?.unwrap_or(0).max(floor);
-        let after = next
-            .checked_add(1)
-            .ok_or_else(|| ProfileError::Invalid("profile id space exhausted".to_string()))?;
+        let after = next.checked_add(1).ok_or_else(id_space_exhausted)?;
         self.write_marker(NEXT_ID_FILE, &format!("{after}\n"))?;
         Ok(next)
     }

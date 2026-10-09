@@ -501,3 +501,89 @@ fn sandbox_profiles_do_not_record_progress() {
     assert!(!sandbox.records_progress());
     assert!(standard.records_progress());
 }
+
+/// A surviving `driver-<u64::MAX>` leaves no free suffix: the
+/// `max + 1` floor would overflow (panic under `overflow-checks`, wrap
+/// onto a live id without them), so `create` reports the exhausted id
+/// space instead — and writes nothing new.
+#[test]
+fn an_exhausted_id_space_is_reported_not_wrapped() {
+    let (_dir, store) = store();
+    let ceiling = store.root().join(format!("driver-{}.json", u64::MAX));
+    std::fs::write(&ceiling, b"{}").unwrap();
+
+    let err = store
+        .create("Nobody", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap_err();
+    match err {
+        ProfileError::Invalid(reason) => {
+            assert!(
+                reason.contains("id space exhausted"),
+                "unexpected: {reason}"
+            )
+        }
+        other => panic!("expected an exhausted-id-space error, got {other}"),
+    }
+    // No `driver-0.json` appeared and the ceiling file is untouched.
+    assert!(!store.root().join("driver-0.json").exists());
+    assert!(ceiling.exists());
+    assert_eq!(
+        store.list().unwrap()[0].id.as_str(),
+        format!("driver-{}", u64::MAX)
+    );
+}
+
+/// The same exhaustion, reached through the persisted high-water mark
+/// rather than a surviving file: `next-id` at `u64::MAX` has no
+/// successor to write, and `create` reports that instead of panicking.
+#[test]
+fn a_high_water_mark_at_the_u64_ceiling_is_reported() {
+    let (_dir, store) = store();
+    std::fs::write(store.root().join("next-id"), format!("{}\n", u64::MAX)).unwrap();
+
+    let err = store
+        .create("Nobody", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap_err();
+    match err {
+        ProfileError::Invalid(reason) => {
+            assert!(
+                reason.contains("id space exhausted"),
+                "unexpected: {reason}"
+            )
+        }
+        other => panic!("expected an exhausted-id-space error, got {other}"),
+    }
+    assert!(!store.root().join("driver-0.json").exists());
+}
+
+/// `finishes` is a persisted count: a hand-edited profile pinned at
+/// `u32::MAX` must saturate there (still recording the run's time and
+/// place) rather than overflow — a panic in debug, a wrap back to 0 in
+/// release.
+#[test]
+fn a_finish_count_pinned_at_the_u32_ceiling_saturates() {
+    let (_dir, store) = store();
+    let mut profile = store
+        .create("Counter", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let key = event_key();
+    {
+        let record = profile.event_mut(key.clone());
+        record.finishes = u32::MAX;
+        record.record_finish(9_000, Some(1), Difficulty::Professional);
+        assert_eq!(record.finishes, u32::MAX, "the counter saturates");
+        assert_eq!(record.best_race_ticks, Some(9_000));
+        assert_eq!(record.best_place, Some(1));
+        assert!(record.beaten_professional);
+    }
+    // A further finish at the ceiling behaves the same way, and the
+    // saturated count survives the persistence round trip.
+    profile
+        .event_mut(key.clone())
+        .record_finish(8_000, Some(1), Difficulty::Professional);
+    store.save(&mut profile).unwrap();
+    let loaded = store.load(&profile.id).unwrap().profile;
+    let record = loaded.event(&key).unwrap();
+    assert_eq!(record.finishes, u32::MAX);
+    assert_eq!(record.best_race_ticks, Some(8_000));
+}
