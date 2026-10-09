@@ -68,6 +68,7 @@ mod stuck;
 mod surface;
 mod texel_fx;
 mod traffic;
+mod traffic_retail;
 mod trailer;
 mod vfs_audit;
 mod wheel_fx;
