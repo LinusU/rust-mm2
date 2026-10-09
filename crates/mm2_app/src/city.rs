@@ -979,7 +979,17 @@ pub fn emit_psdl(psdl: &Psdl, surfaces: Option<&SurfaceTables>) -> CityImport {
             .insert("emitted-before-first-texture-ref".into(), unset_emits);
     }
 
-    let (spawn, spawn_yaw) = choose_spawn(psdl, &road_midpoints, &road_surfaces);
+    let (spawn, spawn_yaw, skipped) =
+        choose_spawn(psdl.bounds_center, &road_midpoints, &road_surfaces);
+    if skipped > 0 {
+        warn!(
+            skipped,
+            "city: non-finite PSDL geometry left out of the spawn choice"
+        );
+        report
+            .unsupported
+            .insert("non-finite-spawn-source".into(), skipped);
+    }
     CityImport {
         meshes,
         colliders,
@@ -995,23 +1005,48 @@ pub fn emit_psdl(psdl: &Psdl, surfaces: Option<&SurfaceTables>) -> CityImport {
 /// (curved or hilly roads put it beside or under the road). Cities without
 /// road strips fall back to the nearest road room's centroid, a vehicle
 /// height above its highest road vertex.
-fn choose_spawn(psdl: &Psdl, midpoints: &[(Vec3, Vec3)], roads: &[(Vec3, f32)]) -> (Vec3, f32) {
-    let center = v3(psdl.bounds_center);
-    let dist = |p: Vec3| (p.xz() - center.xz()).length_squared();
-    if let Some((pos, dir)) = midpoints
-        .iter()
-        .min_by(|a, b| dist(a.0).total_cmp(&dist(b.0)))
-    {
-        // Vehicle forward is local −Z.
-        return (*pos + Vec3::Y * SPAWN_CLEARANCE, (-dir.x).atan2(-dir.z));
+fn choose_spawn(
+    bounds_center: [f32; 3],
+    midpoints: &[(Vec3, Vec3)],
+    roads: &[(Vec3, f32)],
+) -> (Vec3, f32, usize) {
+    // Authored vertices are not validated by the PSDL reader: a
+    // non-finite candidate would become the session's start pose (and
+    // an Avian ray origin), so it is skipped and counted instead. A
+    // non-finite bounds centre is measured from the origin.
+    let mut skipped = 0;
+    let mut center = v3(bounds_center);
+    if !center.is_finite() {
+        skipped += 1;
+        center = Vec3::ZERO;
     }
-    match roads.iter().min_by(|a, b| dist(a.0).total_cmp(&dist(b.0))) {
+    let dist = |p: Vec3| (p.xz() - center.xz()).length_squared();
+    let midpoints = midpoints.iter().filter(|(p, d)| {
+        let ok = p.is_finite() && d.is_finite();
+        skipped += usize::from(!ok);
+        ok
+    });
+    if let Some((pos, dir)) = midpoints.min_by(|a, b| dist(a.0).total_cmp(&dist(b.0))) {
+        // Vehicle forward is local −Z.
+        return (
+            *pos + Vec3::Y * SPAWN_CLEARANCE,
+            (-dir.x).atan2(-dir.z),
+            skipped,
+        );
+    }
+    let roads = roads.iter().filter(|(c, y)| {
+        let ok = c.is_finite() && y.is_finite();
+        skipped += usize::from(!ok);
+        ok
+    });
+    match roads.min_by(|a, b| dist(a.0).total_cmp(&dist(b.0))) {
         Some((centroid, max_y)) => (
             Vec3::new(centroid.x, max_y + SPAWN_CLEARANCE, centroid.z),
             0.0,
+            skipped,
         ),
         // No road attributes at all: above the bounds centre.
-        None => (Vec3::new(center.x, center.y + 10.0, center.z), 0.0),
+        None => (Vec3::new(center.x, center.y + 10.0, center.z), 0.0, skipped),
     }
 }
 
@@ -4498,6 +4533,22 @@ const KINK_COS: f32 = 0.9994;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn non_finite_spawn_sources_are_skipped_and_counted() {
+        let nan = Vec3::NAN;
+        let good = (Vec3::new(10.0, 1.0, 10.0), Vec3::Z);
+        let mids = [(nan, Vec3::Z), (Vec3::ZERO, nan), good];
+        let (pos, yaw, skipped) = super::choose_spawn([0.0; 3], &mids, &[]);
+        assert_eq!(skipped, 2);
+        assert!(pos.is_finite() && yaw.is_finite());
+        assert_eq!(pos.x, 10.0);
+        // Road-centroid fallback, and a non-finite bounds centre.
+        let roads = [(nan, 1.0), (Vec3::new(3.0, 0.0, 4.0), f32::NAN)];
+        let (pos, _, skipped) = super::choose_spawn([f32::NAN; 3], &[], &roads);
+        assert_eq!(skipped, 3);
+        assert!(pos.is_finite());
+    }
+
     use super::*;
     #[test]
     fn custom_city_chunks_validate_paths_without_silent_fallback() {
