@@ -1396,13 +1396,19 @@ fn run_headless(
     // and, on a client, the rows that landed or were refused for a
     // world that differs — two processes in one session must print the
     // same `sites`. Absent while nothing is stamped, so every record
-    // without props stays bit-identical.
+    // without props stays bit-identical. `parked` counts the kerbside
+    // parked cars this process placed (they are bangers, so they sit in
+    // the same digest); it shows a networked race kept them and a
+    // networked cruise skipped them.
+    let parked = world_ecs
+        .get_resource::<crate::city::ParkedCarReport>()
+        .map_or(0, |p| p.cars);
     let props_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .filter(|r| r.prop_world.count > 0)
         .map(|r| {
             format!(
-                " props=sites{}:{:016x},landed{},mism{}",
+                " props=sites{}:{:016x},landed{},mism{},parked{parked}",
                 r.prop_world.count, r.prop_world.digest, r.props_landed, r.props_mismatched
             )
         })

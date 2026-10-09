@@ -1,16 +1,16 @@
-# Last iteration — impaired-link leg of the remote breakdown (iteration 12 of the new run)
+# Last iteration — parked cars across peers in a networked race (iteration 13 of the new run)
 
-Selection: iteration 11 (`eb62a4154`) passed gates and review with no blocking findings. Report 6 follow-up 2 turned out to be landed already (`cd7ad71`, DSN-11 text and `the_field_keeps_racing_through_the_wire_deferral`), so the open networking items were F27-C and F25-B's impaired breakdown leg; I took the latter — the smallest and the one the previous review named as uncovered ("no impaired link").
+Selection: iteration 12 (`7eaee43`) passed gates and review with no blocking findings. Its next-step list offered F27-C (needs a second driven client) or report 6 follow-up 3. I took the checkable half of follow-up 3: "whether the seed-rolled parked cars agree across peers in networked races". The existing two-process prop-world leg was a Cruise, where the session skips parked cars, so the question had no evidence.
 
-Change (candidate, not independently checked; test-only):
-- `net_drive`: the breakdown run is now `run_breakdown(retail, Option<Impair>)` returning a `BreakdownRun` (client record, host `destroyed`/`repaired` log lines, host record, proxy counters), with `assert_breakdown` holding the shared assertions (client `stop=repaired`, exactly one dead episode `imp=…/1d`, `dsyn>0`; host interval 595–610 ticks). The clean test is unchanged in what it asserts.
-- New `a_remote_drivers_breakdown_survives_an_impaired_link` (`MM2_RETAIL`-gated): the client reaches the host through a seeded `ImpairProxy` with the matrix's lossy recipe (30 % loss, 10 % dup, 10 % reorder, 40±30 ms, both directions, armed 400 ms after `Start`); both directions must show impairment.
-- `docs/research/net.md` (report 6 follow-up 1 bullet) records it.
+Change (candidate, not independently checked):
+- `smoke.rs`: the networked `props=` record cell gains `parked<n>` (cars this process placed, from `ParkedCarReport`). Records without a stamped networked world are unchanged.
+- `net_drive`: new `two_retail_processes_roll_the_same_parked_cars_in_a_race` (`MM2_RETAIL`-gated): host `--event checkpoint:0`, parked client; both must place the same non-zero parked count, share one `SiteTable` digest, and the client must refuse no row (`mism0`). The cruise leg now also asserts `parked0` on both sides (the original skips them in networked cruise).
+- `docs/research/net.md` and the PLAN F26-A row / report-6 summary record it.
 
-Evidence (retail london `checkpoint:0`, loopback, headless; `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`): both breakdown legs 3/3 passes (~12 s per pair). Impaired: host `destroyed` tick 900 → `repaired` tick 1499 (599 ticks), client `stop=repaired imp=1i/1r/1d`, host `in…/36x` shows the duplicated inputs the relay injected.
+Evidence (retail london `checkpoint:0`, loopback, headless; `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`): 3/3 passes (~7.5 s each); host and client both `props=sites6632:6c14ab6b820cd46b,…,parked481`; client landed 486–495 prop rows, `mism0`. The four other `two_retail_processes_*` legs also passed in the same run (82 s together).
 
-Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok` lines, none failed (without `MM2_RETAIL`; the retail legs were run separately above).
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok` lines, none failed (without `MM2_RETAIL`; the retail legs ran separately above).
 
-Not verified: the destruction is the knob's, not a driven wreck; no second client watching the wrecked seat's copy; smoke plume observed (`ptx`) not asserted; nothing rendered; Blitz not run; loopback only; the impaired leg uses one seed and one recipe, not the full matrix.
+Not verified: the paint roll is not in the digest (same seed stream, so a paint-only divergence would pass); one event and city; same machine and binary, so cross-platform rolls are unobserved; nothing rendered. Drawbridge, mover (sailboat/ferry/train) and sound actors of follow-up 3 are still clock-only / local; follow-up 3 is not closed.
 
-Status: implemented candidate; not independently checked. Next: F27-C multi-client contested pickup (needs a second driven client), or report 6 follow-up 3 (F26-A actors) audit.
+Status: implemented candidate; not independently checked. Next: F27-C multi-client contested pickup (needs a second driven client), or the remaining follow-up-3 actors (proximity leaves, sounds).

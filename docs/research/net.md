@@ -1745,6 +1745,23 @@ wire actually moved rather than an in-process mailbox's contents.
   dead episode (`imp=1i/1r/1d`) — a stale or duplicated pre-repair snap
   never opened a second one (the push watermark drops it). 3/3 passes
   (~4 s each), loopback only.
+- **Parked cars agree across peers in a networked race (report 6
+  follow-up 3, new-run iteration 13).** Kerbside parked cars (WLD-27)
+  are seeded bangers that go through the same placement ordinal
+  (`BangerSite`) as every stamped prop, so they sit in the v18
+  `SiteTable` digest; the session skips them in a networked cruise and
+  cops & robbers and keeps them in a race. The record's networked
+  `props=` field gains a `parked<n>` cell (cars this process placed).
+  `net_drive::two_retail_processes_roll_the_same_parked_cars_in_a_race`
+  (`MM2_RETAIL`-gated; retail london `checkpoint:0`, parked client):
+  both processes place 481 parked cars inside 6,632 stamped sites with
+  one digest (`6c14ab6b820cd46b`), and the client lands 486–495 prop
+  rows with `mism0`; 3/3 passes (~7.5 s each). The cruise leg
+  (`two_retail_processes_stamp_the_same_prop_world`) now asserts the
+  converse, `parked0` on both sides. Not covered: the paint roll is not
+  in the digest (it rests on the same seed stream, so a paint-only
+  divergence would pass); other events and cities; same machine and
+  binary, so cross-platform agreement of the rolls is unobserved.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded

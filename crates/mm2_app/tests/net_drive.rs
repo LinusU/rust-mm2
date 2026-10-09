@@ -1316,6 +1316,67 @@ fn two_retail_processes_stamp_the_same_prop_world() {
         (count, digest),
         "host and client stamped different worlds:\nhost   {host_rec}\nclient {rec}"
     );
+    // The original skips kerbside parked cars in a networked cruise.
+    assert_eq!(parked_cars(&rec), 0, "{rec}");
+    assert_eq!(parked_cars(&host_rec), 0, "{host_rec}");
+}
+
+/// The `parked<n>` cell of the `props=` record field: the kerbside
+/// parked cars this process placed (F26-A / WLD-27).
+fn parked_cars(line: &str) -> u64 {
+    field(line, "props")
+        .split(',')
+        .find_map(|c| c.strip_prefix("parked"))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no parked cell in {line}"))
+}
+
+/// Report 6 follow-up 3's open question: do the seed-rolled kerbside
+/// parked cars agree across peers in a networked *race*? They are
+/// knockable bangers placed from the session seed, and the original
+/// keeps them in races (WLD-27). A hosted retail `checkpoint:0` and a
+/// joined client each roll their own, so both must have placed some,
+/// the same number, inside one identical `SiteTable` digest, and the
+/// client must have refused no prop row for a world that differs.
+/// Skipped without `MM2_RETAIL=<dir>`, like the legs around it.
+///
+/// Same machine, same binary, loopback; cross-platform agreement of the
+/// seed rolls is unobserved.
+#[test]
+fn two_retail_processes_roll_the_same_parked_cars_in_a_race() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 9000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(["--event".into(), "checkpoint:0".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let mut client_args = join_args(&retail, addr, "bob", 1000);
+    client_args.push("--parked".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+
+    let rec = client.until("smoke=headless-physics");
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let (count, digest, _landed, mismatched) = props_field(&rec);
+    assert_eq!(mismatched, 0, "the client refused the host's rows: {rec}");
+    assert!(client.wait().success(), "the client did not exit cleanly");
+
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    let (host_count, host_digest, ..) = props_field(&host_rec);
+    assert_eq!(
+        (host_count, host_digest),
+        (count, digest),
+        "host and client stamped different worlds:\nhost   {host_rec}\nclient {rec}"
+    );
+    eprintln!("host   {host_rec}\nclient {rec}");
+    let parked = parked_cars(&host_rec);
+    assert!(parked > 0, "the race placed no parked cars: {host_rec}");
+    assert_eq!(parked_cars(&rec), parked, "{host_rec}\n{rec}");
+    assert!(count >= parked, "parked cars are part of the digest: {rec}");
 }
 
 /// The `cars=sent<n>,omit<n>,live<n>,landed<n>,mism<n>` record field —
