@@ -77,7 +77,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F03 world placement | implemented | retail-data | sampled original-location comparison; race-cleanup and mod-replacement end to end; UNK-20/21 |
 | F04 breakables | implemented | retail-data (strike runs) | break threshold semantics (UNK-22), `NumParts` role, birth-rule effects, natural >32 pool reclaim |
 | F05 damage/recovery | checked (A) / active | synthetic + retail-data | damage-driven detachment (UNK-13); recovery on articulated cars; replication |
-| F06 surfaces/traction | active | synthetic (six slices, mutation-checked) | AC06 two-process proof; original-data weather × surface run; UNK-23/39 (original wetness rule unknown — policy is *designed*) |
+| F06 surfaces/traction | active | synthetic (six slices, mutation-checked) + retail-data (sf weather × surface in the real force path) + loopback two-process (AC06 authority-owned pin) | UNK-23/39 (original wetness rule unknown — policy is *designed*); `effect` and `width`/`height`/`depth` still have no consumer |
 | F07 vehicle/impact audio | active | synthetic + retail-data decode | **no audible capture recorded** (AC05); scrape/continuous-impact semantics; scripted idle→shift→reverse evidence (AC02); UNK-25 |
 | F08 ambience/commentary/music | active (A), B/C queued | retail-data (classification) | commentary beyond pre-race weather/time cues, music (DirectMusic), AC05 capture; no listening evidence |
 | F09 road network | implemented | retail-data | AC04 sampled-road overlay comparison in both cities is local/visual only; UNK-18/19 |
