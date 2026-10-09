@@ -3853,7 +3853,8 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
             "Game: Free for all",
             "Gold weight: Weightless",
             "Limit: No limit",
-            "Start match"
+            "Start match",
+            "Host lobby"
         ]
     );
     activate_row(&mut app, "Game:");
@@ -3897,6 +3898,98 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
             .is_some(),
         "the launched mode builds the match"
     );
+}
+
+/// F27-C: the menu opens a Cops & Robbers lobby. *Host lobby* keeps the
+/// session at `Menu` with a loopback listener advertising the picked
+/// match (the shell steps aside for the lobby's own surface), the
+/// host's `Enter` starts it through the lobby's own gate — a hosted
+/// generation, `Host` authority — and `Esc` after the match takes the
+/// lobby down and returns the menu with nothing networked left behind.
+#[test]
+fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
+    use mm2_app::net::{HostLink, LobbyState, close_menu_host, drive_host, host_input};
+    use mm2_game::SessionAuthority;
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let mut app = menu_app(tmp.path(), None);
+    app.add_systems(
+        Update,
+        (
+            host_input,
+            drive_host.after(session::drive_session),
+            close_menu_host.after(drive_host),
+        )
+            .run_if(resource_exists::<HostLink>),
+    );
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Host lobby");
+
+    // The lobby is up and the shell has stepped aside.
+    {
+        let link = app.world().resource::<HostLink>();
+        assert!(link.addr().ip().is_loopback(), "{}", link.addr());
+        assert!(
+            link.summary().contains("cops & robbers"),
+            "{}",
+            link.summary()
+        );
+        assert_eq!(link.config().authority, SessionAuthority::Host);
+    }
+    assert!(app.world().get_resource::<LobbyState>().is_some());
+    assert!(!shell(&app).active);
+    assert_eq!(phase(&app), SessionPhase::Menu);
+    app.update();
+    app.update();
+    assert!(!shell(&app).active, "the menu stays out of the lobby's way");
+    assert_eq!(phase(&app), SessionPhase::Menu);
+
+    // `Enter` starts: the lobby mints a generation and the host seat
+    // begins the advertised match under it.
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 60, |a| phase(a) == SessionPhase::Playing),
+        "the hosted match never reached Playing: {:?}",
+        phase(&app)
+    );
+    let config = app.world().resource::<Session>().config().cloned().unwrap();
+    assert!(matches!(config.mode, SessionMode::CopsAndRobbers(_)));
+    assert_eq!(config.authority, SessionAuthority::Host);
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::cnr::CnrHost>()
+            .is_some()
+    );
+
+    // Leave the match, then close the lobby: the menu comes back.
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        run_until(&mut app, 60, |a| phase(a) == SessionPhase::Menu),
+        "the hosted session never returned to Menu: {:?}",
+        phase(&app)
+    );
+    assert!(!shell(&app).active, "the open lobby still owns the screen");
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        run_until(&mut app, 60, |a| a
+            .world()
+            .get_resource::<HostLink>()
+            .is_none()),
+        "the closed lobby was never taken down"
+    );
+    assert!(app.world().get_resource::<LobbyState>().is_none());
+    app.update();
+    assert!(shell(&app).active, "the menu returns once the lobby closes");
 }
 
 /// F27-B.4c (rematch leg): a decided single-seat match opens the

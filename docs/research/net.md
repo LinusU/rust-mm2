@@ -1372,6 +1372,31 @@ locally (the roster entry keeps `pick: None`, so the host spawns no body for
 that seat — no mismatch to teleport, but also no mirrored car); the client is
 told via `VehicleRefused` and shows it as a lobby notice.
 
+**A menu-hosted Cops & Robbers lobby (F27-C, implementation choice).** The main
+menu's `Cops & Robbers` options screen gains a `Host lobby` row beside
+`Start match`: `MenuEffect::Host` carries the same resolved config and car as
+a launch, and `menu_input` runs `net::open_menu_host` — the flag-time gates
+`--host` runs (`validate`, `check_session`, the gameplay fingerprint, the
+catalog's pick validator) with a fresh seed — then `net::adopt_menu_host`
+inserts the `HostLink`, `LobbyState`, `NetDriveReport`, `WireStall` and the
+`HostText` status line. The session stays at `Menu`; `menu_watch` keeps the
+shell closed while the link is up (the lobby owns `Enter`=start, `Esc`=stop
+hosting), and `net::close_menu_host` removes the link and everything that
+existed for it once the lobby is leaving and the session is back at `Menu`, so
+the shell reopens. The host systems are now registered for any menu app and
+gated `run_if(resource_exists::<HostLink>)`; `--host` is unchanged. The bind is
+loopback + an ephemeral port unless `--menu-bind <addr>` names a wider one
+(`--bind` stays a `--host` flag; the two conflict), so picking the row never
+widens exposure on its own. The lobby surface is still the one-paragraph
+`HostText` (address, session, readiness, notices) — no roster screen, no
+in-menu rematch options. Test: `app::menu::
+the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes` (synthetic
+install: row → listener on loopback advertising `cops & robbers` → `Enter`
+reaches `Playing` with `Host` authority and a `CnrHost` → quit → `Esc` removes
+the link and the menu returns); mutation-checked against `menu_watch`. Not
+shown: a client joining a menu-hosted lobby (the machinery is `--host`'s,
+covered by `net_app`/`net_drive`), a rendered capture of the host text.
+
 ## Rematch within one lobby (F26-B.1, no wire change)
 
 A hosted lobby already loops: the host's `Cancel` (the operator's

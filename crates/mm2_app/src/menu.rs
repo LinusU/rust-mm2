@@ -355,6 +355,9 @@ pub enum Action {
     CycleCnrLimit,
     /// Start the match the Cops & Robbers options screen configures.
     LaunchCnr,
+    /// Open a lobby for the match the Cops & Robbers options screen
+    /// configures; peers join it and the host starts the match.
+    HostCnr,
     /// Select a roster vehicle and open its paint list.
     PickVehicle {
         /// Catalog id.
@@ -440,6 +443,17 @@ pub enum MenuEffect {
     Launch {
         /// The validated session config — boxed to keep the effect
         /// enum small (most effects are a row action, not a launch).
+        config: Box<SessionConfig>,
+        /// Resolved vehicle (None = synthetic dev car).
+        car: Option<Box<VehicleDef>>,
+        /// Paint index driven.
+        paint: usize,
+    },
+    /// Open a lobby advertising a session instead of beginning it — the
+    /// same resolved config and vehicle as [`MenuEffect::Launch`]; the
+    /// host's own `Start` begins it for everyone.
+    Host {
+        /// The validated session config.
         config: Box<SessionConfig>,
         /// Resolved vehicle (None = synthetic dev car).
         car: Option<Box<VehicleDef>>,
@@ -1134,6 +1148,27 @@ impl MenuShell {
                     effects,
                 );
             }
+            Action::HostCnr => {
+                let Screen::CnrOptions { city, settings } = &self.screen else {
+                    return;
+                };
+                let (city, settings) = (city.clone(), *settings);
+                let mut launched = Vec::new();
+                self.launch(
+                    data,
+                    vfs,
+                    SessionMode::CopsAndRobbers(settings),
+                    city,
+                    None,
+                    &mut launched,
+                );
+                effects.extend(launched.into_iter().map(|effect| match effect {
+                    MenuEffect::Launch { config, car, paint } => {
+                        MenuEffect::Host { config, car, paint }
+                    }
+                    other => other,
+                }));
+            }
             Action::ResetGraphics => {
                 self.set_settings(data, GraphicsSettings::default(), effects);
                 self.status = Some("graphics settings reset to the defaults".into());
@@ -1801,6 +1836,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     Action::CycleCnrLimit,
                 ),
                 row("Start match".to_string(), Action::LaunchCnr),
+                row("Host lobby".to_string(), Action::HostCnr),
             ]
         }
         Screen::EventCity => data
@@ -2957,6 +2993,8 @@ pub struct MenuButton(pub MenuCommand);
 pub struct LiveSettings<'w> {
     graphics: Option<Res<'w, GraphicsSettings>>,
     controls: Option<Res<'w, ControlSettings>>,
+    /// The lobby a menu row opened, if one is up.
+    hosted: Option<Res<'w, crate::net::HostLink>>,
 }
 
 /// Keep the shell's `active` flag honest: open exactly while the
@@ -2986,8 +3024,12 @@ pub fn menu_watch(
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
 ) {
+    // A lobby the menu opened owns the screen (its status line and
+    // `Enter`/`Esc`) until it comes down — `close_menu_host` removes the
+    // link and the menu returns.
+    let hosting = live.hosted.as_ref().is_some_and(|link| !link.leaving());
     match session.phase() {
-        SessionPhase::Menu if !control.restart => {
+        SessionPhase::Menu if !control.restart && !hosting => {
             if !shell.active {
                 shell.reopen();
                 data.bound = active.map(|a| a.profile.clone());
@@ -3023,6 +3065,10 @@ pub struct MenuTarget<'w, 's> {
     tuned: ResMut<'w, TunedVehicle>,
     commands: Commands<'w, 's>,
     exit: MessageWriter<'w, AppExit>,
+    /// Where a hosted lobby listens (absent: loopback, ephemeral port).
+    bind: Option<Res<'w, crate::net::MenuHostBind>>,
+    /// Present while a lobby is up — a second one is refused.
+    hosted: Option<Res<'w, crate::net::HostLink>>,
 }
 
 /// Map keyboard + gamepad into [`MenuCommand`]s, run them through
@@ -3165,6 +3211,34 @@ pub fn menu_input(
                         Err(e) => {
                             warn!(error = %e, "menu launch produced an invalid session config");
                             shell.status = Some(format!("session config rejected: {e}"));
+                        }
+                    }
+                }
+                MenuEffect::Host { config, car, paint } => {
+                    if target.hosted.is_some() {
+                        shell.status = Some("a lobby is already open".into());
+                        continue;
+                    }
+                    let driver = data
+                        .bound
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "player".to_string());
+                    let bind = target.bind.as_deref().copied().unwrap_or_default().0;
+                    match crate::net::open_menu_host(&vfs.0, &config, bind, driver) {
+                        Ok(link) => {
+                            let tune = car.as_ref().map(|d| d.config.clone()).unwrap_or_default();
+                            *target.selected = SelectedCar {
+                                def: car.map(|d| *d),
+                                paint,
+                            };
+                            target.tuned.0 = tune;
+                            crate::net::adopt_menu_host(&mut target.commands, link);
+                            shell.active = false;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "menu could not open a lobby");
+                            shell.status = Some(format!("cannot host: {e}"));
                         }
                     }
                 }

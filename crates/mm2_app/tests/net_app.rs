@@ -2395,6 +2395,8 @@ fn mm2_host_flag_gates_are_named_exits() {
     for extra in [
         vec!["--host", "--join", "127.0.0.1:1"],
         vec!["--host", "--menu"],
+        // The menu's lobby bind is the menu's: a `--host` app has `--bind`.
+        vec!["--host", "--menu-bind", "127.0.0.1:0"],
         vec!["--bind", "127.0.0.1:0"],
         vec!["--seed", "3"],
     ] {

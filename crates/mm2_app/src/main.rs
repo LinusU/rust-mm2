@@ -548,6 +548,12 @@ struct Cli {
     #[arg(long, requires = "host", default_value = "127.0.0.1:0")]
     bind: SocketAddr,
 
+    /// Address a lobby opened from the menu's *Host lobby* row listens
+    /// on. Same rule as `--bind`: loopback + ephemeral port unless the
+    /// operator names a wider bind. Only the menu reads it.
+    #[arg(long, conflicts_with = "host", default_value = "127.0.0.1:0")]
+    menu_bind: SocketAddr,
+
     /// Session seed the lobby replicates to every client — default is
     /// clock-derived like `mm2-host`; pass a value to reproduce a run.
     #[arg(long, requires = "host")]
@@ -2218,6 +2224,7 @@ fn main() {
             _ => menu::Screen::Root,
         };
         app.insert_resource(shell)
+            .insert_resource(net::MenuHostBind(cli.menu_bind))
             .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
             .insert_resource(
                 menu::MenuData::new(menu_store, has_mods, menu_bound)
@@ -2333,87 +2340,21 @@ fn main() {
             },
         ));
     }
+    let hosting_from_cli = host_link.is_some();
     if let Some(link) = host_link {
         // A hosted lobby owns `Menu`-time surface and exit like a
         // joined one: `drive_host` drains host-loop events and operator
-        // commands once per update — after `drive_session` so a
-        // teardown landing at `Menu` this frame can settle the
-        // session-ended `Cancel` immediately. `HostText` is the
-        // minimal surface until a real lobby menu exists.
+        // commands once per update. `HostText` is the minimal surface
+        // until a real lobby menu exists.
         app.insert_resource(link)
             .init_resource::<net::LobbyState>()
             .init_resource::<netdrive::NetDriveReport>()
-            .init_resource::<netdrive::WireStall>()
-            .add_systems(
-                Update,
-                (
-                    net::host_input.run_if(not(capturing)),
-                    net::drive_host.after(session::drive_session),
-                    net::drive_host_text,
-                    // F25-A: the roster drives remote participant
-                    // spawning; their `VehicleInput` comes from the
-                    // wire mailbox and their settled poses go back out
-                    // as snapshots — all after the drain sees this
-                    // frame's lobby events. Resets bump the wire epoch
-                    // before the publish so a teleport and its epoch
-                    // leave on the same `Snap`; the tracker also runs
-                    // after `vehicle_reset`, which every Update-scheduled
-                    // `ResetVehicle` writer is ordered ahead of — so the
-                    // bump never trails the teleported pose.
-                    netdrive::reconcile_remote_players.after(net::drive_host),
-                    netdrive::apply_remote_inputs.after(net::drive_host),
-                    // F25-B: a wire seat whose input stream stalled is
-                    // retired — its `TimedOut` mint releases the
-                    // deferral and rides the next `Snap` like any
-                    // resolution.
-                    netdrive::retire_stalled_wire_seats
-                        .after(net::drive_host)
-                        .before(netdrive::publish_snapshots),
-                    // F25-B: driver `ResetRequest`s are `ResetVehicle`
-                    // writers — ahead of the apply like every other so
-                    // the granted reset's pose and epoch bump leave on
-                    // the same `Snap`.
-                    netdrive::apply_reset_requests
-                        .after(net::drive_host)
-                        .before(mm2_vehicle::systems::vehicle_reset),
-                    netdrive::track_reset_epochs
-                        .after(net::drive_host)
-                        .after(mm2_vehicle::systems::vehicle_reset)
-                        .before(netdrive::publish_snapshots),
-                    netdrive::publish_snapshots
-                        .after(net::drive_host)
-                        .after(mm2_vehicle::systems::vehicle_reset)
-                        // F25-B (v16): the seat's `SurfaceContact`
-                        // publish reads `surface_voices`' same-frame
-                        // resolution, not last frame's.
-                        .after(audio::surface_voices),
-                    // F26-A: the world's prop state rides its own frame
-                    // — after the lobby drain, like the snapshot.
-                    mm2_app::worldprops::publish_props.after(net::drive_host),
-                    // F26-A: the ambient population rides its own frame.
-                    mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
-                    // F26-A: the world clock rides its own tiny frame.
-                    mm2_app::worldclock::publish_world_clock.after(net::drive_host),
-                    // F27-B.3: the Cops & Robbers match rides its own
-                    // frame (idle until a `CnrHost` exists).
-                    mm2_app::cnrnet::publish_cnr.after(net::drive_host),
-                ),
-            );
-        app.world_mut().spawn((
-            net::HostText,
-            Text::new(""),
-            TextFont {
-                font_size: bevy::text::FontSize::Px(14.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                left: Val::Px(12.0),
-                ..default()
-            },
-        ));
+            .init_resource::<netdrive::WireStall>();
+        net::spawn_host_text(&mut app.world_mut().commands());
+        app.world_mut().flush();
+    }
+    if hosting_from_cli || menu_mode {
+        add_host_systems(&mut app);
     }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
@@ -2506,6 +2447,71 @@ fn main() {
     if let AppExit::Error(code) = exit {
         std::process::exit(code.get() as i32);
     }
+}
+
+/// The hosted lobby's per-update systems. Registered for a `--host`
+/// launch and for the menu (whose *Host lobby* row opens a link at run
+/// time); every one only runs while a [`net::HostLink`] exists.
+fn add_host_systems(app: &mut App) {
+    app.add_systems(
+        Update,
+        (
+            net::host_input.run_if(not(capturing)),
+            net::drive_host.after(session::drive_session),
+            net::drive_host_text,
+            // F25-A: the roster drives remote participant
+            // spawning; their `VehicleInput` comes from the
+            // wire mailbox and their settled poses go back out
+            // as snapshots — all after the drain sees this
+            // frame's lobby events. Resets bump the wire epoch
+            // before the publish so a teleport and its epoch
+            // leave on the same `Snap`; the tracker also runs
+            // after `vehicle_reset`, which every Update-scheduled
+            // `ResetVehicle` writer is ordered ahead of — so the
+            // bump never trails the teleported pose.
+            netdrive::reconcile_remote_players.after(net::drive_host),
+            netdrive::apply_remote_inputs.after(net::drive_host),
+            // F25-B: a wire seat whose input stream stalled is
+            // retired — its `TimedOut` mint releases the
+            // deferral and rides the next `Snap` like any
+            // resolution.
+            netdrive::retire_stalled_wire_seats
+                .after(net::drive_host)
+                .before(netdrive::publish_snapshots),
+            // F25-B: driver `ResetRequest`s are `ResetVehicle`
+            // writers — ahead of the apply like every other so
+            // the granted reset's pose and epoch bump leave on
+            // the same `Snap`.
+            netdrive::apply_reset_requests
+                .after(net::drive_host)
+                .before(mm2_vehicle::systems::vehicle_reset),
+            netdrive::track_reset_epochs
+                .after(net::drive_host)
+                .after(mm2_vehicle::systems::vehicle_reset)
+                .before(netdrive::publish_snapshots),
+            netdrive::publish_snapshots
+                .after(net::drive_host)
+                .after(mm2_vehicle::systems::vehicle_reset)
+                // F25-B (v16): the seat's `SurfaceContact`
+                // publish reads `surface_voices`' same-frame
+                // resolution, not last frame's.
+                .after(audio::surface_voices),
+            // F26-A: the world's prop state rides its own frame
+            // — after the lobby drain, like the snapshot.
+            mm2_app::worldprops::publish_props.after(net::drive_host),
+            // F26-A: the ambient population rides its own frame.
+            mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
+            // F26-A: the world clock rides its own tiny frame.
+            mm2_app::worldclock::publish_world_clock.after(net::drive_host),
+            // F27-B.3: the Cops & Robbers match rides its own
+            // frame (idle until a `CnrHost` exists).
+            mm2_app::cnrnet::publish_cnr.after(net::drive_host),
+            // A lobby the menu opened goes with its link once it has
+            // come down; a no-op without a menu.
+            net::close_menu_host.after(net::drive_host),
+        )
+            .run_if(resource_exists::<net::HostLink>),
+    );
 }
 
 /// Whether a windowing system is present for a windowed/visual run.

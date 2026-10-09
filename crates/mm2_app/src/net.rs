@@ -1771,13 +1771,137 @@ fn host_started(
     }
 }
 
+/// Where a menu-hosted lobby listens — the `--bind` the app was started
+/// with (loopback + ephemeral port unless the operator chose a wider
+/// bind), so choosing *Host lobby* in the menu never widens exposure
+/// by itself.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuHostBind(pub SocketAddr);
+
+impl Default for MenuHostBind {
+    fn default() -> Self {
+        Self(SocketAddr::from(([127, 0, 0, 1], 0)))
+    }
+}
+
+/// Why a menu could not open a lobby for the session it configured.
+#[derive(Debug, thiserror::Error)]
+pub enum MenuHostError {
+    /// The session fails `validate` or the install cannot run it.
+    #[error("{0}")]
+    Session(String),
+    /// Fingerprinting the content for the handshake failed.
+    #[error("fingerprinting content: {0}")]
+    Fingerprint(String),
+    /// Binding or advertising failed.
+    #[error("{0}")]
+    Open(#[from] HostOpenError),
+}
+
+/// Open a lobby for a session the menu configured, behind the gates
+/// `--host` and `mm2-host` run at flag time: `validate`, then
+/// [`check_session`] (world resolves, a Cops & Robbers city has its
+/// site pool, an event survives `event_race_setup`), the gameplay
+/// fingerprint the handshake compares, and the catalog the roster's
+/// pick validator reads. A fresh seed is minted, so each hosted
+/// lobby replays a different world.
+pub fn open_menu_host(
+    vfs: &Vfs,
+    config: &SessionConfig,
+    bind: SocketAddr,
+    driver: String,
+) -> Result<HostLink, MenuHostError> {
+    let mut config = config.clone();
+    config.seed = fresh_seed();
+    config
+        .validate()
+        .map_err(|e| MenuHostError::Session(e.to_string()))?;
+    check_session(vfs, &config).map_err(|e| MenuHostError::Session(e.to_string()))?;
+    let fingerprint = mm2_content::fingerprint::gameplay(vfs)
+        .map_err(|e| MenuHostError::Fingerprint(e.to_string()))?;
+    let catalog = VehicleCatalog::scan(vfs);
+    Ok(HostLink::open(
+        bind,
+        &config,
+        driver,
+        fingerprint.hash,
+        Some(vehicle_validator(&catalog)),
+    )?)
+}
+
+/// Hand a menu-opened lobby to the app: the link, the resources its
+/// systems read beside it (removed again with it by
+/// [`close_menu_host`], so a closed lobby leaves no networked state
+/// behind) and the status line that is the lobby's surface.
+pub fn adopt_menu_host(commands: &mut Commands, link: HostLink) {
+    commands.insert_resource(link);
+    commands.init_resource::<LobbyState>();
+    commands.init_resource::<crate::netdrive::NetDriveReport>();
+    commands.init_resource::<crate::netdrive::WireStall>();
+    spawn_host_text(commands);
+}
+
+/// Spawn the hosted lobby's status line ([`HostText`]).
+pub fn spawn_host_text(commands: &mut Commands) {
+    commands.spawn((
+        HostText,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+/// Close a menu-hosted lobby once it has come down (`Esc`, `quit`, or a
+/// dead host loop): at `Menu`, with the lobby leaving and nothing left
+/// to start, the link and everything that existed only for it go, and
+/// `menu_watch` reopens the shell. Only acts under a [`MenuShell`] — a
+/// `--host` app has no menu to return to and exits through
+/// [`drive_host`] instead.
+#[allow(clippy::too_many_arguments)] // the resources a hosted lobby owns, by name
+pub fn close_menu_host(
+    mut commands: Commands,
+    link: Res<HostLink>,
+    mut lobby: ResMut<LobbyState>,
+    session: Res<Session>,
+    menu: Option<Res<MenuShell>>,
+    texts: Query<Entity, With<HostText>>,
+) {
+    if menu.is_none()
+        || !link.leaving()
+        || *session.phase() != SessionPhase::Menu
+        || lobby.pending_start.is_some()
+    {
+        return;
+    }
+    if let Some(notice) = lobby.notice.take() {
+        warn!(notice, "menu-hosted lobby closed");
+    }
+    for text in &texts {
+        commands.entity(text).despawn();
+    }
+    commands.remove_resource::<HostLink>();
+    commands.remove_resource::<LobbyState>();
+    commands.remove_resource::<crate::netdrive::NetDriveReport>();
+    commands.remove_resource::<crate::netdrive::WireStall>();
+}
+
 /// The windowed host lobby's keyboard surface — `Enter` requests the
 /// start (the lobby's own gate answers `Started`/`StartRefused`),
 /// `Esc` takes the lobby down. Both ride the command channel the
 /// stdin driver feeds, so the keys and the operator words share one
-/// intake. Only live while the session parks at `Menu`.
+/// intake. Only live while the session parks at `Menu`. A lobby the
+/// menu opened this frame ignores the keypress that opened it.
 pub fn host_input(keys: Res<ButtonInput<KeyCode>>, session: Res<Session>, link: Res<HostLink>) {
-    if *session.phase() != SessionPhase::Menu || link.leaving() {
+    if *session.phase() != SessionPhase::Menu || link.leaving() || link.is_added() {
         return;
     }
     if keys.just_pressed(KeyCode::Enter) {
