@@ -61,11 +61,11 @@ jobs:
       # ~140 s serial against ~90 s parallel on a 8-core machine.
       - name: test (everything but the network suite)
         run: |
-          cargo test --workspace --exclude mm2_app
-          cargo test -p mm2_app --doc
-          cargo test -p mm2_app --lib --bins --test app --test low_gpu
+          cargo test --workspace -- \
+            --skip net_app:: --skip net_check:: --skip net_drive:: \
+            --skip net_edge:: --skip net_host:: --skip net_join::
       - name: test (network suite, serial)
-        run: cargo test -p mm2_app --test network -- --test-threads=1
+        run: cargo test --workspace --test network -- --test-threads=1
 
   # Non-gating platform signal (F30): does the workspace compile, tests
   # included, on the other desktop targets? It is a compile check only —
