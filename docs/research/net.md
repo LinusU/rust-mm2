@@ -1392,6 +1392,33 @@ each fail it); 6/6 repeat runs. Not shown: cars *driven* into reach (the placed
 drop, and the process-level three-process version stay open), packet loss on
 the contest, a rendered match.
 
+**A client's match view under loss and reordering (F27-AC05, in-process
+evidence).** `network::net_app::a_clients_replica_converges_on_the_hosts_match_through_loss_and_reordering`:
+a hosted dev-world session and a joined client app (production `publish_cnr` /
+`apply_cnr`), the client dialled through a seeded `ImpairProxy`, a synthetic
+Cops vs. Robbers match whose events are driven by hand on the host's
+`GoldMatch` (no cars, no physics). Over a 35 % loss / 15 % duplicate / 20 %
+reorder / 8 ± 8 ms downstream recipe the gold changes hands on scripted
+pickups, deliveries and a 60-step burst of back-to-back pickups and drops; the
+replica's `(revision, elapsed)` never goes backwards at any step, and the
+stage refused older or repeated frames (`stale() > 0`, so the recipe really
+reached it). The link then recovers, the replica levels with the host, and a
+total blackout swallows one last change (a pickup): the replica is provably
+behind (`!= host view`, wrong carrier) and the host sends nothing more for that
+state. Only the match-time cadence repairs it: with the link healed the replica
+equals the host's whole view `PUBLISH_EVERY_TICKS` (120) ticks later — the
+host's cadence, not a change, carried it — and the carrier, every player's
+score and each side's total agree. Mutation-checked: dropping the stage's
+stale test fails the `stale() > 0` guard, and pushing the cadence out of reach
+fails the heal; 6/6 repeats. **Consequence recorded, not changed:** a lost
+*last* change of an undecided steady state is visible to a client as stale
+for up to one cadence period (120 match ticks);
+a decided match repeats on `DECIDED_REPEAT_RUNS` instead. Not shown: loss on
+the real TCP transport (the proxy drops whole frames, the application-level
+effect), late join under this recipe at in-process grain (the process legs
+above cover it), a second concurrently joined client comparing views, driven
+cars, a rendered scoreboard.
+
 **A menu-hosted Cops & Robbers lobby (F27-C, implementation choice).** The main
 menu's `Cops & Robbers` options screen gains a `Host lobby` row beside
 `Start match`: `MenuEffect::Host` carries the same resolved config and car as

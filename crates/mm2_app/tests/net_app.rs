@@ -17,7 +17,7 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -850,13 +850,20 @@ fn remote_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
 }
 
 /// `peer.recv()` until `pred` holds — bounded by the peer's read
-/// timeout, so a missing message fails rather than hanging.
+/// timeout while the stream is quiet and by `WAIT` while it keeps
+/// sending other messages, so a missing message fails rather than
+/// hanging.
 fn until_wire(peer: &mut Client, pred: impl Fn(&Message) -> bool) -> Message {
+    let deadline = Instant::now() + WAIT;
     loop {
         let msg = peer.recv().expect("the peer stream ended");
         if pred(&msg) {
             return msg;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the wanted message never came among the others"
+        );
     }
 }
 
@@ -9589,6 +9596,354 @@ fn a_decided_match_survives_its_first_frame_being_lost() {
         decided,
         "the repeat is the decided match, whole"
     );
+}
+
+/// F27-AC05: the observable match — teams, scores, carrier, round —
+/// agrees between the host and a joined client's replica over a link
+/// that loses, duplicates, reorders and delays frames. Real host and
+/// client apps over loopback TCP, the client behind an `ImpairProxy`,
+/// the host's production `publish_cnr` and the client's production
+/// `apply_cnr`; only the match's events are driven by hand on the
+/// host's `GoldMatch` (no cars, no physics). Three claims:
+///
+/// - through a lossy phase the replica never steps backwards in
+///   `(revision, elapsed)` — a reordered or repeated older frame cannot
+///   hand the gold back or undo a score;
+/// - when the *last* change of state is lost outright (a total
+///   blackout) the replica is provably behind the host, and still
+///   nothing is ever sent again for that change — the match-time
+///   cadence alone heals it, within `PUBLISH_EVERY_TICKS`;
+/// - after the heal the whole view equals the host's, so both agree on
+///   the carrier, each side's total and every player's points.
+///
+/// The proxy's loss is a whole-frame drop — the application-level
+/// effect of a lost datagram; the real transport is TCP. Late join and
+/// the process-level legs are covered by the `net_drive` tests.
+#[test]
+fn a_clients_replica_converges_on_the_hosts_match_through_loss_and_reordering() {
+    use mm2_app::cnr::CnrHost;
+    use mm2_app::cnrnet::{CnrReplica, PUBLISH_EVERY_TICKS};
+    use mm2_game::PlayerId;
+    use mm2_game::gold::{
+        CarrierLoad, CnrVariant, Contact, DeliveryVerdict, DropCause, EndRule, GoldMatch,
+        GoldRules, Side,
+    };
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), 23).unwrap();
+    let mut host = host_app(host_vfs, link);
+    let client_link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), client_link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    let step = |host: &mut App, client: &mut App| {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(5));
+    };
+    let mut ready = false;
+    for _ in 0..400 {
+        step(&mut host, &mut client);
+        let our_id = client.world().resource::<LobbyLink>().player_id();
+        if host
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.player_id == our_id && e.ready && e.pick.is_some())
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the client never readied");
+    host.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    for _ in 0..400 {
+        step(&mut host, &mut client);
+        if session_phase(&host) == SessionPhase::Loading {
+            break;
+        }
+    }
+    {
+        let mut session = host.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let generation = host.world().resource::<Session>().wire_generation();
+    until_begun_with_host(&mut host, &mut client);
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    const COP: PlayerId = PlayerId(0);
+    const ROBBER: PlayerId = PlayerId(1);
+    host.insert_resource(CnrHost::new(
+        GoldMatch::new(
+            generation,
+            mm2_game::ObjectId {
+                generation,
+                slot: 90,
+            },
+            GoldRules {
+                variant: CnrVariant::CopsVsRobbers,
+                end: EndRule::None,
+                load: CarrierLoad::NONE,
+                pickup_points: 25,
+                delivery_points: 100,
+                pickup_radius: 4.0,
+                delivery_radius: 12.0,
+                drop_lockout_ticks: 10,
+            },
+            (0..6)
+                .map(|i| Vec3::new(i as f32 * 40.0, 0.0, -(i as f32) * 25.0))
+                .collect(),
+            11,
+            &[(COP, Side::Cops), (ROBBER, Side::Robbers)],
+        )
+        .unwrap(),
+    ));
+    fn game(host: &mut App) -> Mut<'_, CnrHost> {
+        host.world_mut().resource_mut::<CnrHost>()
+    }
+    let take = |host: &mut App, player: PlayerId| {
+        let mut cnr = game(host);
+        let c = Contact {
+            player,
+            round: cnr.game.round(),
+            position: cnr.game.gold_position().expect("the gold rests"),
+        };
+        assert!(
+            matches!(
+                cnr.game.resolve_pickups(&[c])[0],
+                mm2_game::gold::PickupVerdict::Granted { .. }
+            ),
+            "{player:?} takes the gold"
+        );
+    };
+    let deliver = |host: &mut App, player: PlayerId| {
+        let mut cnr = game(host);
+        let target = cnr.game.sites();
+        let at = match cnr.game.side_of(player) {
+            Some(Side::Cops) => target.bank,
+            _ => target.hideout,
+        };
+        let round = cnr.game.round();
+        assert!(
+            matches!(
+                cnr.game.deliver(player, round, at),
+                DeliveryVerdict::Delivered { .. }
+            ),
+            "{player:?} delivers"
+        );
+    };
+    let replica = |client: &App| {
+        client
+            .world()
+            .get_resource::<CnrReplica>()
+            .map(|r| r.0.clone())
+    };
+
+    // The opening frame reaches the client over the clean link.
+    for _ in 0..400 {
+        step(&mut host, &mut client);
+        if replica(&client).is_some() {
+            break;
+        }
+    }
+    assert_eq!(replica(&client), Some(game(&mut host).game.view()));
+
+    // A rough link: 35 % loss, duplicates, swaps and a little latency
+    // both ways. Events happen on the host while it runs; every step
+    // checks the replica's freshness only ever grows.
+    let rough = Impair {
+        delay: Duration::from_millis(8),
+        jitter: Duration::from_millis(8),
+        loss: 0.35,
+        duplicate: 0.15,
+        reorder: 0.2,
+    };
+    proxy.set(LinkDir::Down, rough);
+    let mut newest = replica(&client).unwrap().freshness();
+    let mut walk = |host: &mut App, client: &mut App, steps: usize| {
+        for _ in 0..steps {
+            game(host).game.tick();
+            step(host, client);
+            if let Some(view) = replica(client) {
+                let now = view.freshness();
+                assert!(
+                    now >= newest,
+                    "the replica stepped back: {now:?} < {newest:?}"
+                );
+                newest = now;
+            }
+        }
+    };
+    walk(&mut host, &mut client, 6);
+    take(&mut host, COP);
+    walk(&mut host, &mut client, 6);
+    {
+        let spot = Vec3::new(20.0, 0.0, -10.0);
+        game(&mut host)
+            .game
+            .dislodge(COP, spot, DropCause::Knocked { by: Some(ROBBER) })
+            .unwrap();
+    }
+    walk(&mut host, &mut client, 14);
+    take(&mut host, ROBBER);
+    walk(&mut host, &mut client, 6);
+    deliver(&mut host, ROBBER);
+    walk(&mut host, &mut client, 6);
+    take(&mut host, ROBBER);
+    walk(&mut host, &mut client, 6);
+    deliver(&mut host, ROBBER);
+    walk(&mut host, &mut client, 6);
+    take(&mut host, COP);
+    walk(&mut host, &mut client, 6);
+    deliver(&mut host, COP);
+    walk(&mut host, &mut client, 20);
+    // A burst: the gold changes hands (a change of state, so a frame)
+    // on every step, back to back — the adjacent frames the proxy
+    // swaps, repeats and drops are all match frames, so an older one
+    // really does arrive after a newer one.
+    let spot = Vec3::new(30.0, 0.0, -20.0);
+    let mut who = COP;
+    for _ in 0..60 {
+        if let Some(carrier) = game(&mut host).game.carrier() {
+            let other = if carrier == COP { ROBBER } else { COP };
+            game(&mut host)
+                .game
+                .dislodge(carrier, spot, DropCause::Knocked { by: Some(other) })
+                .unwrap();
+        } else {
+            for _ in 0..11 {
+                game(&mut host).game.tick();
+            }
+            take(&mut host, who);
+            who = if who == COP { ROBBER } else { COP };
+        }
+        walk(&mut host, &mut client, 1);
+    }
+    if let Some(carrier) = game(&mut host).game.carrier() {
+        let other = if carrier == COP { ROBBER } else { COP };
+        game(&mut host)
+            .game
+            .dislodge(carrier, spot, DropCause::Knocked { by: Some(other) })
+            .unwrap();
+    }
+    for _ in 0..11 {
+        game(&mut host).game.tick();
+    }
+    walk(&mut host, &mut client, 20);
+    let lossy = proxy.stats(LinkDir::Down);
+    assert!(lossy.dropped > 0, "the lossy phase lost frames: {lossy:?}");
+    assert!(
+        lossy.duplicated + lossy.reordered > 0,
+        "and repeated or swapped some: {lossy:?}"
+    );
+    let cnr_stats = client.world().resource::<netdrive::RemoteSnaps>().cnr();
+    assert!(cnr_stats.landed() > 1, "frames did land through it");
+    assert!(
+        cnr_stats.stale() > 0,
+        "an older or repeated frame reached the stage and was refused"
+    );
+
+    // The link recovers and the replica catches up, so the blackout
+    // below is the only thing that can leave it behind.
+    proxy.set(LinkDir::Down, Impair::default());
+    let mut level = false;
+    for _ in 0..PUBLISH_EVERY_TICKS * 2 {
+        walk(&mut host, &mut client, 1);
+        if replica(&client) == Some(game(&mut host).game.view()) {
+            level = true;
+            break;
+        }
+    }
+    assert!(level, "the clean link never levelled the replica");
+
+    // Blackout: the last change of state — the robber lifts the gold
+    // again — goes into a dead link, and nothing ever changes again.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    let before_drops = proxy.stats(LinkDir::Down).dropped;
+    let sent = |h: &App| h.world().resource::<netdrive::NetDriveReport>().cnr_sent;
+    let sent_before = sent(&host);
+    take(&mut host, ROBBER);
+    for _ in 0..20 {
+        step(&mut host, &mut client);
+    }
+    assert!(
+        proxy.stats(LinkDir::Down).dropped > before_drops,
+        "the changed frame went out and was swallowed"
+    );
+    assert_eq!(sent(&host), sent_before + 1);
+    let behind = replica(&client).unwrap();
+    let truth = game(&mut host).game.view();
+    assert_ne!(behind, truth, "the replica is provably behind the host");
+    assert_eq!(truth.carrier(), Some(ROBBER));
+    assert_ne!(behind.carrier(), Some(ROBBER));
+
+    // The link heals. The state is steady, so only the cadence of match
+    // time can carry it — and it does, within one period.
+    proxy.set(LinkDir::Down, Impair::default());
+    let mut healed = None;
+    for i in 0..PUBLISH_EVERY_TICKS + 20 {
+        game(&mut host).game.tick();
+        step(&mut host, &mut client);
+        if replica(&client).as_ref() == Some(&game(&mut host).game.view()) {
+            healed = Some(i);
+            break;
+        }
+    }
+    let healed = healed.expect("the cadence never healed the replica") as usize;
+    let period = PUBLISH_EVERY_TICKS as usize;
+    assert!(
+        (period - 5..=period + 10).contains(&healed),
+        "healed by the cadence frame, not by a change: after {healed} ticks"
+    );
+
+    // Whole-view agreement means the observable results agree.
+    let view = replica(&client).unwrap();
+    let truth = game(&mut host).game.view();
+    assert_eq!(view, truth);
+    assert_eq!(view.carrier(), Some(ROBBER));
+    assert_eq!(view.outcome, None);
+    let host_game = &game(&mut host).game;
+    assert!(
+        host_game.side_total(Side::Cops) > 0 && host_game.side_total(Side::Robbers) > 100,
+        "the match really scored"
+    );
+    for side in [Side::Cops, Side::Robbers] {
+        assert_eq!(
+            view.standings
+                .iter()
+                .filter(|s| s.side == side)
+                .map(|s| s.score)
+                .sum::<u32>(),
+            host_game.side_total(side),
+            "{side:?} total agrees"
+        );
+    }
 }
 
 /// F27-B.3 client half: the host's match frame lands as a replica for
