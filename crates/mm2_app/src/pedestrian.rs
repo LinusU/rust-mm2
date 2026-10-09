@@ -420,6 +420,10 @@ pub fn spawn_ped_lab(
         return;
     };
     let origin = player.translation() + player.forward() * LAB_AHEAD;
+    // Avian's BVH asserts a finite ray origin.
+    if !origin.is_finite() {
+        return;
+    }
     let filter = SpatialQueryFilter::from_mask(GameLayer::World);
     let Some(ground) = spatial.cast_ray(origin + Vec3::Y * 20.0, Dir3::NEG_Y, 60.0, false, &filter)
     else {

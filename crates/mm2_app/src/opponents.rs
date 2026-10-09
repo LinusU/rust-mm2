@@ -1835,6 +1835,10 @@ pub fn opponent_drive(
             let origin = pos.0 + Vec3::Y * FEELER_HEIGHT;
             let is_static = |e: Entity| bodies.get(e).is_ok_and(|b| b.is_static());
             sense_walls(fwd, speed, |dir, len| {
+                // Avian's BVH asserts a finite ray origin.
+                if !origin.is_finite() {
+                    return None;
+                }
                 let dir = Dir3::new(dir).ok()?;
                 sq.cast_ray_predicate(origin, dir, len, true, &filter, &is_static)
                     .map(|hit| (hit.distance, hit.normal))

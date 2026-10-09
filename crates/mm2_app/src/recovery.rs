@@ -181,6 +181,11 @@ impl SupportProbe<'_, '_> {
             return false;
         }
         let com = pos + rot * Vec3::from(vehicle.config.center_of_mass);
+        // Avian's BVH asserts a finite ray origin; a non-finite pose
+        // (or authored centre of mass) holds nothing up.
+        if !com.is_finite() {
+            return false;
+        }
         let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
         // `solid: false` — a centre of mass already inside the ground
         // must find nothing below it, not a hit at its own origin.
@@ -239,6 +244,11 @@ pub(crate) fn seat_on_static_ground(
     position: Vec3,
     yaw: f32,
 ) -> Option<Vec3> {
+    // Every probe below starts at or above `position`: Avian's BVH
+    // asserts a finite ray origin, so a non-finite pose has no ground.
+    if !position.is_finite() || !yaw.is_finite() || !Vec3::from(config.center_of_mass).is_finite() {
+        return None;
+    }
     let reach = hull_points(config)
         .into_iter()
         .chain(config.wheels.iter().map(|w| w.position))
@@ -489,5 +499,64 @@ pub fn resolve_recovery(
             }
         }
         report.recovered += 1;
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_tests {
+    //! A non-finite pose must never reach Avian's ray cast, which
+    //! asserts a finite origin (`tests/nonfinite_ray.rs` pins that).
+
+    use std::time::Duration;
+
+    use avian3d::prelude::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use mm2_vehicle::VehicleConfig;
+
+    use super::seat_on_static_ground;
+
+    #[test]
+    fn a_non_finite_landing_has_no_ground() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .add_plugins(bevy::mesh::MeshPlugin)
+            .add_plugins(bevy::gizmos::GizmoPlugin)
+            .add_plugins(PhysicsPlugins::default())
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 60.0,
+            )))
+            .add_plugins(TransformPlugin)
+            .init_resource::<Assets<Mesh>>();
+        app.finish();
+        app.cleanup();
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(100.0, 1.0, 100.0),
+            Transform::from_xyz(0.0, -0.5, 0.0),
+        ));
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut seat = |position: Vec3, yaw: f32| {
+            app.world_mut()
+                .run_system_once(move |spatial: SpatialQuery| {
+                    seat_on_static_ground(
+                        &spatial,
+                        &|_| true,
+                        Entity::PLACEHOLDER,
+                        &VehicleConfig::default(),
+                        position,
+                        yaw,
+                    )
+                })
+                .expect("system runs")
+        };
+        assert!(seat(Vec3::new(0.0, 1.0, 0.0), 0.0).is_some());
+        assert!(seat(Vec3::new(f32::NAN, 1.0, 0.0), 0.0).is_none());
+        assert!(seat(Vec3::new(0.0, f32::INFINITY, 0.0), 0.0).is_none());
+        assert!(seat(Vec3::new(0.0, 1.0, 0.0), f32::NAN).is_none());
     }
 }
