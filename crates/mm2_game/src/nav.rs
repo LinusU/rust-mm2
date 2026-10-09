@@ -404,10 +404,12 @@ pub enum NavIssue {
         /// Index among curves of the same kind on that side.
         index: usize,
     },
-    /// A road carries a non-finite float outside its lane curves
-    /// (width, speed, centre-line frames, distance rows). The road is
+    /// A road carries a non-finite road-level float outside its lane
+    /// curves (width, speed, centre-line frames). The road is
     /// unusable: it gets no vehicle arc, so nothing routes or spawns
-    /// on it; its curves stay queryable.
+    /// on it; its curves stay queryable. Per-curve distance rows are
+    /// not road-level — see `NavIssue::LaneDistancesRecomputed` and
+    /// `NavIssue::NonFiniteLane`.
     NonFiniteRoad {
         /// BAI road index.
         road: usize,

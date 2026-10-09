@@ -247,12 +247,20 @@ pub struct Road {
 }
 
 impl Road {
-    /// The first non-finite float on the road outside its lane
-    /// vertices (which [`BaiIssue::NonFiniteCurveVertex`] covers) and
-    /// its signal heads (gated separately by `nav_signal`, which drops
-    /// a non-finite origin and zeroes a non-finite axis): widths,
-    /// speed, centre-line frames and the per-curve distance rows.
-    /// `None` when every one is finite.
+    /// The first non-finite float that makes the whole road unusable —
+    /// half width, base speed and the centre-line section frames, all
+    /// of which [`NavGraph::build`](crate) reads at road level to
+    /// position and speed every vehicle arc. `None` when they are all
+    /// finite.
+    ///
+    /// Deliberately *excludes* the per-curve lane/edge distance rows
+    /// and the sidewalk edges: those are consumed per curve, where a
+    /// non-finite authored distance row is recomputed from the
+    /// vertices and a non-finite curve is dropped outright. Treating a
+    /// bad row on one lane as poisoning the whole road would delete
+    /// its healthy sibling lanes too (the
+    /// `plan_skips_non_finite_lane_geometry` contract). Signal heads
+    /// are gated separately by `nav_signal`.
     pub fn non_finite_field(&self) -> Option<&'static str> {
         if !self.half_width.is_finite() {
             return Some("half_width");
@@ -274,18 +282,6 @@ impl Road {
                 if !finite3(v) {
                     return Some(name);
                 }
-            }
-        }
-        for side in [&self.right, &self.left] {
-            if side.lane_distances.iter().flatten().any(|d| !d.is_finite()) {
-                return Some("lane distance");
-            }
-            if side.edge_distances.iter().any(|d| !d.is_finite()) {
-                return Some("edge distance");
-            }
-            if !side.sidewalk_inner.iter().all(finite3) || !side.sidewalk_outer.iter().all(finite3)
-            {
-                return Some("sidewalk edge");
             }
         }
         None
@@ -444,10 +440,10 @@ pub enum BaiIssue {
         /// Section count.
         sections: usize,
     },
-    /// A road or intersection carries a non-finite scalar or vector
-    /// outside the lane curves (see [`Road::non_finite_field`] and
-    /// [`Intersection::non_finite_field`]). Raw f32 bits are untrusted;
-    /// consumers treat the row as unusable.
+    /// A road or intersection carries a non-finite road-level scalar
+    /// or vector outside the lane curves (see [`Road::non_finite_field`]
+    /// and [`Intersection::non_finite_field`]). Raw f32 bits are
+    /// untrusted; consumers treat the row as unusable.
     NonFiniteField {
         /// `"road"` or `"intersection"`.
         subject: &'static str,
