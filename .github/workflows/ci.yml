@@ -53,8 +53,19 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: test
-        run: cargo test --workspace
+      # Every test runs, in two steps. The `network` suite (~130 tests,
+      # many spawning 2-3 headless game processes on loopback) used to
+      # run at the runner's default parallelism next to everything else;
+      # on 4 vCPUs the children missed their wall-clock deadlines at
+      # random (#1131, #1133). It now runs alone and one test at a time:
+      # ~140 s serial against ~90 s parallel on a 8-core machine.
+      - name: test (everything but the network suite)
+        run: |
+          cargo test --workspace --exclude mm2_app
+          cargo test -p mm2_app --doc
+          cargo test -p mm2_app --lib --bins --test app --test low_gpu
+      - name: test (network suite, serial)
+        run: cargo test -p mm2_app --test network -- --test-threads=1
 
   # Non-gating platform signal (F30): does the workspace compile, tests
   # included, on the other desktop targets? It is a compile check only —
