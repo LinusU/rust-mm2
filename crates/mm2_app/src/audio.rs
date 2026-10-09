@@ -2005,7 +2005,10 @@ pub fn siren_drive(
 /// carries only its own copy's entity — the struck side's identity
 /// lives in the authority's id namespace and never crosses the wire —
 /// so those key on the striker alone. Disclosed, not hidden: every
-/// replicated impact one copy earns shares one window.
+/// replicated impact one copy earns shares one window, and — the event
+/// stream carries `ObjectId`s, not collider entities — so does every
+/// piece of unmarked static geometry, so a second world surface inside
+/// one window reads as the same scrape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ImpactPair {
     /// A locally resolved contact: striker entity + struck object id.

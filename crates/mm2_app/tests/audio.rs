@@ -1239,7 +1239,7 @@ fn an_absent_table_degrades_to_silence() {
 /// The same fixture with a *long* wall clip: one second of samples at
 /// 22 050 Hz, so the window (the clip's own length = 120 session
 /// ticks) outruns a re-contact the way retail's wall-scrape clips do —
-/// every retail `WALL` car impact measures 0.53–2.38 s at 22 050 Hz,
+/// every retail `WALL` band sample measures 0.61–1.76 s at 22 050 Hz,
 /// longer than the upstream 24-tick pair cooldown, so in a real
 /// session it is this window, not the event dedup, that paces a
 /// scrape.

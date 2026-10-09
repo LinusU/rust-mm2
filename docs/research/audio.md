@@ -70,13 +70,18 @@ F07-B.10 adds the sustained-scrape window over the same stream
 `default_impacts.csv` row is a one-shot). Each contact pair — striker
 entity + struck `ObjectId` (`WORLD` for world geometry; a replicated
 row keys on its own copy's entity alone, the struck side never
-crossing the wire) — is held for the length of the clip it just
-spawned, the picked sample's decoded duration in session ticks
+crossing the wire — so one copy's replicated impacts share a window,
+and, the stream carrying `ObjectId`s rather than collider entities,
+every piece of static geometry shares one `WORLD` window) — is held
+for the length of the clip it just spawned, the picked sample's
+decoded duration in session ticks
 (`ceil(duration × 120)`, clamped to 600 ticks = 5 s). All 22 retail
 `aud/aud22/impacts/*.wav` measure 0.13 s (`orangecone`) to 2.97 s
-(`glassbreak`) by size at 22 050 Hz, and the `WALL` band's own car
-impacts run 0.53 s (`carimpactsoft1`) to 2.38 s
-(`carimpacthuge2`) — every one of them longer than the upstream
+(`glassbreak`) by size at 22 050 Hz, and the `WALL` band's own three
+samples — `Carimpactmed1` 0.61 s, `Carimpactsoft3` 0.68 s,
+`Carimpacthuge1` 1.76 s, the same trio in the player and opponent
+files (`carimpactsoft1`/`carimpacthuge2` are shipped but referenced by
+no impact table) — every one of them longer than the upstream
 `ImpactPolicy` pair cooldown (24 ticks = 200 ms), so in a real
 wall-scrape session it is this window — not the event dedup — that
 paces the scrape: one voice per clip instead of a crash sound per
