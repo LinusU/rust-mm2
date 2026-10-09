@@ -45,6 +45,7 @@ mod non_ascii_paths;
 mod nonfinite_ray;
 mod oppind;
 mod opponents;
+mod opponents_retail;
 mod package;
 mod pedestrian;
 mod police;

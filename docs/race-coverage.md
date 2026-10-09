@@ -991,3 +991,24 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   @gate5-bind) — opponent controller skill, F15-B class;
   (c) opponent deep-course pace generally — no Circuit finish reached
   except london-0's four.
+
+## F15-C retail opponent soak
+
+`crates/mm2_app/tests/opponents_retail.rs` (opt-in, `MM2_RETAIL`) runs
+`mm2 --headless --event <e> --frames 3000` on `sf checkpoint:0`,
+`london checkpoint:0` and `sf circuit:0` and asserts from the smoke
+record: `status=pass`, `finite=true`, the `opps=` rows equal the
+`opp=` spawned count in distinct roster slots (F15-AC01 — the authored
+lineup; the authored vehicle is the same for every slot of these rows,
+`vpbug` in sf and `vpcoop` in london, so *distinct vehicle models* is
+not evidenced), at least one opponent earning gates (AC02, checkpoint
+course and circuit, through the swept triggers), and no stationary spell
+over 1500 frames (AC03; the longest observed was 900, the DSN-14
+re-anchor budget). Observed 2026-10-10 (hold driver, Amateur, Apple M1):
+sf cp:0 opponents 3-6 gates, 4/6 finished; london cp:0 3-5 gates, 2/4
+finished; sf circuit:0 lap 1 gates 3-5. Not evidenced here: AC04 and AC06
+stay on the synthetic tests in `tests/opponents.rs`
+(`permanently_stuck_opponent_reanchors_and_resumes`,
+`session_difficulty_measures_on_track`, `catch_up_lifts_a_trailing_opponents_demand`);
+AC05's fixed-seed repeatability is not asserted (outcomes of the chaotic
+soak are recorded, not compared run-to-run).
