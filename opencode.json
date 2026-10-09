@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "rally": {
+        "type": "remote",
+        "url": "https://rally.linusu.com/mcp",
+        "headers": {
+          "Authorization": "Bearer {env:RALLY_AGENT_TOKEN}"
+        },
+        "timeout": {
+          "request": 60000
+        }
+      }
+    }
+  }
+}
