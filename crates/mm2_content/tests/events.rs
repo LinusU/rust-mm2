@@ -389,8 +389,8 @@ fn malformed_table_is_a_table_error_not_a_panic() {
 
 /// Retail (F16-AC05): every authored reward row of both stock cities
 /// becomes a rule — none is dropped into a diagnostic — and the rules
-/// include the Crash Course links; every granted vehicle/paint lands
-/// on a garage row (`MM2_RETAIL=<dir>`).
+/// include the Crash Course links, and the garage scans without
+/// diagnostics (`MM2_RETAIL=<dir>`).
 #[test]
 fn retail_every_authored_reward_row_becomes_a_rule() {
     let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
