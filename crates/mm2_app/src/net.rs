@@ -2669,10 +2669,6 @@ mod tests {
         ));
     }
 
-    /// The validator applies the designed policy: the dev car is always
-    /// legal (paint 0 only), catalog ids must match exactly, incomplete
-    /// entries refuse with their missing deps, and paint is bounded by
-    /// the entry's `Colors` list.
     /// A `Start` seats us in the host's echo of our pick; a late
     /// joiner's `Start` that beat the echo keeps the car it offered
     /// rather than the dev car.
@@ -2712,6 +2708,10 @@ mod tests {
         );
     }
 
+    /// The validator applies the designed policy: the dev car is always
+    /// legal (paint 0 only), catalog ids must match exactly, incomplete
+    /// entries refuse with their missing deps, and paint is bounded by
+    /// the entry's `Colors` list.
     #[test]
     fn the_vehicle_validator_gates_picks_by_catalog() {
         let validate = vehicle_validator(&test_catalog());

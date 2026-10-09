@@ -1352,8 +1352,25 @@ car, buried its wheels and it fell through the retail city
 (`status=fail … fell through the world`, plain Cruise included; the
 dev-world late-join legs could not see it: flat ground, same dev car on both
 sides). `net::start_pick` now keeps the offered pick when the roster has no
-echo yet. Not shown: late join under loss, a joiner that drives or delivers,
-a contested pickup, a rendered match.
+echo yet. Not shown: a joiner that drives or delivers, a contested pickup, a
+rendered match.
+
+**The same late join under loss (F27-AC05, evidence).** `network::net_drive::
+a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link`
+(`MM2_RETAIL`-gated, ~75 s): the run above with the joiner behind a seeded
+`ImpairProxy`. The joiner connects clean and the recipe (30 % loss, 10 %
+duplicate, 10 % reorder, 40 ± 30 ms, both directions) arms 400 ms after the
+host logs `event=vehicle id=1`, so the one-shot `Start` and pick are
+deliberately outside it; the match rides the repeating whole-view frames. Host:
+`Picked` tick 763, `Delivered`/`Ended(PointLimit, Player(0))` tick 12370.
+Client: `status=pass`, `ref0, seats2, dec1, win=p0, phase=results, landed69,
+stale133`; the proxy dropped 2354 of 8575 downstream and 1667 of 6144 upstream
+frames. 3/3 local runs. Loss on the join handshake itself (Start/pick are
+unreliable verbs) is *not* covered. **Corner, not tested:** if the host's
+validator refuses a joiner's pick, `start_pick` seats that refused offered car
+locally (the roster entry keeps `pick: None`, so the host spawns no body for
+that seat — no mismatch to teleport, but also no mirrored car); the client is
+told via `VehicleRefused` and shows it as a lobby notice.
 
 ## Rematch within one lobby (F26-B.1, no wire change)
 

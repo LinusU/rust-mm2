@@ -1840,11 +1840,12 @@ fn a_decided_cops_and_robbers_match_reaches_a_client_on_an_impaired_link() {
 /// admits joiners), so the late client is handed the running session,
 /// seated in the match mid-carry, and must then read the same ending
 /// the host decides — the delivery, the point-limit verdict for player 0
-/// — and sit on the match-over screen. Loopback only; no impairment.
+/// — and sit on the match-over screen. Loopback only; no impairment (the
+/// lossy variant is `a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link`).
 /// Skipped without `MM2_RETAIL=<dir>`.
 ///
-/// What it is not: a late joiner under loss, a joiner that drives, a
-/// contested pickup, or a rendered match.
+/// What it is not: a joiner that drives, a contested pickup, or a
+/// rendered match.
 #[test]
 fn a_client_that_joins_a_cops_and_robbers_match_mid_carry_reads_the_verdict() {
     let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
@@ -1893,6 +1894,100 @@ fn a_client_that_joins_a_cops_and_robbers_match_mid_carry_reads_the_verdict() {
     );
     host.cmd("quit");
     host.until_within("smoke=headless-physics", bound);
+
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let cell =
+        |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+    assert_eq!(cell("ref"), 0, "the late joiner refused the match: {rec}");
+    assert_eq!(cell("seats"), 2, "{rec}");
+    assert_eq!(cell("dec"), 1, "the verdict never reached it: {rec}");
+    assert!(
+        field(&rec, "cnr").split(',').any(|c| c == "win=p0"),
+        "the late joiner's winner differs from the host's: {rec}"
+    );
+    assert_eq!(field(&rec, "phase"), "results", "{rec}");
+    assert!(cell("landed") > 0, "{rec}");
+}
+
+/// F27-AC05's late-join leg under loss: the mid-carry late join (above)
+/// with the joiner's link through a seeded [`ImpairProxy`]. The joiner
+/// connects clean, is handed the running session and has its pick
+/// echoed (`event=vehicle` on the host), and only then does the recipe
+/// arm — 30 % frame loss, duplicates, reorders and a 40 ms ± 30 ms hold,
+/// both directions — so `Start` and the pick, which are one-shot verbs
+/// with no retransmit, are not what is tested. The match state rides the
+/// repeating whole-view frames; the joiner must still read the host's
+/// delivery and point-limit verdict. Loopback only. Skipped without
+/// `MM2_RETAIL=<dir>`.
+///
+/// What it is not: loss on the join handshake itself, a joiner that
+/// drives, a contested pickup, or a rendered match.
+#[test]
+fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    let seed = host_args.iter().position(|a| a == "--seed").unwrap();
+    host_args[seed + 1] = "1291".into();
+    host_args.extend(
+        [
+            "--city",
+            "sf",
+            "--cnr",
+            "ffa",
+            "--cnr-limit",
+            "100pts",
+            "--bot",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    start_when_ready(&mut host, 0);
+
+    let bound = Duration::from_secs(300);
+    let picked = host.until_within("Picked {", bound);
+    assert!(picked.contains("player: PlayerId(0)"), "{picked}");
+    let proxy = ImpairProxy::loopback_seeded(addr, 0xF27A6).unwrap();
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let mut client_args = join_args(&retail, proxy.addr(), "late", 25_000);
+    client_args.push("--parked".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    host.until_within("event=vehicle id=1", bound);
+    std::thread::sleep(Duration::from_millis(400));
+    proxy.set(LinkDir::Up, recipe);
+    proxy.set(LinkDir::Down, recipe);
+
+    let delivered = host.until_within("Delivered {", bound);
+    let ended = host.until_within("Ended(", bound);
+    eprintln!("host   {picked}\nhost   {delivered}\nhost   {ended}");
+    assert!(ended.contains("reason: PointLimit"), "{ended}");
+    assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(
+        client.wait().success(),
+        "the late joiner did not exit cleanly: {rec}"
+    );
+    let up = proxy.stats(LinkDir::Up);
+    let down = proxy.stats(LinkDir::Down);
+    eprintln!("client {rec}\nup {up:?}\ndown {down:?}");
+    host.cmd("quit");
+    host.until_within("smoke=headless-physics", bound);
+
+    // The recipe really bit the match's own stream.
+    assert!(down.frames_in > 0 && down.dropped > 0, "{down:?}");
+    assert!(down.delayed > 0, "{down:?}");
+    assert!(up.frames_in > 0, "{up:?}");
 
     assert_eq!(field(&rec, "status"), "pass", "{rec}");
     let cell =
