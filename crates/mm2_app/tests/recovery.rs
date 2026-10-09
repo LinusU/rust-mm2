@@ -62,6 +62,16 @@ fn recovery_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
 /// `recovery_app` under a caller-chosen session config — the authority
 /// legs need a `Host`/`Remote` stamp.
 fn recovery_app_with(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
+    recovery_app_for(config, VehicleConfig::default(), car_pos)
+}
+
+/// `recovery_app_with` for a caller-chosen vehicle — the F05-AC05
+/// class matrix drives the same detectors with authored retail cars.
+fn recovery_app_for(
+    config: SessionConfig,
+    vehicle: VehicleConfig,
+    car_pos: Vec3,
+) -> (App, Entity, ObjectId) {
     let mut session = Session::new();
     session.begin(config).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
@@ -153,7 +163,7 @@ fn recovery_app_with(config: SessionConfig, car_pos: Vec3) -> (App, Entity, Obje
             role,
             mm2_game::DamageSignals::default(),
             VehicleRecovery::with_anchor(POLICY, car_pos, SPAWN_YAW),
-            vehicle_bundle(&VehicleConfig::default()),
+            vehicle_bundle(&vehicle),
             Position(car_pos),
             Transform::from_translation(car_pos),
         ))
@@ -1435,4 +1445,90 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
         );
         assert!(wading.is_empty(), "{city}: {wading:?}");
     }
+}
+
+/// F05-AC05's class matrix on the authored retail roster: a small car
+/// (`vpbug`), a heavy bus (`vpbus`) and an articulated rig (`vpsemi`,
+/// tractor + trailer at the authored hitch) all recover from deep water
+/// and from a fall out of the world to a dry resting pose — the same
+/// detectors the synthetic default car exercises above. Skipped without
+/// the operator's install (`MM2_RETAIL=<dir>`).
+#[test]
+fn retail_small_heavy_and_articulated_vehicles_recover_from_water_and_the_void() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+
+    let mut masses = Vec::new();
+    for id in ["vpbug", "vpbus", "vpsemi"] {
+        let def = mm2_content::load_vehicle(&vfs, id, 0).unwrap();
+        masses.push(def.config.mass);
+        for leg in ["water", "void"] {
+            let rest_y = 0.5 + def.config.chassis_size[1];
+            let (mut app, car, _object) = recovery_app_for(
+                SessionConfig::default(),
+                def.config.clone(),
+                Vec3::new(0.0, rest_y, 0.0),
+            );
+            let trailer = def.trailer.as_ref().map(|t| {
+                // Offsets as the session wires them: hitch difference.
+                let offset = Vec3::from(t.car_hitch) - Vec3::from(t.trailer_hitch);
+                let pos = position(&app, car) + offset;
+                let e = app
+                    .world_mut()
+                    .spawn((
+                        mm2_app::car_visual::Trailer {
+                            towing: car,
+                            rest_offset: offset,
+                        },
+                        vehicle_bundle(&t.config),
+                        Position(pos),
+                        Transform::from_translation(pos),
+                    ))
+                    .id();
+                app.world_mut()
+                    .resource_mut::<SpawnPoint>()
+                    .trailers
+                    .push((e, offset));
+                (e, offset)
+            });
+            run(&mut app, 30);
+            let anchor = position(&app, car);
+            let to = match leg {
+                "water" => Vec3::new(WATER_AT.x, rest_y, WATER_AT.z),
+                _ => Vec3::new(0.0, -60.0, 0.0),
+            };
+            teleport(&mut app, car, to);
+            if let Some((t, offset)) = trailer {
+                teleport(&mut app, t, to + offset);
+            }
+            run(&mut app, 240);
+
+            let r = report(&app);
+            assert_eq!(r.recovered, 1, "{id}/{leg}: exactly one recovery");
+            let landed = position(&app, car);
+            assert!(
+                landed.is_finite() && landed.y > -1.0 && landed.y < anchor.y + 3.0,
+                "{id}/{leg}: landed on dry ground, not {landed}"
+            );
+            assert!(
+                landed.x.abs() < 20.0,
+                "{id}/{leg}: back at the dry anchor, not {landed}"
+            );
+            if let Some((t, _)) = trailer {
+                let t_pos = position(&app, t);
+                assert!(
+                    t_pos.is_finite() && t_pos.distance(landed) < 25.0 && t_pos.y > -1.0,
+                    "{id}/{leg}: trailer re-seated near its tractor: {t_pos} vs {landed}"
+                );
+            }
+        }
+    }
+    assert!(
+        masses.iter().any(|m| *m < 1500.0) && masses.iter().any(|m| *m > 4000.0),
+        "the roster spans small and heavy: {masses:?}"
+    );
 }
