@@ -1,3 +1,8 @@
 /retail/
 /target/
 /screenshots/
+
+# Rally workspaces keep their agent token and API keys here.
+.env
+.env.*
+.rally-mcp.json
