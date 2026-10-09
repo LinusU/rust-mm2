@@ -27,8 +27,10 @@
 //! inside the tolerance — and a longer path drifts out of it and
 //! re-seeks each frame.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use mm2_game::drawbridge::{DrawbridgeMode, LeafMotion};
 use mm2_game::movers::{PathFollower, TrainMotion};
@@ -543,6 +545,10 @@ pub fn advance_world_clock(
     mut movers: Query<(&mut Mover, &WorldStart<PathFollower>)>,
     mut trains: Query<(&mut Train, &WorldStart<TrainMotion>)>,
 ) {
+    let stepping = matches!(
+        session.phase(),
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
+    );
     match session.phase() {
         SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results => {
             clock.ticks += 1;
@@ -561,19 +567,107 @@ pub fn advance_world_clock(
     let Some(target) = clock.seek.take() else {
         return;
     };
+    // The drivers run after this system and take the step this frame
+    // counted, so while the world is stepping the scenery is replayed
+    // one step short of the target and ends the frame *at* it — the
+    // host's `ticks` is the count of steps its actors have taken. (A
+    // target of 0 cannot be undone: the frame's step stands.) A world
+    // that is not stepping gets the full replay: nothing follows it.
+    let (steps, replay) = match (stepping, target) {
+        (true, 0) => (1, 0),
+        (true, t) => (t, t - 1),
+        (false, t) => (t, t),
+    };
     let dt = time.delta_secs();
     for mut leaf in &mut leaves {
         if leaf.motion.mode == DrawbridgeMode::Timed {
-            leaf.motion = replay_leaf(DrawbridgeMode::Timed, target, dt);
+            leaf.motion = replay_leaf(DrawbridgeMode::Timed, replay, dt);
         }
     }
     for (mut mover, start) in &mut movers {
-        mover.follower = replay_follower(&start.0, target, dt);
+        mover.follower = replay_follower(&start.0, replay, dt);
     }
     for (mut train, start) in &mut trains {
-        train.motion = replay_train(&start.0, target, dt);
+        train.motion = replay_train(&start.0, replay, dt);
     }
-    clock.ticks = target;
+    clock.ticks = steps;
+}
+
+/// World ticks between two [`SceneryProbe`] samples.
+pub const PROBE_EVERY_TICKS: u64 = 60;
+
+/// Samples a [`SceneryProbe`] keeps, newest last: about 16 s of world
+/// time, enough for two processes that end a little apart to still
+/// share a tick.
+pub const PROBE_KEEP: usize = 32;
+
+/// Evidence for F26-A: a digest of where the clock-driven scenery
+/// stands, taken at known world ticks, so two processes can be
+/// compared at the *same* tick. Timed leaves, boats, ferries and train
+/// cars only — a proximity leaf depends on where cars were, not on the
+/// clock, and is not compared. Read by the headless smoke's record; no
+/// game system consumes it.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct SceneryProbe {
+    /// `(world tick, digest)`, oldest first, bounded by [`PROBE_KEEP`].
+    pub samples: VecDeque<(u64, u64)>,
+    /// Actors the newest sample covered.
+    pub actors: usize,
+}
+
+/// One body's pose, quantised to a millimetre and a ten-thousandth of a
+/// quaternion component so a last-bit float difference is not a
+/// difference.
+fn pose_hash(kind: u8, pos: Vec3, rot: Quat) -> u64 {
+    let q = |v: f32, scale: f32| ((v * scale).round() as i64).to_le_bytes();
+    let mut hash = crate::worldprops::fnv(0xcbf2_9ce4_8422_2325, &[kind]);
+    for v in pos.to_array() {
+        hash = crate::worldprops::fnv(hash, &q(v, 1_000.0));
+    }
+    for v in rot.to_array() {
+        hash = crate::worldprops::fnv(hash, &q(v, 10_000.0));
+    }
+    hash
+}
+
+/// Sample the scenery's poses on every [`PROBE_EVERY_TICKS`]th world
+/// tick. Runs after the drivers, so the poses are those of the step the
+/// clock just counted. Order-independent: the per-actor hashes are
+/// sorted before they are folded, because two processes spawn the same
+/// actors under different entity ids.
+pub fn sample_scenery(
+    clock: Res<WorldClock>,
+    leaves: Query<(&DrawbridgeLeaf, &Position, &Rotation)>,
+    movers: Query<(&Position, &Rotation), With<Mover>>,
+    cars: Query<(&Position, &Rotation), With<crate::movers::TrainCar>>,
+    mut probe: ResMut<SceneryProbe>,
+) {
+    let tick = clock.ticks;
+    if tick == 0 || !tick.is_multiple_of(PROBE_EVERY_TICKS) {
+        return;
+    }
+    if probe.samples.back().is_some_and(|&(t, _)| t >= tick) {
+        return;
+    }
+    let mut poses: Vec<u64> = leaves
+        .iter()
+        .filter(|(leaf, ..)| leaf.motion.mode == DrawbridgeMode::Timed)
+        .map(|(_, p, r)| pose_hash(0, p.0, r.0))
+        .chain(movers.iter().map(|(p, r)| pose_hash(1, p.0, r.0)))
+        .chain(cars.iter().map(|(p, r)| pose_hash(2, p.0, r.0)))
+        .collect();
+    if poses.is_empty() {
+        return;
+    }
+    poses.sort_unstable();
+    let digest = poses.iter().fold(0xcbf2_9ce4_8422_2325, |hash, pose| {
+        crate::worldprops::fnv(hash, &pose.to_le_bytes())
+    });
+    probe.actors = poses.len();
+    if probe.samples.len() == PROBE_KEEP {
+        probe.samples.pop_front();
+    }
+    probe.samples.push_back((tick, digest));
 }
 
 #[cfg(test)]
@@ -944,9 +1038,17 @@ mod tests {
         let prox = app.world_mut().spawn(leaf(DrawbridgeMode::Proximity)).id();
         app.update();
         let world = app.world();
+        // The frame's driver step follows, and lands on the target.
+        let mut seeked = world.get::<DrawbridgeLeaf>(timed).unwrap().motion;
         assert_eq!(
-            world.get::<DrawbridgeLeaf>(timed).unwrap().motion,
-            replay_leaf(DrawbridgeMode::Timed, 2_000, fixed_dt()),
+            seeked,
+            replay_leaf(DrawbridgeMode::Timed, 1_999, fixed_dt()),
+            "a stepping world is replayed one step short of the target"
+        );
+        seeked.step(fixed_dt());
+        assert_eq!(
+            seeked,
+            replay_leaf(DrawbridgeMode::Timed, 2_000, fixed_dt())
         );
         assert_eq!(
             world.get::<DrawbridgeLeaf>(prox).unwrap().motion,
@@ -954,6 +1056,160 @@ mod tests {
         );
         let clock = world.resource::<WorldClock>();
         assert_eq!((clock.ticks, clock.seek), (2_000, None));
+    }
+
+    /// One `advance_world_clock` frame in `phase` with a timed leaf and
+    /// a seek to `target` queued, then the leaf driver's step if the
+    /// world is stepping. Returns the leaf's motion and the clock.
+    fn seek_frame(phase: &SessionPhase, target: u64) -> (LeafMotion, WorldClock) {
+        let mut app = App::new();
+        let mut fixed = Time::<Fixed>::from_hz(60.0);
+        fixed.advance_by(std::time::Duration::from_secs_f32(DT));
+        let mut session = Session::default();
+        session.transition(SessionPhase::Loading).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        if *phase != SessionPhase::Ready {
+            session.transition(SessionPhase::Countdown).unwrap();
+            if *phase != SessionPhase::Countdown {
+                session.transition(SessionPhase::Playing).unwrap();
+            }
+            if *phase == SessionPhase::Results {
+                session.transition(SessionPhase::Results).unwrap();
+            }
+        }
+        app.insert_resource(fixed)
+            .insert_resource(session)
+            .insert_resource(WorldClock {
+                ticks: 0,
+                seek: Some(target),
+            })
+            .add_systems(Update, advance_world_clock);
+        let leaf = app
+            .world_mut()
+            .spawn(DrawbridgeLeaf {
+                motion: LeafMotion::new(DrawbridgeMode::Timed),
+                partner: None,
+                hinge: Vec3::ZERO,
+                base: Quat::IDENTITY,
+            })
+            .id();
+        app.update();
+        let mut motion = app.world().get::<DrawbridgeLeaf>(leaf).unwrap().motion;
+        if matches!(
+            app.world().resource::<Session>().phase(),
+            SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
+        ) {
+            motion.step(fixed_dt());
+        }
+        (motion, *app.world().resource::<WorldClock>())
+    }
+
+    #[test]
+    fn a_seeked_peer_stands_where_a_live_peer_stands_at_the_same_clock() {
+        // A live peer's clock is the count of steps its actors took. A
+        // seek in a stepping world must end the frame at the target
+        // too, or every re-seeked client trails its clock by a step.
+        for phase in &[
+            SessionPhase::Countdown,
+            SessionPhase::Playing,
+            SessionPhase::Results,
+        ] {
+            for target in [1, 2, 600, 2_000] {
+                let (motion, clock) = seek_frame(phase, target);
+                assert_eq!(clock.ticks, target, "{phase:?} {target}");
+                assert_eq!(
+                    motion,
+                    replay_leaf(DrawbridgeMode::Timed, target, fixed_dt()),
+                    "{phase:?} {target}"
+                );
+            }
+        }
+        // A target of 0 cannot undo the frame's own step.
+        let (motion, clock) = seek_frame(&SessionPhase::Countdown, 0);
+        assert_eq!(clock.ticks, 1);
+        assert_eq!(motion, replay_leaf(DrawbridgeMode::Timed, 1, fixed_dt()));
+    }
+
+    #[test]
+    fn a_seek_before_the_world_steps_replays_in_full() {
+        // A joiner's first race row seeks in `Ready`; no driver step
+        // follows, and the first `Countdown` frame adds its own.
+        let (motion, clock) = seek_frame(&SessionPhase::Ready, 180);
+        assert_eq!(clock.ticks, 180);
+        assert_eq!(motion, replay_leaf(DrawbridgeMode::Timed, 180, fixed_dt()));
+    }
+
+    fn probe_app(ticks: u64, bodies: &[Vec3]) -> App {
+        let mut app = App::new();
+        app.insert_resource(WorldClock { ticks, seek: None })
+            .init_resource::<SceneryProbe>()
+            .add_systems(Update, sample_scenery);
+        let path = vec![Vec3::ZERO, Vec3::X * 50.0];
+        for &at in bodies {
+            app.world_mut().spawn((
+                Mover {
+                    family: crate::movers::MoverFamily::Sailboat,
+                    follower: PathFollower::new(path.clone(), 5.0).unwrap(),
+                    lift: 0.0,
+                },
+                Position(at),
+                Rotation(Quat::IDENTITY),
+            ));
+        }
+        app
+    }
+
+    #[test]
+    fn the_probe_samples_on_its_stride_and_ignores_spawn_order() {
+        let (a, b) = (Vec3::new(1.0, 2.0, 3.0), Vec3::new(-4.0, 0.0, 9.0));
+        let sample = |ticks, bodies: &[Vec3]| {
+            let mut app = probe_app(ticks, bodies);
+            app.update();
+            app.update(); // a repeat frame at the same tick adds nothing
+            app.world().resource::<SceneryProbe>().clone()
+        };
+        let forward = sample(PROBE_EVERY_TICKS, &[a, b]);
+        let backward = sample(PROBE_EVERY_TICKS, &[b, a]);
+        assert_eq!(forward.samples.len(), 1);
+        assert_eq!(forward.actors, 2);
+        assert_eq!(
+            forward.samples, backward.samples,
+            "entity order is not state"
+        );
+        assert_ne!(
+            forward.samples,
+            sample(PROBE_EVERY_TICKS, &[a, a]).samples,
+            "a different pose is a different digest"
+        );
+        assert_ne!(
+            forward.samples,
+            sample(PROBE_EVERY_TICKS, &[a]).samples,
+            "a missing actor is too"
+        );
+        assert!(sample(PROBE_EVERY_TICKS + 1, &[a, b]).samples.is_empty());
+        assert!(sample(0, &[a, b]).samples.is_empty());
+        assert!(sample(PROBE_EVERY_TICKS, &[]).samples.is_empty());
+        // Sub-millimetre float noise is not a difference.
+        assert_eq!(
+            forward.samples,
+            sample(PROBE_EVERY_TICKS, &[a + Vec3::splat(1e-5), b]).samples
+        );
+    }
+
+    #[test]
+    fn the_probe_keeps_only_the_newest_samples() {
+        let mut app = probe_app(0, &[Vec3::ONE]);
+        for i in 1..=(PROBE_KEEP as u64 + 5) {
+            app.world_mut().resource_mut::<WorldClock>().ticks = i * PROBE_EVERY_TICKS;
+            app.update();
+        }
+        let probe = app.world().resource::<SceneryProbe>();
+        assert_eq!(probe.samples.len(), PROBE_KEEP);
+        assert_eq!(probe.samples.front().unwrap().0, 6 * PROBE_EVERY_TICKS);
+        assert_eq!(
+            probe.samples.back().unwrap().0,
+            (PROBE_KEEP as u64 + 5) * PROBE_EVERY_TICKS
+        );
     }
 
     #[test]

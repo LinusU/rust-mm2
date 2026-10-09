@@ -607,6 +607,7 @@ fn run_headless(
         .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
         .init_resource::<crate::worldclock::WorldClock>()
+        .init_resource::<crate::worldclock::SceneryProbe>()
         .init_resource::<crate::cablecar::CableCircuits>()
         .add_systems(
             FixedLast,
@@ -615,6 +616,7 @@ fn run_headless(
                 crate::worldclock::advance_world_clock,
                 crate::drawbridge::drive_drawbridges,
                 crate::movers::drive_movers,
+                crate::worldclock::sample_scenery,
                 crate::cablecar::drive_cable_cars,
             )
                 .chain(),
@@ -1461,8 +1463,23 @@ fn run_headless(
             if r.world_row_throttled > 0 {
                 row.push_str(&format!(",rowthr{}", r.world_row_throttled));
             }
+            // `scen=` only when the clock-driven scenery was sampled: the
+            // actor count, then `tick:digest` per sample, so two
+            // processes can be compared at the ticks they share.
+            let scen = world_ecs
+                .get_resource::<crate::worldclock::SceneryProbe>()
+                .filter(|p| !p.samples.is_empty())
+                .map(|p| {
+                    let samples: Vec<String> = p
+                        .samples
+                        .iter()
+                        .map(|(tick, digest)| format!("{tick}:{digest:016x}"))
+                        .collect();
+                    format!(" scen=n{},{}", p.actors, samples.join(","))
+                })
+                .unwrap_or_default();
             format!(
-                " wclk=sent{},landed{},seek{},ref{},thr{}{row}",
+                " wclk=sent{},landed{},seek{},ref{},thr{}{row}{scen}",
                 r.world_sent, r.world_landed, r.world_seeks, r.world_refused, r.world_throttled
             )
         })

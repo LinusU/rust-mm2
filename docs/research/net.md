@@ -1763,6 +1763,32 @@ wire actually moved rather than an in-process mailbox's contents.
   divergence would pass); other events and cities; same machine and
   binary, so cross-platform agreement of the rolls is unobserved.
 
+- **Clock-driven scenery stands in the same place at the same tick
+  (report 6 follow-up 3, new-run iteration 14).** A new
+  `SceneryProbe` (headless smoke only; no game system reads it) hashes
+  the poses of every timed drawbridge leaf, boat, ferry and train car
+  (46 actors in London; order-independent, quantised to 1 mm) every 60
+  world ticks and the record prints the newest 32 as
+  `scen=n<actors>,<tick>:<digest>,…`. The two-process legs
+  `two_retail_processes_stand_the_same_scenery_in_a_cruise` / `_in_a_race`
+  (`MM2_RETAIL`-gated; retail london, Cruise and `checkpoint:0`) require
+  at least four shared ticks and one digest at each. **First run failed**:
+  a client agreed with the host until its first re-seek, then differed at
+  every tick (cruise from tick 360, race from tick 60). Cause:
+  `advance_world_clock` replayed the actors to the target and set the
+  clock to the target, but the drivers run after it in the same frame and
+  take that frame's step, so a re-seeked client's actors stood one step
+  ahead of its clock for good (~8 ms; far inside `SYNC_TOLERANCE_TICKS`,
+  so no tolerance check could see it). A seek in a stepping phase now
+  replays one step short (a world not stepping — a joiner's `Ready` seek
+  — replays in full). After the fix both legs pass 4/4 runs (cruise: 6
+  seeks, race: 3, digests agree at every shared tick; ~6 s each).
+  Not covered: proximity leaves (their state depends on where cars were,
+  not the clock; still local), the sailboat/ferry/train/object *sounds*,
+  a windowed or impaired-link run, a run past the host's first tolerance
+  breach on a slow link; same machine and binary, so cross-platform float
+  agreement of the replay is unobserved.
+
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
 delay/jitter/loss matrix exists at both levels now — in-process (see

@@ -1379,6 +1379,88 @@ fn two_retail_processes_roll_the_same_parked_cars_in_a_race() {
     assert!(count >= parked, "parked cars are part of the digest: {rec}");
 }
 
+/// The `scen=n<actors>,<tick>:<digest>,…` cell that follows `wclk=`: how
+/// many clock-driven scenery actors the process sampled and the digest
+/// of their poses at each sampled world tick.
+fn scenery_field(line: &str) -> (u64, std::collections::BTreeMap<u64, String>) {
+    let cells = line
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("scen=n"))
+        .unwrap_or_else(|| panic!("no scen= cell in {line}"));
+    let (actors, samples) = cells.split_once(',').expect("actors,samples");
+    let samples = samples
+        .split(',')
+        .map(|s| {
+            let (tick, digest) = s.split_once(':').expect("tick:digest");
+            (tick.parse().expect("tick"), digest.to_string())
+        })
+        .collect();
+    (actors.parse().expect("actors"), samples)
+}
+
+/// Report 6 follow-up 3's scenery half: where a hosted retail London
+/// stands its clock-driven scenery (Thames drawbridge leaves, boats,
+/// Underground trains) must be where a joined client stands it *at the
+/// same world tick*. Each process samples a digest of those actors'
+/// poses every 60 world ticks; the two records must share ticks, and
+/// every shared tick must carry one digest. `extra` picks the session:
+/// a Cruise (the host's clock frames align the client) or a race (the
+/// race row does).
+fn two_retail_processes_stand_the_same_scenery(extra: &[&str]) {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 9000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(extra.iter().map(|a| a.to_string()));
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "bob", 1000));
+    start_when_ready(&mut host, 1);
+
+    let rec = client.until("smoke=headless-physics");
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    let (host_actors, host_poses) = scenery_field(&host_rec);
+    let (actors, poses) = scenery_field(&rec);
+    assert!(actors > 0, "the city fields no clock-driven scenery: {rec}");
+    assert_eq!(host_actors, actors, "different actors: {host_rec}\n{rec}");
+    let shared: Vec<u64> = poses
+        .keys()
+        .filter(|t| host_poses.contains_key(t))
+        .copied()
+        .collect();
+    assert!(
+        shared.len() >= 4,
+        "too few shared world ticks to compare ({shared:?}):\n{host_rec}\n{rec}"
+    );
+    for tick in shared {
+        assert_eq!(
+            host_poses[&tick], poses[&tick],
+            "the scenery differs at world tick {tick}:\n{host_rec}\n{rec}"
+        );
+    }
+}
+
+/// A Cruise: no race row, so the client's scenery clock aligns to the
+/// host's `World` frames. `MM2_RETAIL`-gated.
+#[test]
+fn two_retail_processes_stand_the_same_scenery_in_a_cruise() {
+    two_retail_processes_stand_the_same_scenery(&["--city", "london"]);
+}
+
+/// A race: the client's scenery clock aligns to the race row.
+/// `MM2_RETAIL`-gated.
+#[test]
+fn two_retail_processes_stand_the_same_scenery_in_a_race() {
+    two_retail_processes_stand_the_same_scenery(&["--event", "checkpoint:0"]);
+}
+
 /// The `cars=sent<n>,omit<n>,live<n>,landed<n>,mism<n>` record field —
 /// the host's published ambient rows and, on a client, the traffic
 /// copies it holds and the rows it landed or refused (F26-A, v19).

@@ -1,16 +1,17 @@
-# Last iteration — parked cars across peers in a networked race (iteration 13 of the new run)
+# Last iteration — scenery poses across peers (iteration 14 of the new run)
 
-Selection: iteration 12 (`7eaee43`) passed gates and review with no blocking findings. Its next-step list offered F27-C (needs a second driven client) or report 6 follow-up 3. I took the checkable half of follow-up 3: "whether the seed-rolled parked cars agree across peers in networked races". The existing two-process prop-world leg was a Cruise, where the session skips parked cars, so the question had no evidence.
+Selection: iteration 13 (`916af0e`) passed gates and review with no blocking findings. The checkable half left of report 6 follow-up 3 was the drawbridge/mover actors: the docs said "no check that drawbridge/mover *poses* match the host's after a seek". F27-C still needs a second driven client, so I took this.
 
 Change (candidate, not independently checked):
-- `smoke.rs`: the networked `props=` record cell gains `parked<n>` (cars this process placed, from `ParkedCarReport`). Records without a stamped networked world are unchanged.
-- `net_drive`: new `two_retail_processes_roll_the_same_parked_cars_in_a_race` (`MM2_RETAIL`-gated): host `--event checkpoint:0`, parked client; both must place the same non-zero parked count, share one `SiteTable` digest, and the client must refuse no row (`mism0`). The cruise leg now also asserts `parked0` on both sides (the original skips them in networked cruise).
-- `docs/research/net.md` and the PLAN F26-A row / report-6 summary record it.
+- `worldclock.rs`: `SceneryProbe` + `sample_scenery` (registered in the headless smoke only; nothing in the game reads it). Every 60 world ticks it hashes the poses of timed drawbridge leaves, boats, ferries and train cars (order-independent, 1 mm quantised) and keeps the newest 32. The record prints `scen=n<actors>,<tick>:<digest>,…` after `wclk=`.
+- `net_drive`: `two_retail_processes_stand_the_same_scenery_in_a_cruise` and `_in_a_race` (`MM2_RETAIL`-gated, retail london): at least four shared world ticks, one digest at each, same actor count.
+- **Defect found and repaired.** The first run failed: a client matched the host until its first re-seek, then differed at every tick (cruise from tick 360, race from tick 60). `advance_world_clock` replayed the actors to `target` and set the clock to `target`, but the drivers run after it in the same frame and take that frame's step, so a re-seeked client's actors stayed one step (~8 ms) ahead of its clock. That is inside `SYNC_TOLERANCE_TICKS`, so no existing check could see it. A seek in a stepping phase (Countdown/Playing/Results) now replays `target - 1` (a target of 0 keeps the frame's step, clock 1); a `Ready` seek (joiner's first race row) replays in full because no driver step follows.
+- Unit tests: seeked leaf equals live leaf at the same clock for each stepping phase and several targets, the `Ready` full replay, probe stride/order-independence/noise tolerance/bounded ring. `the_system_seeks_timed_leaves…` now asserts the one-short replay plus the driver step.
 
-Evidence (retail london `checkpoint:0`, loopback, headless; `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`): 3/3 passes (~7.5 s each); host and client both `props=sites6632:6c14ab6b820cd46b,…,parked481`; client landed 486–495 prop rows, `mism0`. The four other `two_retail_processes_*` legs also passed in the same run (82 s together).
+Evidence (retail london, loopback, headless; `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail`): before the fix both new legs failed as above; after it both pass 4/4 runs (~6 s each; cruise client `seek6`, race client `seek3`). Host digests are identical before and after (host unchanged).
 
-Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok` lines, none failed (without `MM2_RETAIL`; the retail legs ran separately above).
+Gates (foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok` lines, none failed (without `MM2_RETAIL`; the retail legs ran separately above).
 
-Not verified: the paint roll is not in the digest (same seed stream, so a paint-only divergence would pass); one event and city; same machine and binary, so cross-platform rolls are unobserved; nothing rendered. Drawbridge, mover (sailboat/ferry/train) and sound actors of follow-up 3 are still clock-only / local; follow-up 3 is not closed.
+Not verified: proximity leaves (state depends on cars, still per-peer); scenery/object sounds; impaired-link or windowed run; same machine and binary, so cross-platform float agreement of the replay is unobserved. Follow-up 3 is still not closed for those.
 
-Status: implemented candidate; not independently checked. Next: F27-C multi-client contested pickup (needs a second driven client), or the remaining follow-up-3 actors (proximity leaves, sounds).
+Status: implemented candidate; not independently checked. Next: F27-C multi-client contested pickup (needs a second driven client), proximity-leaf trigger replication, or the remaining F25/F26 lifecycle items.
