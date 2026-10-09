@@ -289,7 +289,7 @@ fn surface_counts(line: &str) -> (u64, u64, u64, u64) {
 /// also the host's Cancel→teardown→exit lifecycle leg.)
 fn quit_and_assert_host_drove(mut host: Proc) -> NetField {
     host.cmd("quit");
-    let rec = host.until("smoke=headless-physics");
+    let rec = host.until_within("smoke=headless-physics", Duration::from_secs(60));
     assert_eq!(field(&rec, "status"), "pass", "{rec}");
     assert_eq!(field(&rec, "phase"), "menu", "{rec}");
     assert!(rec.contains("lobby closed"), "{rec}");
@@ -2432,6 +2432,9 @@ fn run_shove_trio(
     bob_frames: u32,
     impair: Option<Impair>,
 ) -> (String, String, Option<(LinkStats, LinkStats)>) {
+    // Each lifecycle step is waited on for an observed line, bounded and
+    // named in the failure (a loaded runner is slow, not wrong).
+    const STEP: Duration = Duration::from_secs(60);
     let mut host_flags = host_args(install, 9000);
     host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
@@ -2457,13 +2460,13 @@ fn run_shove_trio(
         alice_flags.extend(["--with-impacts", "1"].map(String::from));
     }
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
-    host.until("ready=true");
+    host.until_within("ready=true", STEP);
     let mut bob_flags = join_args(install, join_addr, "bob", bob_frames);
     bob_flags.push("--parked".into());
     let bob = Proc::spawn(MM2_EXE, &bob_flags);
-    host.until("ready=true");
+    host.until_within("ready=true", STEP);
     host.cmd("start");
-    host.until("event=started generation=1");
+    host.until_within("event=started generation=1", STEP);
     if let (Some(proxy), Some(impair)) = (&proxy, impair) {
         // `Start` rides Down: let the clean lane deliver it first.
         std::thread::sleep(Duration::from_millis(400));
@@ -2484,7 +2487,7 @@ fn run_shove_trio(
     // the clients leave once the proxy is down.
     drop(proxy);
     for _ in 0..2 {
-        host.until("event=left");
+        host.until_within("event=left", STEP);
     }
     quit_and_assert_host_drove(host);
     (alice_rec, bob_rec, link)
