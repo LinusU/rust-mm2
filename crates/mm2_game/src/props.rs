@@ -594,7 +594,10 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                 continue;
             }
             let ri = (rid - 1) as usize;
-            reached[rid as usize] = true;
+            // `reached` is sized by `prop_rules`, not `rooms`: index it checked.
+            if let Some(seen) = reached.get_mut(rid as usize) {
+                *seen = true;
+            }
             let rule = psdl.prop_rules.get(rid as usize).copied().unwrap_or(0);
             if rule == 0 {
                 walk.stats.rooms_no_rule += 1;
@@ -1688,6 +1691,22 @@ mod tests {
             ],
             vec![quad_road(false)],
         )
+    }
+
+    /// S2 of the authored-number audit: `reached` is sized by `prop_rules`,
+    /// so a rule table shorter than the room list must not index past it.
+    #[test]
+    fn a_rule_table_shorter_than_the_rooms_is_not_indexed_past() {
+        let mut city = psdl(
+            quad_verts(),
+            vec![room1_solo()],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        city.prop_rules.truncate(1);
+        let (defs, rules) = tables(vec![], vec![]);
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stats.rooms_no_rule, 1);
     }
 
     #[test]

@@ -1160,9 +1160,11 @@ impl WheelPtx {
             let spew_due = ch.acc[slot].floor() as usize;
             ch.blast[slot] = 0;
             ch.acc[slot] -= spew_due as f32;
-            let want = blast_due + spew_due;
+            // Both terms are authored-scale (`InitialBlast`, `SpewRate`); the sum
+            // saturates and `dropped` below counts the excess.
+            let want = blast_due.saturating_add(spew_due);
             let emit = want.min(room);
-            out.dropped += want - emit;
+            out.dropped = out.dropped.saturating_add(want - emit);
             room -= emit;
             for _ in 0..emit {
                 out.puffs

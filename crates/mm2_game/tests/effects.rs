@@ -1283,3 +1283,25 @@ fn puffs_ignore_the_stale_authored_world_position() {
     let p = r.puff(0, origin, e).unwrap();
     assert_eq!(p.position, origin);
 }
+
+/// S1 of the authored-number audit: a hostile `InitialBlast` plus a
+/// saturating `SpewRate` must neither overflow the due sum nor emit past
+/// the live cap; the excess is counted as dropped.
+#[test]
+fn wheel_ptx_survives_hostile_blast_and_spew_counts() {
+    let mut specs = spec_table();
+    let mut hostile = spew_spec();
+    hostile.initial_blast = i64::MAX;
+    hostile.spew_rate = f32::MAX;
+    hostile.spew_time_limit = 0.0;
+    specs[4] = Some(hostile);
+    let spec_of = table_lookup(&specs);
+    let road = PtxChannels {
+        index: [4, -1],
+        threshold: [0.25, 0.5],
+    };
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let e = rig.draw(0, draw_of(1.0, 0.4, Some(road), &spec_of, 0));
+    assert_eq!(e.puffs.len(), WheelPtxPolicy::default().max_live);
+    assert!(e.dropped > 0);
+}
