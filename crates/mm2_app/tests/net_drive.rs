@@ -1742,6 +1742,96 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
     assert!(cell("landed") > 0, "{rec}");
 }
 
+/// F27-AC05's process-level leg: the decided Cops & Robbers match of
+/// `two_retail_processes_decide_a_cops_and_robbers_match` (host `--bot`,
+/// retail sf, seed 1291, `100pts`) with the parked client's whole link
+/// riding an armed [`ImpairProxy`] — 30 % frame loss, duplicates,
+/// reorders and a 40 ms ± 30 ms hold, both directions, from just after
+/// `Start`. The match is host-authoritative and its state travels as
+/// repeating whole-view frames (on change, on a cadence, and repeated
+/// once decided), so the client must still read the decided match with
+/// the host's winner and be on the match-over screen, and the proxy's
+/// counters must show the recipe really bit the data plane. Loopback
+/// only; the frame-level recipe is the harness's, over the real TCP
+/// transport. Skipped without `MM2_RETAIL=<dir>`.
+///
+/// What it is not: a late joiner, a client that drives, a contested
+/// pickup, or a rendered match.
+#[test]
+fn a_decided_cops_and_robbers_match_reaches_a_client_on_an_impaired_link() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    let seed = host_args.iter().position(|a| a == "--seed").unwrap();
+    host_args[seed + 1] = "1291".into();
+    host_args.extend(
+        [
+            "--city",
+            "sf",
+            "--cnr",
+            "ffa",
+            "--cnr-limit",
+            "100pts",
+            "--bot",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let proxy = ImpairProxy::loopback_seeded(addr, 0xF27A5).unwrap();
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let mut client_args = join_args(&retail, proxy.addr(), "bob", 25_000);
+    client_args.push("--parked".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+    // `Start` is a one-shot verb with no retransmit: let the still-clean
+    // link deliver it, then arm the recipe on the data plane.
+    std::thread::sleep(Duration::from_millis(400));
+    proxy.set(LinkDir::Up, recipe);
+    proxy.set(LinkDir::Down, recipe);
+
+    let bound = Duration::from_secs(300);
+    let delivered = host.until_within("Delivered {", bound);
+    let ended = host.until_within("Ended(", bound);
+    eprintln!("host   {delivered}\nhost   {ended}");
+    assert!(ended.contains("reason: PointLimit"), "{ended}");
+    assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    let up = proxy.stats(LinkDir::Up);
+    let down = proxy.stats(LinkDir::Down);
+    eprintln!("client {rec}\nup {up:?}\ndown {down:?}");
+    host.cmd("quit");
+    host.until_within("smoke=headless-physics", bound);
+
+    // The recipe really bit the match's own stream.
+    assert!(down.frames_in > 0 && down.dropped > 0, "{down:?}");
+    assert!(down.delayed > 0, "{down:?}");
+    assert!(up.frames_in > 0, "{up:?}");
+
+    let cell =
+        |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+    assert_eq!(cell("ref"), 0, "the client refused the host's match: {rec}");
+    assert_eq!(cell("seats"), 2, "{rec}");
+    assert_eq!(cell("dec"), 1, "the decided match never reached it: {rec}");
+    assert!(
+        field(&rec, "cnr").split(',').any(|c| c == "win=p0"),
+        "the client's winner differs from the host's: {rec}"
+    );
+    assert_eq!(field(&rec, "phase"), "results", "{rec}");
+    assert!(cell("landed") > 0, "{rec}");
+}
+
 /// F27-AC01's client leg over real processes: the *joined client's*
 /// `--bot` reads the host's replica, drives its own predicted car to the
 /// gold, and the host — which parks its own seat — measures the contact
