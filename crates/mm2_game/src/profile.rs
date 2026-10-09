@@ -38,7 +38,11 @@
 //!   reference can never resolve to a different person. If the mark
 //!   file itself is lost, allocation degrades to the file-scan floor:
 //!   a deleted highest id could then be reissued, but no live profile
-//!   is ever displaced.
+//!   is ever displaced. When neither the surviving suffix nor the mark
+//!   has a successor left (either already sits at `u64::MAX`) the id
+//!   space is exhausted: [`ProfileStore::create`] reports
+//!   [`ProfileError::Invalid`] instead of wrapping onto a live id, and
+//!   the store writes nothing.
 //! - Progress is keyed by [`EventKey`] — the event's authored file stem
 //!   (`race3`), not its table row index — so a mod inserting a table row
 //!   cannot silently retarget a saved record (spec req 4). The consumer

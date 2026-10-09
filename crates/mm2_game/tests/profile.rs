@@ -524,8 +524,12 @@ fn an_exhausted_id_space_is_reported_not_wrapped() {
         }
         other => panic!("expected an exhausted-id-space error, got {other}"),
     }
-    // No `driver-0.json` appeared and the ceiling file is untouched.
+    // No `driver-0.json` appeared, the ceiling file's bytes are
+    // untouched, and no high-water mark was written — the failure
+    // happens before the store touches the directory.
     assert!(!store.root().join("driver-0.json").exists());
+    assert!(!store.root().join("next-id").exists());
+    assert_eq!(std::fs::read(&ceiling).unwrap(), b"{}");
     assert!(ceiling.exists());
     assert_eq!(
         store.list().unwrap()[0].id.as_str(),
@@ -535,7 +539,8 @@ fn an_exhausted_id_space_is_reported_not_wrapped() {
 
 /// The same exhaustion, reached through the persisted high-water mark
 /// rather than a surviving file: `next-id` at `u64::MAX` has no
-/// successor to write, and `create` reports that instead of panicking.
+/// successor to write, so `create` reports that as an explicit error
+/// and writes nothing instead of wrapping the mark.
 #[test]
 fn a_high_water_mark_at_the_u64_ceiling_is_reported() {
     let (_dir, store) = store();
@@ -554,6 +559,11 @@ fn a_high_water_mark_at_the_u64_ceiling_is_reported() {
         other => panic!("expected an exhausted-id-space error, got {other}"),
     }
     assert!(!store.root().join("driver-0.json").exists());
+    // The mark was not advanced past what it already holds.
+    assert_eq!(
+        std::fs::read_to_string(store.root().join("next-id")).unwrap(),
+        format!("{}\n", u64::MAX)
+    );
 }
 
 /// `finishes` is a persisted count: a hand-edited profile pinned at
