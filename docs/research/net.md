@@ -1700,9 +1700,14 @@ wire actually moved rather than an in-process mailbox's contents.
   resets` (a single run cannot force the loss). Bob runs his frame
   budget here instead of `--until-peer-left`: through a lossy relay
   alice's one-shot `Leave` can be dropped and the relay keeps her
-  socket open, so bob would never see her go. Not covered: other
-  recipes, a trailer rig reset, reset-while-moving divergence;
-  loopback, dev world.
+  socket open, so bob would never see her go. Flake measurement
+  (iteration 10 of the run): both reset legs together passed 15/15
+  consecutive isolated runs (~13 s each), and 3/3 runs of the whole
+  `net_drive` module (19 process tests contending, ~86 s), including
+  the clean leg's exact one-ask assertion — so that timing assumption
+  (the reset returns well inside `DEV_RESET_RETRY`) held under CPU
+  contention too. Not covered: other recipes, a trailer rig reset,
+  reset-while-moving divergence; loopback, dev world.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
