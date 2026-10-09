@@ -85,6 +85,10 @@ the build artefacts and the git stash stack are shared:
   documented / inferred / designed / unknown with sources. Read it
   before implementing a game-mode, unlock or world-behavior rule, and
   update it when a rule's evidence changes.
+- [specs/](specs/README.md) — the feature specs (`Fxx-*.md`) every task
+  is written against, with acceptance-criterion IDs `Fxx-ACnn`. Read your
+  task's spec before starting, and its "Read alongside" files. Owner-
+  maintained: record a disagreement on the task, don't edit the spec.
 - [docs/research/](docs/research/) — notes on the MM2 binary formats. When
   a format's meaning is inferred rather than documented, say so there and
   in the code, and prefer measuring against the retail data over guessing.
