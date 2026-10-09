@@ -1,15 +1,17 @@
-# Last iteration — the menu tests run the production lobby schedule (iteration 22 of the new run)
+# Last iteration — the menu join dials off the render thread (iteration 1 of the 2026-10-09 run)
 
-Selection: iteration 21 (`96f742d`) passed gates and review. Its review's first verification gap: the menu-join test registered only `lobby_input`/`drive_lobby`/`close_menu_join`, so the rest of `add_client_systems` in menu mode (reconcile/apply/send systems) was checked by source reading only. Picked closing that gap for both the client and host sets (F27-C / F24-B).
+Selection: iteration 22 (`b7511e6`) passed gates and review with no blocking findings. Operator report 7 items 1–11 are all implemented, so no report item was ready. Picked the one concrete defect slice 7 of F27-C had recorded: the menu's *Join lobby* dial ran inline in `menu_input`, so a host that accepts and never speaks froze the window for up to `HANDSHAKE_TIMEOUT` (10 s). Also fixed the review's cosmetic nit (the `never_capturing` helper had split `menu_app`'s doc comment from its function).
 
 Changes (candidate, not independently checked):
-- New `mm2_app::lobby_systems` with `add_client_systems`/`add_host_systems`, moved from `main.rs` (the `capturing` freeze condition is a parameter). `main.rs` calls them; behaviour for `--join`/`--host` unchanged.
-- The three menu lobby tests (`the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes`, `a_client_joins_the_lobby_the_menu_opened`, `the_menu_joins_a_lobby_another_menu_opened`) now register the full production sets (the join test also registers the `RemoteImpact`/`BangerStateChanged`/`RaceStarted` messages the binary registers).
-- **Defect found by that:** with the full host set, `Esc` out of a menu-hosted lobby panicked (`publish_snapshots`: `Res<HostLink>` missing, `track_reset_epochs`: `ResMut<NetDriveReport>` missing). `close_menu_*` remove the link/resources by deferred commands which a sync point applied mid-schedule, before other lobby systems ran. Fix: every lobby system is in `HostedLobby`/`JoinedLobby`, and the close systems run `.after` that set. Before: host test failed on the first run (system names obtained with `--features bevy/debug`); after: passes.
-- Docs: `docs/research/net.md`, PLAN F27-C slice 8.
+- `net::begin_menu_dial` runs the VFS-bound checks in-frame (driver bound, pick, fingerprint — `plan_menu_join`) and moves `LobbyLink::join` + the pick offer to an `mm2-menu-dial` thread behind a `MenuDial` resource. `open_menu_join` (no other consumer) is gone; `MenuJoinError::Lost` names a dial thread that died without answering.
+- `menu::menu_dial` (registered before `menu_watch` in the binary and in `tests/menu.rs`) adopts the answer: a link closes the shell and adopts the lobby, a failure goes to the status line with the address field still open. A link answered outside the `Menu` phase is dropped with a warning.
+- `menu_input`: while a dial is pending, launch/host/join answer `still joining a lobby` instead of queueing; status reads `joining <addr>…`.
+- Tests: new `a_silent_host_does_not_freeze_the_menu_join` (accepting listener that never speaks: `Enter` returns at once, frames keep running, a second `Enter` is refused, dropping the peer lands `cannot join …`); the two existing join tests wait on `settle_dial`. Docs: `docs/research/net.md`, PLAN F27-C slice 9.
 
-Not shown: two OS processes joined through the menu rows, a driven menu-joined client, rendered capture, retail data.
+Known behaviour, documented: `Esc` out of the field during a dial does not cancel it (bounded thread; a late success still adopts the lobby).
 
-Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`).
+Not shown: a rendered capture of the `joining …` status, two OS processes through the rows, retail data. The new test was not mutation-checked against the old inline dial.
+
+Gates (foreground, final tree): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0; `cargo test --locked --workspace` exit 0, 58 `test result: ok`, none failed (no `MM2_RETAIL`).
 
 Status: implemented candidate; not independently checked.

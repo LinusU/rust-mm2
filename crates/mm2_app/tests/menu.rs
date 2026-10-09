@@ -322,15 +322,15 @@ fn circuit_install() -> tempfile::TempDir {
     tmp
 }
 
-/// A headless app wired like the binary's menu mode: parked session,
-/// the menu resources and the production session/menu systems, minus
-/// the window.
 /// The binary's `capturing` condition for an app that is not taking a
 /// screenshot: the lobby sets run unfrozen.
 fn never_capturing() -> bool {
     false
 }
 
+/// A headless app wired like the binary's menu mode: parked session,
+/// the menu resources and the production session/menu systems, minus
+/// the window.
 fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
     menu_app_with(dir, MenuData::new(store, false, None))
 }
@@ -424,6 +424,7 @@ fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
                 // Same chain as the binary: the mouse path queues
                 // commands for `menu_input`.
                 (
+                    menu::menu_dial,
                     menu::menu_watch,
                     menu::menu_mouse.run_if(not(display_trial::display_trial_pending)),
                     menu::menu_input.run_if(not(display_trial::display_trial_pending)),
@@ -4157,6 +4158,89 @@ fn a_client_joins_the_lobby_the_menu_opened() {
 /// fingerprint, the shell steps aside for the lobby surface, the joiner's
 /// `Enter` readies it, the host's `Enter` starts the match for both, and
 /// `Esc` after the match leaves the lobby and returns the menu saying so.
+/// Step a menu app until the join it started has answered. The dial runs
+/// on its own thread, so this waits on the clock, not a frame count.
+fn settle_dial(app: &mut App) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while app
+        .world()
+        .get_resource::<mm2_app::net::MenuDial>()
+        .is_some()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dial never answered"
+        );
+        app.update();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    app.update();
+}
+
+/// A host that accepts and never speaks holds the handshake for up to
+/// `HANDSHAKE_TIMEOUT`; the dial must not hold the window with it. The
+/// menu keeps updating (and refuses a second lobby or a launch) while it
+/// waits, and the answer lands on the status line once the peer gives up.
+#[test]
+fn a_silent_host_does_not_freeze_the_menu_join() {
+    use mm2_app::net::{LobbyLink, MenuDial};
+
+    let tmp = install();
+    let mut client = menu_app(tmp.path(), None);
+    client.update();
+
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &addr.to_string());
+    let started = std::time::Instant::now();
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the Enter waited on the handshake: {:?}",
+        started.elapsed()
+    );
+    let (held, _) = silent.accept().unwrap();
+    assert!(client.world().get_resource::<MenuDial>().is_some());
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("joining")),
+        "{:?}",
+        shell(&client).status
+    );
+
+    // Frames keep running; a second join is refused rather than queued.
+    for _ in 0..5 {
+        client.update();
+    }
+    assert!(client.world().get_resource::<MenuDial>().is_some());
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("still joining")),
+        "{:?}",
+        shell(&client).status
+    );
+
+    // The peer hanging up answers the dial: a named failure, field still open.
+    drop(held);
+    settle_dial(&mut client);
+    assert!(client.world().get_resource::<LobbyLink>().is_none());
+    assert!(shell(&client).active);
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("cannot join")),
+        "{:?}",
+        shell(&client).status
+    );
+}
+
 #[test]
 fn the_menu_joins_a_lobby_another_menu_opened() {
     use mm2_app::lobby_systems::{add_client_systems, add_host_systems};
@@ -4230,6 +4314,7 @@ fn the_menu_joins_a_lobby_another_menu_opened() {
     };
     type_text(&mut client, &dead.to_string());
     press(&mut client, KeyCode::Enter);
+    settle_dial(&mut client);
     assert!(client.world().get_resource::<LobbyLink>().is_none());
     assert!(shell(&client).active, "a failed dial leaves the field open");
     assert!(
@@ -4251,6 +4336,7 @@ fn the_menu_joins_a_lobby_another_menu_opened() {
     let addr = host.world().resource::<HostLink>().addr();
     type_text(&mut client, &addr.to_string());
     press(&mut client, KeyCode::Enter);
+    settle_dial(&mut client);
     assert!(
         client.world().get_resource::<LobbyLink>().is_some(),
         "{:?}",

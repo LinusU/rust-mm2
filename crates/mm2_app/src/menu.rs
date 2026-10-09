@@ -3133,6 +3133,41 @@ pub fn menu_watch(
     }
 }
 
+/// Land a join the menu started: once the dial thread has answered, a
+/// joined lobby is adopted and owns the screen, a refusal or an
+/// unreachable host goes to the status line with the address field still
+/// open. Runs before `menu_watch` so the shell closes the frame the link
+/// appears.
+pub fn menu_dial(
+    mut commands: Commands,
+    dial: Option<Res<crate::net::MenuDial>>,
+    session: Res<Session>,
+    mut shell: ResMut<MenuShell>,
+) {
+    let Some(dial) = dial else {
+        return;
+    };
+    let Some(answer) = dial.poll() else {
+        return;
+    };
+    let addr = dial.addr();
+    commands.remove_resource::<crate::net::MenuDial>();
+    match answer {
+        // Launches wait on the dial, so the phase can only have left
+        // `Menu` by a path outside the menu; a link opened there would
+        // have no screen to own.
+        Ok(link) if *session.phase() == SessionPhase::Menu => {
+            crate::net::adopt_menu_join(&mut commands, link);
+            shell.active = false;
+        }
+        Ok(_) => warn!(peer = %addr, "menu dial answered outside the menu; dropped"),
+        Err(e) => {
+            warn!(error = %e, peer = %addr, "menu could not join a lobby");
+            shell.status = Some(format!("cannot join {addr}: {e}"));
+        }
+    }
+}
+
 /// ECS targets a launch/bind/exit effect writes to — bundled so the
 /// input system stays under the argument lint.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -3149,6 +3184,9 @@ pub struct MenuTarget<'w, 's> {
     /// Present while a joined lobby is up — hosting or joining another
     /// is refused.
     joined: Option<Res<'w, crate::net::LobbyLink>>,
+    /// Present while a join's handshake is unanswered — a launch or
+    /// another lobby waits for it.
+    dialing: Option<Res<'w, crate::net::MenuDial>>,
 }
 
 /// Map keyboard + gamepad into [`MenuCommand`]s, run them through
@@ -3282,6 +3320,11 @@ pub fn menu_input(
     for cmd in cmds {
         for effect in shell.apply(cmd, &mut data, &vfs.0) {
             match effect {
+                MenuEffect::Launch { .. } | MenuEffect::Host { .. } | MenuEffect::Join { .. }
+                    if target.dialing.is_some() =>
+                {
+                    shell.status = Some("still joining a lobby".into());
+                }
                 MenuEffect::Launch { config, car, paint } => {
                     let tune = car.as_ref().map(|d| d.config.clone()).unwrap_or_default();
                     *target.selected = SelectedCar {
@@ -3335,11 +3378,11 @@ pub fn menu_input(
                         .as_ref()
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| "player".to_string());
-                    match crate::net::open_menu_join(&vfs.0, addr, driver, data.has_mods, &vehicle)
+                    match crate::net::begin_menu_dial(&vfs.0, addr, driver, data.has_mods, &vehicle)
                     {
-                        Ok(link) => {
-                            crate::net::adopt_menu_join(&mut target.commands, link);
-                            shell.active = false;
+                        Ok(dial) => {
+                            shell.status = Some(format!("joining {addr}…"));
+                            target.commands.insert_resource(dial);
                         }
                         Err(e) => {
                             warn!(error = %e, peer = %addr, "menu could not join a lobby");

@@ -1402,13 +1402,21 @@ lobby is covered below and by `a_client_joins_the_lobby_the_menu_opened`).
 screen (ASCII graphic characters, 64 at most). `Enter` parses the buffer as a
 `SocketAddr` (a non-address names the expected shape and stays on the field);
 `MenuEffect::Join` carries it with the pending vehicle pick and `menu_input`
-runs `net::open_menu_join` — the gameplay fingerprint handshake `--join` runs
-(bounded by `HANDSHAKE_TIMEOUT`, so a silent peer can stall one frame for up to
-10 s; an unreachable or mismatched lobby answers at once) and the pick offered
-at join — then `net::adopt_menu_join` inserts the `LobbyLink`, `LobbyState`,
+runs `net::begin_menu_dial` — the gameplay fingerprint handshake `--join` runs
+and the pick offered at join. The VFS-bound checks (driver bound, pick,
+fingerprint) run in the frame; the socket work runs on an `mm2-menu-dial`
+thread behind a `MenuDial` resource (the handshake is bounded by
+`HANDSHAKE_TIMEOUT`, so a silent peer used to freeze the window for up to 10 s
+when this ran inline). The status line reads `joining <addr>…`, a second
+`Join`/`Host`/launch answers `still joining a lobby` rather than queueing, and
+`menu_dial` (before `menu_watch`) adopts the answer when it lands — then
+`net::adopt_menu_join` inserts the `LobbyLink`, `LobbyState`,
 `RemoteSnaps`, `InputSeq`, `NetDriveReport` and the `LobbyText` line. A refused
-dial leaves the field open with `cannot join <addr>: <why>`; hosting or joining
-while a lobby is up is refused. `menu_watch` keeps the shell closed while the
+dial leaves the field open with `cannot join <addr>: <why>` (a dial thread that
+dies without answering reads `the dial ended without an answer`); hosting or
+joining while a lobby is up is refused. `Esc` out of the field during a dial
+does not cancel it — the thread is bounded and a successful answer still
+adopts the lobby. `menu_watch` keeps the shell closed while the
 link exists (the lobby owns `Enter`=ready, `Esc`=leave; a `Cancel` returns the
 joiner to that lobby, not the menu). `net::close_menu_join` removes the link and
 its resources once `drive_lobby` has queued the exit it would otherwise write as
@@ -1427,7 +1435,11 @@ host's quit returns the joiner to its lobby, `Esc` leaves and the menu returns
 saying `left the lobby`; mutation-checked against `menu_watch`'s hold. Not
 shown: two OS processes through the menu rows, a driving joiner in a
 menu-joined session, a rendered capture of the address field or lobby text,
-retail data.
+retail data. `app::menu::a_silent_host_does_not_freeze_the_menu_join`
+holds a listener that accepts and never speaks: `Enter` returns at once with
+`joining …`, frames keep running, a second `Enter` is refused, and dropping the
+peer lands `cannot join …` on the still-open field. Not mutation-checked
+against the old inline dial.
 
 **Close ordering (found by running the production schedule).** `close_menu_host`/`close_menu_join` remove the link and its companion resources by deferred commands, and a sync point can apply those mid-schedule, so lobby systems not yet run that frame panicked on `Res<HostLink>`/`ResMut<NetDriveReport>` (`Esc` out of a menu-hosted lobby). Both closes now run `.after` a `HostedLobby`/`JoinedLobby` system set holding every other system of the lobby.
 

@@ -1907,20 +1907,27 @@ pub enum MenuJoinError {
     /// The dial or handshake failed (unreachable, refused, mismatched).
     #[error("{0}")]
     Join(#[from] NetError),
+    /// The dial thread ended without reporting (it panicked).
+    #[error("the dial ended without an answer")]
+    Lost,
 }
 
-/// Join the lobby at `addr` for the menu's *Join lobby* row: the same
-/// fingerprint-bound handshake `--join` runs, then the menu's vehicle
-/// pick offered to the roster. A refused or unreachable lobby is a named
-/// error for the menu's status line, never a silent local session. The
-/// handshake is bounded by `HANDSHAKE_TIMEOUT`.
-pub fn open_menu_join(
+/// What a menu join sends once the socket is up: the handshake `Hello`
+/// and the car pick offered to the roster behind it.
+struct JoinPlan {
+    hello: Hello,
+    pick: VehiclePick,
+    mods_active: bool,
+}
+
+/// Validate and fingerprint everything a join sends, before any socket
+/// is touched: the checks that need the VFS and the menu's selection.
+fn plan_menu_join(
     vfs: &Vfs,
-    addr: SocketAddr,
     driver: String,
     mods_active: bool,
     vehicle: &VehicleSelection,
-) -> Result<LobbyLink, MenuJoinError> {
+) -> Result<JoinPlan, MenuJoinError> {
     if driver.len() > mm2_net::MAX_STRING {
         return Err(MenuJoinError::Pick(format!(
             "driver name is {} bytes; the wire bound is {}",
@@ -1931,12 +1938,77 @@ pub fn open_menu_join(
     let pick = encode_pick(vehicle).map_err(|e| MenuJoinError::Pick(e.to_string()))?;
     let fingerprint = mm2_content::fingerprint::gameplay(vfs)
         .map_err(|e| MenuJoinError::Fingerprint(e.to_string()))?;
-    let hello = mm2_net::hello(crate::smoke::COMMIT.to_string(), driver, fingerprint.hash);
-    let link = LobbyLink::join(addr, &hello, mods_active, DevOverrides::default())?;
-    // Offer the pick at once, as `--join` does: the roster shows what we
-    // will drive and the host's catalog gate confirms it can spawn.
-    let _ = link.ctl().set_vehicle(&pick.vehicle, pick.paint);
+    Ok(JoinPlan {
+        hello: mm2_net::hello(crate::smoke::COMMIT.to_string(), driver, fingerprint.hash),
+        pick,
+        mods_active,
+    })
+}
+
+/// Dial `addr` and run the fingerprint-bound handshake `--join` runs,
+/// then offer the pick at once: the roster shows what we will drive and
+/// the host's catalog gate confirms it can spawn. Blocks up to
+/// `HANDSHAKE_TIMEOUT` on a silent peer, so the menu runs it on
+/// [`MenuDial`]'s thread. A refused or unreachable lobby is a named
+/// error for the menu's status line, never a silent local session.
+fn dial_menu_join(addr: SocketAddr, plan: JoinPlan) -> Result<LobbyLink, MenuJoinError> {
+    let link = LobbyLink::join(addr, &plan.hello, plan.mods_active, DevOverrides::default())?;
+    let _ = link.ctl().set_vehicle(&plan.pick.vehicle, plan.pick.paint);
     Ok(link)
+}
+
+/// A menu join in flight: the dial runs on its own thread so a silent
+/// host (the handshake waits up to `HANDSHAKE_TIMEOUT`) cannot freeze
+/// the window, and `menu_dial` adopts the answer when it lands. Present
+/// exactly while a dial is unanswered; the menu refuses a second lobby,
+/// or a launch, meanwhile.
+#[derive(Resource)]
+pub struct MenuDial {
+    addr: SocketAddr,
+    answer: Mutex<Receiver<Result<LobbyLink, MenuJoinError>>>,
+}
+
+impl MenuDial {
+    /// The address being dialled.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The dial's answer once it has landed, `None` while it is still
+    /// in flight. A dial thread that died without answering is
+    /// [`MenuJoinError::Lost`], not an eternal wait.
+    pub fn poll(&self) -> Option<Result<LobbyLink, MenuJoinError>> {
+        let rx = self.answer.lock().ok()?;
+        match rx.try_recv() {
+            Ok(answer) => Some(answer),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(MenuJoinError::Lost)),
+        }
+    }
+}
+
+/// Start the menu's join without waiting for the handshake: the checks
+/// that need the VFS run here (their errors are immediate), the socket
+/// work moves to a thread the returned [`MenuDial`] reads back.
+pub fn begin_menu_dial(
+    vfs: &Vfs,
+    addr: SocketAddr,
+    driver: String,
+    mods_active: bool,
+    vehicle: &VehicleSelection,
+) -> Result<MenuDial, MenuJoinError> {
+    let plan = plan_menu_join(vfs, driver, mods_active, vehicle)?;
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("mm2-menu-dial".to_string())
+        .spawn(move || {
+            let _ = tx.send(dial_menu_join(addr, plan));
+        })
+        .map_err(NetError::from)?;
+    Ok(MenuDial {
+        addr,
+        answer: Mutex::new(rx),
+    })
 }
 
 /// Hand a menu-joined lobby to the app: the link plus the resources the

@@ -2236,6 +2236,7 @@ fn main() {
             .add_systems(
                 Update,
                 (
+                    menu::menu_dial,
                     menu::menu_watch,
                     // The mouse path queues commands for `menu_input` —
                     // it runs first so a hover/click lands the same
