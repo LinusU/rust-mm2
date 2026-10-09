@@ -65,6 +65,30 @@ not an error. Non-local voices are spatial emitters at the impact
 point under `ENGINE_SPATIAL_SCALE`; the local player's hits stay
 non-spatial (DSN-37). `aud=` gains `<impacts>i` when nonzero.
 
+F07-B.10 adds the sustained-scrape window over the same stream
+(designed, DSN-103 — retail authors no scrape sample: every
+`default_impacts.csv` row is a one-shot). Each contact pair — striker
+entity + struck `ObjectId` (`WORLD` for world geometry; a replicated
+row keys on its own copy's entity alone, the struck side never
+crossing the wire) — is held for the length of the clip it just
+spawned, the picked sample's decoded duration in session ticks
+(`ceil(duration × 120)`, clamped to 600 ticks = 5 s). All 22 retail
+`aud/aud22/impacts/*.wav` measure 0.13 s (`orangecone`) to 2.97 s
+(`glassbreak`) by size at 22 050 Hz, and the `WALL` band's own car
+impacts run 0.53 s (`carimpactsoft1`) to 2.38 s
+(`carimpacthuge2`) — every one of them longer than the upstream
+`ImpactPolicy` pair cooldown (24 ticks = 200 ms), so in a real
+wall-scrape session it is this window — not the event dedup — that
+paces the scrape: one voice per clip instead of a crash sound per
+re-contact. A re-contact inside the window spawns nothing and
+counts `AudioReport::scrapes` (`aud=` gains `/<n>S` when nonzero, so
+un-scraped records stay bit-identical); a different striker, a
+different struck side, the reverse side of a two-car hit and the same
+pair after its clip has played out all voice as before.
+`MAX_IMPACT_VOICES` 12 is unchanged: a pile-up of distinct contacts
+still reaches the bound, one pair re-contacting is paced. The watch
+is system-`Local` state cleared on a session-generation change.
+
 F07-B.6 adds the ambient-traffic consumer: `mm2_app::traffic` resolves
 each `va_*` class's `aud/cardata/ambient/<id>_engine.csv` — falling
 back to `default_engine.csv`, a designed binding (UNK-25; only
@@ -86,8 +110,7 @@ spawned over the run — it tracks `sp`, the spawn count; n = loops
 audible at record — the live fleet; `0s` stays honest: no output
 device headless). Which classes the original binds, what it feeds the
 bands and whether it pitches the ambient loop at all are unrecovered
-(DSN-41/UNK-25). Sustained-scrape semantics remain F07-B/C work, and
-DirectMusic is recognized but not decoded (F08).
+(DSN-41/UNK-25), and DirectMusic is recognized but not decoded (F08).
 
 F07-B.7 adds the siren-program consumer: the session resolves
 `aud/cardata/player/<psdl-stem>policesiren.csv` (the city-keyed naming
@@ -578,8 +601,11 @@ etc.) are extras.
 - `default_impacts` semantics: the runtime binds `AudioId`→`ID` with an
   id-0 fallback and weighs `severity × striker mass` against the force
   bands — both designed readings (the original's selector, force
-  quantity and per-side emission rule are unrecovered); the opponent
-  file's divergent `WALL` bands have no consumer yet.
+  quantity and per-side emission rule are unrecovered); so is the
+  original's sustained-scrape behavior — retail ships no scrape
+  sample, and the runtime's per-pair clip-length window (DSN-103) is
+  a designed reading. The opponent file's divergent `WALL` bands have
+  no consumer yet.
 - `flags` word on the horn row — bit `4` (`vpcop`) now binds the
   siren program (DSN-42); `1`/`2`/`8` on vpbus/vpcentury/vpddbus/
   vpsemi have no recovered meaning; also whether the original holds

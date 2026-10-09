@@ -55,6 +55,18 @@
 //! everyone but the local player, whose impacts stay non-spatial like
 //! its engine rig (DSN-37).
 //!
+//! F07-B.10 adds the sustained-scrape window a voice *bound* alone
+//! cannot give (spec req 4): a contact pair — who struck, what it
+//! struck — is held for as long as the clip it just spawned plays
+//! out, so a car dragging along a wall paces one voice per clip
+//! instead of stacking a crash sound on every re-contact the upstream
+//! dedup lets through, while any other contact, and the same pair
+//! once its clip has ended, still voices — that is what separates a
+//! sustained scrape from repeated crashes. Held re-triggers count in
+//! [`AudioReport::scrapes`] (`aud=` `<n>S`). The window is the picked
+//! sample's own decoded length bounded to [`MAX_SCRAPE_WINDOW_TICKS`]
+//! (designed — UNK-25).
+//!
 //! F07-B.4 adds the surface rig: every `Vehicle` car resolves its
 //! grounded wheels through [`SurfaceTables`] — `SurfaceMaterial` → the
 //! material's authored `sound` class → a row of the session's
@@ -100,7 +112,6 @@
 //! is unverified, UNK-25) and [`siren_drive`] walks the authored
 //! `(play time, next index)` chain off the session's fixed tick,
 //! holding one `PlaybackMode::Loop` voice on the current sample.
-//! Sustained-scrape semantics remain F07-B/C work.
 //!
 //! F18-B.3 voices the session's precipitation itself: a rainy
 //! effective-weather pick (the same `Weather::precipitation` binding
@@ -150,10 +161,10 @@ use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EmergencyLights, EngineLoopSpec, EngineMix,
     ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
-    SIREN_FLAG, Session, SessionConditions, SessionEntity, SessionPhase, SirenPlayback, SirenSpec,
-    SirenTransition, SkidUnit, SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather,
-    cue_wave_stem, draw_cue_suffix, draw_speaker, impact_category, pick_impact, prerace_tod_stem,
-    prerace_weather_stem, tire_slippage,
+    RACE_TICK_HZ, SIREN_FLAG, Session, SessionConditions, SessionEntity, SessionPhase,
+    SirenPlayback, SirenSpec, SirenTransition, SkidUnit, SurfaceMaterial, SurfaceSpec,
+    SurfaceVariant, VehicleAudio, Weather, cue_wave_stem, draw_cue_suffix, draw_speaker,
+    impact_category, pick_impact, prerace_tod_stem, prerace_weather_stem, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState};
 
@@ -187,6 +198,14 @@ const ENGINE_SPATIAL_SCALE: f32 = 0.25;
 /// beyond this is counted and dropped rather than stacking voices
 /// (F07-AC04's bounded-voices requirement; designed bound).
 const MAX_IMPACT_VOICES: usize = 12;
+/// Longest a contact pair may be held by its scrape window (F07-B.10)
+/// — 5 s at the session's 120 Hz step, above every retail impact clip
+/// (all 22 of `aud/aud22/impacts/*.wav` measured by size at 22 050
+/// Hz: 0.13 s `orangecone` … 2.97 s `glassbreak`) so a malformed mod
+/// wave can only quieten its own pair for a bounded moment rather
+/// than for minutes (designed bound; the clips themselves set the
+/// real window).
+const MAX_SCRAPE_WINDOW_TICKS: u64 = 600;
 /// The impact table the session reads: the player-side
 /// `default_impacts.csv` — the local listener's authored mix
 /// (designed choice: the opponent file authors the same categories
@@ -1452,6 +1471,12 @@ pub struct AudioReport {
     pub rigs: u64,
     /// Impact voices spawned this session (a subset of `voices`).
     pub impacts: u64,
+    /// Impact re-triggers a contact pair's scrape window held back
+    /// (F07-B.10): a sustained scrape's repeat contacts count here
+    /// instead of stacking a second voice over the clip still
+    /// playing. Never counted without a voice behind it — the window
+    /// only closes a pair that already sounded.
+    pub scrapes: u64,
     /// Skid band voices whose last computed mix is audible — a gauge
     /// rewritten every drive pass, not a cumulative count (F07-B.4).
     pub skids: u64,
@@ -1511,6 +1536,7 @@ impl AudioReport {
     pub fn active(&self) -> bool {
         self.horns
             + self.voices
+            + self.scrapes
             + self.dropped
             + self.failed
             + self.loops
@@ -1973,6 +1999,72 @@ pub fn siren_drive(
     }
 }
 
+/// Which contact a scrape window belongs to (F07-B.10): the striker's
+/// entity and *what it struck*. A local-stream event knows both sides
+/// (world geometry reads as [`ObjectId::WORLD`]); a replicated row
+/// carries only its own copy's entity — the struck side's identity
+/// lives in the authority's id namespace and never crosses the wire —
+/// so those key on the striker alone. Disclosed, not hidden: every
+/// replicated impact one copy earns shares one window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ImpactPair {
+    /// A locally resolved contact: striker entity + struck object id.
+    Known(Entity, ObjectId),
+    /// A replicated row's striker, struck side unresolved.
+    Replicated(Entity),
+}
+
+/// The scrape windows one instance of [`impact_voices`] holds — system
+/// `Local` state, so it is exactly as session-scoped as the system's
+/// own `MessageReader` cursors (the system registers once per app).
+/// Public only because a public system's parameter types must be
+/// nameable; every field and method stays crate-private.
+///
+/// Pair → the tick its current clip finishes playing. A sustained
+/// scrape re-contacts the same pair on every solver flap the upstream
+/// [`mm2_game::ImpactPolicy`] lets through (a `CollisionStart` edge at
+/// most every 24 ticks = 200 ms), which would stack one crash sound
+/// per flap; holding the pair for the length of the clip it just
+/// spawned voices the scrape one clip at a time and re-voices it the
+/// moment that clip has played out, so a repeated crash — same pair
+/// later, or any other pair — still sounds.
+#[derive(Default)]
+pub struct ScrapeWatch {
+    /// Session the windows belong to: a new generation clears them, so
+    /// a recycled `Entity` or id can never inherit a hold.
+    generation: u64,
+    /// Pair → the tick its clip has finished (`holds.retain` prunes
+    /// every closed window, so this map only ever holds live clips).
+    holds: HashMap<ImpactPair, u64>,
+}
+
+impl ScrapeWatch {
+    /// Adopt `generation`, dropping every hold the last session left.
+    fn sync(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.holds.clear();
+        }
+    }
+
+    /// Whether `pair`'s last clip is still playing at `tick` — asked
+    /// once per candidate voice, which is also when closed windows are
+    /// pruned.
+    fn held(&mut self, pair: ImpactPair, tick: u64) -> bool {
+        self.holds.retain(|_, until| *until > tick);
+        self.holds.get(&pair).is_some_and(|until| tick < *until)
+    }
+
+    /// Hold `pair` from `tick` for the clip's own length, bounded to
+    /// [`MAX_SCRAPE_WINDOW_TICKS`] (a zero-length clip still holds one
+    /// tick, so a degenerate wave cannot fire again inside the step
+    /// that spawned it).
+    fn hold(&mut self, pair: ImpactPair, tick: u64, clip_ticks: u64) {
+        let until = tick.saturating_add(clip_ticks.clamp(1, MAX_SCRAPE_WINDOW_TICKS));
+        self.holds.insert(pair, until);
+    }
+}
+
 /// Deduplicated impact → one-shot voices (F07-B.3, spec req 4). Each
 /// event's *vehicle* participants each earn a voice: the original
 /// drives impact audio off the car's own impact callback, so a
@@ -2012,6 +2104,15 @@ pub fn siren_drive(
 /// same authored category the authority played (still the id-0
 /// catch-all for world/seat/recordless struck sides; the striker
 /// side's mass is the copy's own).
+///
+/// Spec req 4's cooldown leg is the [`ScrapeWatch`] this system keeps
+/// in its [`Local`] state: each spawn holds its contact pair for the
+/// clip it just spawned, and a re-contact inside that window is
+/// counted in [`AudioReport::scrapes`] instead of stacked over the
+/// voice still playing. The window is per pair, so a pile-up of
+/// distinct contacts reaches [`MAX_IMPACT_VOICES`] exactly as before —
+/// only a *sustained* scrape (the same pair re-contacting while its
+/// clip runs) is paced.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn impact_voices(
     mut commands: Commands,
@@ -2027,6 +2128,7 @@ pub fn impact_voices(
     cars: Query<(Option<&Vehicle>, Option<&ComputedMass>, Option<&Mass>)>,
     bangers: Query<&Banger>,
     voices: Query<&AudioVoice>,
+    mut watch: Local<ScrapeWatch>,
 ) {
     if !session.is_playing() {
         reader.read().for_each(drop);
@@ -2043,6 +2145,12 @@ pub fn impact_voices(
     // not split through `ResMut`'s Deref — reborrow the inner struct.
     let table = &mut *table;
     let generation = session.generation();
+    // The scrape window counts on the session's fixed step — the same
+    // clock the voice sinks pause with, so a held pair's clip and the
+    // window over it advance together.
+    let tick = session.tick();
+    watch.sync(generation);
+    let watch = &mut *watch;
     let authority = session.authority_role().is_authority();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
@@ -2061,6 +2169,7 @@ pub fn impact_voices(
                         severity: f32,
                         audio_id: i64,
                         spatial: bool,
+                        pair: ImpactPair,
                         live: &mut usize| {
         let Ok((vehicle, computed, mass)) = cars.get(entity) else {
             return;
@@ -2090,12 +2199,29 @@ pub fn impact_voices(
             // sub-floor touch, not a failure.
             return;
         };
+        // F07-B.10: this pair's own clip is still playing out, so the
+        // re-contact is part of one sustained scrape — it counts here
+        // instead of stacking a second voice over the first. Every
+        // other contact, and this pair again once its clip has ended,
+        // passes: that is the line between a scrape and a repeated
+        // crash.
+        if watch.held(pair, tick) {
+            report.scrapes += 1;
+            return;
+        }
         if *live >= MAX_IMPACT_VOICES {
             report.dropped += 1;
             return;
         }
         match bank.load(&vfs.0, &mut waves, &pick.sample.name) {
             Ok(handle) => {
+                // The window this spawn opens: the clip's own decoded
+                // length in session ticks, so the pair may voice again
+                // exactly when the sound it is making has ended.
+                let clip_ticks = waves
+                    .get(&handle)
+                    .map(|clip| (clip.duration() * RACE_TICK_HZ as f32).ceil() as u64)
+                    .unwrap_or(1);
                 // The local player's hits anchor the mix non-spatially
                 // like its engine rig (DSN-37); everyone else is a
                 // world emitter at the contact.
@@ -2117,6 +2243,7 @@ pub fn impact_voices(
                 report.voices += 1;
                 report.impacts += 1;
                 *live += 1;
+                watch.hold(pair, tick, clip_ticks);
             }
             Err(e) => {
                 report.failed += 1;
@@ -2155,6 +2282,7 @@ pub fn impact_voices(
                 event.severity,
                 audio_id,
                 spatial,
+                ImpactPair::Known(entity, other),
                 &mut live,
             );
         }
@@ -2172,6 +2300,7 @@ pub fn impact_voices(
             impact.severity,
             impact.audio_id,
             true,
+            ImpactPair::Replicated(impact.entity),
             &mut live,
         );
     }

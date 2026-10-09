@@ -971,6 +971,9 @@ fn a_wall_impact_picks_the_authored_band() {
     let r = app.world().resource::<AudioReport>();
     assert_eq!((r.impacts, r.voices, r.failed), (1, 1, 0));
 
+    // The pair's 10 ms clip holds it for 2 ticks: step past it, or
+    // this re-contact would count as the same scrape (F07-B.10).
+    tick(&mut app, 5);
     // 30 m/s → 39 000 lands HUGE's band — a different authored sample.
     write_impact(&mut app, car, ObjectId::WORLD, 30.0);
     app.update();
@@ -1149,13 +1152,17 @@ fn the_impact_voice_bound_caps_pile_ups() {
     let dir = impact_dir();
     let mut app = impact_app(dir.path());
     let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    // Twenty *distinct* contacts in one tick — a pile-up. Twenty
+    // re-contacts of one pair are the scrape window's business (below);
+    // this bound is what a pile-up of separate hits reaches.
     for i in 0..20u64 {
+        let (struck, _) = spawn_object(&mut app, ());
         let generation = app.world().resource::<Session>().generation();
         app.world_mut().write_message(ImpactEvent {
             id: ImpactId(i + 1),
             generation,
             tick: 0,
-            participants: (car, ObjectId::WORLD),
+            participants: (car, struck),
             point: Vec3::ZERO,
             normal: Vec3::Y,
             severity: 3.0,
@@ -1166,6 +1173,7 @@ fn the_impact_voice_bound_caps_pile_ups() {
     let r = app.world().resource::<AudioReport>();
     assert_eq!(r.impacts, 12, "MAX_IMPACT_VOICES bounds the pile-up");
     assert_eq!(r.dropped, 8);
+    assert_eq!(r.scrapes, 0, "distinct contacts are not scrapes");
     assert_eq!(impact_voices(&mut app).len(), 12);
 }
 
@@ -1220,6 +1228,124 @@ fn an_absent_table_degrades_to_silence() {
     write_impact(&mut app, car, ObjectId::WORLD, 30.0);
     app.update();
     assert!(impact_voices(&mut app).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.10: the sustained-scrape window. A contact pair that re-voices
+// while its own clip is still playing is one scrape — counted, never
+// stacked — and every other contact passes untouched.
+// ---------------------------------------------------------------------------
+
+/// The same fixture with a *long* wall clip: one second of samples at
+/// 22 050 Hz, so the window (the clip's own length = 120 session
+/// ticks) outruns a re-contact the way retail's wall-scrape clips do —
+/// every retail `WALL` car impact measures 0.53–2.38 s at 22 050 Hz,
+/// longer than the upstream 24-tick pair cooldown, so in a real
+/// session it is this window, not the event dedup, that paces a
+/// scrape.
+fn scrape_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "aud/aud22/impacts/scrape.22k.wav",
+        &pcm_wav(22050, 22_050),
+    );
+    write(
+        d,
+        "aud/cardata/player/default_impacts.csv",
+        b"***\nBanger name,Num samples,ID\nWALL,1,0\nsample name,min volume,max volume,min force,max force,frequency\nSCRAPE,0.5,0.6,1000,8000,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n",
+    );
+    tmp
+}
+
+#[test]
+fn a_sustained_scrape_voices_one_clip_at_a_time_and_counts_the_rest() {
+    let dir = scrape_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+
+    // The first contact sounds.
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+    assert_eq!(impact_voices(&mut app).len(), 1);
+
+    // Three re-contacts inside the one-second clip: the same scrape —
+    // held, counted, and never stacked over the voice still playing.
+    for _ in 0..3 {
+        tick(&mut app, 5); // 5/120 s apart, well inside the window
+        write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.impacts, r.voices, r.scrapes),
+        (1, 1, 3),
+        "one clip, not four stacked voices"
+    );
+    assert_eq!(impact_voices(&mut app).len(), 1);
+
+    // Past the clip the same pair is a fresh impact again — a scrape
+    // is paced, not silenced.
+    tick(&mut app, 121);
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.scrapes), (2, 3));
+    assert_eq!(impact_voices(&mut app).len(), 2);
+}
+
+#[test]
+fn another_contact_is_never_held_by_a_scrape_it_did_not_make() {
+    let dir = scrape_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    let (rival, _) = spawn_test_car(&mut app, PlayerControl::Ai, 1300.0);
+    let (struck, _) = spawn_object(&mut app, ());
+
+    // One scrape against the world …
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    // … holds only that pair: a different struck side and a different
+    // striker both voice in the same tick (each side of a two-car hit
+    // is its own contact, which the two-vehicle test relies on).
+    write_impact(&mut app, car, struck, 3.0);
+    write_impact(&mut app, rival, ObjectId::WORLD, 3.0);
+    app.update();
+
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.voices, r.scrapes), (3, 3, 0));
+    assert_eq!(impact_voices(&mut app).len(), 3);
+}
+
+#[test]
+fn the_scrape_window_does_not_outlive_the_session() {
+    let dir = scrape_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+    assert_eq!(impact_voices(&mut app).len(), 1);
+
+    // The next session restarts the clock at 0 — a hold minted at the
+    // old session's tick would silence a recycled entity's first hit,
+    // so the watch adopts the new generation and drops it.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Unloading).unwrap();
+        session.transition(SessionPhase::Menu).unwrap();
+        session.begin(SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        assert_eq!(session.tick(), 0, "the restarted clock starts over");
+    }
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.impacts, r.voices, r.scrapes),
+        (2, 2, 0),
+        "the old session's hold never reaches the new one"
+    );
 }
 
 // ---------------------------------------------------------------------------

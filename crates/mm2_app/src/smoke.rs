@@ -2327,13 +2327,21 @@ fn run_headless(
             } else {
                 String::new()
             };
+            // F07-B.10: impact re-triggers the scrape window held —
+            // appended only when nonzero, so a record with no scrape
+            // stays bit-identical to pre-B.10.
+            let scrapes = if r.scrapes > 0 {
+                format!("/{}S", r.scrapes)
+            } else {
+                String::new()
+            };
             let cue_issues = if r.cue_issues > 0 {
                 format!("+{}c", r.cue_issues)
             } else {
                 String::new()
             };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{dropped}{failed}{cue_issues}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{scrapes}{dropped}{failed}{cue_issues}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })
