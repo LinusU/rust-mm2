@@ -2440,6 +2440,15 @@ fn run_shove_trio(
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
     let mut alice_flags = join_args(install, join_addr, "alice", alice_frames);
     alice_flags.push("--parked".into());
+    // Alice's record must be taken while bob is still a seat she holds
+    // and after he has printed: end her run when bob leaves (her frame
+    // count is only the ceiling), not on a frame count that a slower
+    // bob can lose the race against on a loaded runner. The shoved run
+    // also waits for her to have taken the shove.
+    alice_flags.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
+    if host_rams {
+        alice_flags.extend(["--with-impacts", "1"].map(String::from));
+    }
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     host.until("ready=true");
     let mut bob_flags = join_args(install, join_addr, "bob", bob_frames);
