@@ -1283,9 +1283,11 @@ Gates: `net::check_session` (the `mm2-join` gate) refuses a city whose
 `multicopwaypoints.csv` yields fewer than the 3 sites a round draws — the
 same verdict `CnrHost::from_content` gives. `net::late_join_policy` is the
 one place both the in-process host and `mm2-host` read the mode's join
-policy: Cruise stays open, events and Cops & Robbers close at start (the
-latter an implementation choice — there is no join-time unicast of the
-match yet).
+policy: Cruise and Cops & Robbers stay open (MP-5), events close at start.
+Cops & Robbers first closed at start as an implementation choice (no
+join-time unicast of the match); it opened once the repeating whole-view
+frame was seen to be the late joiner's way in (see "A late join mid-carry"
+below).
 
 Evidence: synthetic only (config validation, the full 3×3×9 option grid
 round-trips, unnamed/unknown choices rejected, pool gate, join policy).
@@ -1332,6 +1334,26 @@ match-over state with the host's winner. The record's `cnr=` field gains
 carries or delivers (the client never moves), a contested pickup, any
 impairment, a rendered screen, or a process-level check of the client's
 carrier mass.
+
+**A late join mid-carry (F27-AC05, evidence).** `network::net_drive::
+a_client_that_joins_a_cops_and_robbers_match_mid_carry_reads_the_verdict`
+(`MM2_RETAIL`-gated, ~75 s): the same retail sf seed-1291 `100pts` run with the
+host `--bot` started *alone*; the client connects once the host's log shows
+`Picked` (tick 763). It is admitted (Cops & Robbers is now `LateJoin::Open`),
+seated by `enroll_cnr_participants` as its car appears, and reads the next
+repeating frame; the host then logs `Delivered`/`Ended(PointLimit, Player(0))`
+and the client's record reads `ref0, seats2, dec1, win=p0, phase=results,
+landed>0`. Loopback, no impairment, parked client. **A defect this exposed
+(fixed, same change):** a late joiner's `Start` outruns the echo of the pick
+it offers on joining, and `net::start` then seated it in the *dev car* while
+the host simulated its `vpbug` copy — a different wheelbase and ride height,
+so the first settled divergence asserted the host's pose over the predicted
+car, buried its wheels and it fell through the retail city
+(`status=fail … fell through the world`, plain Cruise included; the
+dev-world late-join legs could not see it: flat ground, same dev car on both
+sides). `net::start_pick` now keeps the offered pick when the roster has no
+echo yet. Not shown: late join under loss, a joiner that drives or delivers,
+a contested pickup, a rendered match.
 
 ## Rematch within one lobby (F26-B.1, no wire change)
 

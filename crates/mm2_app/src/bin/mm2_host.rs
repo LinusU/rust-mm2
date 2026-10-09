@@ -267,7 +267,7 @@ fn main() {
     // stdin ends the thread without touching the host — unattended
     // operation is normal. `start` takes the session mode's late-join
     // policy (MP-5): an event lobby closes to joins once started,
-    // a cruise lobby stays open.
+    // a cruise or Cops & Robbers lobby stays open.
     let start_policy = mm2_app::net::late_join_policy(&config.mode);
     let quitting = Arc::new(AtomicBool::new(false));
     {

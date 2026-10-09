@@ -1325,7 +1325,8 @@ pub struct HostLink {
     /// `listening=` record's summary.
     ad: SessionAdvertisement,
     /// The start's late-join policy — the session mode's (MP-5:
-    /// event lobbies close once started, cruise stays open).
+    /// event lobbies close once started, cruise and Cops & Robbers
+    /// stay open).
     late_join: LateJoin,
     /// The host driver's display name — never on the wire roster.
     driver: String,
@@ -1850,15 +1851,16 @@ fn summarize(config: &SessionConfig) -> String {
 }
 
 /// Whether a session of this mode takes joins once started (MP-5): an
-/// event's roster is fixed at the start, Cruise stays open. A Cops &
-/// Robbers match is closed too — its participants and sides are drawn
-/// at the start and there is no join-time unicast of the match yet
-/// (F27-B.4 *implementation choice*; `GoldMatch` itself supports a late
-/// joiner).
+/// event's roster is fixed at the start, while Cruise and Cops &
+/// Robbers stay open ("join/leave at any time"). A late joiner to a
+/// match is seated by [`crate::cnr::enroll_cnr_participants`] as soon as
+/// its car appears on the authority, and learns the match from the next
+/// repeating whole-view frame ([`crate::cnrnet`]) — there is no
+/// join-time unicast to wait for.
 pub fn late_join_policy(mode: &SessionMode) -> LateJoin {
     match mode {
-        SessionMode::Cruise => LateJoin::Open,
-        SessionMode::Event(_) | SessionMode::CopsAndRobbers(_) => LateJoin::Closed,
+        SessionMode::Cruise | SessionMode::CopsAndRobbers(_) => LateJoin::Open,
+        SessionMode::Event(_) => LateJoin::Closed,
     }
 }
 
@@ -2520,14 +2522,14 @@ mod tests {
         }
     }
 
-    /// MP-5 policy: only Cruise stays open once started — a match's
-    /// participants and sides are fixed at the start.
+    /// MP-5 policy: Cruise and Cops & Robbers stay open once started;
+    /// an event's roster is fixed at the start.
     #[test]
-    fn only_cruise_stays_joinable() {
+    fn cruise_and_cops_and_robbers_stay_joinable_but_events_do_not() {
         assert_eq!(late_join_policy(&SessionMode::Cruise), LateJoin::Open);
         assert_eq!(
             late_join_policy(&SessionMode::CopsAndRobbers(CnrSettings::default())),
-            LateJoin::Closed
+            LateJoin::Open
         );
         assert_eq!(
             late_join_policy(&SessionMode::Event(EventRef {
