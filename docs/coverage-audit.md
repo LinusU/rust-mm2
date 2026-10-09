@@ -89,7 +89,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F15 opponent AI | active | retail-data (controller read from `Midtown2.exe`) | `unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption; designed readings stand in |
 | F16 profiles/unlocks | active | synthetic + retail-data | AC01 process-level interactive finish (`--bot` results deliberately ineligible); UNK-6/8 |
 | F17 menu/flow | active | synthetic + local render | AC03 keyboard/gamepad + visible-focus evidence; C&R/scoring result variants; no human journey recorded |
-| F18 weather/time | active | synthetic + retail-data | AC05 contrasting-preset screenshots/audio on the supported path; `.ldef`/`.lmap` consumers; network replication; UNK-24/39/40 |
+| F18 weather/time | active | synthetic + retail-data | AC05 audio captures + full preset capture set (one cloudy-noon/rainy-night sf pair recorded; 32-slot retail matrix test landed in F18-C); `.ldef`/`.lmap` consumers; network replication; UNK-24/39/40 |
 | F19 pedestrians | active (A only) | retail-data (parsers, skin/deform *domain types*) | **no runtime**: spawn, skinned render, routes, reaction, audio, reset (reqs 3–6; AC02–AC06); UNK-15/41 |
 | F20 police | active | synthetic + retail-data | pursuit rules unknown (UNK-9) — behaviour is *designed*; trigger/loss/outcome matrix and session restrictions |
 | F21 Crash Course | active | structural catalog only | **evaluators unrecovered** (UNK-14/35): lesson-by-lesson pass/fail, instruction/voice flow, reward credit; 42 lessons not playable as a course |

@@ -20,6 +20,7 @@ mod damage_fx;
 mod dash;
 mod device_transitions;
 mod environment;
+mod environment_retail;
 mod event;
 mod game_keys;
 mod hud;

@@ -523,3 +523,29 @@ shape (the linear reading is inferred), `.water`'s elevated-room
 composition (the `max(level, room-top)` bound is designed; the exe
 bounds by the global level only), and `sf_fog_orig.csv`'s role also
 stay open.
+
+## F18-C retail matrix (2026-10-10)
+
+`crates/mm2_app/tests/environment_retail.rs` (opt-in, `MM2_RETAIL`)
+runs the production binary headless over every authored slot —
+4 times of day × 4 weathers — in both london and sf and reads the
+smoke record. Result on the fingerprinted install: 32/32 slots bind
+their own `ltNN(<weather>-<tod>)` preset (never the fallback), each
+with a fog band and sky dome bound; 16 distinct fog/sky pairs per
+city; `traction=0.8`/`surf=wet`/`ppt=rain` appear on the four rainy
+slots only, and dry slots carry none of the three (dry behaviour
+unchanged); rain's live drops (`e - x - l`) stay under
+`PRECIP_MAX_LIVE` after 300 frames; `--weather 4` / `--time-of-day 4`
+exit 2. This advances F18-AC01 (selection + intended name/fog/sky
+bound; the *visual* distinction is the capture pair below),
+AC02 (the traction leg through the real session path; a controlled
+surface drive is F06's `surface` tests), AC03 (bound; unload is
+covered by `precip.rs::restart_reloads_the_precipitation_rig`) and
+AC06 (explicit rejection). Capture pair (sf, `--cam=-747.5,42.4,275.0,179,-15`,
+Metal, not committed): cloudy-noon (`--weather 1 --time-of-day 1`)
+shows a lit skyline under a grey-blue cloud dome; rainy-night
+(`--weather 3 --time-of-day 3`) is near-black with the skyline lost
+in the 50-120 m fog and a pink-purple cast on lit surfaces; rain
+streaks are not discernible at this pose. Still open: AC04 (network
+replication/late join), AC05 audio captures and a human-read
+capture set across all presets.
