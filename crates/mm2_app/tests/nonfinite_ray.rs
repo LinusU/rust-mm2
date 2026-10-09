@@ -70,3 +70,27 @@ fn avian_asserts_an_infinite_ray_origin() {
     let mut app = ground_app();
     cast(&mut app, Vec3::new(0.0, 5.0, f32::INFINITY), 20.0);
 }
+
+/// The banger bound-strike scan (`activate_bangers`) is the one
+/// spatial-query site that is *not* a ray: it calls
+/// `SpatialQuery::shape_intersections`, which builds an AABB and
+/// traverses — no `Ray::new`, no finite-origin assert. A non-finite
+/// striker pose therefore yields an empty hit list rather than a
+/// panic, so no producer guard is needed there. Pinned so a future
+/// Avian upgrade that routes the query through a ray is noticed.
+#[test]
+fn avian_shape_intersections_tolerate_a_non_finite_pose() {
+    let mut app = ground_app();
+    let hits = app
+        .world_mut()
+        .run_system_once(|spatial: SpatialQuery| {
+            spatial.shape_intersections(
+                &Collider::cuboid(2.0, 1.0, 4.0),
+                Vec3::new(f32::NAN, 1.0, 0.0),
+                Quat::IDENTITY,
+                &SpatialQueryFilter::default(),
+            )
+        })
+        .expect("intersection-query system runs");
+    assert!(hits.is_empty(), "a NaN pose must not select any collider");
+}

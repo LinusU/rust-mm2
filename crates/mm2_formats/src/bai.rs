@@ -248,9 +248,11 @@ pub struct Road {
 
 impl Road {
     /// The first non-finite float on the road outside its lane
-    /// vertices (which [`BaiIssue::NonFiniteCurveVertex`] covers):
-    /// widths, speed, centre-line frames, end signal heads and the
-    /// per-curve distance rows. `None` when every one is finite.
+    /// vertices (which [`BaiIssue::NonFiniteCurveVertex`] covers) and
+    /// its signal heads (gated separately by `nav_signal`, which drops
+    /// a non-finite origin and zeroes a non-finite axis): widths,
+    /// speed, centre-line frames and the per-curve distance rows.
+    /// `None` when every one is finite.
     pub fn non_finite_field(&self) -> Option<&'static str> {
         if !self.half_width.is_finite() {
             return Some("half_width");

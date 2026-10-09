@@ -754,6 +754,75 @@ fn precip_declines_an_unrepresentable_flipbook_window() {
     assert!(rig.drop(Vec3::ZERO).is_none());
 }
 
+/// The tune tokenizer parses `nan`/`inf` (it is a plain `f64` parse),
+/// so a modded rule can author a non-finite jitter scalar. That must
+/// decline the spawn, not reach the app's cover probe — a NaN
+/// `drop.position` is fed straight into `SpatialQuery::cast_ray`, whose
+/// obvhs `Ray::new` asserts `origin.is_finite()` (pinned by
+/// `mm2_app/tests/nonfinite_ray.rs`). The stream stays deterministic:
+/// the draws are consumed before the check, so a declined drop and a
+/// drawn one advance the rng identically.
+#[test]
+fn precip_declines_a_non_finite_authored_jitter() {
+    for poison in [
+        Vec3::new(f32::NAN, 0.0, 0.0),
+        Vec3::new(0.0, f32::INFINITY, 0.0),
+        Vec3::new(0.0, 0.0, f32::NEG_INFINITY),
+    ] {
+        let mut spec = rain_spec();
+        spec.position_var = poison;
+        let mut rig = Precipitation::new(spec, 7);
+        assert!(rig.drop(Vec3::ZERO).is_none(), "{poison:?}");
+    }
+    // Velocity integrates into position next `advance`; a non-finite
+    // authored velocity or its var declines too.
+    let mut spec = rain_spec();
+    spec.velocity.y = f32::NAN;
+    assert!(Precipitation::new(spec, 7).drop(Vec3::ZERO).is_none());
+    // Gravity and Drag integrate the velocity into the position next
+    // `advance` — non-finite there would poison the ray origin one
+    // frame later.
+    let mut spec = rain_spec();
+    spec.gravity = f32::NAN;
+    assert!(Precipitation::new(spec, 7).drop(Vec3::ZERO).is_none());
+    let mut spec = rain_spec();
+    spec.drag = f32::INFINITY;
+    assert!(Precipitation::new(spec, 7).drop(Vec3::ZERO).is_none());
+    // The retail-faithful spec still spawns.
+    assert!(rain_rig().drop(Vec3::ZERO).is_some());
+}
+
+/// The decline keeps the seeded stream replaying identically: the rng
+/// draws happen before the finiteness check, so two rigs on the same
+/// seed consume the same draws whether or not the drop is declined.
+#[test]
+fn precip_decline_keeps_the_stream_aligned() {
+    let mut good = rain_spec();
+    good.position_var = Vec3::new(25.0, 0.0, 25.0);
+    let mut poisoned = rain_spec();
+    poisoned.position_var = Vec3::new(f32::NAN, 0.0, 25.0);
+    let (mut a, mut b) = (Precipitation::new(good, 7), Precipitation::new(poisoned, 7));
+    // The poisoned rig declines every drop; the good one spawns.
+    assert!(b.drop(Vec3::ZERO).is_none());
+    assert!(a.drop(Vec3::ZERO).is_some());
+    // Both rigs have now consumed the same number of draws, so their
+    // *next* draw (on a fresh, unpoisoned spec) agrees. Rebuild the
+    // poisoned rig's spec as clean and compare against a fresh clean
+    // rig that has taken one drop.
+    let mut healed = rain_spec();
+    healed.position_var = Vec3::new(25.0, 0.0, 25.0);
+    b.spec = healed;
+    let mut fresh = Precipitation::new(rain_spec(), 7);
+    fresh.drop(Vec3::ZERO).unwrap();
+    let (da, db) = (a.drop(Vec3::ZERO).unwrap(), b.drop(Vec3::ZERO).unwrap());
+    assert_eq!(da.position, db.position, "streams diverged after a decline");
+    assert_eq!(
+        da.position,
+        fresh.drop(Vec3::ZERO).unwrap().position,
+        "a decline consumed the same draws as a spawn"
+    );
+}
+
 /// `DAlpha` drifts the sprite alpha (0 on retail → opaque drops);
 /// the bound clamps to 0..1.
 #[test]

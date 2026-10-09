@@ -92,9 +92,11 @@ pub struct PrecipReport {
     pub covered: u64,
     /// Drops despawned on world contact.
     pub landed: u64,
-    /// Spawns declined because the authored `TexFrame*` window cannot
-    /// fit `i64` — an undrawable spec is counted, never overflowed or
-    /// silently clamped.
+    /// Spawns declined because the drop is undrawable: the authored
+    /// `TexFrame*` window cannot fit `i64`, or a composed position/
+    /// velocity or integrating `Gravity`/`Drag` is non-finite (a
+    /// modded rule can author `nan`/`inf`) — counted, never overflowed,
+    /// silently clamped, or fed into the cover probe's ray origin.
     pub undrawable: u64,
 }
 
@@ -264,9 +266,10 @@ pub fn emit_precip(
     let owner = SessionEntity(session.generation());
     let live = drops.iter().count();
     for _ in 0..rig.draw(time.delta_secs(), live) {
-        // A spec whose authored flipbook window cannot fit `i64` is
-        // undrawable — the spawn is declined and counted, never an
-        // overflow.
+        // An undrawable drop — a flipbook window that cannot fit
+        // `i64`, or a non-finite authored jitter/gravity/drag — is
+        // declined and counted, never overflowed or fed to the cover
+        // probe's ray origin.
         let Some(drop) = rig.drop(focus) else {
             report.undrawable += 1;
             continue;

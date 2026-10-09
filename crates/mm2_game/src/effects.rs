@@ -744,14 +744,24 @@ impl Precipitation {
     /// One authored-spec drop around `origin` — the emitter point the
     /// app supplies (its camera-relative anchor); `Position`/
     /// `PositionVar` jitter applies around it through this rig's
-    /// deterministic stream. `None` when the authored `TexFrame*`
-    /// window cannot fit `i64` — an undrawable spec declines before
-    /// drawing so the seeded stream stays aligned (the
-    /// `audio::draw_cue_suffix` contract).
+    /// deterministic stream. `None` when the drop is undrawable: the
+    /// authored `TexFrame*` window cannot fit `i64` (declined before
+    /// drawing so the seeded stream stays aligned — the
+    /// `audio::draw_cue_suffix` contract), or the composed position/
+    /// velocity is non-finite, or the `Gravity`/`Drag` that integrates
+    /// them next `advance` is non-finite. The tune tokenizer parses
+    /// `nan`/`inf` (`tune.rs`), so a modded rule can author those. The
+    /// non-finite decline happens *after* the draws — every draw is
+    /// consumed whether the drop spawns or not, so the stream stays
+    /// deterministic per seed — and the caller counts the decline
+    /// (`PrecipReport::undrawable`) instead of spawning a drop whose
+    /// position is a physics ray origin (the app's cover probe asserts
+    /// a finite origin) and whose velocity would integrate it into a
+    /// NaN transform.
     pub fn drop(&mut self, origin: Vec3) -> Option<PrecipDrop> {
         flipbook_span(self.spec.tex_frame_start, self.spec.tex_frame_end)?;
         let spec = self.spec.clone();
-        Some(PrecipDrop {
+        let drop = PrecipDrop {
             position: origin + spec.position + self.jitter3(Vec3::ZERO, spec.position_var),
             velocity: self.jitter3(spec.velocity, spec.velocity_var),
             age: 0.0,
@@ -765,7 +775,12 @@ impl Precipitation {
             d_rotation: self.jitter(spec.d_rotation, spec.d_rotation_var),
             frame_start: spec.tex_frame_start,
             frame_end: spec.tex_frame_end,
-        })
+        };
+        (drop.position.is_finite()
+            && drop.velocity.is_finite()
+            && drop.gravity.is_finite()
+            && drop.drag.is_finite())
+        .then_some(drop)
     }
 
     /// Uniform `v ± var` draw on this rig's stream.
