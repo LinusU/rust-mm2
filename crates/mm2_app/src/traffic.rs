@@ -815,6 +815,12 @@ fn size_collider(tuning: Option<&AiVehicleData>) -> Collider {
             )
         },
     );
+    box_collider(size, cg)
+}
+
+/// The convex hull of the box `size` centred on `cg`; a cuboid of
+/// `size` when the corners are degenerate.
+fn box_collider(size: Vec3, cg: Vec3) -> Collider {
     let h = size * 0.5;
     let corners: Vec<Vec3> = [-1.0f32, 1.0]
         .iter()
@@ -1409,6 +1415,10 @@ pub fn drape_ambient(
         let filter = SpatialQueryFilter::default();
         let ground_at = |p: Vec3| {
             let origin = p + Vec3::Y * DRAPE_RISE;
+            // Avian's BVH asserts a finite ray origin.
+            if !origin.is_finite() {
+                return None;
+            }
             spatial
                 .cast_ray_predicate(
                     origin,
@@ -2035,5 +2045,40 @@ mod drape_tests {
         // 70° side slope: the fitted up axis leans past 60°.
         let tan = 70f32.to_radians().tan();
         assert!(drape_pose(Vec3::ZERO, Quat::IDENTITY, HALF, |p| Some(tan * p.x)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod size_collider_tests {
+    //! Authored `Size`/`CG` reach `Collider::convex_hull` verbatim
+    //! (`authored-numbers.md` S4). The vehicle decoders reject
+    //! non-finite values; these pin that a finite-but-overflowing box
+    //! and the degenerate boxes do not panic either.
+
+    use bevy::prelude::*;
+
+    use super::box_collider;
+
+    #[test]
+    fn degenerate_and_extreme_boxes_build_without_panicking() {
+        for (size, cg) in [
+            (Vec3::ZERO, Vec3::ZERO),
+            (Vec3::new(2.0, 0.0, 5.0), Vec3::ZERO),
+            (Vec3::splat(-2.0), Vec3::ZERO),
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MAX)),
+            (Vec3::splat(1e30), Vec3::splat(1e30)),
+        ] {
+            let _ = box_collider(size, cg);
+        }
+    }
+
+    #[test]
+    fn an_ordinary_box_is_a_hull() {
+        assert!(
+            box_collider(Vec3::new(2.0, 1.5, 5.0), Vec3::new(0.0, 0.75, 0.0))
+                .shape()
+                .as_convex_polyhedron()
+                .is_some()
+        );
     }
 }
