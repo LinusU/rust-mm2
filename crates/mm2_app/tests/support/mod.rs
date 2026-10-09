@@ -38,9 +38,16 @@ pub struct Proc {
 }
 
 impl Proc {
+    /// Spawn `exe` with its stdout on the record channel. The child's
+    /// log filter is pinned to the app's own default rather than the
+    /// ambient `RUST_LOG`: several legs assert on a `WARN` line (an
+    /// ignored `--traction` pin must be *named*, F06-AC06), and a
+    /// caller's `RUST_LOG=error` shell would otherwise silence it —
+    /// the same `env_remove` the `Command`-spawning suites already do.
     pub fn spawn(exe: &str, args: &[String]) -> Self {
         let mut child = Command::new(exe)
             .args(args)
+            .env_remove("RUST_LOG")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

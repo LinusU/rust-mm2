@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use avian3d::prelude::*;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::session::{self, SessionControl};
@@ -287,8 +288,14 @@ fn city_app(vfs: Vfs) -> App {
 
 /// `city_app` under one weather selector (`3` is `rainy`).
 fn city_app_in(vfs: Vfs, weather: u8) -> App {
+    city_app_config(vfs, city_config(weather))
+}
+
+/// The same wiring under any session config — a retail city mount
+/// (`city/sf.psdl`) is the F06 original-data run's shape.
+fn city_app_config(vfs: Vfs, config: mm2_game::SessionConfig) -> App {
     let mut session = Session::new();
-    session.begin(city_config(weather)).unwrap();
+    session.begin(config).unwrap();
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -1178,4 +1185,258 @@ fn weather_and_surface_move_traction_in_the_real_force_path() {
             pair[1].1
         );
     }
+}
+
+/// One ray-sampled point of a loaded city: where to stand, the
+/// material under that spot and the tire grip that material resolves
+/// to in the session's own `SurfaceTables`.
+#[derive(Clone, Copy, Debug)]
+struct SurfaceSample {
+    at: Vec3,
+    material: SurfaceMaterial,
+    grip: f32,
+}
+
+/// The surface under `x, z` when the centre and ±1.5 m in x and z all
+/// report one material — a spot no wheel base straddles a boundary
+/// with — or `None` when the neighbourhood disagrees or the ray finds
+/// nothing. `top`/`bottom` bound the ray (the map's own height range).
+fn agreeing_surface(
+    spatial: &SpatialQuery,
+    mats: &Query<&SurfaceMaterial>,
+    tables: &mm2_content::SurfaceTables,
+    x: f32,
+    z: f32,
+    top: f32,
+    bottom: f32,
+) -> Option<SurfaceSample> {
+    let mut found: Option<SurfaceSample> = None;
+    for (dx, dz) in [(0.0, 0.0), (1.5, 0.0), (-1.5, 0.0), (0.0, 1.5), (0.0, -1.5)] {
+        let origin = Vec3::new(x + dx, top, z + dz);
+        let hit = spatial.cast_ray(
+            origin,
+            Dir3::NEG_Y,
+            top - bottom,
+            true,
+            &SpatialQueryFilter::default(),
+        )?;
+        let material = mats.get(hit.entity).copied().unwrap_or_default();
+        let grip = tables.tire_surface_for(material)?.grip;
+        let sample = SurfaceSample {
+            at: Vec3::new(x + dx, top - hit.distance, z + dz),
+            material,
+            grip,
+        };
+        match found {
+            None => found = Some(sample),
+            Some(earlier) if earlier.material == material => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// The two most distinct drivable surfaces a retail map offers — the
+/// highest-grip sample and the lowest-grip one on a coarse grid over
+/// the PSDL's own bounds, found inside a single system call so a
+/// 2 km² scan costs one ECS round trip per point, not per ray.
+fn two_distinct_surfaces(app: &mut App, lo: [f32; 3], hi: [f32; 3]) -> Option<[SurfaceSample; 2]> {
+    let (top, bottom) = (hi[1] + 5.0, lo[1] - 5.0);
+    app.world_mut()
+        .run_system_once(
+            move |spatial: SpatialQuery,
+                  mats: Query<&SurfaceMaterial>,
+                  tables: Res<mm2_content::SurfaceTables>| {
+                let (mut firmest, mut slipperiest) = (None, None);
+                let mut z = lo[2];
+                while z <= hi[2] {
+                    let mut x = lo[0];
+                    while x <= hi[0] {
+                        if let Some(s) =
+                            agreeing_surface(&spatial, &mats, &tables, x, z, top, bottom)
+                        {
+                            if firmest.is_none_or(|best: SurfaceSample| s.grip > best.grip) {
+                                firmest = Some(s);
+                            }
+                            if slipperiest.is_none_or(|worst: SurfaceSample| s.grip < worst.grip) {
+                                slipperiest = Some(s);
+                            }
+                        }
+                        x += 25.0;
+                    }
+                    z += 25.0;
+                }
+                let (firm, slippery) = (firmest?, slipperiest?);
+                ((firm.grip - slippery.grip) > 1e-3).then_some([firm, slippery])
+            },
+        )
+        .ok()
+        .flatten()
+}
+
+/// Park the session car on one sample and read what every grounded
+/// wheel's tire path actually applied — the authored material grip ×
+/// the session's environment factor — for eight frames after it
+/// settles. Returns the grounded-wheel frames measured.
+fn measure_grip_at(app: &mut App, sample: SurfaceSample, want: f32) -> usize {
+    use mm2_game::PlayerVehicle;
+
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .single(app.world())
+        .expect("one local car");
+    let at = sample.at + Vec3::Y;
+    app.world_mut().entity_mut(car).insert((
+        Position(at),
+        Transform::from_translation(at),
+        LinearVelocity(Vec3::ZERO),
+        AngularVelocity(Vec3::ZERO),
+    ));
+    run(app, 60);
+
+    let mut checked = 0;
+    for _ in 0..8 {
+        app.update();
+        let state = app.world().get::<VehicleState>(car).unwrap();
+        for w in state.wheels.iter().filter(|w| w.grounded) {
+            let on = w
+                .contact_entity
+                .and_then(|e| app.world().get::<SurfaceMaterial>(e))
+                .copied();
+            assert_eq!(
+                on,
+                Some(sample.material),
+                "a wheel left the sampled retail surface"
+            );
+            assert!(
+                (w.surface_grip - want).abs() < 1e-5,
+                "wheel grip {} vs {want}",
+                w.surface_grip
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "the car never grounded at {:?}", sample.at);
+    checked
+}
+
+/// F06-AC02's original-content run: the same weather × surface matrix
+/// the synthetic leg pins, measured through the real Avian force path
+/// on the retail `sf` PSDL and the retail `materials.{mtl,csv}` pair.
+/// The map itself supplies the two distinct surfaces — a firm land
+/// sample and the slipperiest surface it authors (the bay's
+/// `deepwater`, `friction 0.65` against `_default`'s `0.90`) — found
+/// by ray rather than assumed, and each is driven under a clear and a
+/// rainy session. Every grounded wheel must report exactly the
+/// material's grip × the session's weather factor, the two surfaces
+/// must differ measurably under both weathers, and the rainy factor
+/// must scale both — four combinations, four distinct applied grips.
+///
+/// Opt-in on `MM2_RETAIL` (original-content validation; CI has no
+/// retail data and reports the run as not executed).
+#[test]
+fn retail_weather_and_surface_move_traction_in_the_real_force_path() {
+    use mm2_game::SessionConfig;
+    use mm2_vehicle::TireConditions;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail weather x surface run NOT run");
+        return;
+    };
+
+    // The sampled map's own bounds drive the scan; its authored
+    // material names only make the evidence line readable.
+    let (lo, hi, tables) = {
+        let mut probe = Vfs::new();
+        mm2_assets::mount_install(&mut probe, &retail, &mm2_assets::InstallMount::default())
+            .unwrap();
+        let (bytes, _) = probe.read_path("city/sf.psdl").expect("retail sf PSDL");
+        let psdl = mm2_formats::psdl::Psdl::parse(&bytes).expect("retail sf parses");
+        let tables = mm2_content::load_surface_tables(&probe)
+            .unwrap()
+            .expect("retail surface tables");
+        (psdl.bounds_min, psdl.bounds_max, tables)
+    };
+    let name_of = |m: SurfaceMaterial| match m {
+        SurfaceMaterial::Authored(i) => tables
+            .set
+            .defs
+            .get(usize::from(i))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| format!("{m:?}")),
+        other => format!("{other:?}"),
+    };
+
+    let mut samples: Option<[SurfaceSample; 2]> = None;
+    let mut applied: Vec<(SurfaceSample, f32, f32)> = Vec::new(); // (sample, weather factor, applied)
+    for weather in [0u8, 3u8] {
+        let mut vfs = Vfs::new();
+        mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+        let config = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/sf.psdl".into(),
+            },
+            conditions: mm2_game::SessionConditions {
+                time_of_day: TimeOfDay::new(1).unwrap(),
+                weather: Weather::new(weather).unwrap(),
+            },
+            ..SessionConfig::default()
+        };
+        let mut app = city_app_config(vfs, config);
+        let mut updates = 0;
+        while !playing(&mut app) && updates < 120 {
+            app.update();
+            updates += 1;
+        }
+        assert!(
+            playing(&mut app),
+            "the retail sf session never reached Playing"
+        );
+        let traction = app.world().resource::<TireConditions>().traction;
+        assert_eq!(
+            traction,
+            if weather == 3 {
+                mm2_game::WET_TRACTION
+            } else {
+                1.0
+            },
+            "weather {weather}"
+        );
+
+        let pair = match samples {
+            Some(pair) => pair,
+            None => {
+                let pair = two_distinct_surfaces(&mut app, lo, hi)
+                    .expect("retail sf offers two surfaces with distinct authored grip");
+                samples = Some(pair);
+                pair
+            }
+        };
+        for sample in pair {
+            let want = sample.grip * traction;
+            let frames = measure_grip_at(&mut app, sample, want);
+            eprintln!(
+                "retail sf weather {weather}: {} authored grip {:.4} -> {:.4} applied ({frames} wheel frames)",
+                name_of(sample.material),
+                sample.grip,
+                want
+            );
+            applied.push((sample, traction, want));
+        }
+    }
+
+    // The map really offered two distinct surfaces …
+    let pair = samples.expect("the scan ran");
+    assert!(
+        (pair[0].grip - pair[1].grip).abs() > 1e-6,
+        "the two retail surfaces resolve to the same grip: {pair:?}"
+    );
+    // … and all four (weather × surface) combinations applied four
+    // distinct grips: each surface differs under one weather, and the
+    // rainy factor scales each surface away from its dry value.
+    let mut grips: Vec<f32> = applied.iter().map(|(_, _, want)| *want).collect();
+    grips.sort_by(f32::total_cmp);
+    grips.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert_eq!(grips.len(), 4, "{applied:?}");
 }

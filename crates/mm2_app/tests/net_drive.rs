@@ -694,6 +694,54 @@ fn a_late_joiner_inherits_the_hosts_weather_not_the_default() {
     quit_and_assert_host_drove(host);
 }
 
+/// F06-AC06's two-process proof: the authority is a *rainy* host
+/// (`--weather 3`) and the joined client launches with its own
+/// `--traction 0.4` pin, which `net::start` stamps onto the config the
+/// accepted session hands it. The client's record must carry the
+/// host's wetness factor instead — `session_traction` ignores a pin on
+/// a `Remote` process and names the ignored override on the record
+/// stream rather than dropping it silently — so both OS processes drive
+/// one authority-owned surface state, and the multiplier its tire path
+/// applies to every wheel's authored grip is the authority's, not its
+/// own.
+///
+/// The pin can only ever be the *client's* here: `advertise` refuses a
+/// session whose `dev` set is non-default, so a pinned host cannot be
+/// joined at all. Dev world over loopback; the rainy `0.8` itself is
+/// the designed DSN-59 factor (UNK-39 stands — the original's
+/// weather→grip rule is unrecovered).
+#[test]
+fn a_pinned_client_follows_the_authoritys_surface_state() {
+    let install = tempfile::tempdir().unwrap();
+    let mut args = host_args(install.path(), 12000);
+    args.extend(["--weather".into(), "3".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &args);
+    let addr = listening_addr(&host);
+
+    let mut alice_args = join_args(install.path(), addr, "alice", 4500);
+    alice_args.extend(["--traction".into(), "0.4".into()]);
+    let alice = Proc::spawn(MM2_EXE, &alice_args);
+    start_when_ready(&mut host, 1);
+    host.until("remote participant spawned");
+
+    // The ignored pin is announced when the client's session loads —
+    // an override that did not bind must never be silent.
+    alice.until("--traction ignored");
+    let rec = alice.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_client_drove(&rec, 1);
+    assert!(
+        rec.contains("traction=0.8"),
+        "the client's tire path took the host's rain, not its own pin: {rec}"
+    );
+    assert!(
+        !rec.contains("traction=0.4"),
+        "the client's ignored pin leaked into its surface state: {rec}"
+    );
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
 /// The `env=lt<NN>(<preset>) fog=… sky=…` cells of a record — which
 /// authored light preset, fog and sky the session bound.
 fn env_cells(line: &str) -> String {
