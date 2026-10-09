@@ -3444,6 +3444,37 @@ fn a_city_session_plays_the_authored_weather_and_time_cues() {
     assert_eq!(kinds, ["timenoon", "wearain"]);
 }
 
+/// A malformed cue table degrades to counted diagnostics: the unusable
+/// row is skipped (the next usable row plays), a section with no usable
+/// row counts one failure, and nothing panics or is coerced.
+#[test]
+fn a_malformed_cue_table_counts_issues_and_skips_the_unusable_rows() {
+    let dir = commentary_dir();
+    for speaker in ["as1", "as2"] {
+        write(
+            dir.path(),
+            &format!("aud/spchdata/{speaker}/wearain_prerace.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nZERO,0,0\nWEARAIN,3,0\n",
+        );
+        write(
+            dir.path(),
+            &format!("aud/spchdata/{speaker}/timenoon_prerace.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nTIMEOFDAY header,,\nTIMENOON,2,2\n",
+        );
+    }
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..90 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.cue_issues, 2, "one bad row per table");
+    assert_eq!(r.commentary, 1, "the usable weather row plays");
+    assert_eq!(r.failed, 1, "the time-of-day table has no usable row");
+    let played = commentary_voices(&mut app);
+    assert_eq!(played.len(), 1);
+    assert!(played[0].1.contains("wearain"), "{}", played[0].1);
+}
+
 /// Commentary is a pre-race binding: parked at `Ready` nothing
 /// resolves; `Countdown` opens the window and the queue plays.
 #[test]

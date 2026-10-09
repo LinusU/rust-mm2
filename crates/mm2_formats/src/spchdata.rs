@@ -87,6 +87,52 @@ pub struct AnnouncerIndex {
     pub diagnostics: Vec<TableDiagnostic>,
 }
 
+impl CueRow {
+    /// The semantic problems that make this row unusable: an empty
+    /// prefix, a non-positive `end`, a negative `add`, or an `add` at
+    /// or past `end` (the draw lands inside `add + 1 ..= end`, so
+    /// nothing is left to name). Empty means the row is usable; a
+    /// consumer skips a row with any problem rather than coercing it.
+    pub fn problems(&self) -> Vec<TableDiagnostic> {
+        let row = self;
+        let mut out = Vec::new();
+        if row.prefix.is_empty() {
+            out.push(TableDiagnostic {
+                line: row.line,
+                message: "cue row with an empty prefix".into(),
+            });
+        }
+        if row.end <= 0 {
+            out.push(TableDiagnostic {
+                line: row.line,
+                message: format!(
+                    "cue row {} has a non-positive end sufix value {}",
+                    row.prefix, row.end
+                ),
+            });
+        }
+        if row.add < 0 {
+            out.push(TableDiagnostic {
+                line: row.line,
+                message: format!(
+                    "cue row {} has a negative sufix add value {}",
+                    row.prefix, row.add
+                ),
+            });
+        }
+        if row.end > 0 && row.add >= row.end {
+            out.push(TableDiagnostic {
+                line: row.line,
+                message: format!(
+                    "cue row {} names no wave: sufix add value {} is not below end sufix value {}",
+                    row.prefix, row.add, row.end
+                ),
+            });
+        }
+        out
+    }
+}
+
 impl CueTable {
     /// Parse a cue table. `Err` only on empty input; every malformed
     /// line degrades to a [`TableDiagnostic`] and the file's remaining
@@ -159,42 +205,7 @@ impl CueTable {
                 });
             }
             for row in &section.rows {
-                if row.prefix.is_empty() {
-                    out.push(TableDiagnostic {
-                        line: row.line,
-                        message: "cue row with an empty prefix".into(),
-                    });
-                }
-                if row.end <= 0 {
-                    out.push(TableDiagnostic {
-                        line: row.line,
-                        message: format!(
-                            "cue row {} has a non-positive end sufix value {}",
-                            row.prefix, row.end
-                        ),
-                    });
-                }
-                if row.add < 0 {
-                    out.push(TableDiagnostic {
-                        line: row.line,
-                        message: format!(
-                            "cue row {} has a negative sufix add value {}",
-                            row.prefix, row.add
-                        ),
-                    });
-                }
-                // The draw lands inside `add + 1 ..= end`; an `add`
-                // at or past `end` leaves no wave to name — the same
-                // verdict the consumer's draw returns.
-                if row.end > 0 && row.add >= row.end {
-                    out.push(TableDiagnostic {
-                        line: row.line,
-                        message: format!(
-                            "cue row {} names no wave: sufix add value {} is not below end sufix value {}",
-                            row.prefix, row.add, row.end
-                        ),
-                    });
-                }
+                out.extend(row.problems());
             }
         }
         out

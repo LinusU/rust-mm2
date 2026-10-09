@@ -1499,6 +1499,11 @@ pub struct AudioReport {
     /// Object-sound voices spawned this session — a subset of
     /// `voices` (drawbridges, ferries, the Underground).
     pub objects: u64,
+    /// Diagnostics from commentary cue tables this session: parse
+    /// diagnostics plus `CueTable::validate` findings (the
+    /// `AnnouncerIndex` ones stay log-only). Rows with a problem are
+    /// skipped, not coerced.
+    pub cue_issues: u64,
 }
 
 impl AudioReport {
@@ -1523,6 +1528,7 @@ impl AudioReport {
             + self.commentary
             + self.race_cues
             + self.objects
+            + self.cue_issues
             > 0
     }
 
@@ -2976,15 +2982,32 @@ fn queue_cue(
             return;
         }
     };
-    for d in &table.diagnostics {
-        warn!("audio: {path}:{}: {}", d.line, d.message);
+    let issues: Vec<_> = table
+        .diagnostics
+        .iter()
+        .cloned()
+        .chain(table.validate())
+        .collect();
+    if !issues.is_empty() {
+        report.cue_issues += issues.len() as u64;
+        warn!(
+            "audio: {path}: {} cue table diagnostics (first: line {}: {})",
+            issues.len(),
+            issues[0].line,
+            issues[0].message
+        );
     }
+    // First row of the first authored section that is usable; a row
+    // with a validate problem is skipped, never coerced.
     let Some(row) = sections
         .iter()
         .find_map(|name| table.section(name))
-        .and_then(|s| s.rows.first())
+        .and_then(|s| s.rows.iter().find(|r| r.problems().is_empty()))
     else {
-        fail(report, format!("{path} authors no {} cue", sections[0]));
+        fail(
+            report,
+            format!("{path} authors no usable {} cue", sections[0]),
+        );
         return;
     };
     let Some(suffix) = draw_cue_suffix(row.end, row.add, &mut commentary.rng) else {
