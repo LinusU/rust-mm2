@@ -1742,6 +1742,71 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
     assert!(cell("landed") > 0, "{rec}");
 }
 
+/// F27-AC01's client leg over real processes: the *joined client's*
+/// `--bot` reads the host's replica, drives its own predicted car to the
+/// gold, and the host — which parks its own seat — measures the contact
+/// from the client's car as the wire places it and attributes the pickup
+/// to wire seat 1. The client's replica then reads the gold carried and
+/// its announcer voices the call. Retail sf, seed 1291 (the gold lies
+/// a few metres from the spawn). Skipped without `MM2_RETAIL=<dir>`.
+///
+/// What it is not: a client that *delivers* (with this seat the bot
+/// stalls on the sf hillside beyond the first leg — see the PLAN row;
+/// the same seed's host-driven delivery is
+/// `two_retail_processes_decide_a_cops_and_robbers_match`), a contested
+/// steal, packet loss, or a rendered match.
+#[test]
+fn a_joined_clients_bot_picks_up_the_gold() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    let at = host_args.iter().position(|a| a == "--seed").unwrap();
+    host_args[at + 1] = "1291".into();
+    host_args.extend(
+        [
+            "--city",
+            "sf",
+            "--cnr",
+            "ffa",
+            "--cnr-limit",
+            "100pts",
+            "--parked",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let mut client_args = join_args(&retail, addr, "bob", 12_000);
+    client_args.push("--bot".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+
+    // The host's own log attributes the pickup to the client's wire seat.
+    let bound = Duration::from_secs(120);
+    let picked = host.until_within("Picked {", bound);
+    eprintln!("host   {picked}");
+    assert!(picked.contains("player: PlayerId(1)"), "{picked}");
+    assert!(picked.contains("recovered: false"), "{picked}");
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    host.cmd("quit");
+    let host_rec = host.until_within("smoke=headless-physics", bound);
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    let cell =
+        |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+    assert_eq!(cell("ref"), 0, "the client refused the host's match: {rec}");
+    assert_eq!(cell("seats"), 2, "{rec}");
+    assert_eq!(cell("dec"), 0, "nobody delivered in this run: {rec}");
+    // The announcer voiced what the replica showed: the client's own
+    // pickup (a call exists only if the replica read the gold taken).
+    assert!(cell("say") >= 1, "the client never heard the pickup: {rec}");
+}
+
 /// The cell after a record field's `key` inside a `,`-separated value
 /// whose cells read `<n><suffix>` (`imp=1i/1r/1d` → `imp_cells("imp")`
 /// gives `[1, 1, 1]`); empty when the record has no such field.
