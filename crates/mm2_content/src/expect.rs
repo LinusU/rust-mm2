@@ -2,7 +2,8 @@
 //! audits against, independent of what the VFS successfully resolves.
 //!
 //! These tables are derived from a retail-install audit (enumerated
-//! 2026-09-20; see `docs/ralph/PLAN.md` "Relevant discoveries").
+//! 2026-09-20; see "Relevant discoveries" in Ralph's plan,
+//! `git show 18b469d:docs/ralph/PLAN.md`).
 //! Classification: *documented* — they name what a retail install ships.
 //! They are **not** claims about which records the original engine
 //! requires; partial entries (an event id with only some of the authored

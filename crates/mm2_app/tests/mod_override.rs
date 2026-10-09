@@ -7,7 +7,7 @@
 //! Everything is self-authored synthetic data; no original install is read.
 //! This is *synthetic* evidence for the four consumers named: it says
 //! nothing about the other families (menu art, race rules, surface tables,
-//! localization …), which stay open in `docs/ralph/PLAN.md`.
+//! localization …), which stay open as F29 tasks in Rally.
 
 use std::path::Path;
 

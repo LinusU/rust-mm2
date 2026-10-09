@@ -9,7 +9,8 @@ reading "code-checked" says nothing about original-game fidelity.
 `f145ece` against the read-only retail install (fingerprint
 `fnv1a64:e91e6cd4b2ae30d9`, Apple M1) with the `mm2-inspect` commands named
 beside them. The per-feature rows in §3 are reconciled from
-`docs/ralph/PLAN.md`'s task table, the feature specs' acceptance lists and
+Ralph's task table (`docs/ralph/PLAN.md` as of `18b469d`; the tasks now
+live in Rally), the feature specs' acceptance lists and
 `docs/original-rules.md`; they were *not* re-executed by this audit, so each
 inherits the evidence level its plan row records. Re-run §2's commands to
 refresh; update §3 when a feature's evidence changes.
