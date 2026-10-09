@@ -216,6 +216,34 @@ pub fn encode_pick(selection: &VehicleSelection) -> Result<VehiclePick, SessionW
     })
 }
 
+/// The car this process last selected, as the pick it offers the host:
+/// a catalog id with its paint, or the dev car when none is loaded.
+fn offered_selection(selected: &SelectedCar) -> VehicleSelection {
+    VehicleSelection {
+        id: selected.def.as_ref().map(|d| d.id.clone()),
+        paint: selected.paint,
+    }
+}
+
+/// The car a `Start` seats us in: what the host last confirmed on our
+/// roster entry, else `offered` — the pick we sent on joining. A late
+/// joiner's `Start` can outrun the echo of that pick (the host starts
+/// it the moment it is admitted), and the dev car would not match the
+/// host's copy of the seat: its wheelbase and ride height differ, so
+/// the host's pose, asserted over the predicted car, buries the wheels.
+fn start_pick(
+    roster: &[mm2_net::RosterEntry],
+    me: u16,
+    offered: VehicleSelection,
+) -> VehicleSelection {
+    roster
+        .iter()
+        .find(|e| e.player_id == me)
+        .and_then(|e| e.pick.as_ref())
+        .map(decode_pick)
+        .unwrap_or(offered)
+}
+
 /// The reverse of [`encode_pick`]: a roster pick back into the app's
 /// `VehicleSelection` — the empty wire id is the dev car.
 pub fn decode_pick(pick: &VehiclePick) -> VehicleSelection {
@@ -716,16 +744,8 @@ fn start(
         Err(why) => return refuse(link, lobby, why),
     };
     lobby.host_pick = host_pick;
-    // The pick is roster state, not session params — ours is what the
-    // host last confirmed on our entry (a late joiner without a
-    // committed pick drives the dev car).
-    config.vehicle = lobby
-        .roster
-        .iter()
-        .find(|e| e.player_id == link.player_id())
-        .and_then(|e| e.pick.as_ref())
-        .map(decode_pick)
-        .unwrap_or_default();
+    // The pick is roster state, not session params.
+    config.vehicle = start_pick(&lobby.roster, link.player_id(), offered_selection(selected));
     config.mods_active = link.mods_active;
     config.dev = link.dev.clone();
     match resolve_selection(vfs, &config.vehicle) {
@@ -2651,6 +2671,45 @@ mod tests {
     /// legal (paint 0 only), catalog ids must match exactly, incomplete
     /// entries refuse with their missing deps, and paint is bounded by
     /// the entry's `Colors` list.
+    /// A `Start` seats us in the host's echo of our pick; a late
+    /// joiner's `Start` that beat the echo keeps the car it offered
+    /// rather than the dev car.
+    #[test]
+    fn a_start_seats_the_echoed_pick_else_the_offered_one() {
+        let offered = VehicleSelection {
+            id: Some("vpbug".into()),
+            paint: 2,
+        };
+        let entry = |id: u16, vehicle: Option<&str>, paint: u8| mm2_net::RosterEntry {
+            player_id: id,
+            driver: format!("p{id}"),
+            build: String::new(),
+            ready: true,
+            pick: vehicle.map(|v| VehiclePick {
+                vehicle: v.into(),
+                paint,
+            }),
+        };
+        // The echo wins, whatever was offered.
+        let echoed = [entry(1, Some("vpmustang"), 1)];
+        assert_eq!(
+            start_pick(&echoed, 1, offered.clone()).id.as_deref(),
+            Some("vpmustang")
+        );
+        // No pick on our entry yet, or no entry at all: the offer.
+        for roster in [
+            vec![entry(1, None, 0)],
+            vec![entry(2, Some("vpmustang"), 1)],
+        ] {
+            assert_eq!(start_pick(&roster, 1, offered.clone()), offered);
+        }
+        // An offered dev car stays the dev car.
+        assert_eq!(
+            start_pick(&[], 1, VehicleSelection::default()),
+            VehicleSelection::default()
+        );
+    }
+
     #[test]
     fn the_vehicle_validator_gates_picks_by_catalog() {
         let validate = vehicle_validator(&test_catalog());
