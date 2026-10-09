@@ -242,6 +242,41 @@ impl SettleWatch {
 /// immediate answer to a wedge.
 pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
 
+/// How long `--reset-at`'s ask waits for its own seat's reset to come
+/// back before asking again (F25-C; a dev-evidence knob, designed). A
+/// driver whose `R` seemed to do nothing presses it again; the scheduled
+/// form does the same, so one frame lost on an impaired link cannot
+/// strand the run. Wall clock, not session ticks: a headless client runs
+/// ticks far faster than the wire answers, and an ask repeated inside
+/// the round trip would only be dropped by [`RESET_REQUEST_COOLDOWN`]
+/// (which this must stay above).
+pub const DEV_RESET_RETRY: Duration = Duration::from_secs(3);
+
+/// The scheduled reset ask's state: when it last went out and how many
+/// own-seat resets the client had applied then. Pure, so the retry rule
+/// is testable without a clock.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevResetAsk {
+    asked: Option<(Instant, u64)>,
+}
+
+impl DevResetAsk {
+    /// Whether to send now: never before the first ask is due, once at
+    /// the tick, then again after [`DEV_RESET_RETRY`] if no own-seat
+    /// reset has been applied since the last ask.
+    pub fn due(&self, now: Instant, own_resets: u64, tick_reached: bool) -> bool {
+        match self.asked {
+            None => tick_reached,
+            Some((at, seen)) => own_resets == seen && now.duration_since(at) >= DEV_RESET_RETRY,
+        }
+    }
+
+    /// Record a sent ask.
+    pub fn sent(&mut self, now: Instant, own_resets: u64) {
+        self.asked = Some((now, own_resets));
+    }
+}
+
 /// Client-side bound on replicated impact rows queued ahead of
 /// [`apply_snapshots`] (protocol v10, F25-B). Snaps arrive off the
 /// reader thread faster than the app applies them under load; the
@@ -898,6 +933,9 @@ pub struct NetDriveReport {
     /// landings that bumped a wire epoch; client: epoch-declared
     /// teleports applied to a copy or the own seat.
     pub resets: u64,
+    /// The subset of [`Self::resets`] that landed on this client's own
+    /// seat (client side) — what a driver's ask is waiting for.
+    pub own_resets: u64,
     /// Times the own seat sat at rest apart from the authority's copy
     /// long enough to be reseated on it ([`SettleWatch`]).
     pub own_settles: u64,
@@ -2100,26 +2138,31 @@ pub fn send_reset_request(
 /// session. The flag is the scheduled form of the `R` key, and on an
 /// authority `session::dev_reset_at` teleports the car; here a local
 /// teleport would be the unannounced self-teleport the key's gate
-/// forbids, so the flag does what the key does — asks the authority,
-/// once, when the session clock reaches the tick. This is what lets a
-/// headless process leg exercise the wire reset (request up, epoch
-/// snap down) without a keyboard; the run stays record-ineligible
-/// (`record_eligibility` names `reset-at`).
+/// forbids, so the flag does what the key does — asks the authority
+/// when the session clock reaches the tick, and asks again after
+/// [`DEV_RESET_RETRY`] if the own seat's reset has not come back (the
+/// ask is one frame on a link that may lose it, and a driver would
+/// press `R` again). This is what lets a headless process leg exercise
+/// the wire reset (request up, epoch snap down) without a keyboard; the
+/// run stays record-ineligible (`record_eligibility` names `reset-at`).
 pub fn send_dev_reset_request(
     link: Res<LobbyLink>,
     session: Res<Session>,
     mut report: ResMut<NetDriveReport>,
-    mut fired: Local<bool>,
+    mut ask: Local<DevResetAsk>,
 ) {
-    if *fired || session.authority_role().is_authority() || link.closed || link.leaving() {
+    if session.authority_role().is_authority() || link.closed || link.leaving() {
         return;
     }
     let at = session.config().and_then(|c| c.dev.reset_at);
-    if session.is_playing() && at.is_some_and(|at| session.tick() >= at) {
-        *fired = true;
-        if link.ctl().request_reset(session.wire_generation()).is_ok() {
-            report.requests_sent += 1;
-        }
+    let reached = at.is_some_and(|at| session.tick() >= at);
+    let now = Instant::now();
+    if session.is_playing()
+        && ask.due(now, report.own_resets, reached)
+        && link.ctl().request_reset(session.wire_generation()).is_ok()
+    {
+        report.requests_sent += 1;
+        ask.sent(now, report.own_resets);
     }
 }
 
@@ -3289,6 +3332,7 @@ fn apply_snap_frame(
                     if authority_reset {
                         snaps.own_settle = SettleWatch::default();
                         report.resets += 1;
+                        report.own_resets += 1;
                     } else {
                         report.own_settles += 1;
                     }
@@ -3592,6 +3636,34 @@ mod tests {
         }
         assert!(watch.observe(here, 0.0, there, 0.0));
         assert!(!watch.observe(here, 0.0, there, 0.0));
+    }
+
+    /// The scheduled reset ask goes out at its tick, waits while the
+    /// answer may still be in flight, repeats once it has waited past
+    /// the retry bound with no own-seat reset, and stops for good once
+    /// one has been applied.
+    #[test]
+    fn the_scheduled_reset_ask_repeats_until_the_own_seat_resets() {
+        let t0 = Instant::now();
+        let mut ask = DevResetAsk::default();
+        assert!(!ask.due(t0, 0, false), "nothing before the tick");
+        assert!(ask.due(t0, 0, true), "the tick fires it");
+        ask.sent(t0, 0);
+        let early = t0 + DEV_RESET_RETRY / 2;
+        assert!(!ask.due(early, 0, true), "the answer may be in flight");
+        assert!(
+            DEV_RESET_RETRY > RESET_REQUEST_COOLDOWN,
+            "a retry must outlast the host's grant cooldown"
+        );
+        let late = t0 + DEV_RESET_RETRY;
+        assert!(ask.due(late, 0, true), "no reset came back: ask again");
+        ask.sent(late, 0);
+        assert!(!ask.due(late, 0, true), "the retry restarts the wait");
+        let much_later = late + DEV_RESET_RETRY * 10;
+        assert!(
+            !ask.due(much_later, 1, true),
+            "an own-seat reset applied since the last ask ends it"
+        );
     }
 
     /// A residual inside the bound — the measured prediction error —

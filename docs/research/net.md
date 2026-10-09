@@ -1672,9 +1672,37 @@ wire actually moved rather than an in-process mailbox's contents.
   passes. In-process twin `net_app::reset_at_under_a_remote_
   session_asks_the_authority_once` (before the tick nothing is asked,
   at it one ask keyed to our slot and generation, never a second).
-  Not covered: a reset under an impaired link, a trailer rig reset at
-  process level (the dev car tows nothing), the reset-while-moving
-  divergence window; loopback, dev world.
+  Not covered here: see F25-C.5 for the impaired link; a trailer rig
+  reset at process level (the dev car tows nothing) and the
+  reset-while-moving divergence window stay open; loopback, dev world.
+- **Reset on an impaired link (F25-C.5).** The ask is one frame, and a
+  lossy link may eat it — which the first leg could not survive. The
+  scheduled ask now behaves like a driver whose `R` seemed to do
+  nothing: `netdrive::DevResetAsk` repeats it every `DEV_RESET_RETRY`
+  (3 s wall clock, above the host's 1 s grant cooldown, so a repeat can
+  never be dropped for arriving inside the round trip) until an
+  own-seat epoch reset has been applied (`NetDriveReport::own_resets`,
+  a subset of `resets`). Wall clock, not ticks: a headless client runs
+  ticks far faster than the wire answers. The downlink needs no retry —
+  the reset is declared as a per-seat epoch *state* on every `Snap`, so
+  a lost snap only delays it. `a_scheduled_reset_comes_back_across_two_
+  processes_on_an_impaired_link` runs the same host + alice + bob over
+  an `ImpairProxy` armed both ways after `Start` with 40 ms delay,
+  30 ms jitter, **30 % loss**, 10 % duplication, 10 % reordering:
+  4/4 passes; alice travelled 170–200 m, ended back on her slot
+  (`moved ≤ 1 m`), the host granted exactly one ask (`1g/0d`) every
+  time, and in one run alice had to ask three times (`req3s`) — two
+  asks were lost on the wire and the retry carried it. Asserted: the
+  proxy carried and impaired both directions, alice's asks ≥ 1 and her
+  reset came back, host grants ≥ 1, bob asked nothing. The ask count is
+  a floor, and the retry rule itself is pinned deterministically by
+  `netdrive::tests::the_scheduled_reset_ask_repeats_until_the_own_seat_
+  resets` (a single run cannot force the loss). Bob runs his frame
+  budget here instead of `--until-peer-left`: through a lossy relay
+  alice's one-shot `Leave` can be dropped and the relay keeps her
+  socket open, so bob would never see her go. Not covered: other
+  recipes, a trailer rig reset, reset-while-moving divergence;
+  loopback, dev world.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded

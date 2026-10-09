@@ -347,23 +347,23 @@ fn two_mm2_processes_drive_one_session_over_loopback() {
     quit_and_assert_host_drove(host);
 }
 
-/// F25-C's reset leg at process level: a joined client run with
-/// `--reset-at` asks the host for a reset over the real socket (the
-/// wire form of the `R` key — it never teleports itself), the host
-/// grants exactly that one ask to exactly that seat, and the epoch
-/// declaration comes back on the `Snap` stream so the client applies
-/// it to its own seat. The other client, run without the flag, asks
-/// nothing, and the host drops nothing.
-#[test]
-fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
-    let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+/// One reset run: a host and two joined clients, alice with
+/// `--reset-at 1200 --until-resets 1`, bob with `--until-peer-left`,
+/// both ending on their conditions (frames are only the ceiling) under
+/// a wall-clock deadline. With `impair`, both reach the host through a
+/// seeded [`ImpairProxy`] armed on both directions once `Start` crossed
+/// clean. Returns the three records and the proxy's final up/down
+/// counters.
+fn run_reset_pair(
+    install: &std::path::Path,
+    impair: Option<Impair>,
+) -> (String, String, String, Option<(LinkStats, LinkStats)>) {
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install, 9000));
     let addr = listening_addr(&host);
+    let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC04).unwrap());
+    let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
 
-    // Alice runs until her own reset has come back, bob until alice
-    // has left (frames are only the ceiling), each bounded by a
-    // wall-clock deadline.
-    let mut alice_args = join_args(install.path(), addr, "alice", 6000);
+    let mut alice_args = join_args(install, join_addr, "alice", 6000);
     alice_args.extend(
         [
             "--reset-at",
@@ -376,13 +376,58 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         .map(String::from),
     );
     let alice = Proc::spawn(MM2_EXE, &alice_args);
-    let mut bob_args = join_args(install.path(), addr, "bob", 6000);
-    bob_args.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
+    let mut bob_args = join_args(install, join_addr, "bob", 6000);
+    // Bob is the control seat: he asks nothing. On a clean link he stays
+    // until alice has left; through a lossy relay alice's one-shot
+    // `Leave` can be dropped and the relay keeps her socket open, so he
+    // would never see her go — there he just runs his frame budget.
+    if impair.is_none() {
+        bob_args.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
+    }
     let bob = Proc::spawn(MM2_EXE, &bob_args);
     start_when_ready(&mut host, 2);
+    if let (Some(proxy), Some(impair)) = (&proxy, impair) {
+        // `Start` rides Down: let the clean lane deliver it first.
+        std::thread::sleep(Duration::from_millis(400));
+        proxy.set(LinkDir::Up, impair);
+        proxy.set(LinkDir::Down, impair);
+    }
 
     let bound = Duration::from_secs(90 + 60);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    let link = proxy
+        .as_ref()
+        .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));
+    // The relay holds socket clones until it drops: the host only sees
+    // the clients leave once the proxy is down.
+    let relayed = proxy.is_some();
+    drop(proxy);
+    for _ in 0..2 {
+        let left = host.until("event=left");
+        // Through the relay the departure reads as a closed socket.
+        assert!(relayed || left.contains("cause=quit"), "{left}");
+    }
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    assert!(host.wait().success(), "mm2 --host did not exit cleanly");
+    (alice_rec, bob_rec, host_rec, link)
+}
+
+/// F25-C's reset leg at process level: a joined client run with
+/// `--reset-at` asks the host for a reset over the real socket (the
+/// wire form of the `R` key — it never teleports itself), the host
+/// grants exactly that one ask to exactly that seat, and the epoch
+/// declaration comes back on the `Snap` stream so the client applies
+/// it to its own seat. The other client, run without the flag, asks
+/// nothing, and the host drops nothing.
+#[test]
+fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
+    let install = tempfile::tempdir().unwrap();
+    let (alice_rec, bob_rec, host_rec, _) = run_reset_pair(install.path(), None);
+
     assert_eq!(field(&bob_rec, "stop"), "peer-left", "{bob_rec}");
     // Whether bob also saw alice's copy teleport (`rst`) is a race with
     // her leaving, so it is reported, not asserted.
@@ -392,7 +437,6 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         "the control client asked nothing: {bob_rec}"
     );
 
-    let alice_rec = alice.until_within("smoke=headless-physics", bound);
     assert_eq!(field(&alice_rec, "stop"), "resets", "{alice_rec}");
     // Not `assert_client_drove`: that one wants `moved > 0`, and the
     // reset is exactly what puts alice back at zero.
@@ -423,14 +467,7 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         moved_m(&alice_rec) < 5.0,
         "the granted reset put alice back on her slot: {alice_rec}"
     );
-    assert!(alice.wait().success(), "alice did not exit cleanly");
-    assert!(bob.wait().success(), "bob did not exit cleanly");
-    for _ in 0..2 {
-        assert!(host.until("event=left").contains("cause=quit"));
-    }
 
-    host.cmd("quit");
-    let host_rec = host.until("smoke=headless-physics");
     assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
     let host_net = net_field(&host_rec);
     assert_eq!(
@@ -442,7 +479,71 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         host_net.resets >= 1,
         "the grant bumped the seat's wire epoch on the host: {host_rec}"
     );
-    assert!(host.wait().success(), "mm2 --host did not exit cleanly");
+}
+
+/// The same reset on a bad link (AC02 × AC03): both clients reach the
+/// host through a recipe with 30 % loss, duplication, reordering and
+/// latency armed on both directions for the driving window. The ask is
+/// one frame that the link may lose, so alice repeats it until her own
+/// seat's reset comes back (`DEV_RESET_RETRY`) — the count of asks is
+/// therefore a floor, not exact — and a duplicated or repeated ask the
+/// host sees inside its cooldown is dropped counted, never granted
+/// twice in a row. What must hold is the clean leg's outcome: she
+/// travelled, the host granted at least one ask to her seat, the epoch
+/// came back through the lossy snap stream, and she ended on her slot.
+#[test]
+fn a_scheduled_reset_comes_back_across_two_processes_on_an_impaired_link() {
+    let install = tempfile::tempdir().unwrap();
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let (alice_rec, bob_rec, host_rec, link) = run_reset_pair(install.path(), Some(recipe));
+    eprintln!("impaired reset alice={alice_rec}\n bob={bob_rec}\n host={host_rec}");
+
+    // The recipe really bit while the reset played out.
+    let (up, down) = link.expect("the impaired run reports its proxy counters");
+    for (dir, stats) in [("up", up), ("down", down)] {
+        assert!(stats.frames_in > 0, "{dir} carried nothing: {stats:?}");
+        assert!(
+            stats.dropped + stats.duplicated + stats.reordered > 0,
+            "{dir} saw no impairment: {stats:?}"
+        );
+    }
+
+    assert_eq!(field(&bob_rec, "status"), "pass", "{bob_rec}");
+    assert_eq!(net_field(&bob_rec).requests_sent, 0, "{bob_rec}");
+
+    assert_eq!(field(&alice_rec, "stop"), "resets", "{alice_rec}");
+    assert_eq!(field(&alice_rec, "status"), "pass", "{alice_rec}");
+    let alice_net = net_field(&alice_rec);
+    assert!(
+        alice_net.requests_sent >= 1 && alice_net.resets >= 1,
+        "alice asked and her reset came back: {alice_rec}"
+    );
+    let travel: f64 = field(&alice_rec, "travel")
+        .strip_suffix('m')
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(travel > 50.0, "alice drove before the reset: {alice_rec}");
+    assert!(
+        moved_m(&alice_rec) < 5.0,
+        "the granted reset put alice back on her slot: {alice_rec}"
+    );
+
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+    let host_net = net_field(&host_rec);
+    assert!(
+        host_net.requests_granted >= 1 && host_net.resets >= 1,
+        "the host granted an ask and bumped the epoch: {host_rec}"
+    );
+    assert!(
+        host_net.requests_granted + host_net.requests_dropped <= alice_net.requests_sent * 2,
+        "the host cannot have seen more asks than were sent (plus duplicates): {host_rec}"
+    );
 }
 
 /// F26-AC05's rematch leg at process level: one lobby, two sessions.
