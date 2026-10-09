@@ -1499,8 +1499,10 @@ impl MenuShell {
                 if let Screen::Customize {
                     race: Some(race), ..
                 } = &mut self.screen
+                    && let Some(laps) =
+                        step_bounded(race.laps, 1, mm2_game::CUSTOMIZE_LAP_MAX, forward)
                 {
-                    race.laps = step_bounded(race.laps, 1, mm2_game::CUSTOMIZE_LAP_MAX, forward);
+                    race.laps = laps;
                 }
             }
             Action::CycleOpponents => {
@@ -1512,8 +1514,10 @@ impl MenuShell {
                     seed_race: Some(seed),
                     ..
                 } = &mut self.screen
+                    && let Some(opponents) =
+                        step_bounded(race.opponents, 0, seed.opponents, forward)
                 {
-                    race.opponents = step_bounded(race.opponents, 0, seed.opponents, forward);
+                    race.opponents = opponents;
                 }
             }
             _ => {}
@@ -2751,6 +2755,12 @@ fn options_row(
     }
 }
 
+/// The most opponents an authored Circuit row may ask for. A designed
+/// bound, not a recovered one: the largest count seen in the retail
+/// `Opponents` column is 7 (RACE-11), and a value beyond it is a
+/// malformed row rather than a bigger roster.
+const MAX_AUTHORED_OPPONENTS: u32 = 7;
+
 /// Read an authored parameter block into the customization seed —
 /// the same distillation `event_params` performs (selector 0-3,
 /// density 0..=1) plus RACE-3's Circuit parenthetical (`NumLaps`/
@@ -2783,7 +2793,10 @@ fn authored_seed(
                 .ok()
                 .filter(|&n| n >= 1)
                 .ok_or_else(|| bad("laps"))?,
-            opponents: u32::try_from(p.opponents).map_err(|_| bad("opponents"))?,
+            opponents: u32::try_from(p.opponents)
+                .ok()
+                .filter(|&n| n <= MAX_AUTHORED_OPPONENTS)
+                .ok_or_else(|| bad("opponents"))?,
         }),
         _ => None,
     };
@@ -2792,16 +2805,20 @@ fn authored_seed(
 
 /// Step a count one place in `forward`'s direction inside
 /// `lo..=hi`, wrapping — the laps/opponents picker's range walk
-/// (1..=`CUSTOMIZE_LAP_MAX`, 0..=authored count).
-fn step_bounded(current: u32, lo: u32, hi: u32, forward: bool) -> u32 {
-    debug_assert!(lo <= hi);
-    let len = hi - lo + 1;
-    let pos = current.clamp(lo, hi) - lo;
-    if forward {
-        lo + (pos + 1) % len
+/// (1..=`CUSTOMIZE_LAP_MAX`, 0..=authored count). `None` when the
+/// range is empty or too wide to count (`lo > hi`, or `lo..=hi` spans
+/// more than `u32::MAX` places) — the caller leaves the pick as is.
+fn step_bounded(current: u32, lo: u32, hi: u32, forward: bool) -> Option<u32> {
+    let span = hi.checked_sub(lo)?;
+    let len = span.checked_add(1)?;
+    let (pos, len) = (u64::from(current.clamp(lo, hi) - lo), u64::from(len));
+    let next = if forward {
+        (pos + 1) % len
     } else {
-        lo + (pos + len - 1) % len
-    }
+        (pos + len - 1) % len
+    };
+    // `next < len <= u32::MAX`, so the narrowing cannot fail.
+    Some(lo + u32::try_from(next).ok()?)
 }
 
 /// Step a 0-3 selector one place in `forward`'s direction, wrapping.
@@ -3609,3 +3626,64 @@ fn screen_title(screen: &Screen) -> String {
 #[path = "menu_graphics.rs"]
 mod graphics;
 pub use graphics::{MenuPreviewCapture, menu_present, menu_preview_motion};
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+
+    fn circuit_params(opponents: i64) -> mm2_formats::racedata::RaceParams {
+        mm2_formats::racedata::RaceParams {
+            car_type: 0,
+            time_of_day: 0,
+            weather: 0,
+            opponents,
+            cops: 0,
+            ambient: 0.5,
+            peds: 0.5,
+            num_laps: 3,
+            time_limit: 60.0,
+            difficulty: 0,
+        }
+    }
+
+    #[test]
+    fn step_bounded_wraps_inside_the_range() {
+        assert_eq!(step_bounded(3, 0, 3, true), Some(0));
+        assert_eq!(step_bounded(0, 0, 3, false), Some(3));
+        assert_eq!(step_bounded(9, 1, 3, true), Some(1));
+    }
+
+    #[test]
+    fn step_bounded_survives_the_widest_ranges() {
+        assert_eq!(step_bounded(0, 0, u32::MAX, true), None);
+        assert_eq!(step_bounded(0, 0, u32::MAX, false), None);
+        assert_eq!(step_bounded(u32::MAX, 0, u32::MAX, true), None);
+        assert_eq!(
+            step_bounded(u32::MAX - 1, 1, u32::MAX, true),
+            Some(u32::MAX)
+        );
+        assert_eq!(
+            step_bounded(u32::MAX, 1, u32::MAX, false),
+            Some(u32::MAX - 1)
+        );
+        assert_eq!(step_bounded(1, 1, u32::MAX, false), Some(u32::MAX));
+        assert_eq!(step_bounded(0, 2, 1, true), None);
+    }
+
+    #[test]
+    fn an_authored_opponent_count_past_the_roster_bound_is_refused() {
+        let seed = |n| authored_seed(&circuit_params(n), EventTableKind::Circuit);
+        for ok in [0, 1, i64::from(MAX_AUTHORED_OPPONENTS)] {
+            assert!(seed(ok).is_ok(), "{ok} opponents");
+        }
+        for bad in [
+            i64::from(MAX_AUTHORED_OPPONENTS) + 1,
+            i64::from(u32::MAX),
+            i64::MAX,
+            -1,
+        ] {
+            let err = seed(bad).unwrap_err();
+            assert_eq!(err, "authored opponents is out of range", "{bad}");
+        }
+    }
+}
