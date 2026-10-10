@@ -487,13 +487,15 @@ pub struct SessionConditions {
 /// RACE-4's always-open cruise options. Set by the menu flow; when
 /// present these beat an event's authored [`EventParams`] wherever the
 /// shared resolvers run (`effective_conditions`, the ambient-density
-/// chain). `densities.pedestrians` has no consumer yet (F19) — it
-/// rides the authored seed so a future picker lands on the field.
+/// chain). `densities.traffic` drives ambient traffic and
+/// `densities.pedestrians` the sidewalk crowd (F19-B.2:
+/// `crate::crowd::resolve_density`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SessionCustomization {
     /// Picked weather + time-of-day selectors.
     pub conditions: SessionConditions,
-    /// Picked densities — `traffic` drives ambient traffic today.
+    /// Picked densities — `traffic` drives ambient traffic,
+    /// `pedestrians` the sidewalk crowd.
     pub densities: Densities,
     /// Picked race shape — RACE-3's Circuit parenthetical (laps +
     /// opponents, UI-2). `Some` only on sessions launched from a

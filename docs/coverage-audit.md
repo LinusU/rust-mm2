@@ -90,7 +90,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F16 profiles/unlocks | active | synthetic + retail-data + two-process restart (AC01: CLI-created profiles, eligible finish in the test process) | AC01 interactive finish in a real process (`--bot` results deliberately ineligible); UNK-6/8 |
 | F17 menu/flow | active | synthetic + local render | AC03 keyboard/gamepad + visible-focus evidence; C&R/scoring result variants; no human journey recorded |
 | F18 weather/time | active | synthetic + retail-data + rendered (16-slot sf capture matrix) | AC05 audio captures (visual half now covered by the sf weather×time capture matrix); `.ldef`/`.lmap` consumers; network replication; UNK-24/39/40 |
-| F19 pedestrians | active (A only) | retail-data (parsers, skin/deform *domain types*) | **no runtime**: spawn, skinned render, routes, reaction, audio, reset (reqs 3–6; AC02–AC06); UNK-15/41 |
+| F19 pedestrians | active (A + B) | retail-data (parsers, skin/deform domain types, sidewalk-net census, reaction chains) + synthetic runtime (crowd soak, reaction machine) + retail headless crowd soak (`pedestrian_retail.rs`, both cities: 24/24 walkers inside the actor budget, corner hops on real sidewalks, London provoked a wary→dive→rejoin cycle) | open: crosswalk crossings (UNK-42), the original car-sensing rule (UNK-43), pedestrian audio, rendered reaction inspection (F19-C); UNK-15/41 |
 | F20 police | active | synthetic + retail-data | pursuit rules unknown (UNK-9) — behaviour is *designed*; trigger/loss/outcome matrix and session restrictions |
 | F21 Crash Course | active | structural catalog only | **evaluators unrecovered** (UNK-14/35): lesson-by-lesson pass/fail, instruction/voice flow, reward credit; 42 lessons not playable as a course |
 | F22 HUD/map/cameras | active | synthetic + local render | UNK-26…37 presentation details are inferred; AC05 visual inspection on atypical vehicles |
@@ -118,9 +118,11 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
    difficulty, traction-in-rain, damage thresholds and police behaviour are
    engine self-metrics or `designed` readings; the UNK list in
    `docs/original-rules.md` is the authoritative open set.
-4. **Crash Course and pedestrians are the two scope holes** where parsed
-   data exists but gameplay does not (F21 evaluators, F19 runtime). Neither
-   is covered by a stand-in; both stay in the denominator.
+4. **Crash Course is the remaining scope hole** where parsed data exists
+   but gameplay does not (F21 evaluators). It is not covered by a
+   stand-in and stays in the denominator. (F19's runtime crowd landed:
+   walk, density, recycle and reactions are on main — the open F19 set
+   is UNK-42/43, audio and rendered inspection.)
 5. **Multiplayer is loopback only.** No LAN or Internet evidence exists; the
    Cops & Robbers rule core is built but several original rules are unknown.
 6. **Mod coverage is uneven.** Override infrastructure exists, but no audit
@@ -133,7 +135,9 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 
 1. F21 evaluator recovery — the largest scoped-out *gameplay* hole whose
    data is already inventoried.
-2. F19 runtime spawn/skin render — the other hole; unblocks F20/F28 reaction.
+2. F19 open semantics — crosswalk crossings (UNK-42) and the original
+   car-sensing rule (UNK-43) are the remaining pedestrian gameplay gaps;
+   the runtime crowd (walk/density/recycle/react) is on main.
 3. An audible offline mix harness (closes four audio ACs at once).
 4. F29 consumer coverage for the remaining record families (surface tables, menu art, localization).
 5. A scripted full-journey harness (F31-B) over the real menu → session →

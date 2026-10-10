@@ -273,8 +273,10 @@ clothing, not textured. A rendered capture of the line-up on retail
 
 `mm2_game::pedwalk` is the domain half of pedestrian movement: a
 `SidewalkNet` over the BAI sidewalk curves, a seeded `plan_pedestrians`,
-and `SidewalkNet::advance`. Nothing spawns from it yet (the runtime leg
-is the next slice); `--ped-lab` is still the only on-screen spawner.
+and `SidewalkNet::advance`. The runtime leg (F19-B.2) fields it:
+`mm2_app::crowd` builds the crowd on a city session's first `Playing`
+frame and recycles it with the players' interest bubbles; `--ped-lab`
+remains the pose/animation diagnostic view.
 
 Walk speed comes from the animation, not a constant:
 `PedAnimState::locomotion_speed` = the state's `Y AXIS DISTANCE` over the
@@ -319,3 +321,37 @@ shorter than its csv distance (man `ANTIC_LDIVE`: 0 → −1.23 against
 continuously, so the runtime applies the csv distances (linear per row,
 DSN-89) and holds them through the ground rows. The sensing rule that
 picks these states is unrecovered (UNK-43).
+
+## Runtime crowd and retail soak evidence (F19-B.2/B.3)
+
+The windowed app and the headless evidence path (`--headless`, the
+`peds=` smoke-record fields) run the same four systems
+(`mm2_app::crowd`): recycle/refill → react → walk → animate. Density
+resolves from the player's pick, else the event's authored `Peds` dial,
+else the session default (0.5 → 24 walkers under the 48-walker cap);
+the draw stream is seeded from the session seed, so a restart with the
+same seed fields the same crowd (F19-AC06). There is still no
+collider — a walker's whole response to a car is the authored
+stop/look/dive chain.
+
+Measured on retail (fingerprint `e91e6cd4b2ae30d9`), 3600 frames
+(60 s of game time) per city, headless, default density, driver
+`hold` — `cargo test -p mm2_app --test app pedestrian_retail -- --nocapture`
+(spawns `mm2 --headless --city <city> --frames 3600`):
+
+| city | live/target | spawned / recycled | corner hops / turn-arounds | wary / dive / rejoin | ms/frame (3 runs) |
+| --- | --- | --- | --- | --- | --- |
+| San Francisco | 24 / 24 | 134 / 110 | 25 / 0 | 0 / 0 / 0 | 5.2–8.2 |
+| London | 24 / 24 | 108 / 84 | 64 / 22 | 1 / 1 / 1 | 8.5–18.4 |
+
+The census fields are identical run to run (fixed seed); only the
+wall-clock column moves with the machine's load. The run stays finite
+and inside the actor budget in both cities, the crowd recycles as the
+driving player leaves its bubble, and London's run caught a real
+wary→dive→rejoin cycle (an ambient car bore down on a walker, which
+dove clear through the authored chain and walked back to its curve —
+the F19-AC03 movement/reaction half at original-content level;
+F19-C owns the rendered inspection). Single no-crowd baseline runs on
+the same machine measured 13.2 ms/frame (SF) and 11.1 ms (London);
+the machine is shared, so wall-clock figures are order-of-magnitude
+evidence, not a benchmark (F30-A owns the frame budget proper).
