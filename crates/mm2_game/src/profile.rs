@@ -852,7 +852,15 @@ impl ProfileStore {
     /// `version` before serializing.
     pub fn save(&self, profile: &mut PlayerProfile) -> Result<(), ProfileError> {
         profile.version = PROFILE_SCHEMA_VERSION;
-        profile.revision += 1;
+        // Saturating would be wrong: load keeps the highest revision, so a
+        // saturated document could never beat its own `.bak` and the save
+        // would be silently undone. Refuse before touching any file.
+        profile.revision = profile.revision.checked_add(1).ok_or_else(|| {
+            ProfileError::Invalid(format!(
+                "revision counter exhausted at {}; the profile cannot be saved again",
+                profile.revision
+            ))
+        })?;
         profile.validate().map_err(ProfileError::Invalid)?;
         let bytes =
             serde_json::to_vec_pretty(profile).map_err(|e| ProfileError::Invalid(e.to_string()))?;

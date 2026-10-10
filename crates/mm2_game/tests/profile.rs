@@ -597,3 +597,45 @@ fn a_finish_count_pinned_at_the_u32_ceiling_saturates() {
     assert_eq!(record.finishes, u32::MAX);
     assert_eq!(record.best_race_ticks, Some(8_000));
 }
+
+/// A hand-edited document at `revision = u64::MAX` loads cleanly, but
+/// the next save has no revision to advance to. Saturating would let the
+/// save lose to its own `.bak` on load, so `save` reports the error and
+/// leaves every file (and the in-memory counter) untouched.
+#[test]
+fn a_revision_at_the_u64_ceiling_is_reported_not_wrapped() {
+    let (_dir, store) = store();
+    let mut profile = store
+        .create("Ceiling", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    store.save(&mut profile).unwrap();
+    let main = store.root().join("driver-0.json");
+    let backup = store.root().join("driver-0.json.bak");
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&main).unwrap()).unwrap();
+    doc["revision"] = serde_json::json!(u64::MAX);
+    std::fs::write(&main, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+    let (main_bytes, backup_bytes) = (
+        std::fs::read(&main).unwrap(),
+        std::fs::read(&backup).unwrap(),
+    );
+
+    let mut loaded = store.load(&profile.id).unwrap().profile;
+    assert_eq!(loaded.revision, u64::MAX);
+    match store.save(&mut loaded).unwrap_err() {
+        ProfileError::Invalid(reason) => {
+            assert!(
+                reason.contains("revision counter exhausted"),
+                "unexpected: {reason}"
+            )
+        }
+        other => panic!("expected an exhausted-revision error, got {other}"),
+    }
+    assert_eq!(loaded.revision, u64::MAX);
+    assert_eq!(std::fs::read(&main).unwrap(), main_bytes);
+    assert_eq!(std::fs::read(&backup).unwrap(), backup_bytes);
+    assert!(!store.root().join("driver-0.json.tmp").exists());
+    let again = store.load(&profile.id).unwrap();
+    assert!(!again.recovered_from_backup);
+    assert_eq!(again.profile.revision, u64::MAX);
+}
