@@ -69,3 +69,25 @@ Statuses:
   (Pro Points formula is UNK-8), original hover/click behavior,
   per-screen help content, Driver's Stats fields. None of these are
   claimed verified.
+
+## F17 acceptance evidence (F17-C)
+
+Evidence level reached: **synthetic integration** (the `mm2_app`
+`tests/menu.rs` suite through the real `Session::begin`, profile store
+and pause/results overlays on a fixture install). No rendered or
+original-content capture was produced: the `--menu --menu-screen <s>
+--screenshot` path panics at window creation in a session with no
+display (`winit … no handler was set`).
+
+| AC | Evidence (`crates/mm2_app/tests/menu.rs` unless noted) | State |
+|---|---|---|
+| F17-AC01 | `a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch` — driver, car, event, play, result, reward, back to menu | synthetic only |
+| F17-AC02 | same test (relaunch finds the reward); `option_changes_apply_persist_and_reset`, `volume_rows_step_wrap_persist_and_reset` | synthetic only |
+| F17-AC03 | `any_connected_pad_navigates_the_main_menu_through_hot_plug`, `the_pause_menu_answers_any_pad`, `results_rows_answer_any_connected_pad` (`tests/results.rs`); Esc/back: `a_right_click_backs_out_without_clobbering_the_restored_focus`. Visible focus unchecked by eye | open: rendered |
+| F17-AC04 | `a_failed_launch_returns_to_the_menu_with_the_reason`, `an_empty_install_reports_instead_of_faking`, `unresolvable_records_stay_listed_with_their_reasons` | synthetic only |
+| F17-AC05 | the capability tables above; remaining rows are `tracked`/`open` | open: Driver's Stats, Multiplayer, help "?", original art |
+| F17-AC06 | `cruise_launches_then_quit_returns_to_the_menu` (two cycles: one menu root, one camera, one player, no leaked rows); audio loops not covered | partial |
+
+Not yet covered: a rendered capture of each screen at normal and
+high-DPI sizes, a window resized during loading, and a duplicate-audio
+check across repeated transitions.
