@@ -1957,6 +1957,33 @@ delay/jitter/loss matrix exists at both levels now — in-process (see
 harness ("Process-level grid", same cell table). LAN and Internet
 scope remain open.
 
+## Wait-shape audit of the net/thread tests (OPR-6.4)
+
+One-time sweep of `crates/mm2_app/tests/net_*.rs`, `tests/support` and
+the `mm2_net` tests for the forbidden shape (a fixed frame count or a
+sleep standing in for "the datum has crossed a socket or thread").
+
+- **Compliant.** `net_app.rs` waits through `spin` / `spin_mut` /
+  `until_begun` / `until_exit` / `until_wire` (condition-checked, bounded
+  loops that panic on the deadline). `mm2_net` tests read with blocking
+  `recv`s under a socket timeout; their `for _ in 0..N` loops are bounded
+  message skips (`recv_roster`), and the `thread::sleep`s in `impair.rs`
+  and `lobby.rs` are pump back-off inside production code.
+  `Proc::wait_timeout` polls `try_wait` against a deadline.
+- **Deliberate quiet-time graces** (a *negative* claim needs time to pass,
+  there is nothing to wait for): `net_app.rs` duplicate-drain after the
+  reset ask (`requests_granted == 1` is already spun on first), the
+  `netdrive::INPUT_STALE` wait, and the 300 ms writer-flush grace in
+  `net_drive.rs` before reading proxy counters.
+- **Not convertible from the test side.** `net_drive.rs` sleeps 400 ms
+  (ten sites) between `event=started` on the host and arming the
+  impairment proxy so the one-shot `Start` verb crosses the clean lane
+  first, and `net_edge.rs::a_killed_host_ends_a_driving_client` sleeps 2 s
+  to let snapshots flow before the kill. The `mm2` client prints no record
+  when it has applied `Start` or its first `Snap`, so there is no
+  condition to spin on. Converting them needs a client-side record in
+  production code; filed as a follow-up rather than done here.
+
 ## Evidence level
 
 Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real
