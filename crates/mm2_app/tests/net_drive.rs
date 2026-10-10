@@ -2181,20 +2181,13 @@ struct BreakdownRun {
 /// (`--until-repaired`, bounded by a wall-clock deadline). With
 /// `impair` the client reaches the host through a seeded
 /// [`ImpairProxy`] armed on both directions once `Start` crossed clean.
-fn run_breakdown(retail: &std::path::Path, impair: Option<Impair>) -> BreakdownRun {
+fn run_breakdown(retail: &std::path::Path, event: &str, impair: Option<Impair>) -> BreakdownRun {
     let mut host_args = host_args(retail, 40_000);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(
-        [
-            "--event",
-            "checkpoint:0",
-            "--wreck-at",
-            "900",
-            "--wreck-seat",
-            "1",
-        ]
-        .into_iter()
-        .map(String::from),
+        ["--event", event, "--wreck-at", "900", "--wreck-seat", "1"]
+            .into_iter()
+            .map(String::from),
     );
     let mut host = Proc::spawn(MM2_EXE, &host_args);
     let addr = listening_addr(&host);
@@ -2292,7 +2285,24 @@ fn a_remote_drivers_breakdown_crosses_two_processes() {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    assert_breakdown(&run_breakdown(&retail, None));
+    assert_breakdown(&run_breakdown(&retail, "checkpoint:0", None));
+}
+
+/// The Blitz leg of the same breakdown (F26-AC06): a networked Blitz
+/// session pays a remote human's wreck the same five dead seconds,
+/// through the same production arm (DMG-2/RACE-5 name the two modes
+/// together). Blitz fields no opponents (BLZ-2), so the roster is the
+/// two humans alone.
+///
+/// Skipped without `MM2_RETAIL`. Loopback scope; the destruction is the
+/// knob's and nothing is rendered.
+#[test]
+fn a_remote_drivers_breakdown_crosses_two_processes_in_a_blitz() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    assert_breakdown(&run_breakdown(&retail, "blitz:0", None));
 }
 
 /// The same breakdown on a bad link (F25-B follow-up 1 × AC03): the
@@ -2320,7 +2330,7 @@ fn a_remote_drivers_breakdown_survives_an_impaired_link() {
         duplicate: 0.10,
         reorder: 0.10,
     };
-    let run = run_breakdown(&retail, Some(recipe));
+    let run = run_breakdown(&retail, "checkpoint:0", Some(recipe));
     // The recipe really bit while the breakdown played out.
     let (up, down) = run
         .link
