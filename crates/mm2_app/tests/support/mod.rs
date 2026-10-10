@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -73,6 +73,7 @@ pub struct Proc {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
+    stderr: Arc<Mutex<String>>,
 }
 
 impl Proc {
@@ -88,10 +89,24 @@ impl Proc {
             .env_remove("RUST_LOG")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn {exe}: {e}"));
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+        let stderr_pipe = child.stderr.take().unwrap();
+        // Drained to a buffer so a failing leg can print why the child
+        // died; an undrained pipe would also stall a chatty child.
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&stderr);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr_pipe).lines() {
+                let Ok(line) = line else { return };
+                let mut sink = sink.lock().unwrap();
+                sink.push_str(&line);
+                sink.push('\n');
+            }
+        });
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -105,6 +120,7 @@ impl Proc {
             child,
             stdin,
             lines: rx,
+            stderr,
         }
     }
 
@@ -156,6 +172,19 @@ impl Proc {
     /// Reap the child and return its exit status — for `quit` legs.
     pub fn wait(mut self) -> std::process::ExitStatus {
         self.child.wait().expect("failed to wait for child")
+    }
+
+    /// Reap the child and fail with its exit status and everything it
+    /// wrote to stderr (plus its final `record`) unless it exited cleanly.
+    pub fn wait_success(mut self, who: &str, record: &str) {
+        let status = self.child.wait().expect("failed to wait for child");
+        // The drain thread ends at EOF, which the exit has just caused.
+        thread::sleep(Duration::from_millis(50));
+        let stderr = self.stderr.lock().unwrap().clone();
+        assert!(
+            status.success(),
+            "{who} did not exit cleanly: {status}\nrecord: {record}\nstderr:\n{stderr}"
+        );
     }
 
     /// SIGKILL the child — the abrupt-loss legs' way to make a process

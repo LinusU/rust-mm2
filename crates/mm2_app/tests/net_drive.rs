@@ -403,8 +403,8 @@ fn run_reset_pair(
     let bound = Duration::from_secs(90 + 60);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
-    assert!(alice.wait().success(), "alice did not exit cleanly");
-    assert!(bob.wait().success(), "bob did not exit cleanly");
+    alice.wait_success("alice", &alice_rec);
+    bob.wait_success("bob", &bob_rec);
     let link = proxy
         .as_ref()
         .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));
@@ -2533,8 +2533,8 @@ fn run_shove_trio(
     let bound = Duration::from_secs(90);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
-    assert!(alice.wait().success(), "alice did not exit cleanly");
-    assert!(bob.wait().success(), "bob did not exit cleanly");
+    alice.wait_success("alice", &alice_rec);
+    bob.wait_success("bob", &bob_rec);
     let link = proxy
         .as_ref()
         .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));
