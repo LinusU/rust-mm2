@@ -2685,3 +2685,244 @@ fn assert_shove_converged(control_bob: &str, alice: &str, bob: &str) {
     assert!(net_field(alice).own_settles <= 1, "{alice}");
     assert_eq!(net_field(bob).own_settles, 0, "{bob}");
 }
+
+/// F26-AC03's real impaired run: a hosted retail race whose data plane
+/// rides a seeded [`ImpairProxy`] recipe (30 % loss, duplication and
+/// reordering with a 40 ms ± 30 ms hold, both directions — the reset
+/// leg's recipe) while the race plays out. The host seat is the `--bot`
+/// course-follower racing the authored gates; the joined client is
+/// `--parked`, so it never moves and the authority decides everything
+/// it ever sees. A networked race fields none of the authored
+/// opponents (MP-4), so the two humans are the whole field.
+///
+/// The leg pins what every wall-clock window must show: race rows and
+/// per-seat progress tails crossed the lossy link and landed
+/// (`race>0a`, `prog>0a`), the client races the hosted generation of
+/// the same two-seat field (`mp=gen1`, `pos=n/2` — never a silently
+/// re-minted private race), the two processes name the same course
+/// (`cp=…/N` on both), and at least one recorded result reached the
+/// client over the impaired link (`results>=1` — in a measured run
+/// the host's finish landed while the client's own seat was still
+/// racing). A resolved client seat carries the wire's word for itself
+/// (`outcome=timed-out`), never a local one. Full terminal standings
+/// agreement across every recipe is the in-process `net_app`
+/// race-results matrix's pin; this leg is the real-socket,
+/// real-content, real-impairment run beside it.
+///
+/// Frame budgets stagger as the other legs do: the client's cap lands
+/// mid-race (measured: after the host's bot had finished), the host's
+/// later cap prints while its session — and `RaceState` — is still
+/// up, the only window a host record carries the race cells at all.
+/// The `--parked` seat can be reseated across a gate by the recovery
+/// path, so its `cp=` count is whatever the authority credited — the
+/// pin is the shared denominator, never a zero numerator. Skipped
+/// without `MM2_RETAIL=<dir>`. Same machine, loopback: the recipe is
+/// synthetic impairment on real sockets, not a measured WAN, and
+/// headless runs show no rendering.
+#[test]
+fn a_networked_retail_race_agrees_across_an_impaired_link() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 90_000);
+    // The retail world and a real event race, not the dev cruise.
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(
+        ["--city", "sf", "--event", "checkpoint:0", "--bot"]
+            .into_iter()
+            .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let proxy = ImpairProxy::loopback_seeded(addr, 0xF26_AC03).unwrap();
+    let mut client_args = join_args(&retail, proxy.addr(), "bob", 45_000);
+    client_args.push("--parked".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
+    start_when_ready(&mut host, 1);
+    // `Start` rides Down: let the still-clean lane deliver it (a
+    // one-shot verb has no retransmit), then arm both directions for
+    // the whole race window.
+    std::thread::sleep(Duration::from_millis(400));
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    proxy.set(LinkDir::Up, recipe);
+    proxy.set(LinkDir::Down, recipe);
+
+    // Bounds are failure guards, not expectations: a retail load on a
+    // contended machine is minutes, and the caps — not the bounds —
+    // decide when each record prints.
+    let bound = Duration::from_secs(600);
+    let rec = client.until_within("smoke=headless-physics", bound);
+    assert!(
+        client.wait().success(),
+        "the client did not exit cleanly: {rec}"
+    );
+    let host_rec = host.until_within("smoke=headless-physics", bound);
+    assert!(
+        host.wait().success(),
+        "the host did not exit cleanly: {host_rec}"
+    );
+    // The operator's evidence: both records, as the runs printed them.
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    // The recipe really bit on the wire in both directions.
+    let (up, down) = (proxy.stats(LinkDir::Up), proxy.stats(LinkDir::Down));
+    assert!(up.frames_in > 0 && down.frames_in > 0, "{up:?} {down:?}");
+    assert!(
+        up.dropped + up.duplicated + up.reordered > 0,
+        "no upstream impairment observed: {up:?}"
+    );
+    assert!(
+        down.dropped + down.duplicated + down.reordered > 0,
+        "no downstream impairment observed: {down:?}"
+    );
+    drop(proxy);
+
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+
+    // Race rows and per-seat progress tails crossed the lossy link
+    // and landed on the client — the impaired run is a data-plane run.
+    let net = net_field(&rec);
+    assert!(net.race_applied > 0, "no race row landed: {rec}");
+    assert!(net.progress_applied > 0, "no progress tail landed: {rec}");
+
+    // The client races the hosted generation of the same two-seat
+    // field and the same course as the host — no silently re-minted
+    // private race, no divergent definition.
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
+    assert!(
+        field(&rec, "pos").ends_with("/2"),
+        "the client's live order does not hold both seats: {rec}"
+    );
+    fn course(line: &str) -> &str {
+        let cp = field(line, "cp");
+        &cp[cp.find('/').unwrap()..]
+    }
+    assert_eq!(course(&rec), course(&host_rec), "{host_rec}\n{rec}");
+
+    // At least one recorded result reached the client over the
+    // impaired link (measured: the host's finish crossed while the
+    // client's own seat was still racing), and the host holds a
+    // recorded result of its own (measured: `outcome=finished` — the
+    // bot raced the course to the end).
+    let results: u64 = field(&rec, "results").parse().unwrap();
+    assert!(results >= 1, "no result crossed the link: {rec}");
+    let host_results: u64 = field(&host_rec, "results").parse().unwrap();
+    assert!(host_results >= 1, "the host recorded no result: {host_rec}");
+
+    // A resolved client seat carries the authority's word only: the
+    // parked car is timed out by the wire (or still racing when its
+    // cap lands), never finished and never self-awarded.
+    if let Some(outcome) = rec
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("outcome="))
+    {
+        assert_eq!(outcome, "timed-out", "{rec}");
+    }
+}
+
+/// F26-AC05/AC02's rematch leg at process level on a retail city: the
+/// same two OS processes play two rounds of one lobby without
+/// reconnecting. Round one runs for a bounded wall-clock window — the
+/// host's full-throttle seat drives the retail city — then the host
+/// `cancel`s back to the lobby, the client readies itself again (its
+/// `--ready` was a command-line flag) and `start` mints generation 2.
+/// The client's frame cap is sized to land inside round two (round one
+/// burns ~30 s of frames; even a much faster headless run leaves the
+/// cap inside round two), so its record must show the round-two
+/// world: the same non-empty `SiteTable` digest the host stamps (the
+/// world re-stamped intact across the restart), every prop row
+/// accepted (`mism0` — a prop stage or ledger carried over from round
+/// one is scoped to the old generation and would be refused or
+/// applied as stale), and the cruise's parked-car skip (`parked0`)
+/// still in force. Both records are printed as the operator's
+/// evidence, the client's live `bng` census included.
+///
+/// What stays the in-process `net_app` leg's
+/// (`a_rematch_does_not_carry_the_last_rounds_broken_props_to_the_client`):
+/// the phase-level dormancy pin — a round-two world that stays
+/// dormant until the host breaks something new in it. An end-of-run
+/// record cannot watch two mid-round worlds, and prop phases are not
+/// on the wire record. Skipped without `MM2_RETAIL=<dir>`.
+#[test]
+fn a_rematch_on_a_retail_city_restamps_the_world_for_the_same_client() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
+    // The retail world, not the dev cruise.
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(["--city".into(), "sf".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "alice", 35_000));
+    start_when_ready(&mut host, 1);
+    host.until("remote participant spawned");
+
+    // Round one: a bounded window of real driving on the retail city.
+    std::thread::sleep(Duration::from_secs(25));
+    host.cmd("cancel");
+    host.until("event=cancelled generation=1");
+    // Nobody pressed anything: the readiness came from the client's
+    // `--ready`, after the host's cancel cleared it.
+    host.until("ready=true");
+    host.cmd("start");
+    host.until("event=started generation=2");
+    host.until("remote participant spawned");
+
+    // Round two plays on (the host stays up): the client's cap lands
+    // mid-round-2 and its record reads the restarted world. The bound
+    // is a failure guard, not an expectation — a retail reload on a
+    // contended machine is minutes.
+    let rec = client.until_within("smoke=headless-physics", Duration::from_secs(600));
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(
+        field(&rec, "mp"),
+        "gen2",
+        "the cap landed outside round two: {rec}"
+    );
+    assert_eq!(field(&rec, "phase"), "playing", "{rec}");
+    assert!(
+        client.wait().success(),
+        "the client did not exit cleanly: {rec}"
+    );
+
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    assert!(
+        host.wait().success(),
+        "the host did not exit cleanly: {host_rec}"
+    );
+    // The operator's evidence: both records, as the runs printed them
+    // (the client's `bng=` census shows its round-two world really
+    // evolved).
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    // Round two stamped a real, identical world on both processes —
+    // the restart re-stamped it, it did not carry a stale table.
+    let (count, digest, _landed, mismatched) = props_field(&rec);
+    assert!(count > 0, "the retail city stamps placements: {rec}");
+    assert_eq!(mismatched, 0, "the client refused the host's rows: {rec}");
+    let (host_count, host_digest, ..) = props_field(&host_rec);
+    assert_eq!(
+        (host_count, host_digest),
+        (count, digest),
+        "host and client stamped different round-two worlds:\nhost   {host_rec}\nclient {rec}"
+    );
+    // Every round-two row was scoped to round two: nothing the host
+    // re-sent for the ended generation slipped through as stale, and
+    // nothing the client's own stage still held was misapplied. (The
+    // `mism0` cell asserted above is that count.)
+    // The networked cruise kept skipping kerbside parked cars in the
+    // restarted round, like the clean leg's first one.
+    assert_eq!(parked_cars(&rec), 0, "{rec}");
+    assert_eq!(parked_cars(&host_rec), 0, "{host_rec}");
+}
