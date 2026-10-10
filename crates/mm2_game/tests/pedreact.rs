@@ -10,6 +10,7 @@ use mm2_game::pedreact::{
 };
 
 const POLICY: ReactPolicy = ReactPolicy {
+    sense_range: 35.0,
     min_speed: 2.0,
     alert_time: 3.0,
     dive_time: 1.2,
@@ -320,4 +321,21 @@ fn the_walk_back_is_bounded_and_arrives() {
     // Hostile input holds still.
     assert_eq!(rejoin_step(at, Vec3::NAN, 1.0, 0.25), (at, false));
     assert_eq!(rejoin_step(at, home + Vec3::X, f32::NAN, 0.25), (at, false));
+}
+
+#[test]
+fn a_car_beyond_the_sense_range_is_not_noticed() {
+    let near = Vec3::new(30.0, 0.0, 0.0);
+    let far = Vec3::new(36.0, 0.0, 0.0);
+    let mut fast = car(60.0);
+    fast.position = Vec3::ZERO;
+    assert!(assess(near, &fast, &POLICY).is_some());
+    assert!(assess(far, &fast, &POLICY).is_none());
+}
+
+#[test]
+fn the_default_policy_carries_the_recovered_retail_thresholds() {
+    let d = ReactPolicy::default();
+    assert_eq!((d.sense_range, d.min_speed), (35.0, 1.0));
+    assert_eq!((d.alert_time, d.dive_time), (2.3, 0.75));
 }

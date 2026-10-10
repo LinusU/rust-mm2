@@ -10,9 +10,11 @@
 //! with the lateral travel of each window in the `X AXIS` columns
 //! (±2.2 m per leg, ≈4.4 m across the chain). *When* the original
 //! switches between them, and how it senses a car, is **unrecovered**
-//! (UNK-43): the thresholds in [`ReactPolicy`] are designed bounds, a
-//! constant-velocity time-to-contact test against the car's footprint,
-//! not original constants.
+//! (UNK-43) only in part: the retail sensing gate (35 m), speed floor
+//! (1 m/s) and the 2.3 s wary / 0.75 s dive time thresholds are
+//! recovered and bound in [`ReactPolicy`]; the time-to-contact is still
+//! a constant-velocity test against the car's footprint, which is
+//! designed, not the original's corridor test.
 //!
 //! The decision is a four-phase machine ([`Phase`]):
 //! `Walking → Wary → Diving → Rejoining → Walking`.
@@ -37,10 +39,15 @@ use bevy::prelude::Vec3;
 
 use crate::ped::PedAnimState;
 
-/// Designed sensing and timing bounds (UNK-43: none is an original
-/// constant).
+/// Sensing and timing bounds. `sense_range`, `min_speed`, `alert_time`
+/// and `dive_time` are the retail constants recovered from
+/// `Midtown2.exe` (UNK-43, `docs/research/pedanim.md` "Car sensing");
+/// the margins and the wary/dive/rejoin timers are designed bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReactPolicy {
+    /// Horizontal distance (m) from the car beyond which a walker does
+    /// not notice it (retail: squared distance < 1225).
+    pub sense_range: f32,
     /// A car slower than this (m/s) is not a threat: stopped, parked
     /// and crawling traffic does not scare anyone.
     pub min_speed: f32,
@@ -70,9 +77,10 @@ pub struct ReactPolicy {
 impl Default for ReactPolicy {
     fn default() -> Self {
         Self {
-            min_speed: 2.0,
-            alert_time: 3.0,
-            dive_time: 1.2,
+            sense_range: 35.0,
+            min_speed: 1.0,
+            alert_time: 2.3,
+            dive_time: 0.75,
             alert_margin: 1.5,
             dive_margin: 0.5,
             clear_hold: 1.0,
@@ -140,6 +148,9 @@ pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threa
         && car.half_length.is_finite()
         && car.half_width.is_finite();
     if !inputs_finite || speed < policy.min_speed {
+        return None;
+    }
+    if flat(ped - car.position).length() >= policy.sense_range {
         return None;
     }
     let dir = v / speed;

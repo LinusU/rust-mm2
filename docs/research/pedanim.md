@@ -320,7 +320,48 @@ shorter than its csv distance (man `ANTIC_LDIVE`: 0 → −1.23 against
 2.2) while `LDIVE_GROUNDL` starts at −2.22 — the clips do not chain
 continuously, so the runtime applies the csv distances (linear per row,
 DSN-89) and holds them through the ground rows. The sensing rule that
-picks these states is unrecovered (UNK-43).
+picks these states is recovered in part, see "Car sensing" below (UNK-43).
+
+## Car sensing (F19-B.7, read from `Midtown2.exe`)
+
+Addresses are this executable's. The walker class's per-frame update is
+`0x54b9a0`; its reaction state is the word at +0x10 (0 walking, 1 wary,
+2 diving), its target-car index +0x38, squared distance +0x34. Anim
+names are resolved at `0x54b200..` (`WALK_STAND`, `STAND_ANTIC`,
+`ANTIC*`, `ANTIC_{L,R}DIVE`, `WALK_{L,R}DIVE`, `RUN`, `BACKUP`, ...).
+
+- **Which cars**: the loop at `0x54ba4a` walks a linked list of items
+  of the four-slot table at `0x6b1df0` (stride 0x30, accessor
+  `0x534ad0`) and keeps the nearest by horizontal (x,z) squared
+  distance. AI/traffic cars are *inferred* to be absent from the table
+  (it is indexed by player slot); not proven.
+- **Range and speed**: nothing happens at squared distance ≥ 1225
+  (35 m) (`0x54bc1a`); the car's speed (its vtable +8) must exceed 1.0
+  (`0x54bc65`).
+- **Corridor tests**: `0x54e660` — along-axis distance `L` of the walker
+  from the car, signed by a direction flag at car-sim +0x304, must lie
+  in (0.25·field(+0x224), 20); lateral offset must lie inside
+  ±(0.5·field(+0x21c)+2). `0x54e8a0` is the same shape with `L` in
+  (0.25·field(+0x224), 35) and lateral ±(0.5·field(+0x21c)+4). Failing,
+  the distance output is 10000. The field names are not recovered.
+- **Time value**: `0x54e630` = (stored per-car factor at +0x24) ×
+  (`L` − 2). Treated as seconds to contact; the factor was not traced.
+- **Decision**: first test passes → value < 0.75 ⇒ dive, else < 2.3 ⇒
+  wary; second test passes → value < 2.3 ⇒ wary (never a dive); else
+  walking.
+- **Wary (`0x54d0e0`)**: turns the walker to face the car (`atan2` of
+  car − walker) and plays `ANTIC`; a sidewalk probe (`0x468e30`) decides
+  between walking on along the curve and stopping.
+- **Dive (`0x54d8b0`)**: on entry the heading is set from the car's
+  axis and a side value = dot(car axis, walker − car) is stored. If the
+  car's field +0x1554 (inferred steering input) > 0.85 the walker plays
+  `*_RDIVE`, if < −0.85 `*_LDIVE`, otherwise side value ≤ 0 ⇒ R, > 0 ⇒
+  L. `WALK_*DIVE` when the walker's current clip is `WALK`, else
+  `ANTIC_*DIVE`.
+- **Bound in the port**: `ReactPolicy` sense range 35 m, min speed
+  1 m/s, alert 2.3 s, dive 0.75 s. Not bound: the corridor geometry,
+  player-only filtering and the steering-based side choice (each needs
+  a field or table identity the disassembly did not settle).
 
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
@@ -439,6 +480,6 @@ process.
 Still open for F19, deliberately: the original's crossing behaviour
 (UNK-42 — sites measured, rule unrecovered; ordinary joins crossing
 vehicle lanes stay refused),
-the original car-sensing rule (UNK-43 — the runtime's constant-velocity
-time-to-contact test is designed, DSN-89), pedestrian audio, and any
+the rest of the original car-sensing rule (UNK-43 — the corridor
+geometry is still the designed constant-velocity test, DSN-89), pedestrian audio, and any
 human play-test judgement of the figures' feel (owner evidence).
