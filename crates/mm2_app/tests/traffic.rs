@@ -8,7 +8,7 @@
 //! off, and teardown removes everything.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use avian3d::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
@@ -30,7 +30,7 @@ use mm2_game::{
     SpawnPose, StuckWindow, VehicleDamage, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
-use mm2_net::Message;
+use mm2_net::{Impair, Message};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1107,185 @@ fn a_client_copies_the_hosts_traffic_and_retires_it_when_frames_stop() {
             .live(),
         0
     );
+}
+
+/// F26-AC01/AC03 (traffic, v19) under impairment: the host's real
+/// population, collected through the production row collector and the
+/// frame codec, crosses a real loopback socket and a seeded
+/// `ImpairProxy` in every cell of the shared matrix, and lands on a
+/// `Remote` client through the production `apply_traffic`. During the
+/// storm the client only ever holds copies of cars the host fielded
+/// (never more than the host's ids), and once the link is clean the
+/// next frame brings every host car to its copy, pose and class —
+/// within a deadline, whatever loss ate: a frame is the whole state.
+/// The recorded rows are `eprintln!`ed.
+///
+/// Evidence level: synthetic integration (a synthetic city and `va_*`
+/// classes, real sockets) — the host's lobby/relevancy wiring is the
+/// `net_app` legs' business; this cell feeds the frames the way
+/// `publish_traffic` does and receives them off the wire.
+#[test]
+fn the_traffic_copies_converge_through_each_impairment_cell() {
+    use std::collections::BTreeSet;
+    use std::sync::mpsc;
+
+    use mm2_net::{Client, Host, HostConfig, ImpairProxy, LinkDir, hello};
+
+    let install = city_install();
+    for (index, (name, impair)) in crate::support::impair_cells().into_iter().enumerate() {
+        let mut config = city_config();
+        config.authority = SessionAuthority::Host;
+        config.dev = DevOverrides::default();
+        let mut host_sim = test_app(config, vfs_of(install.path()));
+        let mut client_sim = client_app(install.path());
+        assert!(run_until(&mut host_sim, 12, |a| phase_is(
+            a,
+            SessionPhase::Playing
+        )));
+        assert!(run_until(&mut client_sim, 12, |a| phase_is(
+            a,
+            SessionPhase::Playing
+        )));
+
+        // The wire: a bare lobby host, the client dialled through the
+        // proxy, its frames forwarded to this thread.
+        let host = Host::listen_loopback(&HostConfig::new(1)).unwrap();
+        let proxy = ImpairProxy::loopback_seeded(host.addr(), 300 + index as u64).unwrap();
+        let mut peer = Client::join(
+            proxy.addr(),
+            &hello("net-impair-test".into(), name.into(), 1),
+        )
+        .expect("join through the proxy failed");
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            while let Ok(msg) = peer.recv() {
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut ledger = mm2_app::worldtraffic::TrafficLedger::default();
+        let mut fielded: BTreeSet<u32> = BTreeSet::new();
+        let send = |host: &Host, frame: &Message| host.ctl().broadcast(frame).unwrap();
+        let drain = |client: &mut App, wait: Duration| {
+            let mut newest = None;
+            while let Ok(msg) = rx.recv_timeout(wait) {
+                if let Message::Traffic { tick, .. } = &msg {
+                    newest = newest.max(Some(*tick));
+                    deliver(client, msg);
+                    run(client, 1);
+                }
+            }
+            newest
+        };
+
+        proxy.set(LinkDir::Down, impair);
+        for _ in 0..40 {
+            // Enough host updates that successive frames carry
+            // different session ticks.
+            run(&mut host_sim, 6);
+            let frame = host_frame(&mut host_sim, &mut ledger, None);
+            if let Message::Traffic { rows, .. } = &frame {
+                fielded.extend(rows.iter().map(|r| r.id));
+            }
+            send(&host, &frame);
+            drain(&mut client_sim, Duration::from_millis(4));
+            let held: BTreeSet<u32> = copies(&mut client_sim).iter().map(|c| c.0).collect();
+            assert!(
+                held.is_subset(&fielded),
+                "cell {name}: a copy of a car the host never fielded: {held:?} vs {fielded:?}"
+            );
+        }
+        let down = proxy.stats(LinkDir::Down);
+        assert_eq!(
+            down.overflowed, 0,
+            "cell {name} overflowed a lane: {down:?}"
+        );
+        if impair.delay > Duration::ZERO || impair.jitter > Duration::ZERO {
+            assert!(down.delayed > 0, "cell {name} delayed nothing: {down:?}");
+        }
+        if impair.loss >= 0.10 {
+            assert!(down.dropped > 0, "cell {name} dropped nothing: {down:?}");
+        }
+        if impair.duplicate > 0.0 {
+            assert!(
+                down.duplicated > 0,
+                "cell {name} duplicated nothing: {down:?}"
+            );
+        }
+        if impair.reorder > 0.0 {
+            assert!(
+                down.reordered > 0,
+                "cell {name} reordered nothing: {down:?}"
+            );
+        }
+
+        // The storm over: one more frame is the whole state, and the
+        // client must reach it. Frames still held in the lane flush
+        // first; the final one is recognised by its tick.
+        proxy.set(LinkDir::Down, Impair::default());
+        run(&mut host_sim, 6);
+        let final_frame = host_frame(&mut host_sim, &mut ledger, None);
+        let Message::Traffic {
+            tick: final_tick,
+            rows: final_rows,
+            ..
+        } = final_frame.clone()
+        else {
+            unreachable!()
+        };
+        send(&host, &final_frame);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let seen = drain(&mut client_sim, Duration::from_millis(20));
+            if seen.is_some_and(|t| t >= final_tick) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell {name}: the final traffic frame never arrived (want tick {final_tick}, saw {seen:?}, {:?})",
+                proxy.stats(LinkDir::Down)
+            );
+        }
+        let made = copies(&mut client_sim);
+        assert!(!final_rows.is_empty(), "cell {name}: the host fields cars");
+        for row in &final_rows {
+            let copy = made
+                .iter()
+                .find(|c| c.0 == row.id)
+                .unwrap_or_else(|| panic!("cell {name}: no copy of host car {}", row.id));
+            assert_eq!(copy.1, row.class, "cell {name}: car {} class", row.id);
+            // A copy keeps its row's velocity while the client's own
+            // updates run, so it sits a step or two past the pose; a
+            // stale or misplaced copy would be a lane or more away.
+            assert!(
+                copy.2.distance(Vec3::from_array(row.pos)) < 2.5,
+                "cell {name}: copy {:?} is not where the host's car is {:?}",
+                copy.2,
+                row.pos
+            );
+        }
+        let stage = client_sim
+            .world()
+            .resource::<mm2_app::netdrive::RemoteSnaps>()
+            .traffic();
+        eprintln!(
+            "traffic cell={name} cars={} copies={} landed={} stale={} unresolved={} mismatched={} down={down:?}",
+            final_rows.len(),
+            made.len(),
+            stage.landed(),
+            stage.stale(),
+            stage.unresolved(),
+            stage.mismatched(),
+        );
+        assert_eq!(stage.mismatched(), 0, "cell {name}: rosters disagreed");
+        assert_eq!(stage.unresolved(), 0, "cell {name}: a row named no car");
+
+        host.ctl().shutdown().unwrap();
+        drop(proxy);
+        let _ = reader.join();
+    }
 }
 
 /// Put one host cable car on a straight 100 m line, moving at cruise
