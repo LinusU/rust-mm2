@@ -19,18 +19,53 @@
 //! discovered `pedanim_*` files, authored frame windows vs clip
 //! length, and the expected archetype roster ([`EXPECTED_PEDS`]).
 //!
-//! `--strict` exits nonzero on parse failures, issues and missing
-//! expected archetypes. Authored quirks — the `pedmodel_wolf` partial
-//! archetype, the ASCII scene lists masquerading as content, and
-//! off-by-one frame windows — are reported but do not fail strict.
+//! F19-AC01 coverage: every discovered archetype is also loaded
+//! end-to-end through the runtime consumer itself
+//! ([`mm2_content::PedArchetype::load`] — the same call the crowd and
+//! the `--ped-lab` line-up make), and each expected archetype gets a
+//! supported / missing / unsupported status with a reason. `--strict`
+//! exits nonzero when any expected archetype is not supported by the
+//! runtime, in addition to parse failures and issues. Authored quirks
+//! — the `pedmodel_wolf` partial archetype, the ASCII scene lists
+//! masquerading as content, and off-by-one frame windows — are
+//! reported but do not fail strict.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use mm2_assets::Vfs;
-use mm2_content::{EXPECTED_PEDS, PED_REQUIRED_EXTS};
+use mm2_content::{EXPECTED_PEDS, PED_REQUIRED_EXTS, PedArchetype, PedLoadError};
 use mm2_formats::ped::{PedAnim, PedMod, PedModDialect, PedRays, PedRemap, PedSkel, PedStates};
 use mm2_formats::pkg::PkgShaders;
+
+/// Runtime coverage status of one archetype (F19-AC01): what the
+/// consumer the game actually runs ([`PedArchetype::load`]) says about
+/// it, not just what files were found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Coverage {
+    /// The runtime loads the archetype end-to-end (rig, skin, state
+    /// model, shader table and every referenced clip).
+    Supported,
+    /// A member the runtime requires does not resolve — data is
+    /// absent, whether lost or never authored (e.g. the partial
+    /// `pedmodel_wolf`).
+    #[default]
+    Missing,
+    /// Members are present but the runtime refuses them (parse, rig,
+    /// skin, shader-table or state-model failure).
+    Unsupported,
+}
+
+impl Coverage {
+    /// The status word as printed.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Coverage::Supported => "supported",
+            Coverage::Missing => "missing",
+            Coverage::Unsupported => "unsupported",
+        }
+    }
+}
 
 /// Per-archetype audit row.
 #[derive(Debug, Default)]
@@ -39,6 +74,10 @@ pub struct Archetype {
     pub stem: String,
     /// Whether the stem is in [`EXPECTED_PEDS`].
     pub expected: bool,
+    /// Runtime coverage status (F19-AC01).
+    pub coverage: Coverage,
+    /// Why: the load error, or what the runtime loaded.
+    pub coverage_detail: String,
     /// Parsed bone count (skeleton present and valid).
     pub bones: Option<usize>,
     /// `NumBones` header value.
@@ -520,7 +559,84 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
             r.missing_expected.push(format!("anim/{want}.*"));
         }
     }
+
+    // F19-AC01: runtime coverage. The status comes from the consumer
+    // the game itself runs — the crowd spawner and the `--ped-lab`
+    // line-up both call `PedArchetype::load` — so "supported" claims
+    // the runtime path works end-to-end, not just that files parse.
+    for a in &mut r.archetypes {
+        match PedArchetype::load(vfs, &a.stem) {
+            Ok(loaded) => {
+                a.coverage = Coverage::Supported;
+                a.coverage_detail = format!(
+                    "runtime loads {} clips, {} paint jobs",
+                    loaded.clip_count(),
+                    loaded.paint_jobs()
+                );
+            }
+            Err(PedLoadError::Missing(what)) => {
+                a.coverage = Coverage::Missing;
+                a.coverage_detail = format!("{what} absent");
+            }
+            Err(PedLoadError::MissingClip { state, clip }) => {
+                a.coverage = Coverage::Missing;
+                a.coverage_detail = format!("state {state} names missing clip anim/{clip}.anim");
+            }
+            Err(e) => {
+                a.coverage = Coverage::Unsupported;
+                a.coverage_detail = e.to_string();
+            }
+        }
+    }
     r
+}
+
+impl PedsReport {
+    /// `(expected, supported, missing, unsupported)` over
+    /// [`EXPECTED_PEDS`]. An expected archetype with no files at all
+    /// counts as missing — the denominator never shrinks (see
+    /// specs/QUALITY-GATES.md, "Expected denominators").
+    pub fn coverage_counts(&self) -> (usize, usize, usize, usize) {
+        let mut supported = 0;
+        let mut missing = 0;
+        let mut unsupported = 0;
+        for want in EXPECTED_PEDS {
+            match self
+                .archetypes
+                .iter()
+                .find(|a| a.stem == *want)
+                .map(|a| a.coverage)
+            {
+                Some(Coverage::Supported) => supported += 1,
+                Some(Coverage::Unsupported) => unsupported += 1,
+                _ => missing += 1,
+            }
+        }
+        (EXPECTED_PEDS.len(), supported, missing, unsupported)
+    }
+}
+
+/// The reason `--strict` must fail, or `None` when the report is
+/// clean: no parse failures, no issues, no missing expected
+/// archetypes, and every expected archetype supported by the runtime.
+fn strict_error(r: &PedsReport) -> Option<String> {
+    let (expected, supported, missing, unsupported) = r.coverage_counts();
+    let not_supported = expected - supported;
+    if r.failures.is_empty()
+        && r.issues.is_empty()
+        && r.missing_expected.is_empty()
+        && not_supported == 0
+    {
+        return None;
+    }
+    Some(format!(
+        "strict pedestrian audit: {} failures, {} issues, {} missing expected, \
+         {not_supported}/{expected} expected archetypes unsupported by the runtime \
+         ({missing} missing, {unsupported} unsupported)",
+        r.failures.len(),
+        r.issues.len(),
+        r.missing_expected.len(),
+    ))
 }
 
 /// True when every byte is printable ASCII or whitespace — retail ships
@@ -605,6 +721,28 @@ pub fn print_report(r: &PedsReport) {
             println!("  anim/{s}.anim");
         }
     }
+    // F19-AC01: the supported/missing/unsupported status per expected
+    // archetype, judged by the runtime consumer itself.
+    println!("\ncoverage (F19-AC01), by the runtime loader:");
+    for want in EXPECTED_PEDS {
+        match r.archetypes.iter().find(|a| a.stem == *want) {
+            Some(a) => println!("  {want}: {} — {}", a.coverage.as_str(), a.coverage_detail),
+            None => println!("  {want}: missing — no anim/{want}.* files discovered"),
+        }
+    }
+    for a in r.archetypes.iter().filter(|a| !a.expected) {
+        println!(
+            "  {} (extra): {} — {}",
+            a.stem,
+            a.coverage.as_str(),
+            a.coverage_detail
+        );
+    }
+    let (expected, supported, missing, unsupported) = r.coverage_counts();
+    println!(
+        "coverage summary: expected {expected} — supported {supported}, \
+         missing {missing}, unsupported {unsupported}"
+    );
     if !r.extras.is_empty() {
         println!("\nnon-rig records:");
         for (k, n) in &r.extras {
@@ -736,24 +874,14 @@ pub fn run(
     }
     print_report(&report);
     print_reactions(&vfs);
-    if strict
-        && !(report.failures.is_empty()
-            && report.issues.is_empty()
-            && report.missing_expected.is_empty())
-    {
-        return Err(format!(
-            "strict pedestrian audit: {} failures, {} issues, {} missing expected",
-            report.failures.len(),
-            report.issues.len(),
-            report.missing_expected.len()
-        )
-        .into());
+    if strict && let Some(msg) = strict_error(&report) {
+        return Err(msg.into());
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mm2_assets::InstallMount;
 
@@ -763,7 +891,7 @@ mod tests {
         std::fs::write(p, bytes).unwrap();
     }
 
-    fn vfs_of(dir: &Path) -> Vfs {
+    pub(crate) fn vfs_of(dir: &Path) -> Vfs {
         let mut vfs = Vfs::new();
         mm2_assets::mount_install(&mut vfs, dir, &InstallMount::default()).unwrap();
         vfs
@@ -862,7 +990,7 @@ mtxn 1 1 1
 ";
 
     /// A complete synthetic archetype: 3 bones, fpf = (3+1)*3 = 12.
-    fn write_arch(dir: &Path, stem: &str) {
+    pub(crate) fn write_arch(dir: &Path, stem: &str) {
         write(dir, &format!("anim/{stem}.skel"), SKEL.as_bytes());
         write(dir, &format!("anim/{stem}.csv"), CSV.as_bytes());
         write(dir, &format!("anim/{stem}.rays"), RAYS.as_bytes());
@@ -891,6 +1019,83 @@ mtxn 1 1 1
         assert!(r.failures.is_empty());
         assert_eq!(r.poses_sampled, 6); // 2 states × 3 sampled frames
         assert_eq!(r.missing_expected.len(), EXPECTED_PEDS.len() - 1);
+        // F19-AC01: the runtime loader loads the complete archetype
+        // end-to-end; the three expected-but-absent archetypes count
+        // as missing, never as silently dropped denominators.
+        assert_eq!(a.coverage, Coverage::Supported);
+        assert!(a.coverage_detail.contains("2 clips"), "{a:?}");
+        assert_eq!(r.coverage_counts(), (4, 1, 3, 0));
+        // A report whose expected archetypes are absent or unsupported
+        // must fail `--strict`.
+        assert!(strict_error(&r).is_some());
+    }
+
+    #[test]
+    fn coverage_reports_missing_and_unsupported_archetypes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+
+        // An extra partial archetype (retail's pedmodel_wolf shape: a
+        // lone skeleton) is missing its runtime members, by name.
+        write(d, "anim/pedmodel_wolf.skel", SKEL.as_bytes());
+        let r = audit(&vfs_of(d));
+        let wolf = r
+            .archetypes
+            .iter()
+            .find(|a| a.stem == "pedmodel_wolf")
+            .expect("wolf row");
+        assert_eq!(wolf.coverage, Coverage::Missing);
+        assert!(
+            wolf.coverage_detail.contains("anim/pedmodel_wolf.mod"),
+            "{wolf:?}"
+        );
+
+        // Members present but unusable by the runtime: an unparseable
+        // state model refuses the archetype — unsupported, with the
+        // loader's own reason naming the file.
+        write(d, "anim/pedmodel_man.csv", b"\xFF\xFE not text");
+        let r = audit(&vfs_of(d));
+        let man = &r.archetypes[0];
+        assert_eq!(man.coverage, Coverage::Unsupported);
+        assert!(
+            man.coverage_detail.contains("anim/pedmodel_man.csv"),
+            "{man:?}"
+        );
+        assert_eq!(r.coverage_counts(), (4, 0, 3, 1));
+        // Strict fails on this report (the audit's own parsers also
+        // report the corrupt csv — the coverage status adds the
+        // per-archetype reason, it does not replace those).
+        assert!(strict_error(&r).is_some());
+    }
+
+    #[test]
+    fn coverage_a_missing_clip_makes_the_archetype_missing_not_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+        // A state model naming a clip nobody shipped is absent data,
+        // not a parser failure.
+        std::fs::remove_file(d.join("anim/xwalk.anim")).unwrap();
+        let r = audit(&vfs_of(d));
+        let man = &r.archetypes[0];
+        assert_eq!(man.coverage, Coverage::Missing);
+        assert!(man.coverage_detail.contains("xwalk"), "{man:?}");
+        assert_eq!(r.coverage_counts(), (4, 0, 4, 0));
+    }
+
+    #[test]
+    fn strict_error_is_none_only_for_a_fully_supported_roster() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        for stem in EXPECTED_PEDS {
+            write_arch(d, stem);
+        }
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.coverage_counts(), (4, 4, 0, 0));
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+        assert!(strict_error(&r).is_none());
     }
 
     #[test]

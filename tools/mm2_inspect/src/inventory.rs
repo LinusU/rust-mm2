@@ -116,7 +116,7 @@ pub fn build(
     families.push(lessons);
     families.push(placement(vfs, &paths));
     families.push(audio(&paths));
-    families.push(pedestrians(&paths));
+    families.push(pedestrians(vfs, &paths));
     families.push(multiplayer(&paths));
     families.push(traffic(&paths));
     families.push(breakables(&paths));
@@ -621,8 +621,11 @@ fn audio(paths: &[String]) -> Family {
     f
 }
 
-/// `anim/pedmodel_*` archetypes requiring mod+skel+rays+shaders.
-fn pedestrians(paths: &[String]) -> Family {
+/// `anim/pedmodel_*` archetypes requiring mod+skel+rays+shaders, and
+/// (F19-AC01) judged by the runtime consumer itself: every discovered
+/// stem is loaded end-to-end through [`mm2_content::PedArchetype`],
+/// the same call the crowd spawner and the `--ped-lab` line-up make.
+fn pedestrians(vfs: &Vfs, paths: &[String]) -> Family {
     let mut f = Family::new("pedestrian archetypes");
     f.expected = EXPECTED_PEDS.len();
 
@@ -658,9 +661,7 @@ fn pedestrians(paths: &[String]) -> Family {
             .iter()
             .filter(|e| !exts.contains(**e))
             .collect();
-        if missing.is_empty() {
-            f.accepted += 1;
-        } else {
+        if !missing.is_empty() {
             f.rejected.push(Rejected {
                 entry: format!("anim/{stem}.*"),
                 reason: format!(
@@ -672,6 +673,14 @@ fn pedestrians(paths: &[String]) -> Family {
                         .join(", ")
                 ),
             });
+        } else {
+            match mm2_content::PedArchetype::load(vfs, stem) {
+                Ok(_) => f.accepted += 1,
+                Err(e) => f.rejected.push(Rejected {
+                    entry: format!("anim/{stem}.*"),
+                    reason: format!("runtime cannot load: {e}"),
+                }),
+            }
         }
         if !EXPECTED_PEDS.contains(&stem.as_str()) {
             f.extras += 1;
@@ -685,9 +694,17 @@ fn pedestrians(paths: &[String]) -> Family {
             });
         }
     }
-    f.unverified = archetypes.len() + clips;
+    // Clips: judged per file by `mm2-inspect peds` (which parses every
+    // `pedanim_*` clip), but only through their archetype here, so
+    // this inventory keeps them unverified.
+    f.unverified = clips;
     f.notes.push(format!(
-        "{clips} pedanim_* animation clips discovered; the definition-side formats (.skel/.csv/.remap/.rays/.anim/.shaders/.mod) are deep-parsed by `mm2-inspect peds` (F19-A.1/A.2) — no runtime consumer exists yet, so records stay unverified"
+        "{clips} pedanim_* animation clips discovered; each discovered archetype is \
+         loaded end-to-end by the runtime consumer the crowd and `--ped-lab` use \
+         (`mm2_content::PedArchetype`), and the definition-side formats \
+         (.skel/.csv/.remap/.rays/.anim/.shaders/.mod) are deep-parsed per file by \
+         `mm2-inspect peds` (F19-A.1/A.2/A.3/A.4), which also reports the \
+         supported/missing/unsupported coverage per expected archetype (F19-C)"
     ));
     f
 }
@@ -1058,10 +1075,13 @@ mod tests {
             b"Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty\nnone,0,0,0,7,0,0.1,0.0,3,50,1,0,0,1,6,0,0.2,0.0,4,40,1\n",
         );
         write(d, "race/london/mmcrashdata.csv", b"not,a,table\n");
-        write(d, "anim/pedmodel_man.mod", b"");
-        write(d, "anim/pedmodel_man.skel", b"");
-        write(d, "anim/pedmodel_man.rays", b"");
-        write(d, "anim/pedmodel_man.shaders", b"");
+        // A complete archetype the runtime loads end-to-end (F19-C) …
+        crate::peds::tests::write_arch(d, "pedmodel_man");
+        // … and a presence-complete one the runtime refuses.
+        write(d, "anim/pedmodel_broken.mod", b"");
+        write(d, "anim/pedmodel_broken.skel", b"");
+        write(d, "anim/pedmodel_broken.rays", b"");
+        write(d, "anim/pedmodel_broken.shaders", b"");
         write(d, "anim/cvs/entries", b"");
         write(d, "aud/aud11/engine.wav", b"");
 
@@ -1141,7 +1161,21 @@ mod tests {
         assert_eq!(placement.unverified, 1); // sf/props.csv
 
         let peds = family(&report, "pedestrian archetypes");
-        assert_eq!((peds.expected, peds.discovered, peds.accepted), (4, 1, 1));
+        // pedmodel_man loads through the runtime consumer; the
+        // presence-complete pedmodel_broken does not; the three other
+        // expected archetypes are undiscovered.
+        assert_eq!((peds.expected, peds.discovered, peds.accepted), (4, 2, 1));
+        assert!(
+            peds.rejected
+                .iter()
+                .any(|r| r.entry == "anim/pedmodel_broken.*"
+                    && r.reason.starts_with("runtime cannot load"))
+        );
+        assert_eq!(peds.extras, 1); // pedmodel_broken
+        // Only clip records stay unverified — the archetypes are
+        // judged here, not blind-counted. The fixture ships no
+        // `pedanim_*`-named clips, so nothing remains unjudged.
+        assert_eq!(peds.unverified, 0);
         assert!(
             peds.rejected
                 .iter()
