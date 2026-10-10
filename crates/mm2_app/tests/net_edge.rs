@@ -33,6 +33,11 @@ const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
 const JOIN_EXE: &str = env!("CARGO_BIN_EXE_mm2-join");
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 
+/// How long a client may take to notice a stopped host: the
+/// `LIVENESS_TIMEOUT` (5 s) plus slack for process start and a loaded
+/// runner. The legs spin on this deadline, never a fixed sleep.
+const STOPPED_HOST_BOUND: Duration = Duration::from_secs(30);
+
 /// `mm2-join`'s flags — the same shape `net_join` drives.
 fn join_args(
     install: &std::path::Path,
@@ -311,6 +316,46 @@ fn a_killed_host_closes_a_parked_client() {
     let closed = client.until("event=closed");
     assert!(closed.starts_with("event=closed"), "{closed}");
     assert_eq!(client.wait_timeout(WAIT).code(), Some(1));
+}
+
+/// The dead-but-open half of AC04: SIGSTOP leaves the host's sockets
+/// open and silent, so no read ever errors on its own. The lobby's
+/// keepalive makes the silence itself the signal — a parked
+/// `mm2-join` reports `event=closed` and exits 1 inside the liveness
+/// bound (a few keepalive intervals, with slack for a loaded runner).
+#[test]
+fn a_stopped_host_closes_a_parked_client() {
+    let install = tempfile::tempdir().unwrap();
+    let host = Proc::spawn(HOST_EXE, &dev_host_args(install.path()));
+    let (addr, _fp, _) = listening(&host);
+
+    let client = Proc::spawn(JOIN_EXE, &join_args(install.path(), addr, "alice", &[]));
+    assert!(client.line().starts_with("connected="));
+
+    host.stop();
+    let closed = client.until_within("event=closed", STOPPED_HOST_BOUND);
+    assert!(closed.starts_with("event=closed"), "{closed}");
+    assert_eq!(client.wait_timeout(WAIT).code(), Some(1));
+}
+
+/// The same silent host seen by a headless `mm2 --join`: the loss is
+/// the named `lost the host` failure and the app exits nonzero.
+#[test]
+fn a_stopped_host_ends_a_parked_app_client() {
+    let install = tempfile::tempdir().unwrap();
+    let host = Proc::spawn(HOST_EXE, &dev_host_args(install.path()));
+    let (addr, _fp, _) = listening(&host);
+
+    let client = Proc::spawn(MM2_EXE, &mm2_join_args(install.path(), addr, 100_000));
+    host.until("event=joined");
+
+    host.stop();
+    let rec = client.until_within("smoke=", STOPPED_HOST_BOUND);
+    assert!(
+        rec.contains("status=fail") && rec.contains("lost the host"),
+        "a silent host is a named failure, not a wedge: {rec}"
+    );
+    assert_eq!(client.wait_timeout(WAIT).code(), Some(3));
 }
 
 /// Same kill, one state later: the lobby already minted a session, so

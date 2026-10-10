@@ -67,8 +67,11 @@
 /// host's match rather than deciding one (F27-B). v22: the gameplay
 /// fingerprint's classifier moved `tune/*.cinfo` (display names) out of
 /// the hashed set, so a v21 peer would compute a different hash for the
-/// same install and mods (F29).
-pub const PROTOCOL_VERSION: u16 = 22;
+/// same install and mods (F29). v23: `Message::Keepalive` — the host's
+/// periodic liveness frame, so an idle lobby client can tell a silent
+/// host from a quiet one and give up on a dead-but-open socket
+/// (F24-AC04).
+pub const PROTOCOL_VERSION: u16 = 23;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -98,6 +101,7 @@ const TAG_PROPS: u8 = 0x10;
 const TAG_TRAFFIC: u8 = 0x11;
 const TAG_WORLD: u8 = 0x12;
 const TAG_CNR: u8 = 0x13;
+const TAG_KEEPALIVE: u8 = 0x14;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -820,6 +824,12 @@ pub enum Message {
         /// The match.
         frame: SnapCnr,
     },
+    /// Host → every client: nothing happened, the host is alive (v23,
+    /// F24-AC04). Carries no state; a client treats the silence of
+    /// everything else — keepalives included — for longer than the
+    /// liveness timeout as a lost host. A client that sends one is
+    /// dropped, like any other host-only message.
+    Keepalive,
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -1255,6 +1265,7 @@ impl Message {
                     }
                 }
             }
+            Self::Keepalive => out.push(TAG_KEEPALIVE),
             Self::World { generation, ticks } => {
                 out.push(TAG_WORLD);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -1515,6 +1526,7 @@ impl Message {
                     rows,
                 }
             }
+            TAG_KEEPALIVE => Self::Keepalive,
             TAG_WORLD => Self::World {
                 generation: cur.u64()?,
                 ticks: cur.u64()?,
@@ -2047,6 +2059,16 @@ mod tests {
                 "a {cut}-byte prefix decoded"
             );
         }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
+    }
+
+    #[test]
+    fn a_keepalive_is_a_bare_tag_and_refuses_padding() {
+        let bytes = Message::Keepalive.encode().unwrap();
+        assert_eq!(bytes, [TAG_KEEPALIVE]);
+        assert_eq!(Message::decode(&bytes).unwrap(), Message::Keepalive);
         let mut padded = bytes;
         padded.push(0);
         assert!(Message::decode(&padded).is_err());

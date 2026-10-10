@@ -385,6 +385,19 @@ established, since the control channel may then idle between requests;
 need a different one. The F24-B accept loop therefore never waits on a
 single peer indefinitely.
 
+After the handshake the idle channel is bounded the other way (v23,
+F24-AC04, designed — nothing original is involved): the host loop sends
+every rostered peer a `Message::Keepalive` each `KEEPALIVE_INTERVAL`
+(1 s), and a joined `Client` installs a `LIVENESS_TIMEOUT` (5 s) read
+bound, consuming keepalives inside `recv`. A host that keeps its socket
+open but stops speaking (SIGSTOP, wedged, black-holed link) therefore
+fails the client's `recv` with a timeout, which the pump reports as
+`Closed` like any other loss. The in-race `WireStall` handling stays
+the finer-grained stall policy; this only bounds the transport. The
+reverse (host dropping a silent client) is not implemented: a client
+only ever answers with traffic it chooses to send.
+`net_edge::a_stopped_host_*` SIGSTOPs a real `mm2-host`.
+
 ## Content fingerprints
 
 Two fingerprints, different jobs:

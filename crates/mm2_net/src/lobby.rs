@@ -76,6 +76,18 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// dropped as `Lost` instead of blocking the loop forever.
 const WRITE_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
 
+/// How often the host loop sends every rostered peer a
+/// [`Message::Keepalive`] (F24-AC04), so an idle lobby is never silent
+/// for longer than this. Designed, not recovered from the original.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long a joined [`Client`] may hear nothing from the host — not
+/// even a keepalive — before `recv` fails with a timeout: a host that
+/// keeps its socket open but stopped speaking (stopped process, wedged
+/// host, black-holed link) is a lost host. Several keepalive intervals,
+/// so a loaded host is not mistaken for a dead one. Designed.
+pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Bound on `Client::leave`'s post-`Leave` drain. The host closes
 /// promptly once it reads the quit (its reader thread exits and drops
 /// the socket); this only bounds a host that never does.
@@ -615,6 +627,7 @@ impl Client {
         conn.set_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let welcome = conn.recv();
         conn.set_timeout(None)?;
+        conn.set_read_timeout(Some(LIVENESS_TIMEOUT))?;
         let player_id = match welcome? {
             Message::Welcome { player_id } => player_id,
             _ => return Err(NetError::Unexpected("expected Welcome")),
@@ -677,8 +690,16 @@ impl Client {
     /// The next host→client message — a `Roster` broadcast today, more
     /// lobby traffic as later F24-B legs land. `Err` means the
     /// connection to the host is gone.
+    /// Keepalives are consumed here: they only restart the
+    /// [`LIVENESS_TIMEOUT`] clock, which a silent host lets expire
+    /// (`Io` with `WouldBlock`/`TimedOut`).
     pub fn recv(&mut self) -> Result<Message, NetError> {
-        self.conn.recv()
+        loop {
+            match self.conn.recv()? {
+                Message::Keepalive => {}
+                msg => return Ok(msg),
+            }
+        }
     }
 
     /// Bound `recv`/`set_ready` waits — tests install a short backstop so
@@ -900,7 +921,21 @@ fn run(
     // layer so the wire roster and the displayed roster share numbering.
     let mut next_id: u16 = 1;
 
-    while let Ok(msg) = rx.recv() {
+    let mut last_sent = Instant::now();
+    loop {
+        // Wake for the next keepalive even when no message arrives.
+        let wait = KEEPALIVE_INTERVAL.saturating_sub(last_sent.elapsed());
+        let msg = match rx.recv_timeout(wait) {
+            Ok(msg) => msg,
+            Err(RecvTimeoutError::Timeout) => {
+                last_sent = Instant::now();
+                if !broadcast(&mut players, &Message::Keepalive, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match msg {
             LoopMsg::Shutdown => break,
             LoopMsg::Accepted(conn) => {
@@ -2677,6 +2712,36 @@ mod tests {
     /// reader's allowlist is refused by default; this pins the ones
     /// that exist.
     #[test]
+    fn an_idle_lobby_keeps_speaking_and_a_client_swallows_it() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        // A read bound shorter than the idle stretch we wait out: only
+        // the host's keepalives (swallowed by `recv`) keep each read
+        // inside it, so the first message `recv` returns is the one
+        // sent after the lobby sat idle for several bounds.
+        alice.set_timeout(Some(KEEPALIVE_INTERVAL * 2)).unwrap();
+        let ctl = host.ctl();
+        let sender = thread::spawn(move || {
+            thread::sleep(KEEPALIVE_INTERVAL * 4);
+            ctl.broadcast(&Message::World {
+                generation: 1,
+                ticks: 9,
+            })
+            .unwrap();
+        });
+        assert_eq!(
+            alice.recv().unwrap(),
+            Message::World {
+                generation: 1,
+                ticks: 9
+            }
+        );
+        sender.join().unwrap();
+    }
+
+    #[test]
     fn every_host_side_verb_sent_by_a_client_drops_it() {
         let hello_again = hello("b".to_string(), "mallory".to_string(), FP);
         let spoofs = [
@@ -2707,6 +2772,7 @@ mod tests {
                 },
             ),
             ("Cancel", Message::Cancel { generation: 1 }),
+            ("Keepalive", Message::Keepalive),
         ];
         for (name, spoof) in spoofs {
             let host = sessioned_host();

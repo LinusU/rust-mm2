@@ -166,6 +166,19 @@ impl Proc {
         let _ = self.child.kill();
     }
 
+    /// SIGSTOP the child: it keeps its sockets open but stops
+    /// speaking — a dead-but-open peer, which no socket close can model.
+    /// The signal goes to the PID this `Proc` spawned and no other;
+    /// `Drop`'s SIGKILL ends a stopped child, so a failing leg cannot
+    /// leave it behind.
+    pub fn stop(&self) {
+        let status = Command::new("kill")
+            .args(["-STOP", &self.child.id().to_string()])
+            .status()
+            .expect("failed to run kill");
+        assert!(status.success(), "SIGSTOP of the child failed");
+    }
+
     /// Reap the child, bounded: the loss legs' claim is that the child
     /// exits *on its own* once the peer dies, so a child that outlives
     /// `bound` is killed and the leg fails rather than hanging the
