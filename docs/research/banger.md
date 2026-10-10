@@ -611,6 +611,84 @@ retain authored triangle collision so archways and bridges remain open.
 A degenerate intact hull has no collider and follows the existing ordinary
 prop fallback; no volume or original collision primitive is fabricated.
 
+## `ImpulseLimit2` consumer (OPR-1.3, read from `Midtown2.exe`)
+
+Method: disassembled the retail x86-32 image (same address conventions
+as `docs/research/vehicle-physics/README.md`; `dgBangerData` is the
+340-byte record array behind global `0x626650`, base `+0x1c`, fields as
+the loader's `FileIO` order lays them out: `Mass +0x48`, `Elasticity
++0x4c`, `Friction +0x50`, **`ImpulseLimit2 +0x54`**, `YRadius +0x58`,
+`ColliderId +0x5c`, `TexNumber +0x114`, `BillFlags +0x118`,
+`NumParts +0x128`). Every read of `+0x54` in a function that also
+touches the banger manager/data lookup (`0x626650`, `0x626610`,
+`0x441aa0`, `0x440930`) was enumerated; there are exactly three
+readers/writers besides the parser and writer (`0x440c21`,
+`0x440f92`). **verified_original** unless marked.
+
+- **The scaler.** `0x421d70` multiplies a named record's `Mass` *and*
+  `ImpulseLimit2` by **26.0** (`0x5af970`); it runs on
+  `sp_barricadeconcl_f` and `sp_barricadeconcr_f` right after the
+  `singlerace` setup. Scaling both together keeps the limit-to-mass
+  ratio and makes the barricade harder to break — consistent with
+  `ImpulseLimit2` being authored in proportion to `Mass`.
+- **The gate.** `0x469610` (the manager's per-pair collision step,
+  called from `0x468b..` for each colliding instance pair) fetches the
+  second instance's record through `0x441aa0` and, for each of the
+  pair's impacts (`N` of them, `0x44`-byte records at `0x65c9c8`),
+  calls `0x46b610(impact, 1/N, record.ImpulseLimit2)` →
+  `0x46b7c0`. That routine returns 1 exactly when the **squared
+  magnitude of `x = K⁻¹·(−v_rel)` exceeds the limit** (`fcom [limit]` at
+  `0x46b8df`), where `v_rel` is the relative velocity of the two
+  bodies at the contact point (`0x478f30`), `K` is the effective-mass
+  matrix `InvMass·I + [r]× InvInertia [r]×ᵀ` at the contact point
+  (`0x478cc0`; solved by the pivoted 3×3 solver `0x4bf1e0`, so `x` is
+  the full impulse vector, tangential part included), and the test
+  only runs for an approaching contact (`n·v_rel ≤ const`, as the
+  contact solver's own gate). The name's `2` is therefore a square:
+  `ImpulseLimit2` is in (N·s)², like the `Vel2`/`AngVel2`/`ForceLimit2`
+  ICS fields. When it is exceeded the routine also clamps `x` to
+  magnitude `sqrt(limit)` before its friction-cone step.
+  *Inferred, not read:* `K` in the first pass is that of the *other*
+  body (the striker, the first body of the impact record), so for a
+  prop that is not yet attached the quantity is the striker's
+  effective mass times its approach velocity — independent of the
+  prop's own `Mass`; the clamped branch then adds the second body.
+  The caller visiting both argument orders is likewise unverified.
+- **What crossing it does.** Any impact over the limit calls the
+  instance's vtable slot `+0x70`, which for the dormant class
+  (`dgUnhitBangerInstance`) is `0x442000`. With `record.NumParts` (loop
+  bound at `0x442442`: `cmp esi, [record+0x128]`) **greater than 0** it
+  spawns `NumParts` fragment instances (parent's pose and velocity
+  plus a per-part offset/spin; each takes a pool slot) and retires the
+  parent; with `NumParts == 0` (`0x442462`) it swaps the dormant
+  instance for a freshly allocated hit-class instance and attaches a
+  `dgBangerActive` to it — the prop becomes one dynamic body in the
+  ×32 pool. **Break and tip/move are one trigger**; the record's
+  `NumParts` selects between them. This also answers the open item
+  that `NumParts` bounds the spawned fragments (it is the loop count),
+  and that fragments spawn at the activation edge, not at a later
+  threshold.
+- **Not recovered.** What a contact *below* the limit leaves behind:
+  the pair step attaches the banger's active entity before testing
+  (`0x469807`), and the non-exceeded branch (`0x469962`) calls slot
+  `+0x1c` of the attached object, which the `dgBangerActive` vtable
+  fills with a bare `ret` — so whether the prop is released again or
+  simply keeps the response the solver already gave it is *unknown*.
+  The `0x4400d0`/`0x440040` active update (sleep/`Timer`) was only
+  skimmed.
+
+Consequences for the runtime slice (DSN-10): the `½·m·v²` stand-in is
+the wrong quantity — it is quadratic in speed, the original is
+quadratic in the *impulse* (so linear in the striker's effective mass
+times speed, in (N·s)²). For the retail ladder (`ImpulseLimit2 ≈ Mass ×
+{31.25, 500, 800, 2000, 85342}`) the two agree that light props give way
+to a touch, but they diverge at the top rungs: a 1000 kg striker needs
+about 9 m/s head-on against the original's gate for a prop with
+`Mass × limit = 1000 × 85342`, whereas `½·m·v²` needs about 410 m/s, so
+those props never activate. Switching the gate is a handling-adjacent
+change to prop response and is filed as its own task; nothing in this
+note retunes restitution or impulse.
+
 ## Runtime consumption — what is not known
 
 Parsed, bound and provisionally simulated. Everything below is UNK-22:
