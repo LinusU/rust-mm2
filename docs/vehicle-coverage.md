@@ -215,8 +215,9 @@ smoke record alone would not prove the paint reached the render:
   the alternate paint; `vpmoonrover` renders its six-wheel rover at
   its single paint.
 
-Full-sweep renders of *every* declared variant (~88) remain open; this
-pass closes "default + one alternate per car".
+Renders of the remaining declared variants stay open: of the 88
+declared paints this pass captured 41 (default + first alternate, the
+single-paint rover once), so 47 are not rendered.
 
 ## Override causality (F02-AC04)
 
@@ -397,7 +398,7 @@ bottoms out — expected, not a defect).
   `handling_override` paint matrix). Rendered: the default paint of
   every ready car (2026-09-24) plus the first alternate paint of each
   car that declares one (2026-10-10, above); captures of the *rest*
-  of the variants (~86 more) are not run.
+  of the variants (47 of the 88 declared paints) are not run.
 - **F02-AC06, startup paths — re-run this pass.** Both cities launch
   headless (`status=pass`, 120 updates each, `city/sf.psdl` and
   `city/london.psdl`); an unknown `--car` exits 2 with
