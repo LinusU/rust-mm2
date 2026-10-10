@@ -74,6 +74,9 @@ pub struct ChaseLens {
     /// which the boom extends from its rest length to `dist_max`
     /// (designed reading; the record's approach-rate fields stay
     /// verbatim in the spec).
+    /// The window is m/s in the original too, but there it interpolates
+    /// the follow rate (`MaxAppXZPos`→`MinAppXZPos`), not the boom
+    /// length (recovered, UNK-36).
     pub speed_min: f32,
     pub speed_max: f32,
     /// `CollideType` nonzero: the boom pulls in front of world

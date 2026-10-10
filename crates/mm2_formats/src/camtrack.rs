@@ -52,7 +52,11 @@ pub struct TrackCamSpec {
     /// `CollideType` — nonzero when the boom collides with world
     /// geometry (every stock record authors `1`).
     pub collide_type: Option<f32>,
-    /// `MinMaxOn` — authored gate on the `MinDist`/`MaxDist` clamp.
+    /// `MinMaxOn` — nonzero enables the original's ±5 m vertical
+    /// ground/ceiling clamp of the eye. It does *not* gate the
+    /// `MinDist`/`MaxDist` clamp (recovered runtime, UNK-36,
+    /// `docs/research/camtrack.md`); the app still reads it as that
+    /// gate until the recovered behaviour is bound.
     pub min_max_on: Option<f32>,
     /// `TrackBreak` — authored flag for the boom breaking loose on
     /// hard manoeuvres; exact behaviour unrecovered (surfaced, not
@@ -333,8 +337,9 @@ impl TrackCamSpec {
         usable1(self.collide_type).is_some_and(|c| c != 0.0)
     }
 
-    /// `MinMaxOn` as the authored gate on the `MinDist`/`MaxDist`
-    /// clamp — same unusable-field rule as [`Self::collides`].
+    /// `MinMaxOn` as an authored flag — same unusable-field rule as
+    /// [`Self::collides`]. What it gates in the original is the vertical
+    /// eye clamp, not the distance clamp (UNK-36).
     pub fn min_max_gated(&self) -> bool {
         usable1(self.min_max_on).is_some_and(|v| v != 0.0)
     }
