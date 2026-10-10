@@ -99,9 +99,12 @@ pub struct ChaseLens {
     /// `VertOffset` — scales the look target's lift
     /// `LookAbove = (Offset.y − 0.8)·VertOffset` (recovered, UNK-36).
     pub vert_offset: f32,
-    /// `CollideType` nonzero: the boom pulls in front of world
-    /// geometry that would occlude the car.
-    pub collide: bool,
+    /// `CollideType` (`0x51eeb0`, UNK-36): 1 = instant five-ray pull-in,
+    /// 2 = eased single-ray pull-in, anything else does nothing.
+    pub collide: CollideKind,
+    /// `MinMaxOn`: the ±5 m vertical ground/ceiling clamp of the eye
+    /// (`0x51eca0`, UNK-36). Independent of `MinDist`/`MaxDist`.
+    pub min_max: bool,
     /// `CameraFOV`/`CameraNear`/`CameraFar` — projection.
     pub fov_deg: f32,
     /// `CameraNear`.
@@ -111,6 +114,28 @@ pub struct ChaseLens {
     /// Whether the values came from an authored record (smoke `trk=`
     /// provenance — a sized fallback never claims authored data).
     pub authored: bool,
+}
+
+/// The `CollideType` values `camTrackCS` has code for (`0x51eeb0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollideKind {
+    /// 0 or any other value: no occlusion handling.
+    Off,
+    /// 1: five rays, instant pull-in along the aim→eye line.
+    Hard,
+    /// 2: one ray, the pull-in distance eases at ±30·dt (squared metres).
+    Smooth,
+}
+
+impl CollideKind {
+    /// From [`TrackCamSpec::collide_mode`].
+    pub fn from_mode(mode: u8) -> Self {
+        match mode {
+            1 => Self::Hard,
+            2 => Self::Smooth,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// `camTrackCS` constructor defaults (`0x51d750`, UNK-36) for the
@@ -171,7 +196,8 @@ impl ChaseLens {
             approach: spec.approach_enabled(),
             app_xz_init: usable1(spec.app_xz_pos).filter(|r| *r >= 0.0),
             vert_offset: usable1(spec.vert_offset).unwrap_or(ctor::VERT_OFFSET),
-            collide: spec.collides(),
+            collide: CollideKind::from_mode(spec.collide_mode()),
+            min_max: spec.min_max_gated(),
             // `camera_fov_deg` reads an undrawable `CameraFOV`
             // (non-finite or outside `(0, 180)`) as unauthored — the
             // designed 70° stands in, `validate` reports the record.
@@ -203,7 +229,8 @@ impl ChaseLens {
             approach: true,
             app_xz_init: None,
             vert_offset: ctor::VERT_OFFSET,
-            collide: false,
+            collide: CollideKind::Off,
+            min_max: false,
             fov_deg: PerspectiveProjection::default().fov.to_degrees(),
             clip_near: PerspectiveProjection::default().near,
             clip_far: PerspectiveProjection::default().far,
@@ -248,6 +275,9 @@ pub struct FollowState {
     pub app_xz: Option<f32>,
     /// Per-axis low-passed approach distance (`AppApp`).
     pub axis: Vec3,
+    /// `CollideType 2`'s eased squared eye–aim distance (`0x264`);
+    /// `None` while the original's active flag (`0x258`) is clear.
+    pub collide_sq: Option<f32>,
 }
 
 /// The follow rate the car's speed asks for (`0x51eb20`, UNK-36):
@@ -694,11 +724,20 @@ pub fn retarget_hud(
     }
 }
 
-/// Occlusion pull-in margin — the boom stops this far short of the
-/// wall the ray found, and never lands closer than the floor to the
-/// aim point. Designed constants (the record carries no margin).
-const OCCLUSION_MARGIN: f32 = 0.25;
-const OCCLUSION_FLOOR: f32 = 0.05;
+/// `camTrackCS` collision margin (field `0x180`, constructor 0.33 m, not
+/// parsed from the record — verified_original, UNK-36).
+const COLLIDE_MARGIN: f32 = 0.33;
+/// Reach of the `MinMaxOn` vertical probes above and below the eye
+/// (`0x5af418`, verified_original).
+const MINMAX_PROBE: f32 = 5.0;
+/// Clearance the `MinMaxOn` clamp keeps from the ceiling/floor it found.
+const MINMAX_CLEARANCE: f32 = 0.5;
+/// Normal component separating floor-like from other surfaces in the
+/// `MinMaxOn` probes (`0.7`, verified_original).
+const MINMAX_NORMAL: f32 = 0.7;
+/// `CollideType 2` rate of the eased squared distance, per second
+/// (`0x5b0a18`).
+const COLLIDE_EASE_RATE: f32 = 30.0;
 
 /// Apparent vehicle speed (m/s) beyond which the boom concludes the
 /// car teleported — a `ResetVehicle` reset/recovery jump or a re-entry
@@ -808,44 +847,166 @@ pub fn chase_follow(
                 next = aim + from * (len.clamp(lens.dist_min, lens.dist_max) / len);
             }
         }
-        let look = aim;
         let look_target = aim + Vec3::new(0.0, (lens.offset.y - 0.8) * lens.vert_offset, 0.0);
 
-        // CollideType: clamp the smoothed position in front of whatever
-        // would occlude the car. Clamping the *smoothed* candidate —
-        // not the far target — keeps the pull-in immediate (no lagging
-        // through a wall) while expansion still eases back out.
-        if lens.collide
+        if (lens.min_max || lens.collide != CollideKind::Off)
             && let Some(spatial) = &spatial
         {
-            let seg = next - look;
-            let len = seg.length();
-            if len > 1e-3
-                && let Ok(d) = Dir3::new(seg)
-            {
-                // The player's own rig never occludes itself: a towed
-                // trailer sits between the cab and the authored boom
-                // (vpsemi's `_near` anchor lands *inside* its trailer
-                // box), so counting it would park the camera in the
-                // hitch gap or behind the trailer's rear wall. Other
-                // vehicles' trailers still occlude like any world
-                // object (designed reading — UNK-36).
-                let filter = SpatialQueryFilter::from_excluded_entities(
-                    std::iter::once(veh_ent).chain(
-                        spawn
-                            .as_deref()
-                            .into_iter()
-                            .flat_map(|s| s.trailers.iter().map(|(e, _)| *e)),
-                    ),
-                );
-                if let Some(hit) = spatial.cast_ray(look, d, len, true, &filter) {
-                    next = look + d * (hit.distance - OCCLUSION_MARGIN).max(OCCLUSION_FLOOR);
-                }
+            // The player's own rig never occludes itself: a towed
+            // trailer sits between the cab and the authored boom
+            // (vpsemi's `_near` anchor lands *inside* its trailer
+            // box), so counting it would park the camera in the
+            // hitch gap or behind the trailer's rear wall. Other
+            // vehicles' trailers still occlude like any world
+            // object (designed reading — UNK-36).
+            let filter = SpatialQueryFilter::from_excluded_entities(
+                std::iter::once(veh_ent).chain(
+                    spawn
+                        .as_deref()
+                        .into_iter()
+                        .flat_map(|s| s.trailers.iter().map(|(e, _)| *e)),
+                ),
+            );
+            if lens.min_max {
+                next.y = min_max_clamp(spatial, &filter, next);
             }
+            let aspect = match &*proj {
+                Projection::Perspective(p) => p.aspect_ratio,
+                _ => 16.0 / 9.0,
+            };
+            next = collide_eye(
+                spatial,
+                &filter,
+                &lens,
+                aspect,
+                aim,
+                next,
+                &mut cam.follow.collide_sq,
+                dt,
+            );
+        } else {
+            cam.follow.collide_sq = None;
+        }
+        if jumped {
+            cam.follow.collide_sq = None;
         }
 
         xf.translation = next;
         xf.look_at(look_target, Vec3::Y);
+    }
+}
+
+/// `MinMaxOn` vertical clamp (`0x51eca0`, UNK-36): probe ±5 m straight
+/// up and down at the eye's X/Z. A ceiling-like upward hit (normal
+/// component < 0.7) bounds the eye at `hit.y − 0.5`; a floor-like downward
+/// hit (normal component > 0.7) bounds it at `hit.y + 0.5`; the upper
+/// bound applies first and the floor wins when they cross. The hit-result
+/// layout behind the 0.7 test is inferred; avian's `normal.y` stands in.
+fn min_max_clamp(spatial: &SpatialQuery, filter: &SpatialQueryFilter, eye: Vec3) -> f32 {
+    let mut y = eye.y;
+    let ceiling = spatial
+        .cast_ray(eye, Dir3::Y, MINMAX_PROBE, true, filter)
+        .filter(|h| h.normal.y < MINMAX_NORMAL)
+        .map(|h| eye.y + h.distance - MINMAX_CLEARANCE);
+    let floor = spatial
+        .cast_ray(eye, Dir3::NEG_Y, MINMAX_PROBE, true, filter)
+        .filter(|h| h.normal.y > MINMAX_NORMAL)
+        .map(|h| eye.y - h.distance + MINMAX_CLEARANCE);
+    if let Some(top) = ceiling {
+        y = y.min(top);
+    }
+    if let Some(bottom) = floor {
+        y = y.max(bottom);
+    }
+    y
+}
+
+/// `CollideType` 1/2 occlusion pull-in (`0x51eeb0`, UNK-36). Rays run from
+/// the aim point toward the eye, `MaxDist` long (the current eye
+/// distance when the record has no `MaxDist`); only a hit whose normal
+/// faces the camera counts. Type 1 casts the centre line plus four rays
+/// to the corners of the near-plane rectangle around the eye and moves
+/// the eye *instantly* along the aim→eye line to `hit + near − 0.33`
+/// when that is shorter than the current distance. Type 2 casts the
+/// centre ray only and eases the squared distance at ±30·dt. The corner
+/// rectangle's extent (near-plane half-extents) is inferred: the original
+/// scales the camera's right/up axes by frustum globals not yet resolved.
+#[allow(clippy::too_many_arguments)] // a pure helper threading the camera state
+fn collide_eye(
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    lens: &ChaseLens,
+    aspect: f32,
+    aim: Vec3,
+    eye: Vec3,
+    state: &mut Option<f32>,
+    dt: f32,
+) -> Vec3 {
+    let seg = eye - aim;
+    let cur = seg.length();
+    let Ok(dir) = Dir3::new(seg) else {
+        *state = None;
+        return eye;
+    };
+    let reach = if lens.dist_max > 0.0 {
+        lens.dist_max
+    } else {
+        cur
+    };
+    // Distance along the aim→eye line at which `ray` (a unit direction
+    // from the aim point) is blocked, if a camera-facing surface is hit.
+    let blocked = |ray: Dir3, projected: f32| -> Option<f32> {
+        spatial
+            .cast_ray(aim, ray, reach, true, filter)
+            .filter(|h| h.normal.dot(*ray) < -1e-5)
+            .map(|h| h.distance * projected + lens.clip_near - COLLIDE_MARGIN)
+    };
+    match lens.collide {
+        CollideKind::Off => eye,
+        CollideKind::Hard => {
+            let mut best = blocked(dir, 1.0);
+            let half_h = lens.clip_near * (lens.fov_deg.to_radians() * 0.5).tan();
+            let half_w = half_h * aspect;
+            let right = dir.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+            let up = right.cross(*dir).normalize_or_zero();
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let corner = eye + right * (sx * half_w) + up * (sy * half_h);
+                if let Ok(ray) = Dir3::new(corner - aim)
+                    && let Some(d) = blocked(ray, ray.dot(*dir))
+                {
+                    best = Some(best.map_or(d, |b| b.min(d)));
+                }
+            }
+            match best {
+                Some(d) if d < cur => aim + *dir * d.max(0.0),
+                _ => eye,
+            }
+        }
+        CollideKind::Smooth => {
+            let goal = blocked(dir, 1.0).map_or(cur, |d| d.clamp(0.0, cur));
+            let goal_sq = goal * goal;
+            let cur_sq = cur * cur;
+            let step = COLLIDE_EASE_RATE * dt;
+            match *state {
+                None if goal < cur => {
+                    *state = Some(cur_sq);
+                }
+                None => return eye,
+                Some(_) => {}
+            }
+            let s = state.unwrap_or(cur_sq).min(cur_sq);
+            let s = if s > goal_sq {
+                (s - step).max(goal_sq)
+            } else {
+                (s + step).min(goal_sq)
+            };
+            if (s - cur_sq).abs() < f32::EPSILON && goal >= cur {
+                *state = None;
+            } else {
+                *state = Some(s);
+            }
+            aim + *dir * s.sqrt()
+        }
     }
 }
 

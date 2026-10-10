@@ -390,18 +390,27 @@ impl TrackCamSpec {
         usable1(self.app_app_on).is_none_or(|v| v != 0.0)
     }
 
-    /// `CollideType` as the authored gate: nonzero *and*
-    /// [`usable_f32`]. A `nan` flag reads `!= 0.0` — true — so the
-    /// unguarded read would silently enable the occlusion pull-in; an
-    /// unusable value reads unauthored (off) and [`Self::validate`]
-    /// names it.
+    /// `CollideType` as the authored mode (`0x51eeb0`, UNK-36): the
+    /// original has code for exactly 1 (instant pull-in) and 2 (eased
+    /// pull-in); 0 and every other value do nothing, and an unusable
+    /// (`nan`/beyond-[`USABLE_BOUND`]) value reads unauthored (0) —
+    /// [`Self::validate`] names it.
+    pub fn collide_mode(&self) -> u8 {
+        match usable1(self.collide_type) {
+            Some(1.0) => 1,
+            Some(2.0) => 2,
+            _ => 0,
+        }
+    }
+
+    /// Whether `CollideType` selects a mode the original has code for.
     pub fn collides(&self) -> bool {
-        usable1(self.collide_type).is_some_and(|c| c != 0.0)
+        self.collide_mode() != 0
     }
 
     /// `MinMaxOn` as an authored flag — same unusable-field rule as
-    /// [`Self::collides`]. What it gates in the original is the vertical
-    /// eye clamp, not the distance clamp (UNK-36).
+    /// [`Self::collide_mode`]. What it gates in the original is the
+    /// vertical eye clamp, not the distance clamp (UNK-36).
     pub fn min_max_gated(&self) -> bool {
         usable1(self.min_max_on).is_some_and(|v| v != 0.0)
     }

@@ -8,9 +8,9 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
-    CameraMode, ChaseCamera, ChaseLens, FreeCamera, TrackReport, approach_axis, chase_follow,
-    desired_eye, dev_cam_cycle_at, follow_rate_target, load_track_cams, slew_follow_rate,
-    toggle_camera,
+    CameraMode, ChaseCamera, ChaseLens, CollideKind, FreeCamera, TrackReport, approach_axis,
+    chase_follow, desired_eye, dev_cam_cycle_at, follow_rate_target, load_track_cams,
+    slew_follow_rate, toggle_camera,
 };
 use mm2_app::dash::CockpitCamera;
 use mm2_app::input::vehicle_input;
@@ -602,10 +602,159 @@ fn other_trailer_still_occludes() {
         app.update();
     }
     let xf = app.world().get::<Transform>(cam).unwrap();
+    // The recovered pull-in is `hit + near − 0.33`: the eye lands 0.17 m
+    // behind the face at z=3 (the 0.5 m near plane stays in front of it).
     assert!(
-        xf.translation.z < 3.0,
+        xf.translation.z < 3.3,
         "unregistered trailer still pulls the boom in, z={}",
         xf.translation.z
+    );
+}
+
+/// `MinMaxOn`: an overhead slab 5 m above the eye keeps the eye 0.5 m
+/// under it (the rest eye sits ~1.2 m above the aim, so the slab at
+/// y=1.9 must bind), and `MinMaxOn 0` leaves the eye alone.
+#[test]
+fn min_max_on_clamps_eye_under_a_ceiling() {
+    for (min_max, binds) in [(1.0, true), (0.0, false)] {
+        let mut app = physics_app();
+        app.add_systems(Update, chase_follow);
+        spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+        // Ceiling slab, underside at y=2.0 (rest eye is at y=2.7).
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(40.0, 1.0, 40.0),
+            Transform::from_xyz(0.0, 2.5, 4.0),
+        ));
+        let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+        spec.min_max_on = Some(min_max);
+        spec.collide_type = Some(0.0);
+        let cam = spawn_chase(
+            &mut app,
+            ChaseCamera {
+                near: ChaseLens::authored(&spec),
+                far: None,
+                ..Default::default()
+            },
+            true,
+        );
+        for _ in 0..180 {
+            app.update();
+        }
+        let y = app.world().get::<Transform>(cam).unwrap().translation.y;
+        if binds {
+            assert!(y <= 1.5 + 1e-3, "eye held 0.5 m under the slab, y={y}");
+        } else {
+            assert!(y > 2.0, "MinMaxOn 0 does not clamp, y={y}");
+        }
+    }
+}
+
+/// `MinMaxOn`: the floor bound (hit + 0.5) wins over the ceiling.
+#[test]
+fn min_max_on_floor_wins_over_ceiling() {
+    let mut app = physics_app();
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    // Floor top at y=2.4 and ceiling underside at y=2.9: the bounds
+    // cross (floor+0.5=2.9 > ceiling-0.5=2.4); the floor wins.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(40.0, 1.0, 40.0),
+        Transform::from_xyz(0.0, 1.9, 4.0),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(40.0, 1.0, 40.0),
+        Transform::from_xyz(0.0, 3.4, 4.0),
+    ));
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    spec.collide_type = Some(0.0);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: ChaseLens::authored(&spec),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..180 {
+        app.update();
+    }
+    let y = app.world().get::<Transform>(cam).unwrap().translation.y;
+    assert!((y - 2.9).abs() < 0.05, "floor bound wins, y={y}");
+}
+
+/// `CollideType` values other than 1 and 2 do nothing, and 2 pulls the
+/// boom in (eased) once it has settled.
+#[test]
+fn collide_type_modes() {
+    for (mode, pulled) in [(1.0, true), (2.0, true), (3.0, false), (0.0, false)] {
+        let mut app = physics_app();
+        app.add_systems(Update, chase_follow);
+        spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(8.0, 8.0, 0.4),
+            Transform::from_xyz(0.0, 1.0, 2.0),
+        ));
+        let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+        spec.collide_type = Some(mode);
+        let cam = spawn_chase(
+            &mut app,
+            ChaseCamera {
+                near: ChaseLens::authored(&spec),
+                far: None,
+                ..Default::default()
+            },
+            true,
+        );
+        for _ in 0..240 {
+            app.update();
+        }
+        let z = app.world().get::<Transform>(cam).unwrap().translation.z;
+        assert_eq!(z < 2.0, pulled, "CollideType {mode}: z={z}");
+    }
+}
+
+/// `CollideType 1` leaves 0.33 m minus the near plane short of the wall
+/// face (hit + near − margin), measured along the aim→eye line.
+#[test]
+fn collide_type_one_uses_the_recovered_margin() {
+    let mut app = physics_app();
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    // Wall front face at z = 2.0 (centre 2.2, half-depth 0.2).
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(40.0, 40.0, 0.4),
+        Transform::from_xyz(0.0, 1.0, 2.2),
+    ));
+    let lens = ChaseLens::authored(&TrackCamSpec::parse(NEAR_TEXT).unwrap());
+    let aim = lens.aim;
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: lens.clone(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..240 {
+        app.update();
+    }
+    let eye = app.world().get::<Transform>(cam).unwrap().translation;
+    // The centre ray hits the face at distance 2.0/cos(angle) along the
+    // boom; the eye then sits `near − 0.33` beyond that hit.
+    let dir = (eye - aim).normalize();
+    let hit = 2.0 / dir.z;
+    let want = hit + lens.clip_near - 0.33;
+    assert!(
+        ((eye - aim).length() - want).abs() < 0.05,
+        "eye {} from aim, want {want}",
+        (eye - aim).length()
     );
 }
 
@@ -660,7 +809,7 @@ fn sized_lens_drives_the_fallback_boom() {
     assert_eq!(lens.dist_max, 0.0, "no authored MaxDist, no clamp");
     assert_eq!((lens.speed_min, lens.speed_max), (5.0, 35.0));
     assert_eq!((lens.app_xz_min, lens.app_xz_max), (1.8, 12.0));
-    assert!(!lens.collide && !lens.authored);
+    assert!(lens.collide == CollideKind::Off && !lens.authored);
     // The eye lands where the retired constants put it.
     assert!((lens.anchor() - Vec3::new(0.0, 2.0 * 0.55 + 1.4, 4.5 * 0.85 + 3.5)).length() < 1e-5);
     let aim = lens.aim;
@@ -768,7 +917,7 @@ fn non_finite_authored_fields_fall_back_to_the_designed_boom() {
         (5.0, 35.0),
         "unusable speed window takes the constructor defaults"
     );
-    assert!(!lens.collide);
+    assert!(lens.collide == CollideKind::Off);
     assert_eq!(lens.clip_near, 0.5);
     assert_eq!(lens.clip_far, 600.0);
     let p = lens.projection();
@@ -840,7 +989,10 @@ fn overflowing_authored_fields_fall_back_to_the_designed_boom() {
         (5.0, 35.0),
         "unusable speed window takes the constructor defaults"
     );
-    assert!(!lens.collide, "a beyond-bound flag reads off");
+    assert!(
+        lens.collide == CollideKind::Off,
+        "a beyond-bound flag reads off"
+    );
     assert_eq!(lens.clip_far, 600.0);
     for issue in spec.validate() {
         assert!(issue.contains("exceeds the usable bound"), "{issue}");
