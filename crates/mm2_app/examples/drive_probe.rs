@@ -42,6 +42,21 @@
 //! cargo run -p mm2_app --example drive_probe -- retail vpbug --dump-config /tmp/vpbug.toml
 //! cargo run -p mm2_app --example drive_probe -- retail vpbug --config /tmp/vpbug-heavy.toml
 //! ```
+//!
+//! `--override-matrix` runs the whole roster's F02-AC04 sweep in one
+//! command: every ready car measured on its base config against two
+//! overrides built the way `docs/vehicle-coverage.md`'s published sweep
+//! authored them — engine output halved (`peak_torque_nm` and
+//! `max_power_w` together) and tire grip halved (global `[tires]` plus
+//! every wheel entry) — each applied through the production
+//! `apply_handling_override`. The acceleration columns come from the
+//! same probe as the default leg, the brake columns from the
+//! `--controls` stop leg, so the numbers line up with the published
+//! table.
+//!
+//! ```sh
+//! cargo run -p mm2_app --example drive_probe -- retail --override-matrix
+//! ```
 
 use std::path::Path;
 use std::time::Duration;
@@ -72,6 +87,7 @@ fn main() {
     let handbrake_leg = args.iter().any(|a| a == "--handbrake");
     let turn_leg = args.iter().any(|a| a == "--turn");
     let clearance = args.iter().any(|a| a == "--clearance");
+    let override_matrix = args.iter().any(|a| a == "--override-matrix");
     let trace = args.iter().any(|a| a == "--trace");
     let config_path = args
         .iter()
@@ -142,6 +158,15 @@ fn main() {
         let cfg = effective_config(&def, config_path.as_deref());
         std::fs::write(&path, cfg.to_toml()).unwrap();
         println!("wrote {}: {}", def.id, path);
+        return;
+    }
+
+    if override_matrix {
+        assert!(
+            config_path.is_none(),
+            "--override-matrix builds its own overrides; --config would obscure what it measures"
+        );
+        probe_override_matrix(&vfs, &ids);
         return;
     }
 
@@ -331,6 +356,106 @@ fn effective_config(def: &VehicleDef, config_path: Option<&str>) -> VehicleConfi
     }
 }
 
+/// The F02-AC04 override matrix, one command over the whole roster:
+/// each ready car's base config measured against two overrides built
+/// the way the published sweep in `docs/vehicle-coverage.md` authored
+/// them — engine output halved (`peak_torque_nm` and `max_power_w`
+/// together, so the cap reaches the whole rev band, not only the
+/// power-limited top) and tire grip halved (the global `[tires]` value
+/// plus every wheel's own entry) — each applied through the production
+/// [`mm2_content::assemble::apply_handling_override`] the app's
+/// `--vehicle-config` and this probe's `--config` use. The acceleration
+/// columns come from [`probe_acceleration`], the brake columns from the
+/// [`probe_controls`] stop leg, so the cells line up with the published
+/// table; `n/r` is "did not finish inside the probe's window".
+///
+/// The verdict is deliberately saturation-aware rather than per-cell:
+/// a rev-limited top or a traction-limited launch legitimately hides
+/// its delta (the published read documents each one), so `ok` means
+/// *some* suitable measurement moved. A FAIL names the leg whose every
+/// metric stayed at parity — the override channel did not reach that
+/// car's simulation.
+fn probe_override_matrix(vfs: &Vfs, ids: &[String]) {
+    println!(
+        "{:<14} {:>13} {:>15} {:>16} {:>17}   result",
+        "id", "0-100 base→eng", "top base→eng", "stop base→grip", "dist base→grip",
+    );
+    for id in ids {
+        let def = match mm2_content::load_vehicle(vfs, id, 0) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("{id:<14} load failed: {e}");
+                continue;
+            }
+        };
+        // Engine leg: halve both anchors together so the cap reaches the
+        // whole rev band, not only the power-limited top.
+        let mut engine = def.config.clone();
+        engine.engine.peak_torque_nm *= 0.5;
+        engine.engine.max_power_w = engine.engine.max_power_w.map(|w| w * 0.5);
+        let engine = mm2_content::assemble::apply_handling_override(&def.config, engine)
+            .unwrap_or_else(|e| panic!("engine override rejected for {}: {e}", def.id));
+        // Grip leg: the global value plus every wheel's own entry — a
+        // wheel that authors its own tires config keeps it otherwise.
+        let mut grip = def.config.clone();
+        grip.tires.longitudinal_grip *= 0.5;
+        for w in &mut grip.wheels {
+            if let Some(t) = &mut w.tires {
+                t.longitudinal_grip *= 0.5;
+            }
+        }
+        let grip = mm2_content::assemble::apply_handling_override(&def.config, grip)
+            .unwrap_or_else(|e| panic!("grip override rejected for {}: {e}", def.id));
+
+        let a_base = probe_acceleration(&def.config, false);
+        let a_eng = probe_acceleration(&engine, false);
+        let c_base = probe_controls(&def.config);
+        let c_grip = probe_controls(&grip);
+
+        let moved =
+            |a: f32, b: f32, eps: f32| a.is_finite() && b.is_finite() && (a - b).abs() > eps;
+        let engine_moved = moved(a_base.to_100_kmh, a_eng.to_100_kmh, 0.1)
+            || moved(a_base.top_speed, a_eng.top_speed, 1.0)
+            || moved(a_base.trace_marks[0], a_eng.trace_marks[0], 1.5)
+            || moved(a_base.trace_marks[1], a_eng.trace_marks[1], 1.5);
+        let grip_moved = moved(c_base.brake_time, c_grip.brake_time, 0.05)
+            || moved(c_base.brake_distance, c_grip.brake_distance, 0.3);
+        let mut legs = Vec::new();
+        if !engine_moved {
+            legs.push("engine");
+        }
+        if !grip_moved {
+            legs.push("grip");
+        }
+        println!(
+            "{:<14} {:>13} {:>15} {:>16} {:>17}   {}",
+            def.id,
+            cell2(a_base.to_100_kmh, a_eng.to_100_kmh),
+            cell2(a_base.top_speed, a_eng.top_speed),
+            cell2(c_base.brake_time, c_grip.brake_time),
+            cell2(c_base.brake_distance, c_grip.brake_distance),
+            if legs.is_empty() {
+                "ok".to_string()
+            } else {
+                format!("FAIL({})", legs.join(","))
+            },
+        );
+    }
+}
+
+/// `base→over` cell, one decimal; NaN is "did not finish inside the
+/// probe's window".
+fn cell2(base: f32, over: f32) -> String {
+    let f = |v: f32| {
+        if v.is_nan() {
+            "n/r".to_string()
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    format!("{}→{}", f(base), f(over))
+}
+
 /// Spawn in a real city, hold the throttle, and report every stretch where
 /// the chassis touched the world.
 ///
@@ -461,6 +586,11 @@ struct AccelProbe {
     /// Degrees the car wandered off its launch heading. A car that is
     /// spinning is not measuring its gearbox.
     heading_drift: f32,
+    /// Speed at t=8 s and t=16 s of the launch, m/s — midrange trace
+    /// marks. A rev-limited car's 0-100 and top barely move under a
+    /// halved engine while its midrange trace still does, so the
+    /// override-matrix causality check reads these too.
+    trace_marks: [f32; 2],
 }
 
 fn probe_acceleration(cfg: &VehicleConfig, trace: bool) -> AccelProbe {
@@ -569,6 +699,10 @@ fn probe_acceleration(cfg: &VehicleConfig, trace: bool) -> AccelProbe {
         worst_interval_ratio: if mean > 0.0 { worst / mean } else { 0.0 },
         longest_stall: stall,
         heading_drift: drift.to_degrees(),
+        trace_marks: [
+            speeds.get(8 * HZ).copied().unwrap_or(f32::NAN),
+            speeds.get(16 * HZ).copied().unwrap_or(f32::NAN),
+        ],
     }
 }
 
