@@ -269,3 +269,53 @@ fn a_client_process_accepts_a_runnable_event() {
     host.cmd("quit");
     assert!(host.wait().success(), "mm2-host did not exit cleanly");
 }
+
+/// F26-AC05's changed rematch at process level, the refusing side: a
+/// `mm2-join` process that accepted round one's ad hears the host
+/// re-advertise a session its own mount cannot run (a city that
+/// resolves to nothing). The same gate as the first ad applies —
+/// `session_refused`, a clean `quit` leave seen by the host, exit 1 —
+/// and the process does not sit in a lobby it cannot play. The host is
+/// the in-process `mm2_net::Host`, standing in for a host whose install
+/// resolves a city this client's does not (an `mm2` host would refuse
+/// to advertise it); the client is a separate OS process.
+#[test]
+fn a_client_process_leaves_cleanly_when_the_changed_session_is_unrunnable() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&SessionConfig::default()).unwrap())
+        .unwrap();
+
+    let client = Proc::spawn(
+        JOIN_EXE,
+        &join_args(install.path(), host.addr(), "alice", &[]),
+    );
+    assert!(client.line().starts_with("connected="));
+    let first = client.line();
+    assert!(first.starts_with("session="), "{first}");
+    let joined = host.recv_timeout(WAIT).unwrap();
+    assert!(matches!(joined, HostEvent::Joined { .. }), "{joined:?}");
+
+    host.set_session(
+        net::advertise(&SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/nothere.psdl".to_string(),
+            },
+            mode: SessionMode::Cruise,
+            ..SessionConfig::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    client.until("event=session_refused");
+    assert_eq!(client.wait().code(), Some(1));
+    let left = host.recv_timeout(WAIT).unwrap();
+    assert!(
+        matches!(left, HostEvent::Left { cause, .. } if cause == mm2_net::LeaveCause::Quit),
+        "{left:?}"
+    );
+    host.shutdown();
+}
