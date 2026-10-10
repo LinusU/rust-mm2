@@ -1156,3 +1156,84 @@ fn two_profiles_isolate_progress_across_a_restart() {
         "B's session must not touch A's selections"
     );
 }
+
+/// Run the real `mm2` binary headless on a dev world against `store`,
+/// with `profile_args` choosing or creating the driver. A new process per
+/// call, so nothing but the store directory carries between runs.
+fn run_mm2(install: &Path, store: &Path, profile_args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"))
+        .arg("--mm2-path")
+        .arg(install)
+        .args([
+            "--headless",
+            "--dev-world",
+            "--frames",
+            "5",
+            "--profile-dir",
+        ])
+        .arg(store)
+        .args(profile_args)
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("spawn mm2");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The exit status is the smoke verdict of an empty dev world
+    // ("never grounded" without road geometry), not a profile outcome; the
+    // bind line below and the store contents are what this test checks.
+    assert!(log.contains("driver profile bound"), "no bind:\n{log}");
+    log
+}
+
+/// F16-AC01 through the real binary: both profiles are created by the
+/// `--new-profile` flag in separate processes, A's eligible finish lands
+/// through the production result → progress system, and fresh processes
+/// binding either profile leave A's progress intact and B's empty.
+///
+/// Evidence level: synthetic integration. The finish itself runs in the
+/// test process (a headless `--bot` result is deliberately ineligible and
+/// no process can press the keys), so the interactive finish stays open.
+#[test]
+fn two_cli_created_profiles_stay_isolated_across_process_restarts() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let root = store_dir.path().join("saves");
+
+    run_mm2(tmp.path(), &root, &["--new-profile", "Ada"]);
+    run_mm2(tmp.path(), &root, &["--new-profile", "Bea"]);
+    let store = ProfileStore::open(&root).unwrap();
+    let ids: Vec<_> = store.list().unwrap().into_iter().map(|s| s.id).collect();
+    assert_eq!(ids.len(), 2, "two distinct profiles: {ids:?}");
+    let (a_id, b_id) = (ids[0].clone(), ids[1].clone());
+    assert_eq!(store.load(&a_id).unwrap().profile.name, "Ada");
+    assert_eq!(store.load(&b_id).unwrap().profile.name, "Bea");
+
+    // A finishes an eligible event through the production path.
+    let a = mm2_app::profile::resolve(&store, &ProfileRequest::Select(a_id.as_str().to_string()))
+        .unwrap()
+        .expect("A binds");
+    let (vfs, car) = selected_car(tmp.path());
+    let mut app = test_app(event_config(), vfs, car, Some(a));
+    app.update();
+    drive_to_finish(&mut app);
+    let a_saved = store.load(&a_id).unwrap().profile.progress;
+    assert!(a_saved.events.iter().any(|r| r.is_beaten()));
+    assert_eq!(a_saved.unlocks.len(), 2);
+    drop(app);
+
+    // Restart: fresh processes bind B, then A.
+    run_mm2(tmp.path(), &root, &["--profile", b_id.as_str()]);
+    let store = ProfileStore::open(&root).unwrap();
+    let b = store.load(&b_id).unwrap().profile;
+    assert!(b.progress.events.is_empty() && b.progress.unlocks.is_empty());
+    assert_eq!(store.load(&a_id).unwrap().profile.progress, a_saved);
+
+    run_mm2(tmp.path(), &root, &["--profile", a_id.as_str()]);
+    let store = ProfileStore::open(&root).unwrap();
+    assert_eq!(store.load(&a_id).unwrap().profile.progress, a_saved);
+    let b = store.load(&b_id).unwrap().profile;
+    assert!(b.progress.events.is_empty() && b.progress.unlocks.is_empty());
+}

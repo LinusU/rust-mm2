@@ -87,7 +87,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F13 Checkpoint | active | retail-data | original-fidelity comparison (placing, pacing, AI competence) absent; traversal stalls on london-2/5/6/9, sf-7/9 |
 | F14 Circuit | implemented | retail-data | same stalls; catalog-wide completability claim gated on F15-B; UNK-11/38 |
 | F15 opponent AI | active | retail-data (controller read from `Midtown2.exe`) | `unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption; designed readings stand in |
-| F16 profiles/unlocks | active | synthetic + retail-data | AC01 process-level interactive finish (`--bot` results deliberately ineligible); UNK-6/8 |
+| F16 profiles/unlocks | active | synthetic + retail-data + two-process restart (AC01: CLI-created profiles, eligible finish in the test process) | AC01 interactive finish in a real process (`--bot` results deliberately ineligible); UNK-6/8 |
 | F17 menu/flow | active | synthetic + local render | AC03 keyboard/gamepad + visible-focus evidence; C&R/scoring result variants; no human journey recorded |
 | F18 weather/time | active | synthetic + retail-data | AC05 audio captures + full preset capture set (one cloudy-noon/rainy-night sf pair recorded; 32-slot retail matrix test landed in F18-C); `.ldef`/`.lmap` consumers; network replication; UNK-24/39/40 |
 | F19 pedestrians | active (A only) | retail-data (parsers, skin/deform *domain types*) | **no runtime**: spawn, skinned render, routes, reaction, audio, reset (reqs 3–6; AC02–AC06); UNK-15/41 |
