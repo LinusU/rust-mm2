@@ -6884,78 +6884,10 @@ struct MatrixCell {
 /// impaired cell is read against, not evidence of wire impairment.
 #[test]
 fn the_impairment_matrix_records_each_recipe_cell() {
-    let cells = [
-        // The control: a transparent pair of lanes.
-        MatrixCell {
-            name: "clean",
-            impair: Impair::default(),
-        },
-        // Latency — a fixed hold every frame pays.
-        MatrixCell {
-            name: "latency",
-            impair: Impair {
-                delay: Duration::from_millis(100),
-                jitter: Duration::from_millis(20),
-                ..Impair::default()
-            },
-        },
-        // Jitter — small fixed hold, wide spread: releases overtake
-        // each other, a real reorder source on a lane.
-        MatrixCell {
-            name: "jitter",
-            impair: Impair {
-                delay: Duration::from_millis(10),
-                jitter: Duration::from_millis(60),
-                ..Impair::default()
-            },
-        },
-        // Loss — every fifth frame gone, both ways.
-        MatrixCell {
-            name: "loss",
-            impair: Impair {
-                loss: 0.20,
-                ..Impair::default()
-            },
-        },
-        // Heavy loss — the "client falls behind"/intermittent-loss
-        // edge: six of ten frames never arrive.
-        MatrixCell {
-            name: "loss-heavy",
-            impair: Impair {
-                loss: 0.60,
-                ..Impair::default()
-            },
-        },
-        // Duplication — every other frame emits a second adjacent
-        // copy; the second always lands at-or-behind the watermark.
-        MatrixCell {
-            name: "duplicate",
-            impair: Impair {
-                duplicate: 0.50,
-                ..Impair::default()
-            },
-        },
-        // Reorder — every other frame swaps with its successor; the
-        // held frame always lands behind the newer tick it deferred to.
-        MatrixCell {
-            name: "reorder",
-            impair: Impair {
-                reorder: 0.50,
-                ..Impair::default()
-            },
-        },
-        // Combined — the recipe the two-process `net_drive` leg runs.
-        MatrixCell {
-            name: "combined",
-            impair: Impair {
-                delay: Duration::from_millis(40),
-                jitter: Duration::from_millis(30),
-                loss: 0.05,
-                duplicate: 0.10,
-                reorder: 0.10,
-            },
-        },
-    ];
+    let cells: Vec<MatrixCell> = support::impair_cells()
+        .into_iter()
+        .map(|(name, impair)| MatrixCell { name, impair })
+        .collect();
     for (index, cell) in cells.iter().enumerate() {
         run_matrix_cell(cell, index as u64 + 1);
     }

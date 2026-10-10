@@ -573,3 +573,76 @@ pub fn surface_materials(d: &std::path::Path) {
     );
     write(d, "city/materials.csv", b"texture,physics\n");
 }
+
+/// The named link recipes the impairment matrices arm (F25-AC03,
+/// F26-AC01/AC03): one table so every replicated-state cell — `Snap`,
+/// `Props`, `Traffic`, `World` — is read against the same weather.
+pub fn impair_cells() -> Vec<(&'static str, mm2_net::Impair)> {
+    use mm2_net::Impair;
+    vec![
+        // The control: a transparent pair of lanes.
+        ("clean", Impair::default()),
+        // Latency — a fixed hold every frame pays.
+        (
+            "latency",
+            Impair {
+                delay: Duration::from_millis(100),
+                jitter: Duration::from_millis(20),
+                ..Impair::default()
+            },
+        ),
+        // Jitter — small fixed hold, wide spread: releases overtake
+        // each other, a real reorder source on a lane.
+        (
+            "jitter",
+            Impair {
+                delay: Duration::from_millis(10),
+                jitter: Duration::from_millis(60),
+                ..Impair::default()
+            },
+        ),
+        // Loss — every fifth frame gone, both ways.
+        (
+            "loss",
+            Impair {
+                loss: 0.20,
+                ..Impair::default()
+            },
+        ),
+        // Heavy loss — six of ten frames never arrive.
+        (
+            "loss-heavy",
+            Impair {
+                loss: 0.60,
+                ..Impair::default()
+            },
+        ),
+        // Duplication — every other frame emits a second adjacent copy.
+        (
+            "duplicate",
+            Impair {
+                duplicate: 0.50,
+                ..Impair::default()
+            },
+        ),
+        // Reorder — every other frame swaps with its successor.
+        (
+            "reorder",
+            Impair {
+                reorder: 0.50,
+                ..Impair::default()
+            },
+        ),
+        // Combined — the recipe the two-process `net_drive` leg runs.
+        (
+            "combined",
+            Impair {
+                delay: Duration::from_millis(40),
+                jitter: Duration::from_millis(30),
+                loss: 0.05,
+                duplicate: 0.10,
+                reorder: 0.10,
+            },
+        ),
+    ]
+}
