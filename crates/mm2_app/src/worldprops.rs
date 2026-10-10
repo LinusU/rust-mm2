@@ -16,9 +16,12 @@
 //! - **State, not events.** Each row is the prop's phase and pose.
 //!   Every active body rides every frame; a prop that just changed
 //!   rides at once; a rolling window of eight settled/broken ones
-//!   rides each frame, so a dropped frame, a reordered one and a late
-//!   joiner all converge on the host's world within one cycle without
-//!   the frame growing with the session.
+//!   rides each frame, so a dropped frame heals within one cycle
+//!   without the frame growing with the session. A late joiner is
+//!   caught up faster than that cycle: the first frames after it
+//!   enters the roster carry a paced snapshot of every non-default
+//!   site (F26-A.3, [`SNAPSHOT_PACE`]), which supersedes the rolling
+//!   window until it has delivered them all.
 //! - **Application.** The client never runs the transition itself.
 //!   `Active` makes the body kinematic and drives its pose from the
 //!   wire (the predicted car still collides with it), `Settled` makes
@@ -45,6 +48,7 @@
 //! applied as received — no interpolation yet, so an active prop moves
 //! at the publish rate.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use avian3d::prelude::*;
@@ -67,9 +71,16 @@ pub const PROP_SETTLED: u8 = 2;
 pub const PROP_BROKEN: u8 = 3;
 
 /// Settled/broken rows re-sent per frame on top of the active and the
-/// freshly changed — the resend cycle that heals a dropped frame and
-/// brings a late joiner current.
+/// freshly changed — the resend cycle that heals a dropped frame.
 pub const RESEND_WINDOW: usize = 8;
+
+/// Rows of the late-join snapshot one frame may carry, on top of the
+/// active and the freshly changed (F26-A.3). A player the ledger has
+/// not seen before is owed every site that has left its authored pose,
+/// which can be far more than the rolling window; this pace brings a
+/// joiner current within a handful of frames while a frame's live
+/// state still has [`MAX_SNAP_PROPS`] headroom to ride in.
+pub const SNAPSHOT_PACE: usize = 4 * RESEND_WINDOW;
 
 /// Staged rows a client holds before refusing new keys: a hostile or
 /// runaway host cannot grow the inbox without bound while a session
@@ -519,9 +530,19 @@ pub fn publish_props(
             .iter()
             .find(|(wire, _)| wire.0 == id)
             .map(|(_, pos)| pos.0);
-        let client = ledger.clients.entry(id).or_default();
+        // A roster player the ledger has not seen is a late joiner
+        // (F26-A.3): it is owed a snapshot of every non-default site,
+        // paced into the frames that follow rather than burst into one.
+        let client = match ledger.clients.entry(id) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => {
+                let client = v.insert(PropClient::default());
+                client.snapshot = Some(table.keys().copied().collect());
+                client
+            }
+        };
         client.owed.extend(fresh.iter().copied());
-        let rows = rows_for_client(client, centre, &table);
+        let (rows, snapshot_slots) = rows_for_client(client, centre, &table);
         if rows.is_empty() {
             continue;
         }
@@ -535,6 +556,7 @@ pub fn publish_props(
         // leaves the change queued for the next.
         if host.ctl().send_to(id, &frame).is_ok() {
             let client = ledger.clients.entry(id).or_default();
+            client.commit_snapshot(snapshot_slots);
             for (key, _) in &rows {
                 client.owed.remove(key);
             }
@@ -556,19 +578,53 @@ pub struct PropClient {
     owed: BTreeSet<PropKey>,
     /// Rolling resend position over this client's near props.
     cursor: usize,
+    /// The late-join snapshot (F26-A.3): every site that had left its
+    /// authored pose when this player entered the roster, in ordinal
+    /// order. `None` once delivered (and at first for a joiner that
+    /// arrived to an all-default world — there is nothing to snapshot).
+    snapshot: Option<Vec<PropKey>>,
+    /// How much of the snapshot the frames that *left* have carried:
+    /// only a send that went out advances it, so a failed frame's
+    /// rows ride the next one.
+    snapshot_sent: usize,
+}
+
+impl PropClient {
+    /// Record that a frame carrying `slots` of the snapshot left this
+    /// client (F26-A.3).
+    fn commit_snapshot(&mut self, slots: usize) {
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            self.snapshot_sent = (self.snapshot_sent + slots).min(snapshot.len());
+        }
+    }
 }
 
 /// The rows one client is owed this frame, [`MAX_SNAP_PROPS`] at most:
-/// near props that moved, changed or just came near, then the rolling
-/// resend window over the rest of the near ones. A client whose vehicle
-/// has no position yet (its seat is still loading) is treated as near
-/// everything, so the first frames deliver the world rather than none.
+/// near props that moved, changed or just came near, then — while a
+/// late-join snapshot is pending (F26-A.3) — up to [`SNAPSHOT_PACE`]
+/// of its sites, then the rolling resend window over the rest of the
+/// near ones. A client whose vehicle has no position yet (its seat is
+/// still loading) is treated as near everything, so the first frames
+/// deliver the world rather than none.
+///
+/// Returns the rows and how many snapshot slots they consumed; the
+/// caller commits that count only when the frame left, so a failed
+/// send repeats its snapshot rows.
 fn rows_for_client(
     client: &mut PropClient,
     centre: Option<Vec3>,
     table: &BTreeMap<PropKey, (SnapProp, Vec3, bool)>,
-) -> Vec<(PropKey, SnapProp)> {
+) -> (Vec<(PropKey, SnapProp)>, usize) {
     let cap = MAX_SNAP_PROPS as usize;
+    // A snapshot whose rows have all been sent retires here, and the
+    // rolling window below resumes as the heal path.
+    if client
+        .snapshot
+        .as_ref()
+        .is_some_and(|s| client.snapshot_sent >= s.len())
+    {
+        client.snapshot = None;
+    }
     let (near, entered): (Vec<PropKey>, BTreeSet<PropKey>) = match centre {
         Some(centre) => {
             let got = client.interest.update(
@@ -598,8 +654,35 @@ fn rows_for_client(
             rows.push((*key, *row));
         }
     }
-    // Then the rolling resend window over everything not yet carried.
-    if !near.is_empty() {
+    // The late-join snapshot (F26-A.3): every non-default site the
+    // joiner has not been sent yet — near or far — paced so one frame
+    // never carries more than `SNAPSHOT_PACE` of them. A site the
+    // pass above already carried rides that row; a site gone from the
+    // world since the join is skipped and its slot retired with the
+    // frame.
+    let mut snapshot_slots = 0;
+    if let Some(snapshot) = client.snapshot.as_ref() {
+        let start = client.snapshot_sent.min(snapshot.len());
+        let (mut at, mut taken) = (start, 0);
+        while at < snapshot.len() && taken < SNAPSHOT_PACE && rows.len() < cap {
+            let key = snapshot[at];
+            at += 1;
+            if included.contains(&key) {
+                continue;
+            }
+            let Some((row, ..)) = table.get(&key) else {
+                continue;
+            };
+            included.insert(key);
+            rows.push((key, *row));
+            taken += 1;
+        }
+        snapshot_slots = at - start;
+    }
+    // Then the rolling resend window over everything not yet carried —
+    // superseded while the snapshot is still delivering, which covers
+    // the same inventory faster.
+    if client.snapshot.is_none() && !near.is_empty() {
         let start = client.cursor % near.len();
         let mut taken = 0;
         for step in 0..near.len() {
@@ -616,7 +699,7 @@ fn rows_for_client(
         }
         client.cursor = (start + RESEND_WINDOW) % near.len();
     }
-    rows
+    (rows, snapshot_slots)
 }
 
 /// The client index from placement ordinal / fragment key to entity.
@@ -902,18 +985,18 @@ mod tests {
         for client in [&mut near, &mut far] {
             client.owed.extend(table.keys().copied());
         }
-        let got = rows_for_client(&mut near, Some(Vec3::ZERO), &table);
+        let (got, _) = rows_for_client(&mut near, Some(Vec3::ZERO), &table);
         assert_eq!(sites(&got), [1, 2]);
         let far_centre = Some(Vec3::new(5000.0, 0.0, 0.0));
-        assert!(rows_for_client(&mut far, far_centre, &table).is_empty());
+        assert!(rows_for_client(&mut far, far_centre, &table).0.is_empty());
         // The far client never saw the change; it still owes it, and
         // coming near delivers the settled state of both.
-        let entered = rows_for_client(&mut far, Some(Vec3::ZERO), &table);
+        let (entered, _) = rows_for_client(&mut far, Some(Vec3::ZERO), &table);
         assert_eq!(sites(&entered), [1, 2]);
         // Once delivered and settled, only the resend window repeats it.
         far.owed.clear();
         let quiet = table_of(&[(2, 30.0, false)]);
-        let again = rows_for_client(&mut far, Some(Vec3::ZERO), &quiet);
+        let (again, _) = rows_for_client(&mut far, Some(Vec3::ZERO), &quiet);
         assert_eq!(sites(&again), [2], "the resend window still heals drops");
     }
 
@@ -921,7 +1004,90 @@ mod tests {
     fn a_client_with_no_vehicle_yet_is_treated_as_near_everything() {
         let mut client = PropClient::default();
         let table = table_of(&[(1, 9000.0, true)]);
-        assert_eq!(sites(&rows_for_client(&mut client, None, &table)), [1]);
+        let (rows, _) = rows_for_client(&mut client, None, &table);
+        assert_eq!(sites(&rows), [1]);
+    }
+
+    #[test]
+    fn a_late_joiners_snapshot_covers_every_site_at_the_pace() {
+        // Three paces of settled sites, all far from the client's
+        // vehicle: the interest set holds none of them, but the
+        // snapshot is over every non-default site (F26-A.3).
+        let total = 3 * SNAPSHOT_PACE;
+        let props: Vec<(u32, f32, bool)> = (0..total)
+            .map(|i| (i as u32, 5000.0 + i as f32, false))
+            .collect();
+        let table = table_of(&props);
+        let mut client = PropClient {
+            snapshot: Some(table.keys().copied().collect()),
+            ..default()
+        };
+        let far = Some(Vec3::new(-9000.0, 0.0, 0.0));
+        let mut seen: BTreeSet<u32> = BTreeSet::new();
+        let mut frames = 0;
+        loop {
+            let (rows, slots) = rows_for_client(&mut client, far, &table);
+            assert!(
+                rows.len() <= SNAPSHOT_PACE,
+                "a frame carried {} snapshot rows",
+                rows.len()
+            );
+            for (key, _) in &rows {
+                assert!(seen.insert(key.0), "site {} sent twice", key.0);
+            }
+            // Each frame left, so its slots commit.
+            client.commit_snapshot(slots);
+            frames += 1;
+            if client.snapshot.is_none() {
+                break;
+            }
+            assert!(frames < 4, "the snapshot never completed");
+        }
+        assert_eq!(seen, (0..total as u32).collect::<BTreeSet<u32>>());
+        // The far client's near set is still empty: with the snapshot
+        // done, nothing else rides.
+        let (quiet, _) = rows_for_client(&mut client, far, &table);
+        assert!(quiet.is_empty());
+    }
+
+    #[test]
+    fn a_failed_frame_repeats_its_snapshot_rows() {
+        let table = table_of(&[(1, 500.0, false), (2, 502.0, false)]);
+        let mut client = PropClient {
+            snapshot: Some(vec![(1, SNAP_NO_FRAGMENT)]),
+            ..default()
+        };
+        let far = Some(Vec3::new(-9000.0, 0.0, 0.0));
+        let (first, slots) = rows_for_client(&mut client, far, &table);
+        assert_eq!(sites(&first), [1]);
+        // The frame never left: the same row rides the next one, and
+        // the rolling window stays home while the snapshot is owed.
+        let (repeat, retry) = rows_for_client(&mut client, far, &table);
+        assert_eq!(sites(&repeat), [1]);
+        assert_eq!(retry, slots);
+        // The frame left: the snapshot retires, and near props fall
+        // back to the rolling resend window.
+        client.commit_snapshot(slots);
+        let centre = Some(Vec3::new(500.0, 0.0, 0.0));
+        let (entered, _) = rows_for_client(&mut client, centre, &table);
+        assert_eq!(sites(&entered), [1, 2], "coming near still enters");
+        let (window, slots) = rows_for_client(&mut client, centre, &table);
+        assert_eq!(slots, 0);
+        assert_eq!(sites(&window), [1, 2], "the window resumed");
+    }
+
+    #[test]
+    fn a_joiner_with_a_live_body_carries_it_ahead_of_its_snapshot() {
+        // The active/owed pass keeps priority: a body that just moved
+        // rides the same frame the snapshot paces into.
+        let table = table_of(&[(1, 5.0, true), (2, 30.0, false), (3, 40.0, false)]);
+        let mut client = PropClient {
+            snapshot: Some(table.keys().copied().collect()),
+            ..default()
+        };
+        let (rows, _) = rows_for_client(&mut client, Some(Vec3::ZERO), &table);
+        assert_eq!(sites(&rows), [1, 2, 3], "entered + snapshot in one frame");
+        assert_eq!(rows[0].0, (1, SNAP_NO_FRAGMENT), "the live body first");
     }
 
     fn row(site: u32, fragment: u8, phase: u8) -> SnapProp {

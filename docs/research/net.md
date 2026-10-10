@@ -974,9 +974,27 @@ a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
   broken (dormant is never sent); `pos`/`rot` the world pose. Each frame
   carries every active body, every prop that changed since its last
   carried frame, and `RESEND_WINDOW` = 8 settled/broken rows from a
-  rolling cursor, so a dropped/reordered frame and a late joiner heal
-  within one cycle while the frame never grows with the session.
-  Published every second `Update` (`PUBLISH_EVERY`).
+  rolling cursor, so a dropped/reordered frame heals within one cycle
+  while the frame never grows with the session. Published every second
+  `Update` (`PUBLISH_EVERY`).
+- **Late join (F26-A.3).** A player the host's prop ledger has not
+  seen before is owed a *snapshot*: every site that has left its
+  authored pose — near or far, all non-default props — paced at
+  `SNAPSHOT_PACE` = 32 rows a frame (on top of the active/changed
+  pass, inside the same `MAX_SNAP_PROPS` frame cap) and superseding
+  the rolling window until it has delivered them all, so a joiner
+  lands on the host's broken/moved world in a handful of frames
+  instead of a full resend cycle. Only a frame whose send left
+  advances the snapshot; a failed frame repeats its rows. Sites gone
+  from the world since the join are skipped and their slots retired
+  with the frame; props that change after the join ride the ordinary
+  fresh/owed path alongside it. No wire change: the snapshot is the
+  host's pacing policy over the same v17 rows, so no version bump.
+  *Verified on the in-process loopback harness
+  (`net_app::a_late_joiner_lands_on_the_hosts_world_not_the_defaults`:
+  a client joining after the host broke/moved props, ran its clock on
+  and seeded traffic converges on all of them plus the `Start`
+  conditions) and the `worldprops` pacing unit tests.*
 - **World agreement (v18).** An ordinal only names the same prop on
   two peers if both stamped the same placements in the same order; a
   model that failed to load on one side (or differing content that still
@@ -1017,7 +1035,9 @@ a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
   1; 18 B under v17) + 34 B
   per row (site 4, fragment 1, phase 1, pos 12, rot 16);
   `MAX_SNAP_PROPS` 96 rows = 3,294 B worst case, steady state ≈ 30 +
-  34·(active + 8).
+  34·(active + 8). A late joiner's snapshot frames are bounded by the
+  same 96-row cap (`SNAPSHOT_PACE` 32 of it for snapshot rows), so a
+  join never bursts a larger frame than the steady-state bound allows.
 - **Not covered.** No interpolation (an active prop moves at the
   publish rate); no velocities on the wire; vehicle breakaway parts
   keep their own path (`SnapEntry.breaks`); fragments the authority's

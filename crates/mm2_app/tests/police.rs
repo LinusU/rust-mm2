@@ -869,10 +869,10 @@ fn city_install(cops: i64, rows: &str, with_bai: bool) -> tempfile::TempDir {
     write(
         tmp.path(),
         "city/test.psdl",
-        crate::traffic::synthetic_psdl(),
+        crate::support::synthetic_psdl(),
     );
     if with_bai {
-        write(tmp.path(), "city/test.bai", crate::traffic::bai_bytes());
+        write(tmp.path(), "city/test.bai", crate::support::bai_bytes());
     }
     tmp
 }
@@ -970,8 +970,8 @@ fn the_debug_overlay_runs_only_when_the_session_asked_and_survives_a_live_chase(
 fn cruise_install(roam: Option<&str>) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    write(d, "city/test.psdl", crate::traffic::synthetic_psdl());
-    write(d, "city/test.bai", crate::traffic::bai_bytes());
+    write(d, "city/test.psdl", crate::support::synthetic_psdl());
+    write(d, "city/test.bai", crate::support::bai_bytes());
     write_car(d, "vpcop", 1500.0, None);
     if let Some(rows) = roam {
         let n = rows.lines().filter(|l| !l.trim().is_empty()).count();

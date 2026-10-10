@@ -9046,8 +9046,10 @@ fn a_hosts_prop_state_converges_on_a_joined_clients_world() {
 /// props all ride the first frame as fresh changes; every later frame
 /// carries only the live body plus the rolling resend window — never
 /// the whole inventory — and the window's cursor still brings every
-/// settled prop around again, which is what heals a dropped frame and
-/// catches a late joiner up. A dormant prop never appears.
+/// settled prop around again, which is what heals a dropped frame (a
+/// joiner that arrives mid-session is caught up by the paced snapshot
+/// instead, F26-A.3 — this peer was rostered from the session's start,
+/// so it is owed none). A dormant prop never appears.
 #[test]
 fn the_prop_publish_window_cycles_without_growing_the_frame() {
     use mm2_app::worldprops::{PROP_ACTIVE, PROP_SETTLED, RESEND_WINDOW};
@@ -9122,13 +9124,16 @@ fn the_prop_publish_window_cycles_without_growing_the_frame() {
 
 /// F26-AC02 (props): a client that joins *after* the host's props were
 /// knocked, shattered and settled — every "fresh" mark long spent into
-/// a roster of nobody — still converges on that world, because the
-/// rolling resend window keeps cycling the inventory (state, not
-/// events). Twenty-two settled props exceed one frame's window, so only
-/// a cursor that wraps can bring the last of them to the newcomer; the
-/// host's still-flying prop and airborne fragment arrive too, and a
-/// dormant prop stays dormant. Production `publish_props`/`apply_props`
-/// over a real loopback socket; synthetic placements, not a retail city.
+/// a roster of nobody — still converges on that world. The late-join
+/// snapshot delivers every non-default site in the joiner's first
+/// frames (F26-A.3); the rolling resend window keeps cycling the
+/// inventory behind it, so even a frame the snapshot's send lost heals
+/// (state, not events). Twenty-two settled props exceed one frame's
+/// window, so only a cursor that wraps can bring the last of them to
+/// the newcomer without the snapshot; the host's still-flying prop and
+/// airborne fragment arrive too, and a dormant prop stays dormant.
+/// Production `publish_props`/`apply_props` over a real loopback
+/// socket; synthetic placements, not a retail city.
 #[test]
 fn a_late_joiner_converges_on_props_the_host_broke_before_it_arrived() {
     use avian3d::prelude::{Position, RigidBody};
@@ -9322,6 +9327,334 @@ fn a_late_joiner_converges_on_props_the_host_broke_before_it_arrived() {
         "the host's airborne fragment never reached the joiner"
     );
 
+    let props = client.world().resource::<netdrive::RemoteSnaps>().props();
+    assert_eq!(props.unresolved(), 0, "every row named a real prop");
+    assert_eq!(props.mismatched(), 0, "both peers stamped the same world");
+    assert_eq!(props.local_table().count as usize, host_props.len());
+}
+
+/// F26-AC02 end to end (F26-A.3): a client that joins a running Cruise
+/// long after the host broke and moved props, ran its world clock on
+/// and fielded its traffic lands on the *host's* world, not on
+/// defaults. The host starts alone on the synthetic city, breaks a
+/// prop world, loads the ambient population through the production
+/// loader, advances its world clock and only then admits a late
+/// joiner over the real loopback wire. The joiner must converge on all
+/// four: the `Start` conditions (rain at evening — never the
+/// clear-morning default), the host's broken/shattered/moved props
+/// (the late-join snapshot), the host's world clock (a re-seek, not
+/// this process's zero) and copies of the host's already-spawned
+/// traffic. Production `publish_props`/`apply_props`,
+/// `publish_traffic`/`apply_traffic` and `publish_world_clock`/
+/// `apply_world_clock` on both sides; synthetic city and placements,
+/// not retail content.
+#[test]
+fn a_late_joiner_lands_on_the_hosts_world_not_the_defaults() {
+    use avian3d::prelude::{Position, RigidBody};
+    use bevy::ecs::system::RunSystemOnce;
+    use mm2_app::worldprops::RESEND_WINDOW;
+    use mm2_game::BangerPhase;
+
+    let install = support::city_install();
+    // The hosted session: the synthetic city under rain at evening —
+    // conditions a joiner must inherit from `Start`, not rebuild from
+    // its own defaults.
+    let conditions = mm2_game::SessionConditions {
+        time_of_day: mm2_game::TimeOfDay::new(2).unwrap(),
+        weather: mm2_game::Weather::new(3).unwrap(),
+    };
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/test.psdl".into(),
+        },
+        mode: SessionMode::Cruise,
+        conditions,
+        ..SessionConfig::default()
+    };
+    let (link, host_vfs, fp) = host_link(install.path(), &config);
+    let addr = link.addr();
+    let mut host_app = host_app(host_vfs, link);
+    hosted_playing(&mut host_app);
+
+    // The host's traffic, through the production loader: seeded lane
+    // followers on the city's authored network.
+    let traffic = host_app
+        .world_mut()
+        .run_system_once(
+            |mut commands: Commands,
+             mut session: ResMut<Session>,
+             vfs: Res<mm2_game::Mm2Vfs>,
+             mut meshes: ResMut<Assets<Mesh>>,
+             mut images: ResMut<Assets<Image>>,
+             mut materials: ResMut<Assets<StandardMaterial>>| {
+                let config = session.config().expect("the host session is live").clone();
+                let owner = mm2_game::SessionEntity(session.generation());
+                mm2_app::traffic::load_ambient_traffic(
+                    &mut commands,
+                    &vfs.0,
+                    &config,
+                    None,
+                    None,
+                    owner,
+                    &mut session,
+                    // Quarantined like `traffic.rs`'s `city_config`:
+                    // outside the plan's 60 m player exclusion so the
+                    // fixture roads can field cars, well inside the
+                    // 400 m spawn band.
+                    &[Vec3::new(0.0, 1.5, 200.0)],
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                )
+            },
+        )
+        .expect("the traffic load system ran")
+        .expect("the city fields ambient traffic");
+    host_app.world_mut().insert_resource(traffic);
+    let host_cars = {
+        let mut q = host_app
+            .world_mut()
+            .query_filtered::<Entity, With<mm2_app::traffic::AmbientCar>>();
+        q.iter(host_app.world()).count()
+    };
+    assert!(host_cars > 0, "the host seeded no traffic");
+
+    // The host's prop world, all of it broken/moved long before the
+    // joiner: site 0 untouched, 1 flying, 2 shattered with one piece
+    // airborne, the rest settled — one moved off its home by an impact.
+    let mut host_props = vec![
+        stamp_prop(&mut host_app, BangerPhase::Dormant, Vec3::ZERO, 0),
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Active,
+            Vec3::new(5.0, 2.0, 0.0),
+            0,
+        ),
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Broken,
+            Vec3::new(8.0, 0.0, 0.0),
+            2,
+        ),
+    ];
+    for i in 0..(2 * RESEND_WINDOW + 3) {
+        host_props.push(stamp_prop(
+            &mut host_app,
+            BangerPhase::Settled,
+            Vec3::new(20.0 + i as f32, 0.0, 0.0),
+            0,
+        ));
+    }
+    host_app
+        .world_mut()
+        .get_mut::<Position>(host_props[3])
+        .unwrap()
+        .0 = Vec3::new(20.0, 0.0, 7.0);
+    {
+        let (object, role, owner) = {
+            let mut session = host_app.world_mut().resource_mut::<Session>();
+            (
+                session.mint_object_id(),
+                session.authority_role(),
+                mm2_game::SessionEntity(session.generation()),
+            )
+        };
+        let mut banger = mm2_game::Banger::new(prop_def("piece"));
+        banger.phase = BangerPhase::Active;
+        host_app.world_mut().spawn((
+            mm2_app::banger::banger_bundle(
+                banger,
+                object,
+                role,
+                owner,
+                avian3d::prelude::Collider::cuboid(0.5, 0.5, 0.5),
+                Transform::from_xyz(9.0, 2.0, 0.5),
+                "piece-1".into(),
+            ),
+            mm2_game::BangerFragment {
+                parent: host_props[2],
+                index: 1,
+            },
+            Position(Vec3::new(9.0, 2.0, 0.5)),
+            avian3d::prelude::Rotation(Quat::IDENTITY),
+        ));
+    }
+    // The host's world clock has run on: the next frame announces where
+    // it stands.
+    host_app
+        .world_mut()
+        .insert_resource(mm2_app::worldclock::WorldClock {
+            ticks: 5_000,
+            seek: None,
+        });
+    // The first frames — props, traffic, clock — go out to no one:
+    // every fresh mark and cadence is spent before the client exists.
+    for _ in 0..40 {
+        host_app.update();
+    }
+
+    let client_link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "latecomer".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), client_link);
+    // The client's traffic world, through the production loader over
+    // the same content — the roster the host's rows are relative to —
+    // and the scenery clock the host's world frame re-seeks.
+    let replica = mm2_app::worldtraffic::load_traffic_replica(
+        &mount(install.path()),
+        &SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/test.psdl".into(),
+            },
+            mode: SessionMode::Cruise,
+            authority: SessionAuthority::Remote,
+            ..SessionConfig::default()
+        },
+    )
+    .expect("the same city resolves a roster for the client");
+    client.world_mut().insert_resource(replica);
+    client
+        .world_mut()
+        .insert_resource(mm2_app::worldclock::WorldClock::default());
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    // The host keeps stepping: it owns the late join and the begin.
+    for _ in 0..400 {
+        host_app.update();
+        client.update();
+        if session_phase(&client) != SessionPhase::Menu {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_ne!(
+        session_phase(&client),
+        SessionPhase::Menu,
+        "the running session never reached the late joiner"
+    );
+    // `Start` carried the host's conditions — not this process's
+    // clear-morning defaults.
+    {
+        let session = client.world().resource::<Session>();
+        let begun = session.config().expect("the client begun the session");
+        assert_eq!(begun.conditions, conditions);
+        assert_ne!(
+            begun.conditions,
+            mm2_game::SessionConditions::default(),
+            "the conditions are the default, so this leg proves nothing"
+        );
+    }
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // The joiner stamps the same world, all dormant.
+    let client_props: Vec<Entity> = host_props
+        .iter()
+        .enumerate()
+        .map(|(i, &prop)| {
+            let (pos, pieces) = {
+                let world = host_app.world();
+                let home = match i {
+                    0 => Vec3::ZERO,
+                    1 => Vec3::new(5.0, 2.0, 0.0),
+                    2 => Vec3::new(8.0, 0.0, 0.0),
+                    n => Vec3::new(20.0 + (n - 3) as f32, 0.0, 0.0),
+                };
+                (
+                    home,
+                    world
+                        .get::<mm2_app::banger::BangerPieces>(prop)
+                        .map_or(0, |p| p.fragments.len()),
+                )
+            };
+            stamp_prop(&mut client, BangerPhase::Dormant, pos, pieces)
+        })
+        .collect();
+
+    // Convergence — props, world clock and traffic in one bound. The
+    // host's clock keeps running the way the real app steps it
+    // (`advance_world_clock`), so its cadence re-publishes after the
+    // join; anything at or past the host's announced tick is a landed
+    // re-seek.
+    let mut converged = false;
+    for _ in 0..400 {
+        host_app
+            .world_mut()
+            .resource_mut::<mm2_app::worldclock::WorldClock>()
+            .ticks += 10;
+        host_app.update();
+        client.update();
+        thread::sleep(Duration::from_millis(5));
+        let at_rest = client_props[3..]
+            .iter()
+            .all(|&p| prop_state(&client, p).0 == BangerPhase::Settled);
+        let clock = client.world().resource::<mm2_app::worldclock::WorldClock>();
+        let live = client
+            .world()
+            .resource::<mm2_app::worldtraffic::TrafficReplica>()
+            .live();
+        if prop_state(&client, client_props[1]).0 == BangerPhase::Active
+            && prop_state(&client, client_props[2]).0 == BangerPhase::Broken
+            && at_rest
+            && clock.seek.is_some_and(|ticks| ticks >= 5_000)
+            && live == host_cars
+        {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "the late joiner never reached the host's world");
+    assert_eq!(
+        prop_state(&client, client_props[0]).0,
+        BangerPhase::Dormant,
+        "an untouched prop is not replicated"
+    );
+    let moved = prop_state(&client, client_props[3]);
+    assert_eq!(
+        (moved.1, moved.2),
+        (Some(RigidBody::Static), Vec3::new(20.0, 0.0, 7.0)),
+        "the settled pose, not the stamped home"
+    );
+    // The shattered placement's airborne piece spawned on the joiner
+    // from the snapshot's rows.
+    {
+        let mut q = client
+            .world_mut()
+            .query::<(&mm2_game::BangerFragment, &Position)>();
+        let found: Vec<_> = q
+            .iter(client.world())
+            .filter(|(frag, _)| frag.parent == client_props[2])
+            .collect();
+        assert_eq!(found.len(), 1, "exactly the host's one airborne piece");
+        assert_eq!(found[0].0.index, 1);
+        assert_eq!(found[0].1.0, Vec3::new(9.0, 2.0, 0.5));
+    }
+    // The world clock landed and queued a re-seek — the host's clock,
+    // not this process's zero.
+    {
+        let snaps = client.world().resource::<netdrive::RemoteSnaps>();
+        let world = snaps.world();
+        assert!(world.landed() >= 1, "no world-clock frame landed");
+        assert!(world.seeks() >= 1, "the clock never re-seeked");
+        assert_eq!(world.refused(), 0, "the joiner refused the host's clock");
+    }
+    // The traffic rows landed without a roster mismatch, and the
+    // copies are all of the host's population.
+    {
+        let report = client.world().resource::<netdrive::NetDriveReport>();
+        assert!(report.cars_landed > 0, "no traffic row landed");
+        assert_eq!(report.cars_mismatched, 0, "the rosters disagree");
+        assert_eq!(report.cars_live, host_cars);
+    }
     let props = client.world().resource::<netdrive::RemoteSnaps>().props();
     assert_eq!(props.unresolved(), 0, "every row named a real prop");
     assert_eq!(props.mismatched(), 0, "both peers stamped the same world");
