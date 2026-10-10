@@ -262,6 +262,11 @@ pub struct ProfileSelections {
     /// Last played event (DRV-8: Quick Race jumps straight into it).
     #[serde(default)]
     pub last_event: Option<EventKey>,
+    /// Last picked weather + time of day (F18-AC04). Validated on
+    /// read: a selector outside the authored 0-3 grid makes the file
+    /// corrupt rather than mapping to the default clear morning.
+    #[serde(default)]
+    pub conditions: Option<crate::SessionConditions>,
 }
 
 /// One driver profile on disk.

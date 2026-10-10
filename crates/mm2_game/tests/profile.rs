@@ -687,3 +687,56 @@ fn schema_one_race_times_migrate_once_without_changing_progress() {
         Some(76)
     );
 }
+
+/// F18-AC04/AC06: the weather/time pick a profile remembers survives
+/// a save/reload and resolves to the same effective conditions; a
+/// selector outside the authored grid makes the file corrupt instead
+/// of silently becoming the default clear morning.
+#[test]
+fn weather_and_time_survive_a_restart_and_bad_selectors_are_rejected() {
+    let (dir, store) = store();
+    let mut profile = store
+        .create("Weather", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let picked = SessionConditions {
+        time_of_day: TimeOfDay::new(3).unwrap(),
+        weather: Weather::new(3).unwrap(),
+    };
+    profile.selections.conditions = Some(picked);
+    // Twice, so the `.bak` copy carries the pick as well.
+    store.save(&mut profile).unwrap();
+    store.save(&mut profile).unwrap();
+
+    // A fresh store over the same directory is a restart.
+    let reopened = ProfileStore::open(dir.path().join("profiles")).unwrap();
+    let loaded = reopened.load(&profile.id).unwrap().profile;
+    assert_eq!(loaded.selections.conditions, Some(picked));
+    let config = SessionConfig {
+        conditions: loaded.selections.conditions.unwrap(),
+        ..SessionConfig::default()
+    };
+    assert_eq!(effective_conditions(&config, None), picked);
+    assert_ne!(picked, SessionConditions::default());
+
+    // Hand-edit an unsupported selector into every copy on disk.
+    let profiles = dir.path().join("profiles");
+    for entry in std::fs::read_dir(&profiles).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("driver-0"))
+        {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("\"weather\"") {
+                continue;
+            }
+            let edited = text.replacen("\"weather\": 3", "\"weather\": 9", 1);
+            assert_ne!(edited, text, "{path:?}");
+            std::fs::write(&path, edited).unwrap();
+        }
+    }
+    match reopened.load(&profile.id) {
+        Err(ProfileError::Corrupt { .. }) => {}
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+}

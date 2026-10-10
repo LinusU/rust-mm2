@@ -356,8 +356,23 @@ impl Difficulty {
 
 /// A time-of-day selector. Authored values are 0-3 (WLD-4); the
 /// index→name mapping is measured by the `.ltNN` preset grid (WLD-21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct TimeOfDay(u8);
+
+impl From<TimeOfDay> for u8 {
+    fn from(value: TimeOfDay) -> u8 {
+        value.0
+    }
+}
+
+impl TryFrom<u8> for TimeOfDay {
+    type Error = SelectorError;
+
+    fn try_from(value: u8) -> Result<Self, SelectorError> {
+        Self::new(value)
+    }
+}
 
 impl TimeOfDay {
     /// Largest authored selector value.
@@ -387,8 +402,23 @@ impl TimeOfDay {
 
 /// A weather selector. Authored values are 0-3 (WLD-4); the index→name
 /// mapping is measured by the `.ltNN` preset grid (WLD-21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct Weather(u8);
+
+impl From<Weather> for u8 {
+    fn from(value: Weather) -> u8 {
+        value.0
+    }
+}
+
+impl TryFrom<u8> for Weather {
+    type Error = SelectorError;
+
+    fn try_from(value: u8) -> Result<Self, SelectorError> {
+        Self::new(value)
+    }
+}
 
 impl Weather {
     /// Largest authored selector value.
@@ -475,7 +505,7 @@ impl std::error::Error for SelectorError {}
 /// The session's weather and time-of-day pair. Defaults to selector 0
 /// for both — the measured clear-morning corner of the preset grid
 /// (WLD-21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionConditions {
     pub time_of_day: TimeOfDay,
     pub weather: Weather,
