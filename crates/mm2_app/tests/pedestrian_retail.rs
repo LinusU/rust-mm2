@@ -14,6 +14,9 @@
 
 use std::process::Command;
 
+use mm2_app::pedestrian::MAX_PED_ACTORS;
+use mm2_game::pedwalk::WalkPolicy;
+
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 
 /// Simulated frames per city: 60 s of wall-clock game time at 60 Hz,
@@ -26,10 +29,6 @@ const FRAMES: &str = "3600";
 /// `docs/research/pedanim.md`), so this generous bound only fails a
 /// gross per-frame blow-up — it is not a performance claim.
 const FRAME_MS_CEILING: f64 = 250.0;
-
-/// `WalkPolicy::max_active` — the crowd's actor budget. The density
-/// target must stay inside it and the live count inside the target.
-const MAX_PED_ACTORS: usize = 64;
 
 fn field<'a>(record: &'a str, key: &str) -> Option<&'a str> {
     let pat = format!(" {key}=");
@@ -98,6 +97,14 @@ fn retail_crowd_soak_walks_the_real_sidewalks_stays_finite_and_bounded() {
             .unwrap_or_else(|| panic!("{city}: no peds= field:\n{record}"));
         let (live, target): (usize, usize) = (live.parse().unwrap(), target.parse().unwrap());
         assert!(target > 0, "{city}: density target is zero:\n{record}");
+        // The density target must stay inside the crowd's own placement
+        // cap and the app's live-actor budget (read from the sources, no
+        // duplicated literals to drift).
+        let max_active = WalkPolicy::default().max_active;
+        assert!(
+            target <= max_active,
+            "{city}: target {target} above the walk policy cap {max_active}:\n{record}"
+        );
         assert!(
             target <= MAX_PED_ACTORS,
             "{city}: target {target} above the actor budget:\n{record}"

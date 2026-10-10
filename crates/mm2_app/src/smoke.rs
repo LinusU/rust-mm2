@@ -2042,8 +2042,10 @@ fn run_headless(
         .unwrap_or_default();
     // F19-B.2 sidewalk-crowd evidence: live/target population plus the
     // placement, walk and reaction counters. Absent unless the session
-    // fielded a crowd, so dev-world and event records stay
-    // bit-identical.
+    // fielded a crowd — dev worlds, lobbies and sessions whose resolved
+    // density is 0 (Circuit authors `Peds=0`, CIR-3) keep their records
+    // bit-identical; a city event that authors pedestrians (Blitz, WLD-1)
+    // reports them here like the windowed app fields them.
     let peds_detail = world_ecs
         .get_resource::<crate::crowd::PedCrowd>()
         .filter(|c| c.is_active())
