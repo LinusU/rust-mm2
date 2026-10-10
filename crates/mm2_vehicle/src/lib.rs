@@ -1,10 +1,12 @@
-//! Configurable arcade vehicle simulation built on Avian physics.
+//! Retail vehicle dynamics and a configurable dev-car model on Avian physics.
 //!
 //! Layout:
 //! - [`analysis`]: closed-form handling diagnostics (rollover, ride, clearance)
 //! - [`config`]: the fully serializable handling definition
 //! - [`vehicle`]: ECS components (`Vehicle`, `VehicleInput`, `VehicleState`)
-//! - [`sim`]: pure math (steering curves, torque, slip, grip) — unit tested
+//! - [`original`]: recovered retail tyres, suspension, engine and drivetrain
+//! - [`player_input`]: per-car human steering filters and input quantization
+//! - [`sim`]: generic dev-car steering, torque, slip and grip
 //! - [`systems`]: the per-physics-step simulation + reset handling
 //! - [`debug`]: gizmo visualization
 //!
@@ -16,6 +18,9 @@ use bevy::prelude::*;
 pub mod analysis;
 pub mod config;
 pub mod debug;
+pub mod original;
+mod original_step;
+pub mod player_input;
 pub mod sim;
 pub mod surface;
 pub mod systems;
@@ -27,9 +32,9 @@ pub use debug::VehicleDebugEnabled;
 pub use surface::{TireConditions, TireSurface};
 pub use systems::{UprightLanding, seat_level, seated_upright_pose, upright_recovery_pose};
 pub use vehicle::{
-    DriveDirection, EngineImpairment, PreStepVelocity, RemoteReplica, ResetAuthority, ResetPending,
-    ResetVehicle, SelfRightOptOut, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState,
-    WheelState,
+    DriveDirection, EngineImpairment, HumanDriver, PreStepVelocity, RemoteReplica, ResetAuthority,
+    ResetPending, ResetVehicle, SelfRightOptOut, StrikeBound, Teleported, Vehicle, VehicleInput,
+    VehicleState, WheelState,
 };
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
@@ -49,11 +54,22 @@ impl Plugin for VehiclePlugin {
             .init_resource::<TireConditions>()
             .add_systems(
                 PhysicsSchedule,
-                systems::vehicle_simulation
+                (
+                    original_step::prepare_integration,
+                    systems::vehicle_simulation,
+                    original_step::integrate,
+                )
+                    .chain()
                     .in_set(PhysicsStepSystems::First)
-                    // Deliberate: forces accumulate regardless of ordering vs.
-                    // Avian's own `First` systems (same pattern Avian uses).
+                    // Avian First systems update collider/interpolation
+                    // metadata independently of this body velocity update.
                     .ambiguous_with(PhysicsStepSystems::First),
+            )
+            .add_systems(
+                PhysicsSchedule,
+                (original_step::evaluate, original_step::push_out)
+                    .chain()
+                    .in_set(PhysicsStepSystems::Last),
             )
             // `vehicle_self_right` emits `ResetVehicle`; the chained
             // `vehicle_reset` applies it the same frame — and every
@@ -66,6 +82,9 @@ impl Plugin for VehiclePlugin {
             .add_systems(Update, debug::debug_draw);
     }
 }
+
+/// The original's body speed limit, m/s.
+const ORIGINAL_MAX_SPEED: f32 = 500.0;
 
 /// Bundle for spawning a vehicle. Add `Transform`/`Position` to place it.
 ///
@@ -130,9 +149,19 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
             Restitution::new(config.collider_restitution),
         ),
         // We apply our own drag; keep Avian's damping out of the way.
+        // The original model's body has no damping at all beyond its
+        // `vehAero` terms, and the original's speed limits.
         (
             LinearDamping(0.0),
-            AngularDamping(0.02),
+            AngularDamping(if config.original.is_some() { 0.0 } else { 0.02 }),
+            // Retail clamps each body axis in airborne explicit mode;
+            // Avian's norm clamp would also limit grounded implicit spins.
+            MaxAngularSpeed(f32::INFINITY),
+            MaxLinearSpeed(if config.original.is_some() {
+                ORIGINAL_MAX_SPEED
+            } else {
+                f32::INFINITY
+            }),
             LinearVelocity::ZERO,
             AngularVelocity::ZERO,
             SleepingDisabled,

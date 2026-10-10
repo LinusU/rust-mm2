@@ -217,7 +217,7 @@ pub struct VehWheel {
     pub suspension_damp_coef: f32,
     /// `SteeringLimit` — maximum steer angle in radians.
     pub steering_limit: f32,
-    /// `SteeringOffset` — throttle-dependent steer reduction.
+    /// `SteeringOffset` — Ackermann steering angle correction.
     pub steering_offset: f32,
     /// `BrakeCoef` — fraction of the brake budget on this axle.
     pub brake_coef: f32,
@@ -323,7 +323,7 @@ fn decode_wheel(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehResu
         steering_limit: req_finite_f32(b, ctx, "SteeringLimit")?,
         steering_offset: opt_finite_f32(b, ctx, "SteeringOffset")?.unwrap_or(0.0),
         brake_coef: req_finite_f32(b, ctx, "BrakeCoef")?,
-        handbrake_coef: opt_finite_f32(b, ctx, "HandbrakeCoef")?.unwrap_or(0.0),
+        handbrake_coef: opt_finite_f32(b, ctx, "HandbrakeCoef")?.unwrap_or(1.0),
         camber_limit: opt_finite_f32(b, ctx, "CamberLimit")?,
         wobble_limit: opt_finite_f32(b, ctx, "WobbleLimit")?,
         tire_disp_limit_long: req_finite_f32(b, ctx, "TireDispLimitLong")?,

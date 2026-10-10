@@ -256,8 +256,22 @@ use std::f32::consts::FRAC_PI_2;
 /// The authored lineup under the production schedule plus the pursuit
 /// system (the shared harness predates it).
 fn pursuit_app(rows: &str) -> (tempfile::TempDir, App) {
+    pursuit_app_with_finish(rows, 180.0)
+}
+
+fn pursuit_app_with_finish(rows: &str, finish_x: f32) -> (tempfile::TempDir, App) {
     let n = rows.lines().filter(|l| !l.trim().is_empty()).count() as i64;
     let tmp = install(n, rows);
+    write(
+        tmp.path(),
+        "race/testcity/race0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}",
+            waypoint_row(60.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(finish_x, COURSE_Z),
+        ),
+    );
     let mut app = event_app(event_config(), vfs_of(tmp.path()));
     app.add_systems(Update, (police_pursuit, count_cop_impacts));
     app.update();
@@ -362,7 +376,15 @@ fn a_cop_in_sight_chases_the_racing_player_and_a_far_one_does_not() {
 /// counts cop-on-player impacts through the production impact stream.
 #[test]
 fn a_chasing_cop_rams_the_player_and_stays_in_contact() {
-    let (_tmp, mut app) = pursuit_app(NEAR);
+    // Keep the race active throughout the push: crossing the old finish
+    // at x=180 correctly stood the cop down before the observation ended.
+    let (_tmp, mut app) = pursuit_app_with_finish(NEAR, 1000.0);
+    // Extend the dev ground (which ends at x=200) along the push corridor.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(800.0, 1.0, 100.0),
+        Transform::from_translation(Vec3::new(600.0, -0.5, COURSE_Z)),
+    ));
     let (cop, player) = (cop_at(&mut app, 0), local_car(&mut app));
     run_to_racing(&mut app);
 
@@ -385,14 +407,22 @@ fn a_chasing_cop_rams_the_player_and_stays_in_contact() {
         }
     }
     let report = app.world().resource::<PursuitReport>();
+    assert_eq!(
+        app.world().get::<RaceProgress>(player).unwrap().state,
+        ParticipantState::Racing,
+        "the contact observation must retain an eligible target"
+    );
     assert!(
         first_ram.is_some() && report.rams >= 1,
         "the cop never hit the player: {report:?}"
     );
     assert!(
         matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)),
-        "{:?}",
-        phase_of(&app, cop)
+        "cop {:?} at {:?}, player {:?} at {:?}",
+        phase_of(&app, cop),
+        pos_of(&app, cop),
+        app.world().get::<RaceProgress>(player),
+        pos_of(&app, player),
     );
     // The old shadow policy held the cop 8 m out; it now stays against the
     // car (two car lengths at most) for the last four seconds.
@@ -999,9 +1029,10 @@ fn cruise_app(roam: Option<&str>, authority: SessionAuthority) -> (tempfile::Tem
 }
 
 /// The harness spawns the Cruise player at (0, _, 100): cop 0 stands
-/// 30 m beyond it in the open, cop 1 is 135 m off the other end of the
-/// synthetic ground — past the 90 m notice range.
-const ROAM: &str = "vpcop 0 0 130 0 0 15 0.5 50\nvpcop 0 0 -35 180 0 15 0.5 50\n";
+/// 30 m beyond it in the open, cop 1 is 130 m farther along the same
+/// ground. The near cop pushes the player away from the distant cop,
+/// keeping this negative sighting case beyond the 90 m notice range.
+const ROAM: &str = "vpcop 0 0 130 0 0 15 0.5 50\nvpcop 0 0 230 180 0 15 0.5 50\n";
 
 #[test]
 fn a_cruise_city_fields_its_roam_lineup_with_the_road_graph() {
@@ -1087,13 +1118,28 @@ fn a_dev_world_cruise_fields_no_police() {
 fn a_cruising_player_in_sight_is_chased_and_a_distant_one_is_not() {
     let (_tmp, mut app) = cruise_app(Some(ROAM), SessionAuthority::Local);
     let (near, far) = (cop_at(&mut app, 0), cop_at(&mut app, 1));
-    run(&mut app, 600);
+    let player = local_car(&mut app);
+    for _ in 0..600 {
+        app.update();
+        assert!(
+            pos_of(&app, far).distance(pos_of(&app, player))
+                > PursuitPolicy::default().detect_range,
+            "the distant cop must remain outside the notice range"
+        );
+    }
     assert!(
         matches!(phase_of(&app, near), PursuitPhase::Pursuing(_)),
         "{:?}",
         phase_of(&app, near)
     );
-    assert_eq!(phase_of(&app, far), PursuitPhase::Idle);
+    assert_eq!(
+        phase_of(&app, far),
+        PursuitPhase::Idle,
+        "near {:?}, far {:?}, player {:?}",
+        pos_of(&app, near),
+        pos_of(&app, far),
+        pos_of(&app, player),
+    );
     assert!(app.world().get::<EmergencyLights>(near).is_some());
     let report = app.world().resource::<PursuitReport>();
     assert_eq!((report.committed, report.peak), (1, 1));

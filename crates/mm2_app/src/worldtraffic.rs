@@ -101,10 +101,10 @@ pub const MAX_APPLIED_CARS: usize = 16384;
 /// retirement is still pending. A row for a new car past it is refused.
 pub const MAX_COPIES: usize = 2 * MAX_SNAP_CARS as usize;
 
-/// Session ticks (fixed 120 Hz) a copy survives without a frame
+/// Session ticks (fixed 60 Hz) a copy survives without a frame
 /// carrying it — two seconds: far longer than a frame's gap, short
 /// enough that a car the host recycled does not linger.
-pub const COPY_TTL_TICKS: u64 = 240;
+pub const COPY_TTL_TICKS: u64 = 2 * mm2_game::RACE_TICK_HZ as u64;
 
 /// A copy this far (m) from its row's pose snaps instead of easing:
 /// a recycle that reused no id cannot teleport a copy, but a host-side

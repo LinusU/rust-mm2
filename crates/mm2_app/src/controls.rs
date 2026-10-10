@@ -552,7 +552,7 @@ impl ControlSettings {
         out
     }
 
-    fn pressed(&self, action: DriveAction, keys: &ButtonInput<KeyCode>) -> bool {
+    pub(crate) fn pressed(&self, action: DriveAction, keys: &ButtonInput<KeyCode>) -> bool {
         self.keys(action).any(|k| keys.pressed(k))
     }
 
@@ -587,7 +587,19 @@ impl ControlSettings {
         keys: &ButtonInput<KeyCode>,
         pads: impl IntoIterator<Item = &'a Gamepad>,
     ) -> VehicleInput {
+        self.drive_input_with_steering_device(keys, pads).0
+    }
+
+    /// Raw mapping plus the device that owns steering. Device identity is
+    /// needed because retail mouse steering is absolute, while keyboard
+    /// and gamepad steering each have a distinct rate-ramp state.
+    pub fn drive_input_with_steering_device<'a>(
+        &self,
+        keys: &ButtonInput<KeyCode>,
+        pads: impl IntoIterator<Item = &'a Gamepad>,
+    ) -> (VehicleInput, bool) {
         let mut input = VehicleInput::default();
+        let mut pad_steering = false;
         if self.pressed(DriveAction::Throttle, keys) {
             input.throttle = 1.0;
         }
@@ -597,8 +609,9 @@ impl ControlSettings {
         if self.pressed(DriveAction::SteerLeft, keys) {
             input.steering -= 1.0;
         }
-        if self.pressed(DriveAction::SteerRight, keys) {
-            input.steering += 1.0;
+        // Retail keyboard precedence: left wins if both are held.
+        else if self.pressed(DriveAction::SteerRight, keys) {
+            input.steering = 1.0;
         }
         if self.pressed(DriveAction::Handbrake, keys) {
             input.handbrake = 1.0;
@@ -606,10 +619,13 @@ impl ControlSettings {
 
         for pad in pads {
             if self.apply_pad(&mut input, pad) {
+                pad_steering = pad
+                    .get(GamepadAxis::LeftStickX)
+                    .is_some_and(|x| x.abs() > self.steer_deadzone);
                 break;
             }
         }
-        input
+        (input, pad_steering)
     }
 
     /// Fill the channels nothing else touched from the mouse, when

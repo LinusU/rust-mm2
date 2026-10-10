@@ -37,11 +37,11 @@ use crate::result::ResultId;
 
 /// The fixed-step rate the shared race clock counts at — the
 /// `Time::<Fixed>` the app and the headless smoke both install
-/// (120 Hz). Authored time values (`TimeLimit`, seconds — BLZ-3)
+/// (60 Hz). Authored time values (`TimeLimit`, seconds — BLZ-3)
 /// convert through it.
-pub const RACE_TICK_HZ: u32 = 120;
+pub const RACE_TICK_HZ: u32 = 60;
 
-/// Designed default countdown: 3 s at the 120 Hz fixed step. No
+/// Designed default countdown: 3 s at the 60 Hz fixed step. No
 /// authored value exists — the start countdown is not described in the
 /// shipped documentation, so this is a tunable default, not an
 /// original-rules claim.

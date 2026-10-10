@@ -984,7 +984,7 @@ fn two_mm2_processes_relay_a_live_resolved_surface_contact() {
 #[test]
 fn an_impaired_two_process_session_still_converges() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
     let proxy = ImpairProxy::loopback_seeded(addr, 0xC0FFEE).unwrap();
     let recipe = Impair {
@@ -1019,8 +1019,11 @@ fn an_impaired_two_process_session_still_converges() {
 
     // Same cap staggering as the clean leg: bob's record pins rem2
     // while alice is still connected; alice's pins rem>=1.
-    let bob_net = assert_client_drove(&bob.until("smoke=headless-physics"), 2);
-    let alice_net = assert_client_drove(&alice.until("smoke=headless-physics"), 1);
+    // These processes are silent while driving. Bound the whole run rather
+    // than a 15-second per-line wait that parallel children can exhaust.
+    let bound = Duration::from_secs(90);
+    let bob_net = assert_client_drove(&bob.until_within("smoke=headless-physics", bound), 2);
+    let alice_net = assert_client_drove(&alice.until_within("smoke=headless-physics", bound), 1);
     assert!(alice.wait().success(), "alice did not exit cleanly");
     assert!(bob.wait().success(), "bob did not exit cleanly");
 
@@ -2511,12 +2514,10 @@ fn run_shove_trio(
     // Alice's record must be taken while bob is still a seat she holds
     // and after he has printed: end her run when bob leaves (her frame
     // count is only the ceiling), not on a frame count that a slower
-    // bob can lose the race against on a loaded runner. The shoved run
-    // also waits for her to have taken the shove.
+    // bob can lose the race against on a loaded runner. A client receives
+    // the authority's impact without necessarily emitting a local contact;
+    // the replicated shove is asserted below, not a local-impact stop gate.
     alice_flags.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
-    if host_rams {
-        alice_flags.extend(["--with-impacts", "1"].map(String::from));
-    }
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     host.until_within("ready=true", STEP);
     let mut bob_flags = join_args(install, join_addr, "bob", bob_frames);
@@ -2538,6 +2539,11 @@ fn run_shove_trio(
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     alice.wait_success("alice", &alice_rec);
     bob.wait_success("bob", &bob_rec);
+    assert_eq!(field(&alice_rec, "stop"), "peer-left", "{alice_rec}");
+    if host_rams {
+        assert!(net_field(&alice_rec).impacts_applied > 0, "{alice_rec}");
+        assert!(net_field(&bob_rec).impacts_applied > 0, "{bob_rec}");
+    }
     let link = proxy
         .as_ref()
         .map(|p| (p.stats(LinkDir::Up), p.stats(LinkDir::Down)));

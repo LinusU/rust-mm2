@@ -2333,8 +2333,8 @@ fn the_records_screen_shows_persisted_results_and_relaunches() {
         table: EventTableKind::Checkpoint,
         stem: "race0".into(),
     };
-    seed_record(&store, &alice.id, key0(), 120 * 90 + 60, Some(1));
-    seed_record(&store, &alice.id, key0(), 120 * 95, Some(2));
+    seed_record(&store, &alice.id, key0(), 60 * 90 + 30, Some(1));
+    seed_record(&store, &alice.id, key0(), 60 * 95, Some(2));
 
     let mut app = menu_app(tmp.path(), Some(store));
     app.update();

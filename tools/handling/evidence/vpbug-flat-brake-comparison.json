@@ -1,0 +1,70 @@
+{
+  "original_file": "tools/handling/evidence/original-vpbug-flat-brake.json",
+  "native_file": "tools/handling/evidence/native-vpbug-flat-brake.csv",
+  "car": "vpbug",
+  "scenario": "brake",
+  "hz": 60,
+  "frames": 900,
+  "frame_range": [
+    1,
+    900
+  ],
+  "native_offset": -1,
+  "input_byte_mismatches": {
+    "steering_byte": 0,
+    "throttle_byte": null,
+    "brake_byte": null,
+    "handbrake_byte": null
+  },
+  "errors": {
+    "speed_mps": {
+      "samples": 900,
+      "rms": 0.0034293360345785053,
+      "max_absolute": 0.019753652328063254,
+      "mean": 0.00040302701863262553
+    },
+    "lateral_speed_mps": {
+      "samples": 900,
+      "rms": 0.0017596670075988611,
+      "max_absolute": 0.019476896145897298,
+      "mean": -8.152509453697263e-05
+    },
+    "slip_angle_radians": {
+      "samples": 878,
+      "rms": 0.0002940845021183372,
+      "max_absolute": 0.002700014714088539,
+      "mean": -4.1805953045227576e-06
+    },
+    "position_metres": {
+      "samples": 900,
+      "rms": 0.022528620889654082,
+      "max_absolute": 0.053664961598208924,
+      "mean": 0.0163698258029406
+    },
+    "height_metres": {
+      "samples": 900,
+      "rms": 1.281033260368484e-06,
+      "max_absolute": 6.293528556823732e-06,
+      "mean": 2.937374835544167e-07
+    },
+    "yaw_radians": {
+      "samples": 900,
+      "rms": 0.00034368413724017314,
+      "max_absolute": 0.0018525001496181304,
+      "mean": 0.00017382553743126817
+    },
+    "yaw_rate_radians_per_second": {
+      "samples": 900,
+      "rms": 0.0027395566028754264,
+      "max_absolute": 0.02321215678447485,
+      "mean": 3.451652575248239e-05
+    },
+    "rpm": {
+      "samples": 900,
+      "rms": 0.784181326497207,
+      "max_absolute": 7.759160156249891,
+      "mean": 0.02308473849827452
+    }
+  },
+  "interpretation": "Measured differences; inspect terrain/contact/input contamination before changing tuning"
+}

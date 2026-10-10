@@ -9,7 +9,7 @@
 //! pieces overlap one another (coupled train carriages, the two leaves
 //! of a bridge). Neither side of such a pair can respond and nothing
 //! reads the contact, yet measured on London "Tower Tour" they were most
-//! of the narrow phase (~3 ms of the 120 Hz step, in bursts as the
+//! of the narrow phase (~3 ms of the then-120 Hz step, in bursts as the
 //! timed bridges and the train moved) until they were kept apart.
 //!
 //! Only those pairs are separated: [`GameLayer::World`] is the static

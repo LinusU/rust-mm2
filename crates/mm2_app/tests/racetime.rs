@@ -81,7 +81,7 @@ fn def(time_limit_ticks: Option<u32>) -> RaceDefinition {
         laps: 1,
         time_limit_ticks,
         params: EventParams::default(),
-        countdown_ticks: 360,
+        countdown_ticks: mm2_game::DEFAULT_COUNTDOWN_TICKS,
         start_slots: vec![RaceStart {
             position: Vec3::ZERO,
             yaw_deg: Some(0.0),
@@ -317,7 +317,7 @@ fn partial_glyph_set_reports_absent() {
 // ---------------------------------------------------------------------------
 
 /// An untimed race counts up on the authoritative `RaceState::clock`
-/// — 750 ticks at 120 Hz is `0:06:25`, and the slot images are the
+/// — 375 ticks at 60 Hz is `0:06:25`, and the slot images are the
 /// authored digit handles, not a text fallback.
 #[test]
 fn untimed_race_counts_up() {
@@ -327,7 +327,7 @@ fn untimed_race_counts_up() {
     let tmp = glyph_mount();
     let vfs = vfs_of(tmp.path());
     spawn_timer(&mut app, &vfs);
-    insert_race(&mut app, RacePhase::Running, 750, None);
+    insert_race(&mut app, RacePhase::Running, 375, None);
     app.update();
 
     assert!(timer_visible(&mut app));
@@ -380,7 +380,12 @@ fn timed_race_counts_down() {
     let vfs = vfs_of(tmp.path());
     spawn_timer(&mut app, &vfs);
     let limit = 50 * mm2_game::RACE_TICK_HZ;
-    insert_race(&mut app, RacePhase::Running, 10 * 120, Some(limit));
+    insert_race(
+        &mut app,
+        RacePhase::Running,
+        10 * u64::from(mm2_game::RACE_TICK_HZ),
+        Some(limit),
+    );
     app.update();
     assert!(timer_visible(&mut app));
     assert_eq!(report(&app).display.as_deref(), Some("0:40:00"));
@@ -431,7 +436,7 @@ fn complete_and_stale_races_hide_the_timer() {
 
     // A stale resource — a restart generation the teardown has not
     // swept yet — never shows.
-    insert_race(&mut app, RacePhase::Running, 750, None);
+    insert_race(&mut app, RacePhase::Running, 375, None);
     app.world_mut().resource_mut::<RaceState>().generation = 99;
     app.update();
     assert!(!timer_visible(&mut app));
@@ -463,7 +468,7 @@ fn h_gate_hides_the_row_but_keeps_composing() {
     let tmp = glyph_mount();
     let vfs = vfs_of(tmp.path());
     spawn_timer(&mut app, &vfs);
-    insert_race(&mut app, RacePhase::Running, 750, None);
+    insert_race(&mut app, RacePhase::Running, 375, None);
 
     app.world_mut().resource_mut::<HudVisible>().0 = false;
     app.update();

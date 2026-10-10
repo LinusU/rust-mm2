@@ -8,7 +8,8 @@
 use avian3d::prelude::LinearVelocity;
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, RaceState, Session};
-use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
+use mm2_vehicle::player_input::{PlayerSteeringConfig, quantize_pedal, quantize_steering};
+use mm2_vehicle::{HumanDriver, ResetVehicle, Vehicle, VehicleInput, VehicleState};
 
 use crate::camera::CameraMode;
 use crate::contracts::ImpactFilter;
@@ -375,7 +376,78 @@ type DrivenCar = (
     &'static mut VehicleInput,
     Option<&'static VehicleState>,
     Option<&'static Vehicle>,
+    Option<&'static mut HumanDriver>,
+    Option<&'static mut BufferedPlayerInput>,
 );
+
+/// Device collection is per render frame; retail filtering runs once
+/// per physics tick. This buffer owns the independent keyboard/gamepad
+/// ramp state on its car, so extra render frames cannot accelerate it.
+#[derive(Component, Default)]
+pub struct BufferedPlayerInput {
+    raw: VehicleInput,
+    active: bool,
+    mouse: bool,
+    pad: bool,
+    keyboard_held: bool,
+    keyboard: f32,
+    gamepad: f32,
+    pad_active: bool,
+}
+
+impl BufferedPlayerInput {
+    fn filtered(&mut self, config: &PlayerSteeringConfig, speed: f32, dt: f32) -> VehicleInput {
+        let mut input = self.raw;
+        if self.mouse {
+            input.steering = config.mouse(input.steering, speed);
+        } else {
+            self.pad_active |= self.pad;
+            let use_pad = self.pad || (self.pad_active && !self.keyboard_held);
+            let state = if use_pad { self.gamepad } else { self.keyboard };
+            let (next, output) = config.discrete_step(state, input.steering, speed, dt);
+            if use_pad {
+                self.gamepad = next;
+                self.pad_active = next != 0.0;
+            } else {
+                self.keyboard = next;
+            }
+            input.steering = output;
+        }
+        input.steering = quantize_steering(input.steering);
+        input.throttle = quantize_pedal(input.throttle);
+        input.brake = quantize_pedal(input.brake);
+        input.handbrake = quantize_pedal(input.handbrake);
+        input
+    }
+}
+
+type BufferedCar = (
+    &'static mut VehicleInput,
+    &'static Vehicle,
+    Option<&'static VehicleState>,
+    &'static mut BufferedPlayerInput,
+);
+
+/// Consume the latest devices once per fixed tick, before Avian's
+/// FixedPostUpdate physics. Scripted/evidence drivers bypass this system
+/// at scheduling: their VehicleInput is already a direct driving command.
+pub fn apply_player_input(
+    time: Res<Time<Fixed>>,
+    mut vehicles: Query<BufferedCar, With<PlayerVehicle>>,
+) {
+    for (mut input, vehicle, state, mut buffer) in &mut vehicles {
+        if !buffer.active {
+            *input = VehicleInput::default();
+        } else if vehicle.config.original.is_some() {
+            let config = vehicle.config.player_steering.unwrap_or_default();
+            *input = buffer.filtered(
+                &config,
+                state.map_or(0.0, VehicleState::human_steering_speed),
+                time.delta_secs(),
+            );
+        }
+    }
+}
 
 /// Fill `VehicleInput` on the player vehicle from keyboard and the
 /// connected gamepad (gamepad axes take precedence when non-neutral),
@@ -399,6 +471,7 @@ pub fn vehicle_input(
     windows: Query<&Window>,
     controls: Option<Res<ControlSettings>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
+    mut commands: Commands,
 ) {
     // Driving controls are active in every drive view — the chase
     // lenses and the cockpit (HUD-3's three views are all drive views);
@@ -418,8 +491,11 @@ pub fn vehicle_input(
         // never counts.
         manual.release();
         brake_carry.release();
-        for (_, mut vi, _, _) in &mut vehicles {
+        for (_, mut vi, _, _, _, buffer) in &mut vehicles {
             *vi = VehicleInput::default();
+            if let Some(mut buffer) = buffer {
+                *buffer = BufferedPlayerInput::default();
+            }
         }
         return;
     }
@@ -433,8 +509,12 @@ pub fn vehicle_input(
             &fallback
         }
     };
-    let mut input = controls.drive_input(&keys, gamepads.iter());
-    controls.apply_mouse(&mut input, mouse_drive(&windows, mouse.as_deref()));
+    let (mut input, pad_steering) =
+        controls.drive_input_with_steering_device(&keys, gamepads.iter());
+    let mouse_input = mouse_drive(&windows, mouse.as_deref());
+    let mouse_steering =
+        controls.mouse_driving && input.steering == 0.0 && mouse_input.offset.is_some();
+    controls.apply_mouse(&mut input, mouse_input);
     let manual_box = controls.pad_shifts(session.authority_role().is_authority());
     if !manual_box {
         manual.release();
@@ -449,17 +529,61 @@ pub fn vehicle_input(
     let shift_up = key_up || pad_edge(PadAction::ShiftUp);
     let shift_down = key_down || pad_edge(PadAction::ShiftDown);
 
-    for (car, mut vi, state, vehicle) in &mut vehicles {
-        *vi = input;
-        brake_carry.apply(controls, &mut vi, state.map(|s| s.forward_speed));
+    for (car, mut vi, state, vehicle, human, buffer) in &mut vehicles {
+        let mut raw = input;
+        if let Some(mut human) = human {
+            human.auto_reverse = controls.auto_reverse && !manual_box;
+        }
         if let (true, Some(state), Some(vehicle)) = (manual_box, state, vehicle) {
-            vi.forced_gear = Some(manual.command(
+            raw.forced_gear = Some(manual.command(
                 car,
                 state.gear,
-                vehicle.config.transmission.gear_ratios.len(),
+                vehicle.config.original.as_ref().map_or(
+                    vehicle.config.transmission.gear_ratios.len(),
+                    |original| {
+                        original
+                            .gearbox
+                            .ratios
+                            .len()
+                            .saturating_sub(mm2_vehicle::original::FIRST_GEAR)
+                    },
+                ),
                 shift_up,
                 shift_down,
             ));
+        }
+        if vehicle.is_some_and(|v| v.config.original.is_some()) {
+            let keyboard_held = controls.pressed(DriveAction::SteerLeft, &keys)
+                || controls.pressed(DriveAction::SteerRight, &keys);
+            if let Some(mut buffer) = buffer {
+                buffer.raw = raw;
+                buffer.active = true;
+                buffer.mouse = mouse_steering;
+                buffer.pad = pad_steering;
+                buffer.keyboard_held = keyboard_held;
+                // Disconnect clears the device; releasing a connected
+                // stick still centers its existing ramp normally.
+                if gamepads.is_empty() {
+                    buffer.gamepad = 0.0;
+                    buffer.pad_active = false;
+                }
+            } else {
+                commands.entity(car).insert(BufferedPlayerInput {
+                    raw,
+                    active: true,
+                    mouse: mouse_steering,
+                    pad: pad_steering,
+                    keyboard_held,
+                    ..default()
+                });
+            }
+            // Publish only filtered controls. Update may run several
+            // times before the next physics step; raw lock must never
+            // leak onto the car or its network snapshot between steps.
+            vi.forced_gear = raw.forced_gear;
+        } else {
+            *vi = raw;
+            brake_carry.apply(controls, &mut vi, state.map(|s| s.forward_speed));
         }
     }
 }
@@ -518,5 +642,128 @@ pub fn reset_input(
     }
     for msg in session::spawn_resets(&spawn, player.iter().next()) {
         writer.write(msg);
+    }
+}
+
+#[cfg(test)]
+mod steering_cadence_tests {
+    use super::*;
+    use bevy::time::TimeUpdateStrategy;
+    use mm2_content::convert::{ConvertInput, WheelGeom, convert};
+    use mm2_formats::tune::TuneFile;
+    use mm2_formats::veh::VehCarSim;
+    use mm2_game::{SessionConfig, SessionPhase};
+    use std::time::Duration;
+
+    #[derive(Resource, Default)]
+    struct Samples(Vec<f32>);
+
+    fn sample(input: Query<&VehicleInput, With<PlayerVehicle>>, mut samples: ResMut<Samples>) {
+        samples.0.push(input.single().unwrap().steering);
+    }
+
+    fn capture(render_subdivisions: u32) -> Vec<f32> {
+        let wheel = |name: &str| {
+            format!(
+                "{name} {{\n SuspensionExtent 0.2\n SuspensionLimit 0.05\n SuspensionFactor 1\n SuspensionDampCoef 0.1\n SteeringLimit 0.5\n BrakeCoef 0.14\n TireDispLimitLong 0.075\n TireDampCoefLong 0.75\n TireDragCoefLong 0.01\n TireDispLimitLat 0.075\n TireDampCoefLat 0.75\n TireDragCoefLat 0.02\n OptimumSlipPercent 0.05\n StaticFric 3\n SlidingFric 2.95\n }}\n"
+            )
+        };
+        let tune = TuneFile::parse(&format!(
+            "type: a\nvehCarSim {{\n Mass 1000\n InertiaBox 2 1.3 3\n Engine {{\n MaxHorsePower 200\n IdleRPM 750\n OptRPM 5800\n MaxRPM 8500\n }}\n Trans {{\n AutoNumGears 6\n Reverse 20\n Low 20\n High 90\n }}\n Aero {{\n Drag 0.5\n Down 0\n }}\n{}{}}}\n",
+            wheel("WheelFront"),
+            wheel("WheelBack"),
+        ))
+        .unwrap();
+        let sim = VehCarSim::from_tune(&tune).unwrap();
+        let wheels = [(-0.75, -1.3), (0.75, -1.3), (-0.75, 1.3), (0.75, 1.3)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (x, z))| WheelGeom {
+                index,
+                origin: [x, 0.35, z],
+                radius: 0.35,
+                width: 0.2,
+            })
+            .collect::<Vec<_>>();
+        let mut config = convert(&ConvertInput {
+            id: "cadence",
+            display_name: "Cadence",
+            sim: &sim,
+            asnode: None,
+            wheels: &wheels,
+            bound: None,
+            body_aabb: ([-0.9, 0.1, -2.0], [0.9, 1.5, 2.0]),
+            stuck: None,
+            gyro: None,
+        })
+        .unwrap()
+        .config;
+        config.player_steering = Some(PlayerSteeringConfig {
+            speed_high: 44.6,
+            delta_out: [2.573, 0.8],
+            delta_in: [5.0, 5.0],
+            exponent: [1.2, 1.2],
+            ..default()
+        });
+        let mut state = VehicleState::new(&config);
+        state.roll_at(&config, 40.0);
+        let mut session = Session::new();
+        session.begin(SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let fixed = Time::<Fixed>::from_hz(60.0);
+        let tick_ns = fixed.timestep().as_nanos() as u64;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(fixed)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .insert_resource(session)
+            .insert_resource(CameraMode::Chase)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Samples>()
+            .add_systems(Update, vehicle_input)
+            .add_systems(FixedUpdate, (apply_player_input, sample).chain());
+        app.world_mut().spawn((
+            PlayerVehicle,
+            Vehicle { config },
+            state,
+            VehicleInput::default(),
+            HumanDriver::default(),
+        ));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowRight);
+        app.update(); // collect the held key before the first fixed tick
+        for frame in 0..(24 * render_subdivisions) {
+            // Alternate the odd nanosecond between the two render frames,
+            // preserving exactly the same total wall time in both runs.
+            let dt_ns = if render_subdivisions == 1 {
+                tick_ns
+            } else if frame % 2 == 0 {
+                tick_ns / 2
+            } else {
+                tick_ns - tick_ns / 2
+            };
+            *app.world_mut().resource_mut::<TimeUpdateStrategy>() =
+                TimeUpdateStrategy::ManualDuration(Duration::from_nanos(dt_ns));
+            app.update();
+        }
+        app.world().resource::<Samples>().0.clone()
+    }
+
+    #[test]
+    fn extra_render_frames_do_not_change_fixed_steering_samples() {
+        let sixty = capture(1);
+        let one_twenty = capture(2);
+        assert_eq!(sixty.len(), 24);
+        assert_eq!(sixty, one_twenty);
+        assert!(
+            sixty[0] > 0.0 && sixty[0] < 0.1,
+            "first step uses inward rate and byte quantization"
+        );
+        assert!(
+            sixty[23] > sixty[0] && sixty[23] < 1.0,
+            "high-speed steering must still be ramping"
+        );
     }
 }

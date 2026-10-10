@@ -72,7 +72,7 @@ fn unknown_fields_survive_a_round_trip() {
     let profile = store
         .create("Future", Difficulty::Amateur, ProfileKind::Standard)
         .unwrap();
-    // Simulate a file written by a newer schema-1 build with fields this
+    // Simulate a file written by a newer build with fields this
     // build does not model.
     let path = store.root().join("driver-0.json");
     let text = std::fs::read_to_string(&path).unwrap();
@@ -377,7 +377,14 @@ fn unsupported_schema_version_is_rejected() {
         .unwrap();
     let path = store.root().join("driver-0.json");
     let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, text.replace("\"version\": 1", "\"version\": 99")).unwrap();
+    std::fs::write(
+        &path,
+        text.replace(
+            &format!("\"version\": {PROFILE_SCHEMA_VERSION}"),
+            "\"version\": 99",
+        ),
+    )
+    .unwrap();
 
     match store.load(&profile.id) {
         Err(ProfileError::Corrupt { main, .. }) => {
@@ -638,4 +645,45 @@ fn a_revision_at_the_u64_ceiling_is_reported_not_wrapped() {
     let again = store.load(&profile.id).unwrap();
     assert!(!again.recovered_from_backup);
     assert_eq!(again.profile.revision, u64::MAX);
+}
+
+#[test]
+fn schema_one_race_times_migrate_once_without_changing_progress() {
+    let (_dir, store) = store();
+    let mut profile = store
+        .create("Original", Difficulty::Professional, ProfileKind::Standard)
+        .unwrap();
+    profile
+        .event_mut(event_key())
+        .record_finish(151, Some(1), Difficulty::Professional);
+    profile.progress.unlocks.insert("vehicle:vpbus".to_string());
+    profile.selections.last_event = Some(event_key());
+    store.save(&mut profile).unwrap();
+    let path = store.root().join("driver-0.json");
+    let mut old = serde_json::to_value(&profile).unwrap();
+    old["version"] = serde_json::json!(1);
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let mut migrated = store.load(&profile.id).unwrap().profile;
+    assert_eq!(migrated.version, 2);
+    assert_eq!(migrated.revision, profile.revision);
+    assert_eq!(migrated.rank, profile.rank);
+    assert_eq!(migrated.selections, profile.selections);
+    assert_eq!(migrated.progress.unlocks, profile.progress.unlocks);
+    let record = migrated.event(&event_key()).unwrap();
+    assert_eq!(record.best_race_ticks, Some(76));
+    assert_eq!(record.finishes, 1);
+    assert_eq!(record.best_place, Some(1));
+    assert!(record.beaten_professional);
+    // Loading is a read; saving makes the migration durable.
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["version"],
+        1
+    );
+    store.save(&mut migrated).unwrap();
+    let loaded = store.load(&profile.id).unwrap().profile;
+    assert_eq!(loaded.version, 2);
+    assert_eq!(
+        loaded.event(&event_key()).unwrap().best_race_ticks,
+        Some(76)
+    );
 }

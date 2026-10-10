@@ -1,0 +1,644 @@
+{
+  "description": "Production Avian vehicle plugin, HumanDriver auto-reverse, verified cold engine reset, imported keyboard steering, flat friction1.0, 60Hz, 600 actual physics ticks of settlement; stability coverage, not original comparison; human steering preserves the measured two-frame speed cache",
+  "expected_cars": 21,
+  "attempted_runs": 63,
+  "passed_finite_runs": 63,
+  "runs": [
+    {
+      "car": "vp4x4",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 46.642525,
+      "final_speed_mps": 46.642525,
+      "final_original_gear": 6
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 45.931599,
+      "final_speed_mps": 45.931599,
+      "final_original_gear": 6
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 31.245258,
+      "final_speed_mps": -19.526541,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 60.483688,
+      "final_speed_mps": 60.483688,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 54.833298,
+      "final_speed_mps": 54.833298,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 31.181557,
+      "final_speed_mps": -19.381704,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpbug",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 42.573677,
+      "final_speed_mps": 42.573677,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpbug",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 40.071136,
+      "final_speed_mps": 40.071136,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpbug",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 20.157297,
+      "final_speed_mps": -19.01652,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 56.805363,
+      "final_speed_mps": 56.805363,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 54.663429,
+      "final_speed_mps": 54.663429,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 30.589157,
+      "final_speed_mps": -16.621758,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpbus",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 28.522528,
+      "final_speed_mps": 28.522528,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpbus",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 27.240566,
+      "final_speed_mps": 27.240566,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpbus",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 17.700115,
+      "final_speed_mps": -17.700115,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcab",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 45.331181,
+      "final_speed_mps": 45.331181,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpcab",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 43.124626,
+      "final_speed_mps": 43.124626,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpcab",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 22.146463,
+      "final_speed_mps": -14.866382,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 56.240505,
+      "final_speed_mps": 56.240505,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 54.363964,
+      "final_speed_mps": 54.363964,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 29.899269,
+      "final_speed_mps": -19.379614,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 37.193115,
+      "final_speed_mps": 37.193115,
+      "final_original_gear": 7
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 35.253525,
+      "final_speed_mps": 35.253525,
+      "final_original_gear": 7
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 18.929066,
+      "final_speed_mps": -13.924681,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 36.05698,
+      "final_speed_mps": 36.05698,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 34.565712,
+      "final_speed_mps": 34.565712,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 18.614815,
+      "final_speed_mps": -18.613449,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 39.871586,
+      "final_speed_mps": 39.871586,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 35.699486,
+      "final_speed_mps": 35.699486,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 20.000195,
+      "final_speed_mps": -18.936333,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpcop",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 71.65361,
+      "final_speed_mps": 71.65361,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcop",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 67.347443,
+      "final_speed_mps": 67.347443,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpcop",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 39.24622,
+      "final_speed_mps": -18.499603,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 59.216377,
+      "final_speed_mps": 59.216377,
+      "final_original_gear": 6
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 54.782188,
+      "final_speed_mps": 54.782188,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 28.998402,
+      "final_speed_mps": -18.604309,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 34.231731,
+      "final_speed_mps": 34.231731,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 33.842945,
+      "final_speed_mps": 33.842945,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 19.522594,
+      "final_speed_mps": -19.522594,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpdune",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 55.008266,
+      "final_speed_mps": 55.008266,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpdune",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 51.421112,
+      "final_speed_mps": 51.421112,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpdune",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 29.564531,
+      "final_speed_mps": -19.356201,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpford",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 42.63372,
+      "final_speed_mps": 42.63372,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpford",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 3,
+      "max_abs_speed_mps": 33.360088,
+      "final_speed_mps": 33.360088,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpford",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 22.992105,
+      "final_speed_mps": -19.487789,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 41.355221,
+      "final_speed_mps": 41.355221,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 0,
+      "max_abs_speed_mps": 36.87875,
+      "final_speed_mps": 36.87875,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 0,
+      "max_abs_speed_mps": 22.253183,
+      "final_speed_mps": -18.813324,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 52.623936,
+      "final_speed_mps": 52.623936,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 41.53825,
+      "final_speed_mps": 41.53825,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 25.97506,
+      "final_speed_mps": -18.490589,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 62.466694,
+      "final_speed_mps": 62.466694,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 52.184738,
+      "final_speed_mps": 52.184738,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 30.414288,
+      "final_speed_mps": -21.285297,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 81.536896,
+      "final_speed_mps": 81.536896,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 72.885918,
+      "final_speed_mps": 72.885918,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 41.779083,
+      "final_speed_mps": -34.471848,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 35.886581,
+      "final_speed_mps": 35.886581,
+      "final_original_gear": 6
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 33.57233,
+      "final_speed_mps": 33.57233,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 19.531031,
+      "final_speed_mps": -13.77031,
+      "final_original_gear": 0
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "launch",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 60.390858,
+      "final_speed_mps": 60.390858,
+      "final_original_gear": 5
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "turn",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 46.493328,
+      "final_speed_mps": 46.493328,
+      "final_original_gear": 4
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "brake",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "max_abs_speed_mps": 32.788719,
+      "final_speed_mps": -19.408985,
+      "final_original_gear": 0
+    }
+  ],
+  "engine_base_commit": "64c1be1",
+  "engine_branch": "codex/original-handling",
+  "hz": 60,
+  "seconds_per_run": 15,
+  "surface_friction": 1.0,
+  "settle_seconds": 10
+}

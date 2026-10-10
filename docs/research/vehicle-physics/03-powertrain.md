@@ -58,6 +58,28 @@ The `Freetrain` file block is loaded into `FreetrainL` and copied to
 
 `1 hp = 746 W` (`0x5b2028`).
 
+### Constructor, init and reset — cold engine (`0x4d8cd0`)
+
+**verified_original**, checked directly in retail disassembly on 2026-10-10:
+the constructor (`0x4d8c00`, call at `0x4d8ca5`) calls `Reset`
+(`0x4d8cd0`). `Init` (`0x4d8d10`) calls the same virtual reset at
+`0x4d8d95`, through vtable `0x5b1fec`, slot `+0x0c`, before recomputing
+constants. The reset writes:
+
+```
+ωe = 0                         # +0x64, store at 0x4d8ce6
+RPM = rpmAtShift = IdleRPM      # +0x68 / +0x54
+Throttle = T = hp = 0
+inGearChange = 1 ; gclTimer = GCL
+powerScale = throttleCap = 1
+```
+
+The displayed idle RPM therefore does **not** mean that the engine is
+already spinning at idle. With no throttle, its actual speed rises
+toward idle under the zero-throttle torque below. Initialising actual
+`ωe` at `ωidle` removes that startup transient and changes an immediate
+launch after selecting or resetting a car.
+
 ### Torque curve
 
 `CalcTorqueAtFullThrottle(ω)` (`0x4d8e10`):

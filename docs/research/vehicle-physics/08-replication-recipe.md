@@ -68,6 +68,8 @@ trains: type 0 → drive {whl2,whl3}, free {whl0},{whl1}
         type 1 → drive {whl0,whl1}, free {whl2},{whl3}
         type 2 → drive {whl0,whl1,whl2,whl3}
 gear = first (index 2), gearChanged = 1                                 # Reset
+engine.ωe = 0 ; engine.RPM = engine.rpmAtShift = IdleRPM                # cold reset, 03
+engine.inGearChange = 1 ; engine.gclTimer = GCL
 ```
 
 ## Per step, per car

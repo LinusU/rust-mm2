@@ -26,6 +26,72 @@ comparison against this implementation in
 Where this document calls an original mechanism unrecovered or
 designed, check there first.
 
+## Current imported-car simulation
+
+Four-wheel imported cars now use `VehicleConfig.original`, populated from
+retail tuning. The synthetic dev car and passive trailers retain their
+existing configurable model. Imported cars use 19.6 m/s² gravity, authored
+centre of mass (`-CenterOfGravity` on every axis), the square-root-five
+engine curve, clutch and shaft inertia, per-wheel brake torques,
+stick–slip tyre displacements, rear counter-steering, aero angular damping
+and gyro yaw torques. Keyboard steering uses each car's `.asnode` rate
+ramp and signed-byte quantization; full authored wheel lock stays
+available at every speed.
+Speed-sensitive human steering preserves the recorder/player cache order:
+its parameters use body speed from two fixed steps earlier, as measured
+in the original Beetle powerslide.
+
+The application and trajectory probe run at 60 Hz. Vehicle forces from
+tick k are cached for tick k+1. Suspension rank-one Jacobians are solved
+as a coupled linear/angular velocity increment applied once before Avian
+advances the body. Original cars bypass Avian's velocity integrator; its
+six contact-solver substeps remain enabled. Avian still supplies body collision detection, contact resolution
+and pose integration. Bump-stop penetration moves position without
+introducing artificial velocities. These collision/integration choices
+remain adaptations, so formula fidelity alone does not establish a match
+to a driven retail trajectory.
+
+Modern traction control, countersteering, slide recovery, roll/pitch
+cancellation and airborne levelling are disabled for imported cars.
+Optional automatic flip recovery remains a user setting. The generic
+config's engine, tyres and transmission summarize the original model for
+AI, telemetry and tooling; `original` carries the actual simulation
+parameters. Explicit original tuning takes precedence in overrides;
+legacy scalar overrides are propagated when representable.
+
+Record deterministic inputs on a flat `_default` road with:
+
+```sh
+cargo run -p mm2_app --example handling_trace -- <install> vpmustang99 launch 15
+cargo run -p mm2_app --example handling_trace -- <install> vpbug turn 15
+cargo run -p mm2_app --example handling_trace -- <install> vpbullet powerslide 15 1.0
+```
+
+The CSV records every simulated frame's pose, velocity, yaw, RPM, gear,
+steering and grounded-wheel count. Scenarios include `launch`, `coast`,
+`brake`, `turn`, `handbrake` and `powerslide`. The powerslide keeps full
+throttle, flicks the handbrake at 5.5–5.8 seconds, countersteers at
+6.25–7.25 seconds and then recovers with neutral steering. The turn and
+handbrake scenarios steer from five to seven seconds. The default
+settling period is ten seconds. The optional arguments after duration set
+surface friction and settlement ticks: use friction `1.0` when comparing
+the generated original-game course.
+Positions are relative center-of-mass coordinates. This is a measurement instrument,
+not a substitute for recorded original-game evidence.
+
+Race/profile ticks now use 60 Hz. Schema-1 best times are migrated to schema 2
+on load without rewriting the source file; older builds cannot read schema 2.
+Network protocol 24 rejects older peers because simulation and wire-clock
+semantics changed even when their asset fingerprints match. Human drivers
+also transmit their auto-reverse preference and optional manual gear, so
+the host applies the same pedal rules as their local simulation.
+
+## Historical arcade conversion
+
+The following mapping and measurements describe the previous arcade
+model. They still explain the generic dev-car path and the legacy config
+fields, but no longer describe the forces used by an imported retail car.
+
 ## Conventions
 
 - Vehicle space is an **identity** map of MM2 coordinates: both use `-Z`
@@ -475,21 +541,25 @@ so no tire or spring force can reach it and the drive is simply over.
 `assists.self_right_delay` seconds after it comes to rest inverted, the car
 is set upright on its heading and dropped back on the surface beneath it.
 
-## Deliberately unsupported
+## Remaining gaps
 
-- `Aero.AngCDamp` / `AngVelDamp` / `AngVel2Damp` — MM2's per-axis angular
-  damping. The assist policy (`yaw_stability`, `roll_resistance`,
-  `air_control`) covers the same ground with parameters whose meaning we can
-  state; the axis order of these fields is also not established.
-- `SSSValue` / `SSSThreshold` / `CarFrictionHandling` — legacy steering and
-  friction switches.
-- `Wheel*.CamberLimit` / `WobbleLimit` / `TireDisp*` / `TireDamp*` — camber,
-  wobble and slip-displacement internals with no analog in the tire model.
+- `CamberLimit` and `WobbleLimit` remain parsed visual tuning; wheel camber
+  and wobble are not animated.
+- Legacy `SSSValue`, `SSSThreshold` and `CarFrictionHandling` switches are
+  retained in parsed data. Human steering uses the recovered `.asnode` law.
+- Body/world impacts still use Avian contacts, the raised underside and
+  capped body friction/restitution described above. Impact trajectories
+  have not been established as matching the original solver.
+- Passive trailers retain the generic suspension model. A clean spawn/reset
+  with an aligned hitch does not establish original trailer dynamics.
+- Device mappings, mouse cursor interpretation, AI controllers and optional
+  recovery policies remain modern application choices. Stock keyboard
+  filtering and automatic pedal swapping use the recovered original rules.
 
 ## Overriding handling
 
-Nothing above is baked in. A TOML file replaces or patches the imported
-config:
+A full TOML handling config replaces the imported definition while the
+model's wheel positions, radii and collision geometry stay pinned:
 
 ```sh
 cargo run -p mm2_app --bin mm2 -- --mm2-path <install> --vehicle-config car.toml
@@ -498,3 +568,12 @@ cargo run -p mm2_app --bin mm2 -- --mm2-path <install> --vehicle-config car.toml
 `examples/vehicles/dev-car.toml` is the default config serialised in full,
 which is the easiest starting point — and `cargo run -p mm2_vehicle --example
 dump_default_config` regenerates it.
+
+For a retail car, `drive_probe <install> <car> --dump-config /tmp/car.toml`
+exports its effective config including `original`. Edit the original fields
+for suspension, shaft inertia, gearbox or separate wheel tuning. Common
+legacy power, mass, shared grip, brake, steering-lock and aero scalar edits
+are propagated when the corresponding original fields are unchanged. Unequal
+lateral/longitudinal friction edits are rejected because the retail tyre
+uses one friction circle. Omitting `original` from a full config selects the
+generic model.

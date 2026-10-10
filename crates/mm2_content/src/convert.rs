@@ -15,22 +15,31 @@
 //! * `CenterOfGravity` locates the model *from* the centre of mass, so in
 //!   plan view the centre of mass sits at `-CenterOfGravity` from the
 //!   model origin (the original's static load split; see
-//!   docs/vehicle-handling.md "Centre of mass"). Its height is adapted:
-//!   bound-box centre plus the authored `y` offset.
+//!   docs/vehicle-handling.md "Centre of mass"). Imported original
+//!   configs use all three negated authored coordinates verbatim.
 //! * `Trans.Low`/`High`/`Reverse` are per-band top speeds in mph; combined
 //!   gear ratios are derived so the engine sits at `OptRPM` at each band's
 //!   top speed, geometrically interpolated (biased by `GearBias`).
-//! * `MaxHorsePower` is power (745.7 W/hp) peaking at `OptRPM`; a torque
-//!   peak of `1.15 × P/ω_opt` at `0.72 × OptRPM` gives the curve its shape.
+//! * The generic scalar summaries retain the earlier arcade mapping.
+//!   Actual imported simulation uses `original`: 746 W/hp, the recovered
+//!   √5 torque polynomial, retail gearbox and tyre/suspension laws.
 
 use mm2_formats::bnd::BndFile;
 use mm2_formats::veh::{
     AsNode, DrivetrainType, VehCarSim, VehGyro, VehStuck, VehTrailer, VehWheel,
 };
 use mm2_vehicle::config::{
-    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, GyroConfig, SteeringConfig,
+    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, GyroConfig, OriginalAero, OriginalEngine,
+    OriginalGearbox, OriginalHandling, OriginalTrain, OriginalWheel, SteeringConfig,
     SuspensionConfig, TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
 };
+
+use mm2_vehicle::original;
+
+const ORIGINAL_GRAVITY: f32 = 19.6;
+const ORIGINAL_ROAD_FRICTION: f32 = 0.9;
+const ORIGINAL_HP_TO_W: f32 = 746.0;
+const ORIGINAL_MAX_ANGULAR_SPEED: f32 = 4.0 * std::f32::consts::PI;
 
 const MPH_TO_MPS: f32 = 0.44704;
 const HP_TO_W: f32 = 745.7;
@@ -205,6 +214,8 @@ pub struct WheelGeom {
     pub origin: [f32; 3],
     /// Wheel radius (from geometry bounds or mtx bounds).
     pub radius: f32,
+    /// Wheel width from model/pivot bounds, metres (steering inner-edge pivot).
+    pub width: f32,
 }
 
 /// Inputs for one car conversion.
@@ -856,7 +867,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
             "vehgyro.Spin180/Reverse180/Drift (+Pitch/Roll)",
             "gyro",
             format!(
-                "authored gyro rates — spin {:.2}/{:.2} rad/s, drift {:.2}, righting {}",
+                "authored gyro gains — spin {:.2}/{:.2}, drift {:.2}, righting {}",
                 g.spin180,
                 g.reverse180,
                 g.drift,
@@ -868,7 +879,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         );
     }
 
-    let config = VehicleConfig {
+    let mut config = VehicleConfig {
         name: input.display_name.to_string(),
         mass,
         center_of_mass: com,
@@ -916,9 +927,396 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         // top speed (HUD-1/F22-B.1; inferred binding, DSN-47).
         top_speed_mps: (sim.trans.high_mph > 0.0 && sim.trans.high_mph.is_finite())
             .then_some(sim.trans.high_mph * MPH_TO_MPS),
+        original: None,
+        player_steering: Some(player_steering(input.asnode)),
     };
 
+    report.add(
+        "tune/<id>.asnode",
+        "player_steering",
+        if input.asnode.is_some() {
+            Provenance::Imported
+        } else {
+            Provenance::Defaulted
+        },
+        "retail human-device steering ramp; independent of wheel steering limits",
+    );
+    apply_original(input, &mut config, &mut report);
+
     Ok(Converted { config, report })
+}
+
+/// Put `config` on the original game's car model: build its
+/// [`OriginalHandling`] from the authored tuning, and restate the arcade
+/// fields as a summary of what that model does for the consumers that
+/// plan against them (AI pace and steering, handling analysis, FX).
+///
+/// The original needs the four wheels it was written for — front and
+/// rear, left and right. A rig without them keeps the arcade model.
+fn apply_original(
+    input: &ConvertInput<'_>,
+    config: &mut VehicleConfig,
+    report: &mut ConversionReport,
+) {
+    let sim = input.sim;
+    let geoms = input.wheels;
+    if geoms.len() != 4 {
+        report.warnings.push(format!(
+            "{}: {} physics wheels — the original model needs four; arcade handling kept",
+            input.id,
+            geoms.len()
+        ));
+        return;
+    }
+    let z_min = geoms.iter().map(|w| w.origin[2]).fold(f32::MAX, f32::min);
+    let z_max = geoms.iter().map(|w| w.origin[2]).fold(f32::MIN, f32::max);
+    let z_mid = (z_min + z_max) * 0.5;
+    let is_rear: Vec<bool> = geoms.iter().map(|w| w.origin[2] >= z_mid).collect();
+    let find = |rear: bool, left: bool| {
+        geoms
+            .iter()
+            .enumerate()
+            .find(|(i, w)| is_rear[*i] == rear && (w.origin[0] < 0.0) == left)
+            .map(|(i, _)| i)
+    };
+    let (Some(fl), Some(fr), Some(rl), Some(rr)) = (
+        find(false, true),
+        find(false, false),
+        find(true, true),
+        find(true, false),
+    ) else {
+        report.warnings.push(format!(
+            "{}: wheel rig is not front/rear × left/right — arcade handling kept",
+            input.id
+        ));
+        return;
+    };
+
+    // Remove audit rows for generic mechanisms that this path replaces.
+    report.entries.retain(|e| {
+        !matches!(
+            e.dest.as_str(),
+            "assists" | "assists.roll_resistance" | "assists.pitch_resistance" | "center_of_mass"
+        ) && !matches!(
+            e.source.as_str(),
+            "vehCarSim.SSS*/CarFrictionHandling/Aero.Ang*"
+                | "vehCarSim.Wheel*.CamberLimit/WobbleLimit/TireDisp*"
+        )
+    });
+    report.unsupported("vehCarSim.SSS*/CarFrictionHandling", "legacy switches retained in the parsed data; player steering uses recovered .asnode tuning");
+    report.unsupported(
+        "vehCarSim.Wheel*.CamberLimit/WobbleLimit",
+        "visual camber and wobble are not simulated; tyre displacement and damping are imported",
+    );
+    let mass = config.mass;
+    let cog = sim.center_of_gravity;
+    let gravity = ORIGINAL_GRAVITY;
+
+    // --- wheels -------------------------------------------------------------
+    let wheels: Vec<OriginalWheel> = geoms
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let wt = if is_rear[i] {
+                &sim.wheel_back
+            } else {
+                &sim.wheel_front
+            };
+            // `ComputeConstants`: the axles are taken as symmetric about
+            // the model origin, so `CenterOfGravity.z` alone splits the
+            // weight — `|z − CoG.z| / 2|z|` of it per wheel.
+            let z = g.origin[2];
+            let static_load = if z.abs() > 1e-3 {
+                gravity * 0.25 * mass * (z - cog[2]).abs() / z.abs()
+            } else {
+                gravity * 0.25 * mass
+            };
+            OriginalWheel {
+                static_load: static_load.max(1.0),
+                rear: is_rear[i],
+                side: if g.origin[0] < 0.0 { -1.0 } else { 1.0 },
+                width: g.width,
+                suspension_extent: wt.suspension_extent.max(0.01),
+                suspension_limit: wt.suspension_limit.max(0.0),
+                suspension_factor: wt.suspension_factor.max(0.75),
+                suspension_damp_coef: wt.suspension_damp_coef.max(0.0),
+                steering_limit: wt.steering_limit,
+                steering_offset: wt.steering_offset,
+                brake_coef: wt.brake_coef.max(0.0),
+                // Unauthored, the constructor's `1.0`.
+                handbrake_coef: if is_rear[i] {
+                    if i == rr {
+                        1.0
+                    } else {
+                        wt.handbrake_coef.max(0.0)
+                    }
+                } else {
+                    0.0
+                },
+                tire_disp_limit_lat: wt.tire_disp_limit_lat.max(1e-3),
+                tire_disp_limit_long: wt.tire_disp_limit_long.max(1e-3),
+                tire_damp_coef_lat: wt.tire_damp_coef_lat.max(0.0),
+                tire_damp_coef_long: wt.tire_damp_coef_long.max(0.0),
+                tire_drag_coef_lat: wt.tire_drag_coef_lat.max(0.0),
+                tire_drag_coef_long: wt.tire_drag_coef_long.max(0.0),
+                optimum_slip: wt.optimum_slip_percent.max(0.01),
+                static_fric: wt.static_fric.max(0.0),
+                sliding_fric: wt.sliding_fric.max(0.0),
+            }
+        })
+        .collect();
+    report.derived(
+        "vehCarSim.Mass+CenterOfGravity.z + whlN.mtx",
+        "original.wheels[].static_load",
+        format!(
+            "{:.0} / {:.0} N front/rear: the share of mass × {gravity} m/s² split by CenterOfGravity.z",
+            wheels[fl].static_load, wheels[rl].static_load
+        ),
+    );
+    report.imported(
+        "vehCarSim.WheelFront/WheelBack",
+        "original.wheels[]",
+        "suspension, steering, brake and stick–slip tyre tokens verbatim",
+    );
+
+    // --- drivetrains ----------------------------------------------------------
+    let (driven, free) = match sim.drivetrain_type {
+        DrivetrainType::Rwd => (vec![rl, rr], vec![fl, fr]),
+        DrivetrainType::Fwd => (vec![fl, fr], vec![rl, rr]),
+        DrivetrainType::Awd => (vec![fl, fr, rl, rr], vec![]),
+    };
+    let train = |t: Option<&mm2_formats::veh::VehEndTrain>| OriginalTrain {
+        ang_inertia: t.and_then(|t| t.ang_inertia).unwrap_or(5000.0).max(0.0),
+        brake_dynamic_coef: t.and_then(|t| t.brake_dynamic_coef).unwrap_or(1.0).max(0.0),
+        brake_static_coef: t.and_then(|t| t.brake_static_coef).unwrap_or(1.2).max(0.0),
+    };
+    let drivetrain = train(sim.drivetrain.as_ref());
+    let freetrain = train(sim.freetrain.as_ref());
+
+    // --- engine and gearbox -------------------------------------------------
+    let engine = OriginalEngine {
+        max_power_w: sim.engine.max_horsepower.max(1.0) * ORIGINAL_HP_TO_W,
+        idle_rpm: sim.engine.idle_rpm.max(1.0),
+        opt_rpm: sim.engine.opt_rpm.max(sim.engine.idle_rpm * 2.0 + 1.0),
+        max_rpm: sim.engine.max_rpm.max(sim.engine.opt_rpm * 1.01),
+        ang_inertia: sim.engine.ang_inertia.unwrap_or(1.0).max(1e-3),
+        gear_change_lag: sim.engine.gcl.unwrap_or(0.25).max(0.0),
+    };
+    let constants = original::EngineConstants::of(&engine);
+    // Ratios are anchored on the primary drivetrain's first wheel.
+    let radius = geoms[driven[0]].radius.max(0.05);
+    let ratios = original::gear_ratios(
+        engine.opt_rpm,
+        radius,
+        sim.trans.reverse_mph,
+        sim.trans.low_mph,
+        sim.trans.high_mph,
+        sim.trans.auto_num_gears.max(3) as usize,
+        sim.trans.gear_bias,
+    );
+    let shifts = original::shift_points(
+        &ratios,
+        &constants,
+        engine.max_rpm,
+        sim.trans.upshift_bias,
+        sim.trans.downshift_bias_min,
+        sim.trans.downshift_bias_max,
+    );
+    report.derived(
+        "vehCarSim.Trans.Low/High/Reverse/GearBias/AutoNumGears",
+        "original.gearbox.ratios",
+        format!(
+            "{:?} (R, N, forward) at OptRPM on r={radius:.3} m; upshifts {:?} rpm",
+            ratios.iter().map(|r| format!("{r:.2}")).collect::<Vec<_>>(),
+            shifts
+                .upshift
+                .iter()
+                .map(|r| format!("{r:.0}"))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let gearbox = OriginalGearbox {
+        ratios,
+        upshift_rpm: shifts.upshift,
+        downshift_full_rpm: shifts.downshift_full,
+        downshift_zero_rpm: shifts.downshift_zero,
+        equal_power_rpm: shifts.equal_power,
+        gear_change_time: sim.trans.gear_change_time.max(0.0),
+    };
+
+    let aero = OriginalAero {
+        ang_c_damp: sim.aero.ang_c_damp.unwrap_or([0.0; 3]),
+        ang_vel_damp: sim.aero.ang_vel_damp.unwrap_or([0.0; 3]),
+        ang_vel2_damp: sim.aero.ang_vel2_damp.unwrap_or([0.0; 3]),
+        drag: sim.aero.drag.max(0.0),
+        down: sim.aero.down.max(0.0),
+    };
+    report.imported(
+        "vehCarSim.Aero.AngCDamp/AngVelDamp/AngVel2Damp/Drag/Down",
+        "original.aero",
+        "rotational damping per car axis (x pitch, y yaw, z roll) and drag verbatim",
+    );
+
+    // --- the arcade fields, restated ----------------------------------------
+    // Contact patches rest on the modelled pivots (`x = 0` carries `L`).
+    // The render origin is body CoM + authored CenterOfGravity.
+    config.center_of_mass = [-cog[0], -cog[1], -cog[2]];
+    report.imported(
+        "vehCarSim.CenterOfGravity",
+        "center_of_mass",
+        format!(
+            "-CenterOfGravity from the model origin ({:.2}, {:.2}, {:.2}), verbatim authored offset",
+            config.center_of_mass[0], config.center_of_mass[1], config.center_of_mass[2]
+        ),
+    );
+    let mu = |w: &OriginalWheel| w.static_fric * ORIGINAL_ROAD_FRICTION * gravity / G;
+    let front_lock = wheels[fl].steering_limit.max(0.01);
+    for (i, (wc, ow)) in config.wheels.iter_mut().zip(&wheels).enumerate() {
+        let k = original::WheelConstants::of(ow, geoms[i].radius, gravity);
+        wc.position = [
+            geoms[i].origin[0],
+            geoms[i].origin[1] + ow.suspension_limit,
+            geoms[i].origin[2],
+        ];
+        wc.steered = !ow.rear && ow.steering_limit > 0.0;
+        wc.steer_scale = 1.0;
+        wc.driven = driven.contains(&i);
+        wc.handbrake = ow.rear && ow.handbrake_coef > 0.0;
+        wc.suspension = Some(SuspensionConfig {
+            spring_rate: k.ks,
+            damping_compression: k.cs,
+            damping_rebound: k.cs,
+            travel: ow.suspension_extent + ow.suspension_limit,
+            force_apply_offset: 0.0,
+            max_force: ow.static_load * 10.0,
+        });
+        wc.tires = Some(TireConfig {
+            lateral_grip: mu(ow),
+            longitudinal_grip: mu(ow),
+            peak_slip_angle: ow.optimum_slip.atan(),
+            peak_slip_ratio: ow.optimum_slip,
+            slide_fraction: (ow.sliding_fric / ow.static_fric.max(0.01)).clamp(0.0, 1.0),
+            rolling_resistance: 0.0,
+            load_sensitivity: 0.0,
+        });
+    }
+    let brake_force = wheels
+        .iter()
+        .map(|w| w.brake_coef * w.static_fric * w.static_load)
+        .sum::<f32>()
+        / 4.0;
+    config.brakes.max_brake_force = brake_force;
+    config.steering = SteeringConfig {
+        low_speed_max_angle: front_lock,
+        high_speed_max_angle: front_lock,
+        high_speed: 40.0,
+        input_rate: config.steering.input_rate,
+        return_rate: config.steering.return_rate,
+        response_curve: 1.0,
+        grip_limit: 0.0,
+    };
+    config.aero = AeroConfig {
+        drag_coefficient: aero.drag * 2.0,
+        downforce_coefficient: aero.down * 2.0,
+    };
+    config.transmission = TransmissionConfig {
+        gear_ratios: gearbox.ratios[original::FIRST_GEAR..].to_vec(),
+        reverse_ratio: gearbox.ratios[original::REVERSE_GEAR].abs(),
+        final_drive: 1.0,
+        shift_time: engine.gear_change_lag,
+        efficiency: 1.0,
+        upshift_rpm: gearbox.upshift_rpm.get(original::FIRST_GEAR).copied(),
+        downshift_rpm: gearbox
+            .downshift_full_rpm
+            .get(original::FIRST_GEAR + 1)
+            .copied(),
+    };
+    config.engine.redline_rpm = engine.max_rpm;
+    config.engine.idle_rpm = engine.idle_rpm;
+    config.engine.engine_brake_nm = 0.75 * constants.torque_opt;
+    // None of the arcade assists exist in the original: the tires, the
+    // gyro and the aero damping are the whole of its handling. Only optional self-righting remains a modern recovery policy.
+    config.assists = AssistConfig {
+        roll_resistance: 0.0,
+        pitch_resistance: 0.0,
+        yaw_stability: 0.0,
+        traction_control: 0.0,
+        countersteer: 0.0,
+        slide_recovery: 0.0,
+        air_control: 0.0,
+        ..config.assists
+    };
+    report.adapted(
+        "-",
+        "assists",
+        "original model: no traction control, yaw damper, slide recovery, countersteer or roll/pitch assist; air levelling disabled; optional self-righting remains",
+    );
+
+    config.original = Some(OriginalHandling {
+        gravity,
+        surface_friction: ORIGINAL_ROAD_FRICTION,
+        wheels,
+        driven,
+        free,
+        drivetrain,
+        freetrain,
+        engine,
+        gearbox,
+        aero,
+        max_angular_speed: ORIGINAL_MAX_ANGULAR_SPEED,
+    });
+}
+
+/// Read human steering separately from wheel/AI steering. Missing fields
+/// use the recovered mmPlayer constructor values; absent mouse tuning is
+/// explicit because its constructor defaults have not been transcribed.
+fn player_steering(asnode: Option<&AsNode>) -> mm2_vehicle::player_input::PlayerSteeringConfig {
+    use mm2_vehicle::player_input::PlayerSteeringConfig;
+    let mut out = PlayerSteeringConfig::default();
+    let Some(asnode) = asnode else {
+        return out;
+    };
+    let root = &asnode.raw.root;
+    let value = |name: &str| root.f32(name).filter(|v| v.is_finite());
+    let pair = |lo: &str, hi: &str, default: [f32; 2]| {
+        [
+            value(lo).filter(|v| *v >= 0.0).unwrap_or(default[0]),
+            value(hi).filter(|v| *v >= 0.0).unwrap_or(default[1]),
+        ]
+    };
+    out.speed_sensitive = value("SpeedSensitive")
+        .filter(|v| matches!(*v, 0.0 | 1.0 | 2.0))
+        .map_or(2, |v| v as u8);
+    let low = asnode.speed_base_low.unwrap_or(out.speed_low);
+    let high = asnode.speed_base_hi.unwrap_or(out.speed_high);
+    if low >= 0.0 && high > low {
+        out.speed_low = low;
+        out.speed_high = high;
+    }
+    out.delta_out = pair(
+        "DiscreteSteeringDeltaOutLo",
+        "DiscreteSteeringDeltaOutHi",
+        out.delta_out,
+    );
+    out.delta_in = pair(
+        "DiscreteSteeringDeltaInLo",
+        "DiscreteSteeringDeltaInHi",
+        out.delta_in,
+    );
+    out.exponent = pair(
+        "DiscreteSteeringFilterLo",
+        "DiscreteSteeringFilterHi",
+        out.exponent,
+    );
+    let optional_pair = |lo: &str, hi: &str| -> Option<[f32; 2]> {
+        Some([
+            value(lo).filter(|v| *v > 0.0)?,
+            value(hi).filter(|v| *v > 0.0)?,
+        ])
+    };
+    out.mouse_divisor = optional_pair("MouseSensitivityLow", "MouseSensitivityHi");
+    out.mouse_exponent = optional_pair("MouseSteerFilterLow", "MouseSteerFilterHi");
+    out
 }
 
 /// A `vehgyro` scalar that must be nonnegative: malformed values warn
@@ -1090,6 +1488,7 @@ mod tests {
                 index,
                 origin: [*x, 0.35, side * half_wheelbase],
                 radius: 0.35,
+                width: 0.2,
             })
             .collect()
     }
@@ -1129,42 +1528,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_stubby_tall_car_gets_pitch_resistance() {
-        let sim = sim_with_cog([0.0, -0.1, 0.0]);
-        // Ordinary proportions keep all their squat and dive.
-        let ordinary = convert_with(&sim, &wheels(1.3), 1.5).config;
-        assert_eq!(ordinary.assists.pitch_resistance, 0.0);
-
-        // The same car on the Moon Rover's 0.86 m wheelbase pitches far
-        // past the cap, and is brought back to it.
-        let stubby = convert_with(&sim, &wheels(0.43), 1.5);
-        let pr = stubby.config.assists.pitch_resistance;
-        assert!(pr > 0.5, "stubby car got pitch_resistance {pr}");
-        assert!(stubby.report.entries.iter().any(|e| {
-            e.dest == "assists.pitch_resistance" && e.provenance == Provenance::Adapted
-        }));
-    }
-
-    #[test]
-    fn a_rear_driven_car_that_would_stand_up_is_held_down() {
-        // The same car with its mass 0.3 m ahead of the rear axle instead
-        // of mid-wheelbase: traction alone now takes it past the point
-        // where the nose lifts, so the drive force's lever is shortened.
-        let sim = sim_with_cog([0.0, -0.1, -1.0]);
-        let tail_heavy = convert_with(&sim, &wheels(1.3), 1.5);
-        let pr = tail_heavy.config.assists.pitch_resistance;
-        assert!(pr > 0.3, "tail-heavy car got pitch_resistance {pr}");
-        assert!(
-            tail_heavy
-                .report
-                .entries
-                .iter()
-                .any(|e| { e.dest == "assists.pitch_resistance" && e.note.contains("wheelie") })
-        );
-
-        // Mid-wheelbase mass needs none.
-        let balanced = convert_with(&sim_with_cog([0.0, -0.1, 0.0]), &wheels(1.3), 1.5);
-        assert_eq!(balanced.config.assists.pitch_resistance, 0.0);
+    fn original_cars_keep_authored_pitch_levers() {
+        // Short wheelbases and rearward mass do not trigger the old artificial
+        // pitch cancellation: original suspension and tyre forces carry them.
+        for (cog, half_wheelbase) in [([0.0, -0.1, 0.0], 0.43), ([0.0, -0.1, -1.0], 1.3)] {
+            let converted = convert_with(&sim_with_cog(cog), &wheels(half_wheelbase), 1.5);
+            assert!(converted.config.original.is_some());
+            assert_eq!(converted.config.assists.pitch_resistance, 0.0);
+            assert_eq!(converted.config.assists.roll_resistance, 0.0);
+            assert_eq!(converted.config.center_of_mass, cog.map(|v| -v));
+            assert!(
+                !converted
+                    .report
+                    .entries
+                    .iter()
+                    .any(|e| e.dest == "assists.pitch_resistance")
+            );
+        }
     }
 
     /// Damping ratio implied by a rate, as the physics crate measures it.
@@ -1263,6 +1643,80 @@ mod tests {
             (heavy / light - 2.0).abs() < 1e-3,
             "expected 2x damping, got {}",
             heavy / light
+        );
+    }
+    #[test]
+    fn legacy_summary_overrides_reach_the_native_model() {
+        let sim = sim_with_cog([0.0, -0.1, 0.0]);
+        let imported = convert_with(&sim, &wheels(1.3), 1.5).config;
+        let source = imported.original.as_ref().unwrap();
+        let mut over = imported.clone();
+        over.engine.peak_torque_nm *= 0.5;
+        over.engine.max_power_w = over.engine.max_power_w.map(|p| p * 0.5);
+        over.mass *= 2.0;
+        for wheel in &mut over.wheels {
+            wheel.tires.as_mut().unwrap().longitudinal_grip *= 0.5;
+        }
+        let result = crate::assemble::apply_handling_override(&imported, over).unwrap();
+        let native = result.original.as_ref().unwrap();
+        assert_eq!(native.engine.max_power_w, source.engine.max_power_w * 0.5);
+        for (now, before) in native.wheels.iter().zip(&source.wheels) {
+            assert_eq!(now.static_load, before.static_load * 2.0);
+            assert_eq!(now.static_fric, before.static_fric * 0.5);
+            assert_eq!(now.sliding_fric, before.sliding_fric * 0.5);
+        }
+        assert_eq!(result.wheels[0].position, imported.wheels[0].position);
+        assert_eq!(
+            result.inertia,
+            imported.inertia.map(|axes| axes.map(|v| v * 2.0))
+        );
+        let mut explicit = imported.clone();
+        explicit.engine.max_power_w = explicit.engine.max_power_w.map(|p| p * 0.5);
+        explicit.original.as_mut().unwrap().engine.max_power_w *= 0.75;
+        let result = crate::assemble::apply_handling_override(&imported, explicit).unwrap();
+        assert_eq!(
+            result.original.unwrap().engine.max_power_w,
+            source.engine.max_power_w * 0.75
+        );
+    }
+
+    #[test]
+    fn native_configuration_rejects_bad_indices_arrays_and_numbers() {
+        let sim = sim_with_cog([0.0, -0.1, 0.0]);
+        let baseline = convert_with(&sim, &wheels(1.3), 1.5).config;
+        baseline.validate().unwrap();
+        let mut config = baseline.clone();
+        config.original.as_mut().unwrap().driven.push(99);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("driven/free"))
+        );
+        let mut config = baseline.clone();
+        config
+            .original
+            .as_mut()
+            .unwrap()
+            .gearbox
+            .upshift_rpm
+            .clear();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("upshift_rpm"))
+        );
+        let mut config = baseline;
+        config.original.as_mut().unwrap().wheels[0].static_load = f32::NAN;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("static_load"))
         );
     }
 }

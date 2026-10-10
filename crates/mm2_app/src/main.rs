@@ -309,7 +309,7 @@ struct Cli {
     restart: bool,
 
     /// Queue the session's restart intent once the session clock
-    /// reaches `ticks` fixed steps (120 Hz — the `smoke` record's
+    /// reaches `ticks` fixed steps (60 Hz — the `smoke` record's
     /// `ticks=` field): a delayed `--restart` for evidence legs that
     /// need real race progress banked before the teardown. The
     /// restarted run is record-ineligible. One-shot.
@@ -1590,7 +1590,9 @@ fn main() {
     )
     .add_plugins(PhysicsPlugins::default())
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
-    .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+    .insert_resource(Gravity(
+        Vec3::NEG_Y * if cli.mm2_path.is_some() { 19.6 } else { 9.81 },
+    ))
     .insert_resource(ClearColor(Color::srgb(0.5, 0.65, 0.85)))
     .insert_resource(session)
     .insert_resource(SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
@@ -1661,6 +1663,17 @@ fn main() {
     .init_resource::<pause::PauseMenu>()
     .init_resource::<results::ResultsMenu>()
     .add_systems(FixedUpdate, advance_session_tick)
+    // Sample the human steering ramp once per simulation tick. Update
+    // collects devices; Avian advances bodies later in FixedPostUpdate.
+    .add_systems(
+        FixedUpdate,
+        input::apply_player_input
+            .run_if(not(capturing))
+            .run_if(not(resource_exists::<scripted::ScriptedDrive>))
+            .run_if(not(resource_exists::<input::ParkedDrive>))
+            .run_if(not(resource_exists::<input::RamDrive>))
+            .run_if(not(resource_exists::<sequence::SequenceDrive>)),
+    )
     // F27-B.2b: the gold/hideout/bank markers follow the host's match
     // (idle until a `CnrHost` exists and markers are spawned).
     .add_systems(Update, cnr::sync_cnr_markers)
@@ -2537,7 +2550,7 @@ fn smoke_test(
 
 /// The fixed-step rate (Hz); the perf report's `settings.fixed_hz` row
 /// is formatted from this same value.
-const FIXED_HZ: f64 = 120.0;
+const FIXED_HZ: f64 = 60.0;
 
 /// `1280x720` — how the perf report names a window size; the window is
 /// built from the same [`settings::WindowSize`] value.
@@ -2845,7 +2858,7 @@ mod report_label_tests {
             "1280x720",
             "the shipped window is the report's baseline size"
         );
-        // `f64`'s Display drops a whole number's fraction: the row reads `120`.
-        assert_eq!(FIXED_HZ.to_string(), "120");
+        // `f64`'s Display drops a whole number's fraction: the row reads `60`.
+        assert_eq!(FIXED_HZ.to_string(), "60");
     }
 }

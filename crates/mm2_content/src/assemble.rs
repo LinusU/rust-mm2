@@ -345,6 +345,7 @@ fn load_vehicle_impl(
             index: w.index,
             origin: w.origin,
             radius: w.radius,
+            width: w.width,
         })
         .collect();
 
@@ -492,6 +493,7 @@ fn load_trailer(
             index: w.index,
             origin: w.origin,
             radius: w.radius,
+            width: w.width,
         })
         .collect();
 
@@ -619,11 +621,134 @@ pub fn apply_handling_override(
         w.position = src.position;
         w.radius = src.radius;
     }
+    synchronize_original_override(imported, &mut over)?;
     // Collision geometry is part of the model, not the handling override.
     over.collider_points = imported.collider_points.clone();
     over.striker_points = imported.striker_points.clone();
     over.chassis_size = imported.chassis_size;
+    // Synchronizing summary edits can invalidate otherwise valid retail fields.
+    over.validate().map_err(|problems| {
+        format!(
+            "invalid synchronized handling override: {}",
+            problems.join("; ")
+        )
+    })?;
     Ok(over)
+}
+
+/// Legacy fields remain a supported edit surface in dumped configs. An
+/// unchanged retail field follows its summary override; an explicitly
+/// edited `original` field wins. Removing `original` deliberately selects
+/// the generic model, so legacy full overrides retain their old meaning.
+fn synchronize_original_override(
+    imported: &VehicleConfig,
+    over: &mut VehicleConfig,
+) -> Result<(), String> {
+    let (Some(source), Some(original)) = (&imported.original, &mut over.original) else {
+        return Ok(());
+    };
+    if original.wheels.len() != over.wheels.len() {
+        return Err("original.wheels must match the imported vehicle's physics rig".into());
+    }
+    let ratio = |new: f32, old: f32| if old > 0.0 { new / old } else { 1.0 };
+    let power_changed = over.engine.max_power_w != imported.engine.max_power_w;
+    let power_scale = if power_changed {
+        ratio(
+            over.engine.max_power_w.unwrap_or(0.0),
+            imported.engine.max_power_w.unwrap_or(0.0),
+        )
+    } else {
+        ratio(over.engine.peak_torque_nm, imported.engine.peak_torque_nm)
+    };
+    if original.engine.max_power_w == source.engine.max_power_w {
+        original.engine.max_power_w *= power_scale;
+    }
+    if original.engine.idle_rpm == source.engine.idle_rpm
+        && over.engine.idle_rpm != imported.engine.idle_rpm
+    {
+        original.engine.idle_rpm = over.engine.idle_rpm;
+    }
+    if original.engine.max_rpm == source.engine.max_rpm
+        && over.engine.redline_rpm != imported.engine.redline_rpm
+    {
+        original.engine.max_rpm = over.engine.redline_rpm;
+    }
+    if original.engine.opt_rpm == source.engine.opt_rpm
+        && over.engine.peak_power_rpm != imported.engine.peak_power_rpm
+    {
+        original.engine.opt_rpm = over.engine.peak_power_rpm.unwrap_or(source.engine.opt_rpm);
+    }
+    if original.engine.gear_change_lag == source.engine.gear_change_lag
+        && over.transmission.shift_time != imported.transmission.shift_time
+    {
+        original.engine.gear_change_lag = over.transmission.shift_time;
+    }
+    let mass_scale = ratio(over.mass, imported.mass);
+    if over.inertia == imported.inertia && mass_scale != 1.0 {
+        over.inertia = over.inertia.map(|i| i.map(|axis| axis * mass_scale));
+    }
+    let brake_scale = ratio(over.brakes.max_brake_force, imported.brakes.max_brake_force);
+    let lock_scale = ratio(
+        over.steering.low_speed_max_angle,
+        imported.steering.low_speed_max_angle,
+    );
+    for ((wheel, src), (summary, baseline)) in original
+        .wheels
+        .iter_mut()
+        .zip(&source.wheels)
+        .zip(over.wheels.iter().zip(&imported.wheels))
+    {
+        if wheel.static_load == src.static_load {
+            wheel.static_load *= mass_scale;
+        }
+        let now = summary.tires.unwrap_or(over.tires);
+        let before = baseline.tires.unwrap_or(imported.tires);
+        let lateral = ratio(now.lateral_grip, before.lateral_grip);
+        let longitudinal = ratio(now.longitudinal_grip, before.longitudinal_grip);
+        if lateral != 1.0 && longitudinal != 1.0 && (lateral - longitudinal).abs() > 1e-5 {
+            return Err("retail tires have shared friction: unequal lateral/longitudinal grip overrides are unsupported; edit original.wheels StaticFric/SlidingFric instead".into());
+        }
+        // Retail has one friction coefficient for both axes. A legacy
+        // edit on either summary axis scales that shared coefficient.
+        let grip_scale = if lateral != 1.0 {
+            lateral
+        } else {
+            longitudinal
+        };
+        if wheel.static_fric == src.static_fric {
+            wheel.static_fric *= grip_scale;
+        }
+        if wheel.sliding_fric == src.sliding_fric {
+            wheel.sliding_fric *= grip_scale;
+        }
+        if wheel.brake_coef == src.brake_coef {
+            wheel.brake_coef *= brake_scale * ratio(summary.brake_bias, baseline.brake_bias);
+        }
+        if wheel.handbrake_coef == src.handbrake_coef {
+            wheel.handbrake_coef *= brake_scale
+                * ratio(
+                    summary
+                        .handbrake_coef
+                        .unwrap_or(over.brakes.handbrake_strength),
+                    baseline
+                        .handbrake_coef
+                        .unwrap_or(imported.brakes.handbrake_strength),
+                );
+        }
+        if wheel.steering_limit == src.steering_limit {
+            wheel.steering_limit *= lock_scale;
+        }
+    }
+    if original.aero.drag == source.aero.drag {
+        original.aero.drag *= ratio(over.aero.drag_coefficient, imported.aero.drag_coefficient);
+    }
+    if original.aero.down == source.aero.down {
+        original.aero.down *= ratio(
+            over.aero.downforce_coefficient,
+            imported.aero.downforce_coefficient,
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -638,7 +763,7 @@ mod tests {
         let mut imported = VehicleConfig::default();
         imported.wheels[0].position = [9.0, 9.0, 9.0];
         imported.wheels[0].radius = 0.99;
-        imported.collider_points = Some(vec![[1.0, 2.0, 3.0]]);
+        imported.collider_points = Some(vec![[1.0, 2.0, 3.0]; 4]);
         imported.chassis_size = [4.0, 5.0, 6.0];
 
         let mut over = VehicleConfig {
@@ -656,7 +781,7 @@ mod tests {
         assert_eq!(out.engine.peak_torque_nm, 999.0);
         assert_eq!(out.wheels[0].position, [9.0, 9.0, 9.0]);
         assert_eq!(out.wheels[0].radius, 0.99);
-        assert_eq!(out.collider_points, Some(vec![[1.0, 2.0, 3.0]]));
+        assert_eq!(out.collider_points, Some(vec![[1.0, 2.0, 3.0]; 4]));
         assert_eq!(out.chassis_size, [4.0, 5.0, 6.0]);
     }
 
@@ -669,6 +794,85 @@ mod tests {
         over.wheels.pop();
         let err = apply_handling_override(&imported, over).unwrap_err();
         assert!(err.contains("wheels"), "{err}");
+    }
+
+    fn retail_override_config() -> VehicleConfig {
+        let wheel = "SuspensionExtent 0.15\nSuspensionLimit 0.05\nSuspensionFactor 1\n\
+            SuspensionDampCoef 0.1\nSteeringLimit 0.4\nSteeringOffset 0.25\nBrakeCoef 0.6\n\
+            HandbrakeCoef 2\nTireDispLimitLong 0.125\nTireDampCoefLong 0.25\n\
+            TireDragCoefLong 0.02\nTireDispLimitLat 0.125\nTireDampCoefLat 0.25\n\
+            TireDragCoefLat 0.05\nOptimumSlipPercent 0.16\nStaticFric 3\nSlidingFric 2.7\n";
+        let text = format!(
+            "vehCarSim {{\nMass 1000\nInertiaBox 2 2 3\nCenterOfGravity 0 1 0\nDrivetrainType 2\n\
+             Engine {{\nMaxHorsePower 260\nIdleRPM 750\nOptRPM 5800\nMaxRPM 8500\n}}\n\
+             Trans {{\nAutoNumGears 6\nReverse 30\nLow 20\nHigh 90\nGearBias 0.5\nGearChangeTime 0.8\n}}\n\
+             WheelFront {{\n{wheel}}}\nWheelBack {{\n{wheel}}}\n}}\n"
+        );
+        let tune = TuneFile::parse(&text).unwrap();
+        let sim = VehCarSim::from_tune(&tune).unwrap();
+        let wheels = [(-0.75, -1.0), (0.75, -1.0), (-0.75, 1.0), (0.75, 1.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (x, z))| WheelGeom {
+                index,
+                origin: [x, 0.35, z],
+                radius: 0.35,
+                width: 0.2,
+            })
+            .collect::<Vec<_>>();
+        let config = convert(&ConvertInput {
+            id: "vpbug",
+            display_name: "Test Beetle",
+            sim: &sim,
+            asnode: None,
+            wheels: &wheels,
+            bound: None,
+            body_aabb: ([-0.9, 0.1, -2.0], [0.9, 1.5, 2.0]),
+            stuck: None,
+            gyro: None,
+        })
+        .unwrap()
+        .config;
+        config.validate().unwrap();
+        config
+    }
+
+    #[test]
+    fn override_rejects_invalid_synchronized_retail_rpm_order() {
+        let imported = retail_override_config();
+        let mut over = imported.clone();
+        over.engine.peak_power_rpm = Some(5500.0);
+        over.engine.redline_rpm = 5500.0;
+        // Generic summary validation permits equality; retail synchronization must not.
+        over.validate().unwrap();
+        let error = apply_handling_override(&imported, over).unwrap_err();
+        assert!(error.contains("original.engine.rpm"), "{error}");
+    }
+
+    #[test]
+    fn override_accepts_valid_synchronized_retail_rpm_order() {
+        let imported = retail_override_config();
+        let mut over = imported.clone();
+        over.engine.peak_power_rpm = Some(5500.0);
+        over.engine.redline_rpm = 7000.0;
+        let out = apply_handling_override(&imported, over).unwrap();
+        let engine = out.original.as_ref().unwrap().engine;
+        assert_eq!(engine.opt_rpm, 5500.0);
+        assert_eq!(engine.max_rpm, 7000.0);
+        out.validate().unwrap();
+    }
+
+    #[test]
+    fn override_without_original_retains_generic_rpm_semantics() {
+        let imported = retail_override_config();
+        let mut over = imported.clone();
+        over.original = None;
+        over.engine.peak_power_rpm = Some(5500.0);
+        over.engine.redline_rpm = 5500.0;
+        let out = apply_handling_override(&imported, over).unwrap();
+        assert!(out.original.is_none());
+        assert_eq!(out.engine.peak_power_rpm, Some(5500.0));
+        assert_eq!(out.engine.redline_rpm, 5500.0);
     }
 
     const CAR_CSV: &[u8] = b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,1,REVERSE,0.5\nEngine wave name,a,b\nTESTENG,0.1,0.2\n";

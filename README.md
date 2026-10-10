@@ -11,8 +11,8 @@ Long-term goals:
 
 - Recreate London and San Francisco, vehicles, races, traffic, props,
   pedestrians, audio and UI from the user's own MM2 data.
-- A modern, substantially improved arcade driving model (think
-  *Midtown Madness* meets *Burnout Paradise* / *Forza Horizon* with assists).
+- Vehicle handling reconstructed from the original simulation and retail
+  tuning, with reproducible original-game trajectory comparisons.
 - Mods as first-class citizens: any original asset can be overridden by a
   modern-format replacement (PNG/KTX2 for TEX, glTF for PKG, …) without
   touching the original files.
@@ -243,7 +243,7 @@ cargo run --release -- --mm2-path <dir> --city london --event blitz:2 \
 ```
 
 On exit it writes one CSV row per frame and prints a percentile summary.
-Each frame's wall time is split into `fixed` (the 120 Hz `FixedMain`
+Each frame's wall time is split into `fixed` (the 60 Hz `FixedMain`
 loop: Avian and every fixed-step system), `update` (the rest of the main
 schedule) and `render` (the render world, GPU and present wait — vsync
 lives here), plus `fixed_steps` and Avian's summed `broad_ms`,
@@ -392,7 +392,7 @@ material and requires users to supply their own game data.
 
 Headless smoke reports also include `travel=<metres>`, `sim=<seconds>`,
 `resets=<count>`, `controls=<throttle steps>t/<brake steps>b/<steer steps>s`
-and `finite=<bool>`. Travel is planar solver displacement sampled at 120 Hz;
+and `finite=<bool>`. Travel is planar solver displacement sampled at 60 Hz;
 reset teleports and session-generation changes break the segment. `moved=`
 remains displacement from spawn. These metrics describe evidence, not a
 claim that the whole course was completed; read `cp=` and the race result.

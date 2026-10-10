@@ -257,7 +257,7 @@ pub(crate) fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(mm2_game::RACE_TICK_HZ)))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -1814,7 +1814,9 @@ fn authored_avoid_opponents_decides_the_parked_ai() {
 /// far ahead sweeps the finish trigger and ends the session.
 #[test]
 fn authored_look_ahead_sets_the_sensing_distance() {
-    for (lookahead, expect_dev) in [(150.0f32, true), (30.0, false)] {
+    use bevy::ecs::system::RunSystemOnce;
+
+    for (lookahead, expect_commit) in [(150.0f32, true), (30.0, false)] {
         let tmp = roster_install_rows(
             &format!(
                 "vpt race0-a-0.opp 0.90 0 {lookahead} 0.7 1 1 1 1 0 1.0\n\
@@ -1835,28 +1837,68 @@ fn authored_look_ahead_sets_the_sensing_distance() {
             "the dead .opp reference leaves the slot route-less"
         );
 
-        run(&mut app, 240);
-        // Park the route-less car ~90 m ahead of vpt on its lane —
-        // inside a 150 m corridor, outside a 30 m one.
-        let vx = app.world().get::<Position>(vpt).unwrap().0.x;
-        app.world_mut().get_mut::<Position>(parked).unwrap().0 =
-            Vec3::new(vx + 90.0, 0.0, COURSE_Z);
-
-        // 90 frames ≈ 25–35 m of travel — short enough that the 30 m
-        // corridor cannot reach the blocker inside the window.
-        let mut deviated = false;
-        for _ in 0..90 {
-            app.update();
-            let p = app.world().get::<Position>(vpt).unwrap().0;
-            if (p.z - COURSE_Z).abs() > 0.5 {
-                deviated = true;
-                break;
-            }
-        }
+        // Finish the production countdown, then hold a controlled pose
+        // while invoking the real decision system. This imported-tail
+        // test isolates sensing from acceleration, steering, race-finish
+        // triggers and the finite dev ground exercised by driving tests.
+        run(&mut app, mm2_game::DEFAULT_COUNTDOWN_TICKS as usize + 2);
         assert_eq!(
-            deviated, expect_dev,
-            "look-ahead {lookahead}: pass commit inside 90 frames = {deviated}"
+            app.world().get::<RaceProgress>(vpt).unwrap().state,
+            ParticipantState::Racing
         );
+        let start = Vec3::new(70.0, 1.0, COURSE_Z);
+        let along = Vec3::X;
+        app.world_mut().get_mut::<Position>(vpt).unwrap().0 = start;
+        app.world_mut().get_mut::<Rotation>(vpt).unwrap().0 =
+            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+        {
+            let mut state = app
+                .world_mut()
+                .get_mut::<mm2_vehicle::VehicleState>(vpt)
+                .unwrap();
+            state.forward_speed = 20.0;
+            state.grounded = true;
+        }
+        let fwd = app.world().get::<Rotation>(vpt).unwrap().0 * Vec3::NEG_Z;
+        let blocker_pos = start + along * 90.0;
+        app.world_mut().get_mut::<Position>(parked).unwrap().0 = blocker_pos;
+        app.world_mut()
+            .get_mut::<mm2_vehicle::VehicleState>(parked)
+            .unwrap()
+            .forward_speed = 0.0;
+        let traffic = [Traffic {
+            entity: parked,
+            control: PlayerControl::Ai,
+            pos: blocker_pos,
+            fwd: along,
+            speed: 0.0,
+        }];
+        assert!(nearest_blocker(vpt, start, fwd, 150.0, &traffic, |_| true).is_some());
+        assert!(nearest_blocker(vpt, start, fwd, 30.0, &traffic, |_| true).is_none());
+
+        // Inspect the production sensing decision. Lateral displacement
+        // also depends on tyre response and acceleration, so it cannot
+        // independently identify whether look-ahead sensed the blocker.
+        let decision_dt = app.world().resource::<Time>().delta_secs();
+        assert!((decision_dt - 1.0 / 60.0).abs() < 1e-6);
+        // RunSystemOnce keeps the same render delta (1/60 s) and the
+        // system increments its per-frame decision state each call;
+        // neither physics nor the race clock advances the held poses.
+        for frame in 0..90 {
+            app.world_mut().run_system_once(opponent_drive).unwrap();
+            let driver = app.world().get::<OpponentDriver>(vpt).unwrap();
+            let passing_blocker = driver.pass_entity == Some(parked) && driver.pass_side != 0.0;
+            assert_eq!(
+                passing_blocker, expect_commit,
+                "look-ahead {lookahead}: production pass commitment on decision frame {frame}"
+            );
+            let p = app.world().get::<Position>(vpt).unwrap().0;
+            let blocker = app.world().get::<Position>(parked).unwrap().0;
+            assert!(
+                (blocker.x - p.x).hypot(blocker.z - p.z) > 30.0,
+                "the negative sighting must stay outside the 30 m range"
+            );
+        }
     }
 }
 

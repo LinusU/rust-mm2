@@ -1419,11 +1419,11 @@ fn base_app() -> App {
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(HZ as f64))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / HZ as f64,
         )))
-        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(Gravity(Vec3::NEG_Y * 19.6))
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin);
     app.finish();

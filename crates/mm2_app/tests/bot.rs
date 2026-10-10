@@ -121,7 +121,7 @@ fn bot_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(mm2_game::RACE_TICK_HZ)))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -1390,7 +1390,10 @@ fn explicit_bot_guide_preserves_blitz_countdown_and_deadline() {
     app.update();
     let car = car(&mut app);
     let race = app.world().resource::<RaceState>();
-    assert_eq!(race.definition.time_limit_ticks, Some(60));
+    assert_eq!(
+        race.definition.time_limit_ticks,
+        Some(mm2_game::RACE_TICK_HZ / 2)
+    );
     assert_eq!(race.definition.rule, CheckpointRule::AnyOrder);
     assert_eq!(race.clock, 0);
     assert!(matches!(race.phase, RacePhase::Countdown { .. }));

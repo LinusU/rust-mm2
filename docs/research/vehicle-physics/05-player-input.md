@@ -26,6 +26,16 @@ mmPlayer::Update 0x405760
 physics: vehCar::PreUpdate (drivable-mode overrides) → vehCar::Update → vehCarSim::Update (04)
 ```
 
+The October 2026 controlled Beetle powerslide recording verifies the
+speed-cache timing: reproducing the keyboard ramp from captured body
+velocity `V[k−2]` matches every recorded steering byte. Using `V[k]`
+produces byte differences during turn-in and countersteering. The recorder
+consumes parameters from the preceding `mmPlayer::Update`, which itself
+reads the preceding cached `vehCarSim::Speed`. Preserve both delays when
+adapting this path to a post-integration ECS update; speed-sensitive
+steering must not use the latest body velocity. Evidence and the exact
+input schedule are in `tools/handling/evidence/`.
+
 Frame order follows the asNode tree (`0x4016d0`): the recorder is the
 parent of the game manager, the game of the player, and the game
 manager runs physics after its children. `mmInput::Update` running

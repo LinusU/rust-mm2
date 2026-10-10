@@ -105,6 +105,9 @@ pub struct WheelState {
     pub surface_drag: f32,
     /// Accumulated spin for visuals, radians.
     pub spin: f32,
+    /// 0..1 slide intensity under the original model's tyre (`≥ 0.5` a
+    /// major slip; always `0` under the arcade model).
+    pub slip_visual: f32,
 }
 
 /// Which direction the drivetrain is engaged for.
@@ -148,6 +151,94 @@ pub struct GyroSpin {
     /// Maneuver age in seconds — bounds the latch so a wedged car is not
     /// servoed forever.
     pub age: f32,
+}
+
+/// Per-wheel state the original car model carries between steps.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OriginalWheelState {
+    /// Suspension compression, metres (`0` on the modelled pivot).
+    pub x: f32,
+    /// Tyre bristle displacements.
+    pub bristles: crate::original::Bristles,
+    /// Last step's tyre reaction torque `F_long · r`, N·m — what the
+    /// wheel's drivetrain answers this step.
+    pub reaction: f32,
+    /// Wheel spin, rad/s, `+` rolling forward.
+    pub omega: f32,
+}
+
+/// State of the original car model (see
+/// [`OriginalHandling`](crate::config::OriginalHandling)).
+#[derive(Debug, Clone)]
+pub struct OriginalState {
+    /// Engine, clutch and gearbox.
+    pub powertrain: crate::original::Powertrain,
+    /// The engine's drivetrain: shaft speed (wheel rad/s, `+` forward)
+    /// and limited-slip bias.
+    pub drive_omega: f32,
+    pub drive_bias: f32,
+    /// Per-wheel state, parallel to `VehicleConfig::wheels`.
+    pub wheels: Vec<OriginalWheelState>,
+    /// Forces from the preceding post-integration wheel update.
+    pub pending_force: Vec3,
+    pub pending_torque: Vec3,
+    /// World angular momentum written before the previous pose advance.
+    pub angular_momentum: Option<Vec3>,
+    /// Angular velocity submitted before Avian applies body contacts.
+    pub integrated_angular_velocity: Vec3,
+    /// Player rules read the preceding frame's pre-integration Speed,
+    /// one sample older than the public post-integration telemetry.
+    pub player_speed: f32,
+    /// Recorder steering uses parameters computed by the previous player
+    /// update from its cached Speed: two samples behind body telemetry.
+    pub steering_speed: f32,
+    /// Coupled implicit suspension Jacobians A, B, C (research 01).
+    pub implicit_a: Mat3,
+    pub implicit_b: Mat3,
+    pub implicit_c: Mat3,
+    /// Position-only bump-stop correction. Never adds kinetic energy.
+    pub push: Vec3,
+}
+
+impl OriginalState {
+    /// A car at rest in first, with a freshly reset cold engine.
+    pub fn new(original: &crate::config::OriginalHandling) -> Self {
+        let engine = crate::original::EngineConstants::of(&original.engine);
+        Self {
+            powertrain: crate::original::Powertrain::new(&engine),
+            drive_omega: 0.0,
+            drive_bias: 1.0,
+            wheels: vec![OriginalWheelState::default(); original.wheels.len()],
+            push: Vec3::ZERO,
+            pending_force: Vec3::ZERO,
+            pending_torque: Vec3::ZERO,
+            angular_momentum: None,
+            integrated_angular_velocity: Vec3::ZERO,
+            player_speed: 0.0,
+            steering_speed: 0.0,
+            implicit_a: Mat3::ZERO,
+            implicit_b: Mat3::ZERO,
+            implicit_c: Mat3::ZERO,
+        }
+    }
+}
+
+/// Marks a car a person drives. Under the original car model it gets
+/// the player-side rules the original applied to human input only
+/// (`mmGame::ApplyPlayerInput`, `mmPlayer::Update`): with auto reverse on,
+/// holding the brake below 5 m/s swaps the pedals into reverse, and below
+/// 4 mph off the throttle the handbrake holds the car. AI cars brake to
+/// a stop before reversing; humans with auto reverse off keep their pedals.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HumanDriver {
+    /// The player's auto-reverse option (on in the original by default).
+    pub auto_reverse: bool,
+}
+
+impl Default for HumanDriver {
+    fn default() -> Self {
+        Self { auto_reverse: true }
+    }
 }
 
 /// Fraction of rated engine drive torque delivered this step — the
@@ -207,9 +298,59 @@ pub struct VehicleState {
     pub gyro_spins: u32,
     /// Latched spins that ran to ~180° before releasing.
     pub gyro_completed: u32,
+    /// The original car model's state, when the config runs it.
+    pub original: Option<OriginalState>,
 }
 
 impl VehicleState {
+    /// Speed used by the original recorder's human steering parameters.
+    pub fn human_steering_speed(&self) -> f32 {
+        self.original
+            .as_ref()
+            .map_or(self.forward_speed.abs(), |s| s.steering_speed)
+    }
+    /// Make the car's wheels roll with the road at `forward_speed` (m/s)
+    /// — for a car given that velocity from outside the sim, such as a
+    /// test or probe launching it at speed. Under the original model
+    /// wheel spin is state: without this the car would set off at speed
+    /// on locked wheels. The engine and gearbox follow, in the highest
+    /// forward gear the engine fits in. The arcade model has no wheel
+    /// state, so there it does nothing.
+    pub fn roll_at(&mut self, config: &VehicleConfig, forward_speed: f32) {
+        let (Some(orig), Some(os)) = (config.original.as_ref(), self.original.as_mut()) else {
+            return;
+        };
+        self.forward_speed = forward_speed;
+        os.player_speed = forward_speed.abs();
+        os.steering_speed = forward_speed.abs();
+        for (i, w) in os.wheels.iter_mut().enumerate() {
+            let radius = config.wheels.get(i).map_or(0.34, |c| c.radius).max(0.01);
+            w.omega = forward_speed / radius;
+            w.bristles = crate::original::Bristles::default();
+            w.reaction = 0.0;
+        }
+        let radius = orig
+            .driven
+            .first()
+            .and_then(|&i| config.wheels.get(i))
+            .map_or(0.34, |c| c.radius)
+            .max(0.01);
+        os.drive_omega = forward_speed / radius;
+        os.drive_bias = 1.0;
+        let engine = crate::original::EngineConstants::of(&orig.engine);
+        let ratios = &orig.gearbox.ratios;
+        let pt = &mut os.powertrain;
+        let gear = (crate::original::FIRST_GEAR..ratios.len())
+            .find(|&g| ratios[g] * os.drive_omega <= engine.omega_opt)
+            .unwrap_or(ratios.len().saturating_sub(1));
+        pt.set_gear(gear);
+        let omega = ratios.get(gear).copied().unwrap_or(0.0) * os.drive_omega;
+        if omega > engine.omega_idle {
+            pt.engine_omega = omega.min(engine.omega_max);
+            pt.clutch = true;
+        }
+    }
+
     /// Fresh state for `config`.
     pub fn new(config: &VehicleConfig) -> Self {
         Self {
@@ -226,6 +367,7 @@ impl VehicleState {
             gyro_spin: None,
             gyro_spins: 0,
             gyro_completed: 0,
+            original: config.original.as_ref().map(OriginalState::new),
         }
     }
 }

@@ -199,13 +199,13 @@ const ENGINE_SPATIAL_SCALE: f32 = 0.25;
 /// (F07-AC04's bounded-voices requirement; designed bound).
 const MAX_IMPACT_VOICES: usize = 12;
 /// Longest a contact pair may be held by its scrape window (F07-B.10)
-/// — 5 s at the session's 120 Hz step, above every retail impact clip
+/// — 5 s at the session's 60 Hz step, above every retail impact clip
 /// (all 22 of `aud/aud22/impacts/*.wav` measured by size at 22 050
 /// Hz: 0.13 s `orangecone` … 2.97 s `glassbreak`) so a malformed mod
 /// wave can only quieten its own pair for a bounded moment rather
 /// than for minutes (designed bound; the clips themselves set the
 /// real window).
-const MAX_SCRAPE_WINDOW_TICKS: u64 = 600;
+const MAX_SCRAPE_WINDOW_TICKS: u64 = 5 * RACE_TICK_HZ as u64;
 /// The impact table the session reads: the player-side
 /// `default_impacts.csv` — the local listener's authored mix
 /// (designed choice: the opponent file authors the same categories

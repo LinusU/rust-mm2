@@ -1,0 +1,36 @@
+{
+  "original_file": "tools/handling/evidence/original-vpbullet-city-launch-4s.json",
+  "native_file": "tools/handling/evidence/native-vpbullet-city-launch-reference.csv",
+  "car": "vpbullet",
+  "scenario": "launch",
+  "hz": 60,
+  "frames": 240,
+  "frame_range": [
+    1,
+    240
+  ],
+  "native_offset": -1,
+  "errors": {
+    "speed_mps": {
+      "rms": 0.04265995144049334,
+      "max_absolute": 0.20988220366596955,
+      "mean": -0.003914890657181495
+    },
+    "position_metres": {
+      "rms": 0.03788331051307461,
+      "max_absolute": 0.0701516910935371,
+      "mean": 0.0339985286071083
+    },
+    "yaw_radians": {
+      "rms": 0.0013585803855120095,
+      "max_absolute": 0.0028464549939326567,
+      "mean": -0.00107926681318396
+    },
+    "rpm": {
+      "rms": 12.063558210477597,
+      "max_absolute": 56.91709472656248,
+      "mean": 2.811957326253263
+    }
+  },
+  "interpretation": "Measured differences; inspect terrain/contact/input contamination before changing tuning"
+}

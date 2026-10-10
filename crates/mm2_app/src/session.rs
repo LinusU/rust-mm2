@@ -484,7 +484,7 @@ pub fn dev_restart_once(
 /// `--restart-at TICK` (quarantined `DevOverrides`, evidence runs
 /// only): the delayed form of [`dev_restart_once`] — queues the
 /// session's restart intent on the first `Playing` frame where the
-/// session clock has reached `restart_at` fixed ticks (120 Hz, the
+/// session clock has reached `restart_at` fixed ticks (60 Hz, the
 /// `smoke` record's `ticks=` unit). The deferral is the point: an
 /// event run at tick 0 has nothing banked, so `--restart` can only
 /// prove the teardown/rebuild mechanics, not that a *mid-race*
@@ -575,7 +575,7 @@ pub fn reseat_towed_trailers(
 
 /// `--reset-at TICK` (quarantined `DevOverrides`, evidence runs
 /// only): emit the `R`-key reset bundle once the session clock
-/// reaches `reset_at` fixed ticks (120 Hz, the `smoke` record's
+/// reaches `reset_at` fixed ticks (60 Hz, the `smoke` record's
 /// `ticks=` unit). A `--frames`/`--screenshot` capture freezes live
 /// input, so this is how a mid-run `ResetVehicle` teleport gets
 /// exercised on real content — the reset-transition camera leg.
@@ -1508,6 +1508,7 @@ pub fn load_session_world(
     let vehicle = commands
         .spawn((
             PlayerVehicle,
+            mm2_vehicle::HumanDriver::default(),
             owner,
             ObjectIdentity(vehicle_object),
             Player {

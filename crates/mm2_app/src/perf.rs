@@ -4,7 +4,7 @@
 //! frame, not an average. This records, for every frame, the whole
 //! wall-clock frame time split into the three places it can hide:
 //!
-//! - `fixed` — the `FixedMain` loop (Avian's solver and every 120 Hz
+//! - `fixed` — the `FixedMain` loop (Avian's solver and every 60 Hz
 //!   system) — [`RunFixedMainLoopSystems::FixedMainLoop`]. A slow step
 //!   shows here, and a slow *average* step shows as `steps > 1`: the
 //!   fixed clock runs again to catch up, so the next frame is later

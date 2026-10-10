@@ -46,18 +46,18 @@ use crate::netdrive::{NetDriveReport, RemoteSnaps};
 /// A peer within this many ticks of the host's world time is left
 /// alone: a seek replays the whole history, and snapshot jitter would
 /// otherwise trigger one on every row.
-pub const SYNC_TOLERANCE_TICKS: u64 = 6;
+pub const SYNC_TOLERANCE_TICKS: u64 = mm2_game::RACE_TICK_HZ as u64 / 20;
 
 /// World ticks between the host's clock frames: about a second at the
 /// fixed rate, so a lost frame costs a second of drift, not a session's.
-pub const PUBLISH_EVERY_TICKS: u64 = 120;
+pub const PUBLISH_EVERY_TICKS: u64 = mm2_game::RACE_TICK_HZ as u64;
 
 /// The furthest tick a client will replay its scenery to. A seek steps
 /// every actor from its start, so a hostile or corrupt tick must not be
 /// able to ask for 2^64 steps: past this bound (about five hours at the
 /// fixed rate) the frame is refused counted and the client keeps its
 /// own clock.
-pub const MAX_SEEK_TICKS: u64 = 1 << 21;
+pub const MAX_SEEK_TICKS: u64 = 1 << 20;
 
 /// How hard a host may drive a client's re-seeks. A seek replays every
 /// actor from its start — its cost grows with the target — so a frame
@@ -86,8 +86,8 @@ impl Default for WorldLimits {
     fn default() -> Self {
         Self {
             min_interval: Duration::from_millis(500),
-            // The fixed rate is 120 Hz: four times that.
-            max_ticks_per_second: 480.0,
+            // Allow four times the shared fixed rate.
+            max_ticks_per_second: f64::from(mm2_game::RACE_TICK_HZ) * 4.0,
             slack_ticks: 4 * PUBLISH_EVERY_TICKS,
         }
     }
@@ -594,7 +594,7 @@ pub fn advance_world_clock(
 }
 
 /// World ticks between two [`SceneryProbe`] samples.
-pub const PROBE_EVERY_TICKS: u64 = 60;
+pub const PROBE_EVERY_TICKS: u64 = mm2_game::RACE_TICK_HZ as u64 / 2;
 
 /// Samples a [`SceneryProbe`] keeps, newest last: about 16 s of world
 /// time, enough for two processes that end a little apart to still
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn an_honest_hosts_cadence_is_never_limited() {
         let mut stage = WorldStage::default();
-        // 120 Hz world, a frame every PUBLISH_EVERY_TICKS (1 s).
+        // 60 Hz world, a frame every PUBLISH_EVERY_TICKS (1 s).
         for i in 1..=60u64 {
             stage.push_at(1, i * PUBLISH_EVERY_TICKS, Duration::from_secs(i));
             assert_eq!(

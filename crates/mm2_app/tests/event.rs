@@ -96,7 +96,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(mm2_game::RACE_TICK_HZ)))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -590,7 +590,7 @@ fn incomplete_event_fails_the_session() {
 fn authored_blitz_limit_times_out_the_race() {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    // 0.5 s amateur limit → 60 fixed ticks = 30 updates of racing.
+    // 0.5 s amateur limit → 30 race ticks at the production 60 Hz rate.
     write(
         d,
         "race/testcity/mmblitzdata.csv",
@@ -620,7 +620,7 @@ fn authored_blitz_limit_times_out_the_race() {
     let race = app.world().resource::<RaceState>();
     assert_eq!(
         race.definition.time_limit_ticks,
-        Some(60),
+        Some(mm2_game::RACE_TICK_HZ / 2),
         "the authored 0.5 s limit bound to fixed ticks"
     );
     assert_eq!(race.definition.params.densities.traffic, 0.3);
@@ -628,16 +628,16 @@ fn authored_blitz_limit_times_out_the_race() {
     assert_eq!(race.definition.params.conditions.time_of_day.get(), 2);
     assert_eq!(race.definition.params.conditions.weather.get(), 1);
     assert_eq!(race.definition.params.opponents, 0);
-    assert_eq!(race.time_remaining(), Some(60));
+    assert_eq!(race.time_remaining(), Some(mm2_game::RACE_TICK_HZ / 2));
 
     let car = car(&mut app);
-    run(&mut app, 260); // countdown (≈180) + 60-tick limit (30) + slack
+    run(&mut app, 260); // countdown + half-second limit + slack
 
     let progress = app.world().get::<RaceProgress>(car).unwrap();
     assert!(
         matches!(
             progress.state,
-            ParticipantState::TimedOut { race_ticks: 60, .. }
+            ParticipantState::TimedOut { race_ticks, .. } if race_ticks == u64::from(mm2_game::RACE_TICK_HZ) / 2
         ),
         "the authored deadline expired the race: {:?}",
         progress.state
@@ -651,7 +651,7 @@ fn authored_blitz_limit_times_out_the_race() {
     assert!(
         matches!(
             ledger.iter().next().unwrap().outcome,
-            mm2_game::SessionOutcome::TimedOut { race_ticks: 60 }
+            mm2_game::SessionOutcome::TimedOut { race_ticks } if race_ticks == u64::from(mm2_game::RACE_TICK_HZ) / 2
         ),
         "the one retained result is the timeout"
     );

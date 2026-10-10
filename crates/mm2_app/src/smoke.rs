@@ -301,7 +301,7 @@ impl StopWatch {
 }
 
 /// Run the world + player vehicle headlessly for `frames` app updates
-/// (60 Hz virtual time; physics ticks at 120 Hz internally) through the
+/// (60 Hz virtual time and physics) through the
 /// same session systems the windowed binary runs.
 ///
 /// The `Hold` driver settles for up to two seconds, then holds full
@@ -535,12 +535,14 @@ fn run_headless(
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
         // Deterministic: every app.update() is exactly one 60 Hz frame.
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
-        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(Gravity(
+            Vec3::NEG_Y * vehicle_config.original.as_ref().map_or(9.81, |o| o.gravity),
+        ))
         .insert_resource(session_res)
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
@@ -2461,7 +2463,7 @@ fn run_headless(
     let motion_detail = format!(
         " travel={:.1}m sim={:.2}s resets={} controls={}t/{}b/{}s finite={}",
         motion.distance,
-        motion.steps as f64 / 120.0,
+        motion.steps as f64 / 60.0,
         motion.resets,
         motion.throttle_steps,
         motion.brake_steps,

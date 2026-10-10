@@ -1104,6 +1104,8 @@ mod tests {
             brake: 0,
             steer: 0,
             handbrake: 0,
+            auto_reverse: true,
+            forced_gear: None,
         };
         // Wire order is now [2,1,4,3] — the mailbox must end on the
         // sender's newest, not the newest *arrival*.

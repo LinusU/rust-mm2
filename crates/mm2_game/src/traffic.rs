@@ -825,7 +825,7 @@ pub fn follow_speed(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JunctionPolicy {
     /// Ticks each light-controlled member road holds green — at the
-    /// 120 Hz fixed step the default is a six-second phase.
+    /// 60 Hz fixed step the default is a six-second phase.
     pub green_ticks: u64,
     /// All-red clearance ticks between member greens, so a crossing
     /// car clears the junction before the next road is admitted.
@@ -865,9 +865,9 @@ pub struct JunctionPolicy {
 impl Default for JunctionPolicy {
     fn default() -> Self {
         Self {
-            green_ticks: 720,
-            clear_ticks: 120,
-            stop_dwell_ticks: 90,
+            green_ticks: 6 * u64::from(crate::race::RACE_TICK_HZ),
+            clear_ticks: u64::from(crate::race::RACE_TICK_HZ),
+            stop_dwell_ticks: 3 * u64::from(crate::race::RACE_TICK_HZ) / 4,
             stop_inset: 2.5,
             stop_line_tolerance: 0.1,
             approach_time: 1.0,
@@ -969,7 +969,7 @@ pub struct Junctions {
 
 /// Per-junction signal-phase desynchronisation, in ticks — a fixed
 /// spread so neighbouring junctions never share a phase edge.
-const PHASE_SPREAD: u64 = 137;
+const PHASE_SPREAD: u64 = 137 * crate::race::RACE_TICK_HZ as u64 / 120;
 
 impl Junctions {
     /// Advance the controller clock — call once per drive tick, under
@@ -1336,8 +1336,8 @@ pub fn inside_junction_zone(pos: [f32; 3], zone: ([f32; 3], f32), policy: &Junct
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StuckPolicy {
     /// Drive ticks a car may go without `min_displacement` of
-    /// progress before it is declared stuck — 4800 is 40 s at the
-    /// 120 Hz fixed step, roughly double a four-member signal's worst
+    /// progress before it is declared stuck — 2400 is 40 s at the
+    /// 60 Hz fixed step, roughly double a four-member signal's worst
     /// red and beyond a six-member one's.
     pub window_ticks: u64,
     /// Progress that resets the window (m). Large enough that
@@ -1350,7 +1350,7 @@ pub struct StuckPolicy {
 impl Default for StuckPolicy {
     fn default() -> Self {
         Self {
-            window_ticks: 4800,
+            window_ticks: 40 * u64::from(crate::race::RACE_TICK_HZ),
             min_displacement: 4.0,
         }
     }

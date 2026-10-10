@@ -1237,10 +1237,10 @@ fn an_absent_table_degrades_to_silence() {
 // ---------------------------------------------------------------------------
 
 /// The same fixture with a *long* wall clip: one second of samples at
-/// 22 050 Hz, so the window (the clip's own length = 120 session
+/// 22 050 Hz, so the window (the clip's own length = 60 session
 /// ticks) outruns a re-contact the way retail's wall-scrape clips do —
 /// every retail `WALL` band sample measures 0.61–1.76 s at 22 050 Hz,
-/// longer than the upstream 24-tick pair cooldown, so in a real
+/// longer than the upstream 12-tick pair cooldown, so in a real
 /// session it is this window, not the event dedup, that paces a
 /// scrape.
 fn scrape_dir() -> tempfile::TempDir {
@@ -1273,7 +1273,7 @@ fn a_sustained_scrape_voices_one_clip_at_a_time_and_counts_the_rest() {
     // Three re-contacts inside the one-second clip: the same scrape —
     // held, counted, and never stacked over the voice still playing.
     for _ in 0..3 {
-        tick(&mut app, 5); // 5/120 s apart, well inside the window
+        tick(&mut app, 5); // 5/60 s apart, well inside the window
         write_impact(&mut app, car, ObjectId::WORLD, 3.0);
         app.update();
     }
@@ -2759,7 +2759,8 @@ fn siren_app(dir: &Path, flags: i64) -> App {
     app
 }
 
-/// Step the session clock `n` fixed ticks (n/120 s of program time).
+/// Step the session clock `n` logical ticks; the siren fixture derives
+/// its program time from the explicitly configured fixed timestep.
 fn tick(app: &mut App, n: u64) {
     for _ in 0..n {
         app.world_mut()
@@ -4488,7 +4489,7 @@ fn race_effect_app(dir: &Path) -> (App, Entity) {
         laps: 1,
         time_limit_ticks: Some(20 * mm2_game::RACE_TICK_HZ),
         params: default(),
-        countdown_ticks: 360,
+        countdown_ticks: mm2_game::DEFAULT_COUNTDOWN_TICKS,
         start_slots: vec![],
     };
     let generation = app.world().resource::<Session>().generation();
@@ -4544,7 +4545,7 @@ fn race_effects_countdown_checkpoints_warning_and_finish_once() {
     app.update();
     app.update();
     assert_eq!(race_effect_stems(&mut app), ["startracelow"]);
-    for remaining in [240, 120] {
+    for remaining in [2 * mm2_game::RACE_TICK_HZ, mm2_game::RACE_TICK_HZ] {
         app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Countdown { remaining };
         app.update();
     }
@@ -4702,7 +4703,7 @@ fn gate_line_definition(
         laps,
         time_limit_ticks: None,
         params: default(),
-        countdown_ticks: 360,
+        countdown_ticks: mm2_game::DEFAULT_COUNTDOWN_TICKS,
         start_slots: vec![],
     }
 }

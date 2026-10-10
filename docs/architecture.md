@@ -163,11 +163,13 @@ macOS/Windows/Linux install layouts are untested.
 
 - One dynamic `RigidBody` (chassis) + four raycast wheels. Wheel probes use
   `SpatialQuery::cast_ray` against the world, excluding the car itself.
-- Forces (spring/damper suspension, longitudinal/lateral tire forces, drag,
-  downforce, yaw-stability and air-control torques) are applied through
-  Avian's `Forces` query data inside `PhysicsSchedule`
-  (`PhysicsStepSystems::First`), at the fixed 120 Hz timestep. Rendering rate
-  does not affect handling; `TransformInterpolation` smooths visuals.
+- Imported cars use the reconstructed retail spring, tyre, engine,
+  transmission, aero and gyro model at 60 Hz. `PhysicsStepSystems::Last`
+  caches forces/Jacobians; `First` applies their coupled velocity update on
+  the next tick. Avian provides collision contacts and pose integration
+  with its normal substeps. The generic dev car retains the earlier
+  force-based model. Human device filtering also runs at 60 Hz;
+  `TransformInterpolation` smooths visuals independently of rendering rate.
 - All handling numbers live in `VehicleConfig` (serde-friendly): mass,
   center of mass, wheelbase/track, per-wheel position/radius/flags,
   suspension, engine torque curve, gearbox, tire grip curves, steering,

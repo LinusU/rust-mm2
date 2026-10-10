@@ -1,0 +1,27 @@
+{
+  "hooksRestored": true,
+  "clocksRestored": [
+    0,
+    0.10000000149011612,
+    9.999999747378752e-05
+  ],
+  "mode": 0,
+  "keysReleased": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "archiveSha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+  "looseOverride": {
+    "reverted": false,
+    "hadOverlay": false,
+    "hadWhiteout": false,
+    "romExists": false,
+    "existsAfterReload": false,
+    "removedConfirmed": true
+  },
+  "reloaded": true,
+  "archiveSha256AfterReload": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e"
+}

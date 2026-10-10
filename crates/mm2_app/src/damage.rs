@@ -300,7 +300,7 @@ pub fn resolve_disabled(
 ) {
     // A disabled car is rare, and the index below is a walk over every
     // identified entity with a hash insert each — measured at ~0.2 ms of
-    // every 120 Hz step on a full city when built unconditionally.
+    // every 60 Hz step on a full city when built unconditionally.
     if reader.is_empty() {
         return;
     }

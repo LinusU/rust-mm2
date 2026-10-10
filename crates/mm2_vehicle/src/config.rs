@@ -292,28 +292,19 @@ pub struct AssistConfig {
     pub slide_recovery: f32,
 }
 
-/// Authored `vehGyro` stability-assist rates, carried verbatim from the
-/// tuning record (F05-B.4).
-///
-/// The recovered original (`vehGyro` in MM2Hook) keeps three gated
-/// features behind these fields — the asNode flags `Spinable`,
-/// `Driftable` and `Rightable` — mapping `{Spin180, Reverse180}`,
-/// `{Drift}` and `{Pitch, Roll}` to the three maneuver families. Its
-/// `Update()` is unrecovered, so how the sim applies the rates is a
-/// documented designed reading (UNK-13): the rates are yaw-speed
-/// floors the car is held to while the maneuver input holds — a short
-/// handbrake tap doses a partial spin, a held one the full 180° — and
-/// never ceilings: tires already rotating the car faster are left to.
+/// Authored `vehGyro` gains, carried verbatim from the tuning record.
+/// Original handling applies driven-wheel-spin-scaled yaw torques and
+/// brake-dependent airborne levelling (research/vehicle-physics/04).
+/// The generic arcade model retains its older yaw-floor adaptation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct GyroConfig {
-    /// `Spin180` — yaw-rate floor (rad/s) for the handbrake 180° spin
+    /// `Spin180` — wheel-spin-scaled yaw gain for the handbrake spin
     /// while travelling forward. `0` = the car authors no spin assist.
     pub spin180: f32,
-    /// `Reverse180` — yaw-rate floor (rad/s) for the reverse 180°
+    /// `Reverse180` — wheel-spin-scaled yaw gain for the reverse spin
     /// (J-turn) while travelling backwards.
     pub reverse180: f32,
-    /// `Drift` — 0..1 share of the handbrake yaw-damping relief: a car
-    /// the record says drifts keeps more of its slide.
+    /// `Drift` — driven-wheel-spin-scaled yaw gain, quadratic in steering.
     pub drift: f32,
     /// `Pitch` — authored airborne pitch-righting rate (rad/s natural
     /// frequency). Absent on four retail records (`None`), authored
@@ -322,6 +313,174 @@ pub struct GyroConfig {
     /// `Roll` — authored airborne roll-righting rate; same presence and
     /// values as [`Self::pitch`].
     pub roll: Option<f32>,
+}
+
+/// The original game's vehicle model, carried as authored tuning.
+///
+/// When a [`VehicleConfig`] has one, the simulation runs the retail
+/// `Midtown2.exe` car model recovered in
+/// `docs/research/vehicle-physics/` instead of the arcade model the rest
+/// of the config describes: 19.6 m/s² gravity, a stick–slip tyre per
+/// wheel, drivetrains that integrate their own spin, the original
+/// engine, clutch and automatic gearbox, `vehAero`'s rotational damping
+/// and the `vehGyro` yaw torques. The arcade fields stay filled in as a
+/// summary of what this model does, for the consumers that plan
+/// against them (AI, analysis, presentation). Chassis mass, inertia,
+/// centre of mass, wheel geometry and gyro tuning remain shared config.
+///
+/// Every field is the authored token (or a direct derivation from one)
+/// so a tuned value means what it meant in the original; the few
+/// departures from the original are named on the code that makes them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OriginalHandling {
+    /// Gravity the car falls at and its wheel loads are built on, m/s².
+    /// The original's is 19.6 for every car.
+    pub gravity: f32,
+    /// Friction of the road material a tire sees on an unmarked surface
+    /// — retail `_default` is `0.9`. Surface grip multiplies it.
+    pub surface_friction: f32,
+    /// One entry per wheel, parallel to [`VehicleConfig::wheels`].
+    pub wheels: Vec<OriginalWheel>,
+    /// Wheel indices on the engine's drivetrain, in left/right pairs
+    /// (`DrivetrainType`: rear, front or all four).
+    pub driven: Vec<usize>,
+    /// Wheels that each spin on their own engineless freetrain.
+    pub free: Vec<usize>,
+    /// `Drivetrain` block.
+    pub drivetrain: OriginalTrain,
+    /// `Freetrain` block, shared by both freetrains.
+    pub freetrain: OriginalTrain,
+    /// `Engine` block.
+    pub engine: OriginalEngine,
+    /// `Trans` block, with the automatic box's derived ratios and
+    /// shift points.
+    pub gearbox: OriginalGearbox,
+    /// `Aero` block.
+    pub aero: OriginalAero,
+    /// Body angular speed limit, rad/s (the original's `4π` per axis).
+    pub max_angular_speed: f32,
+}
+
+/// One `WheelFront`/`WheelBack` record applied to one wheel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OriginalWheel {
+    /// Static normal load `L` (N) — the share of `mass · gravity` the
+    /// wheel carries at rest, split by `CenterOfGravity.z`. Every spring
+    /// and tire constant is built on it.
+    pub static_load: f32,
+    /// Whether this wheel is on the rear axle: it steers opposite to the
+    /// front by its own lock, and takes the handbrake.
+    pub rear: bool,
+    /// `-1` left, `+1` right, `0` centred — the Ackermann side.
+    pub side: f32,
+    /// Authored tire width (m), used by the contact probe's inner-edge pivot.
+    /// Older external configs without this field keep a centered probe.
+    #[serde(default)]
+    pub width: f32,
+    /// `SuspensionExtent` — droop travel below rest, which is also the
+    /// static sag (m).
+    pub suspension_extent: f32,
+    /// `SuspensionLimit` — bump travel above rest before the bump stop.
+    pub suspension_limit: f32,
+    /// `SuspensionFactor` — spring progressivity (clamped ≥ 0.75).
+    pub suspension_factor: f32,
+    /// `SuspensionDampCoef`.
+    pub suspension_damp_coef: f32,
+    /// `SteeringLimit` — lock, rad.
+    pub steering_limit: f32,
+    /// `SteeringOffset` — Ackermann gain.
+    pub steering_offset: f32,
+    /// `BrakeCoef` — brake torque `coef · StaticFric · radius · L`.
+    pub brake_coef: f32,
+    /// `HandbrakeCoef`, same scale.
+    pub handbrake_coef: f32,
+    /// `TireDispLimitLat` — lateral bristle travel at full load.
+    pub tire_disp_limit_lat: f32,
+    /// `TireDispLimitLong`.
+    pub tire_disp_limit_long: f32,
+    /// `TireDampCoefLat` — fraction of critical for the quarter mass.
+    pub tire_damp_coef_lat: f32,
+    /// `TireDampCoefLong`.
+    pub tire_damp_coef_long: f32,
+    /// `TireDragCoefLat` — wading drag (water only on retail).
+    pub tire_drag_coef_lat: f32,
+    /// `TireDragCoefLong`.
+    pub tire_drag_coef_long: f32,
+    /// `OptimumSlipPercent` — slip ratio of peak grip.
+    pub optimum_slip: f32,
+    /// `StaticFric` — peak μ, times the surface friction.
+    pub static_fric: f32,
+    /// `SlidingFric` — sliding μ floor.
+    pub sliding_fric: f32,
+}
+
+/// A `Drivetrain`/`Freetrain` block.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OriginalTrain {
+    /// `AngInertia` — not an inertia: the implicit spin stiffness in
+    /// `Δω = dt·τ / (I + dt·AngInertia)`.
+    pub ang_inertia: f32,
+    /// `BrakeDynamicCoef` — brake multiplier while the train turns.
+    pub brake_dynamic_coef: f32,
+    /// `BrakeStaticCoef` — brake multiplier while it is stopped.
+    pub brake_static_coef: f32,
+}
+
+/// The `Engine` block.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OriginalEngine {
+    /// `MaxHorsePower` in watts (`× 746`), delivered at `OptRPM`.
+    pub max_power_w: f32,
+    /// `IdleRPM`.
+    pub idle_rpm: f32,
+    /// `OptRPM` — peak power.
+    pub opt_rpm: f32,
+    /// `MaxRPM` — torque reaches zero; the hard limiter.
+    pub max_rpm: f32,
+    /// `AngInertia` — engine inertia, kg·m².
+    pub ang_inertia: f32,
+    /// `GCL` — seconds of zero engine torque per gear change.
+    pub gear_change_lag: f32,
+}
+
+/// The `Trans` block, as the automatic box uses it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OriginalGearbox {
+    /// Overall ratios (engine revs per wheel rev) in the original's
+    /// order: `[0]` reverse (negative), `[1]` neutral (`0`), `[2..]`
+    /// forward gears from first.
+    pub ratios: Vec<f32>,
+    /// Engine rpm above which the box shifts up out of each gear.
+    pub upshift_rpm: Vec<f32>,
+    /// Engine rpm below which it shifts down at full throttle.
+    pub downshift_full_rpm: Vec<f32>,
+    /// Engine rpm below which it shifts down at zero throttle.
+    pub downshift_zero_rpm: Vec<f32>,
+    /// Engine rpm at which full-throttle power in each gear equals the
+    /// power after the upshift — what the upshift points are biased
+    /// from. Empty when unknown.
+    #[serde(default)]
+    pub equal_power_rpm: Vec<f32>,
+    /// `GearChangeTime` — minimum seconds in a gear before the next
+    /// automatic shift.
+    pub gear_change_time: f32,
+}
+
+/// The `Aero` block. The damping terms are angular *accelerations* per
+/// car axis (`x` pitch, `y` yaw, `z` roll), turned into torque by the
+/// body's own inertia.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OriginalAero {
+    /// `AngCDamp` — constant angular deceleration, rad/s².
+    pub ang_c_damp: [f32; 3],
+    /// `AngVelDamp` — linear, 1/s.
+    pub ang_vel_damp: [f32; 3],
+    /// `AngVel2Damp` — quadratic, 1/rad.
+    pub ang_vel2_damp: [f32; 3],
+    /// `Drag`, kg/m: `F = −Drag · |v_fwd| · v`.
+    pub drag: f32,
+    /// `Down`, kg/m: `F = −Down · v_fwd²` along the car's up axis.
+    pub down: f32,
 }
 
 /// The complete vehicle definition.
@@ -395,6 +554,13 @@ pub struct VehicleConfig {
     /// one.
     #[serde(default)]
     pub top_speed_mps: Option<f32>,
+    /// The original game's car model — when present the simulation runs
+    /// it in place of the arcade model (see [`OriginalHandling`]).
+    #[serde(default)]
+    pub original: Option<OriginalHandling>,
+    /// Authored human steering filter, applied by the input layer.
+    #[serde(default)]
+    pub player_steering: Option<crate::player_input::PlayerSteeringConfig>,
 }
 
 impl Default for VehicleConfig {
@@ -501,6 +667,8 @@ impl Default for VehicleConfig {
             gyro: None,
             trailer: false,
             top_speed_mps: None,
+            original: None,
+            player_steering: None,
         }
     }
 }
@@ -895,6 +1063,170 @@ impl VehicleConfig {
             }
             if let Some(r) = g.roll {
                 check!("gyro.roll", finite(r));
+            }
+        }
+
+        if let Some(original) = &self.original {
+            let positive = |v: f32| v.is_finite() && v > 0.0;
+            let nonnegative = |v: f32| v.is_finite() && v >= 0.0;
+            check!("original.gravity", positive(original.gravity));
+            check!(
+                "original.surface_friction",
+                nonnegative(original.surface_friction)
+            );
+            check!(
+                "original.max_angular_speed",
+                positive(original.max_angular_speed)
+            );
+            check!(
+                "original.wheels",
+                original.wheels.len() == 4 && self.wheels.len() == 4
+            );
+            let mut indices = original.driven.clone();
+            indices.extend(&original.free);
+            indices.sort_unstable();
+            check!(
+                "original.driven/free",
+                indices == [0, 1, 2, 3] && !original.driven.is_empty()
+            );
+            for (i, w) in original.wheels.iter().enumerate() {
+                let prefix = format!("original.wheels[{i}]");
+                for (field, value) in [
+                    ("static_load", w.static_load),
+                    ("suspension_extent", w.suspension_extent),
+                    ("suspension_factor", w.suspension_factor),
+                    ("tire_disp_limit_lat", w.tire_disp_limit_lat),
+                    ("tire_disp_limit_long", w.tire_disp_limit_long),
+                    ("optimum_slip", w.optimum_slip),
+                ] {
+                    check!(format!("{prefix}.{field}"), positive(value));
+                }
+                for (field, value) in [
+                    ("width", w.width),
+                    ("suspension_limit", w.suspension_limit),
+                    ("suspension_damp_coef", w.suspension_damp_coef),
+                    ("steering_limit", w.steering_limit),
+                    ("brake_coef", w.brake_coef),
+                    ("handbrake_coef", w.handbrake_coef),
+                    ("tire_damp_coef_lat", w.tire_damp_coef_lat),
+                    ("tire_damp_coef_long", w.tire_damp_coef_long),
+                    ("tire_drag_coef_lat", w.tire_drag_coef_lat),
+                    ("tire_drag_coef_long", w.tire_drag_coef_long),
+                    ("static_fric", w.static_fric),
+                    ("sliding_fric", w.sliding_fric),
+                ] {
+                    check!(format!("{prefix}.{field}"), nonnegative(value));
+                }
+                check!(format!("{prefix}.side"), matches!(w.side, -1.0 | 0.0 | 1.0));
+                check!(
+                    format!("{prefix}.steering_offset"),
+                    finite(w.steering_offset)
+                );
+            }
+            for (name, train) in [
+                ("drivetrain", original.drivetrain),
+                ("freetrain", original.freetrain),
+            ] {
+                check!(
+                    format!("original.{name}.ang_inertia"),
+                    nonnegative(train.ang_inertia)
+                );
+                check!(
+                    format!("original.{name}.brake_dynamic_coef"),
+                    nonnegative(train.brake_dynamic_coef)
+                );
+                check!(
+                    format!("original.{name}.brake_static_coef"),
+                    nonnegative(train.brake_static_coef)
+                );
+            }
+            let e = &original.engine;
+            check!("original.engine.max_power_w", positive(e.max_power_w));
+            check!("original.engine.ang_inertia", positive(e.ang_inertia));
+            check!(
+                "original.engine.gear_change_lag",
+                nonnegative(e.gear_change_lag)
+            );
+            check!(
+                "original.engine.rpm",
+                positive(e.idle_rpm)
+                    && positive(e.opt_rpm)
+                    && positive(e.max_rpm)
+                    && e.idle_rpm < e.opt_rpm
+                    && e.opt_rpm < e.max_rpm
+            );
+            let box_ = &original.gearbox;
+            let gears = box_.ratios.len();
+            check!(
+                "original.gearbox.ratios",
+                gears >= 3
+                    && box_.ratios.iter().all(|r| finite(*r))
+                    && box_.ratios.first().is_some_and(|r| *r < 0.0)
+                    && box_.ratios.get(1) == Some(&0.0)
+                    && box_.ratios.iter().skip(2).all(|r| *r > 0.0)
+            );
+            for (field, points) in [
+                ("upshift_rpm", &box_.upshift_rpm),
+                ("downshift_full_rpm", &box_.downshift_full_rpm),
+                ("downshift_zero_rpm", &box_.downshift_zero_rpm),
+            ] {
+                check!(
+                    format!("original.gearbox.{field}"),
+                    points.len() == gears && points.iter().all(|r| nonnegative(*r))
+                );
+            }
+            check!(
+                "original.gearbox.equal_power_rpm",
+                (box_.equal_power_rpm.is_empty() || box_.equal_power_rpm.len() == gears)
+                    && box_.equal_power_rpm.iter().all(|r| nonnegative(*r))
+            );
+            check!(
+                "original.gearbox.gear_change_time",
+                nonnegative(box_.gear_change_time)
+            );
+            let aero = &original.aero;
+            for (field, values) in [
+                ("ang_c_damp", aero.ang_c_damp),
+                ("ang_vel_damp", aero.ang_vel_damp),
+                ("ang_vel2_damp", aero.ang_vel2_damp),
+            ] {
+                check!(
+                    format!("original.aero.{field}"),
+                    values.iter().all(|v| nonnegative(*v))
+                );
+            }
+            check!("original.aero.drag", nonnegative(aero.drag));
+            check!("original.aero.down", nonnegative(aero.down));
+        }
+        if let Some(p) = &self.player_steering {
+            check!("player_steering.speed_sensitive", p.speed_sensitive <= 2);
+            check!(
+                "player_steering.speed_range",
+                finite(p.speed_low)
+                    && finite(p.speed_high)
+                    && p.speed_low >= 0.0
+                    && p.speed_high > p.speed_low
+            );
+            for (name, pair) in [
+                ("delta_out", p.delta_out),
+                ("delta_in", p.delta_in),
+                ("exponent", p.exponent),
+            ] {
+                check!(
+                    format!("player_steering.{name}"),
+                    pair.iter().all(|v| finite(*v) && *v > 0.0)
+                );
+            }
+            for (name, pair) in [
+                ("mouse_divisor", p.mouse_divisor),
+                ("mouse_exponent", p.mouse_exponent),
+            ] {
+                if let Some(pair) = pair {
+                    check!(
+                        format!("player_steering.{name}"),
+                        pair.iter().all(|v| finite(*v) && *v > 0.0)
+                    );
+                }
             }
         }
 

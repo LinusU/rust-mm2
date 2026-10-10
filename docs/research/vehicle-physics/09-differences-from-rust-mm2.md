@@ -3,7 +3,9 @@
 A comparison of the recovered original (01–08) with rust-mm2's vehicle
 model **as of commit `c3e1223` (2026-10-08)** — `crates/mm2_vehicle`,
 `crates/mm2_content/src/convert.rs`, `crates/mm2_app` input and AI.
-It goes stale as the code changes; the original's side does not.
+This is a historical snapshot. Imported cars now use the reconstructed
+original model; see [current vehicle handling](../../vehicle-handling.md#current-imported-car-simulation)
+for the live implementation and remaining collision adaptations.
 "Ours" values were read from the code, not measured.
 
 Ordered roughly by how much each difference should change the feel.

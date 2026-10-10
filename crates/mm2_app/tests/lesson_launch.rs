@@ -133,7 +133,7 @@ fn event_app_with_car(config: SessionConfig, vfs: Vfs, selected: session::Select
         .add_plugins(bevy::mesh::MeshPlugin)
         .add_plugins(bevy::gizmos::GizmoPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(mm2_game::RACE_TICK_HZ)))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -226,7 +226,10 @@ fn a_crash_row_loads_leg_zero_with_its_driver() {
     let race = app.world().resource::<RaceState>();
     assert_eq!(race.generation, 1);
     assert_eq!(race.definition.checkpoints.len(), 2);
-    assert_eq!(race.definition.time_limit_ticks, Some(35 * 120));
+    assert_eq!(
+        race.definition.time_limit_ticks,
+        Some(35 * mm2_game::RACE_TICK_HZ)
+    );
     // The local car is a participant of leg 0, with its gates marked.
     let car = car(&mut app);
     let progress = app.world().get::<RaceProgress>(car).unwrap();

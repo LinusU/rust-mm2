@@ -1,0 +1,197 @@
+{
+  "description": "Production human-input powerslide scenario, cold600ticks, 60Hz, friction1.0; finite behavior coverage only, not original equivalence outside the two recorded cars",
+  "expected_cars": 21,
+  "attempted_runs": 21,
+  "passed_finite_runs": 21,
+  "runs": [
+    {
+      "car": "vp4x4",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 179.4295010772772,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 37.983444
+    },
+    {
+      "car": "vpauditt",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 48.7048780496613,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 46.180134
+    },
+    {
+      "car": "vpbug",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 51.51984991624203,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 35.120876
+    },
+    {
+      "car": "vpbullet",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 63.268513101658804,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 44.821854
+    },
+    {
+      "car": "vpbus",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 15.821897969986544,
+      "powered_sliding_seconds": 0.016666666666666666,
+      "final_speed_mps": 26.526739
+    },
+    {
+      "car": "vpcab",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 18.61366099162398,
+      "powered_sliding_seconds": 0.2833333333333333,
+      "final_speed_mps": 41.036018
+    },
+    {
+      "car": "vpcaddie",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 55.15728992856182,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 46.872089
+    },
+    {
+      "car": "vpcentury",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 3.7096223788403853,
+      "powered_sliding_seconds": 0.0,
+      "final_speed_mps": 35.178368
+    },
+    {
+      "car": "vpcoop",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 8.354921821434385,
+      "powered_sliding_seconds": 0.0,
+      "final_speed_mps": 34.491299
+    },
+    {
+      "car": "vpcoop2k",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 26.322577159799636,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 36.056213
+    },
+    {
+      "car": "vpcop",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 86.40953362113368,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 56.586372
+    },
+    {
+      "car": "vpdb7",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 50.92716666120017,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 45.550755
+    },
+    {
+      "car": "vpddbus",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_abs_slide_degrees": 22.71807858706823,
+      "powered_sliding_seconds": 0.15,
+      "final_speed_mps": 29.634884
+    },
+    {
+      "car": "vpdune",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 60.96861485123988,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 44.801922
+    },
+    {
+      "car": "vpford",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 3,
+      "peak_abs_slide_degrees": 9.949412653885467,
+      "powered_sliding_seconds": 0.0,
+      "final_speed_mps": 38.880562
+    },
+    {
+      "car": "vpmoonrover",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 0,
+      "peak_abs_slide_degrees": 49.921063490869884,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 33.189926
+    },
+    {
+      "car": "vpmustang99",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 57.41315907558054,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 42.609528
+    },
+    {
+      "car": "vppanoz",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 29.89849272715472,
+      "powered_sliding_seconds": 0.43333333333333335,
+      "final_speed_mps": 54.884918
+    },
+    {
+      "car": "vppanozgt",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 139.52800267939327,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 57.542793
+    },
+    {
+      "car": "vpsemi",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 2.5545220219056546,
+      "powered_sliding_seconds": 0.0,
+      "final_speed_mps": 33.763931
+    },
+    {
+      "car": "vpvwcup",
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_slide_degrees": 77.33182281522157,
+      "powered_sliding_seconds": 0.45,
+      "final_speed_mps": 47.606525
+    }
+  ]
+}

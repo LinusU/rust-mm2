@@ -61,7 +61,7 @@ pub struct ImpactPolicy {
     /// Ticks the same collider pair may not emit again after a
     /// reportable contact — collapses the flap of a contact edge that
     /// starts/stops over consecutive solver steps into one impact.
-    /// 24 ticks = 200 ms at the 120 Hz fixed step.
+    /// 12 ticks = 200 ms at the 60 Hz fixed step.
     pub pair_cooldown_ticks: u64,
     /// Most impacts one tick may emit; beyond it the lowest-severity
     /// candidates are dropped (and counted, so suppression is visible).
@@ -72,7 +72,7 @@ impl Default for ImpactPolicy {
     fn default() -> Self {
         Self {
             min_severity: 0.5,
-            pair_cooldown_ticks: 24,
+            pair_cooldown_ticks: u64::from(crate::race::RACE_TICK_HZ) / 5,
             max_per_tick: 16,
         }
     }

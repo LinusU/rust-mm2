@@ -890,3 +890,14 @@ mod ram {
         assert_eq!((got.throttle, got.steering), (0.0, 0.0));
     }
 }
+
+/// Retail GetSteering checks left first rather than subtracting two keys.
+#[test]
+fn simultaneous_steering_keys_choose_left() {
+    let mut app = drive_app(CameraMode::Chase);
+    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.press(KeyCode::ArrowLeft);
+    keys.press(KeyCode::ArrowRight);
+    app.update();
+    assert_eq!(player_input(&mut app).steering, -1.0);
+}

@@ -2977,6 +2977,8 @@ mod tests {
             brake: 40,
             steer: -90,
             handbrake: 0,
+            auto_reverse: true,
+            forced_gear: None,
         }
     }
 

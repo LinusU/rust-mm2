@@ -587,7 +587,7 @@ pub fn toggle_camera(
 /// `--cam-cycle-at TICK` (quarantined `DevOverrides`, evidence runs
 /// only): advance the documented `C` chain once — the same
 /// successor/activation logic [`toggle_camera`] runs for the key —
-/// when the session clock reaches `cam_cycle_at` fixed ticks (120 Hz,
+/// when the session clock reaches `cam_cycle_at` fixed ticks (60 Hz,
 /// the `smoke` record's `ticks=` unit). A `--frames`/`--screenshot`
 /// capture freezes live input, so this is how a mid-drive view
 /// transition gets inspected on real content. Render-only like

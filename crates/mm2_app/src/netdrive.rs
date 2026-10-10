@@ -147,7 +147,7 @@ use mm2_net::{
     SnapRace, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
-    DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
+    DriveDirection, HandlingMetrics, HumanDriver, RemoteReplica, ResetVehicle, Teleported, Vehicle,
     VehicleConfig, VehicleInput, VehicleState, vehicle_bundle,
 };
 
@@ -1111,8 +1111,9 @@ pub(crate) fn wire_quat(raw: [f32; 4]) -> Quat {
 }
 
 /// `VehicleInput` → a wire sample. Controls quantize to the `u8`/`i8`
-/// fields; `forced_gear` is a local control command that never rides the
-/// wire (the remote driver's own sim selects gears).
+/// fields; the optional manual gear rides as a forward index. An index
+/// beyond the wire's u32 range saturates instead of wrapping; the receiving
+/// vehicle clamps any out-of-range index to its authored last gear.
 pub fn encode_input(input: &VehicleInput, generation: u64, seq: u64) -> DriveInput {
     let q8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     DriveInput {
@@ -1122,6 +1123,10 @@ pub fn encode_input(input: &VehicleInput, generation: u64, seq: u64) -> DriveInp
         brake: q8(input.brake),
         steer: (input.steering.clamp(-1.0, 1.0) * 127.0).round() as i8,
         handbrake: q8(input.handbrake),
+        auto_reverse: true,
+        forced_gear: input
+            .forced_gear
+            .map(|gear| u32::try_from(gear).unwrap_or(u32::MAX)),
     }
 }
 
@@ -1136,7 +1141,7 @@ pub fn decode_input(input: &DriveInput) -> VehicleInput {
         brake: input.brake as f32 / 255.0,
         steering: (input.steer as f32 / 127.0).clamp(-1.0, 1.0),
         handbrake: input.handbrake as f32 / 255.0,
-        ..VehicleInput::default()
+        forced_gear: input.forced_gear.map(|gear| gear as usize),
     }
 }
 
@@ -1763,6 +1768,9 @@ fn spawn_remote(
             role,
             NetPlayer(wire),
             RemotePick(pick.clone()),
+            // Lobby wire seats are human drivers. Replicated AI use a
+            // separate path despite sharing PlayerControl::Remote.
+            HumanDriver::default(),
             ResetEpoch(0),
             DamageSignals::default(),
             vehicle_bundle(&cfg),
@@ -2058,21 +2066,19 @@ pub fn send_drive_input(
     link: Res<LobbyLink>,
     session: Res<Session>,
     mut seq: ResMut<InputSeq>,
-    local: Query<&VehicleInput, With<PlayerVehicle>>,
+    local: Query<(&VehicleInput, Option<&HumanDriver>), With<PlayerVehicle>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     if !session.is_playing() || link.closed || link.leaving() {
         return;
     }
-    let Ok(input) = local.single() else {
+    let Ok((input, human)) = local.single() else {
         return;
     };
+    let mut sample = encode_input(input, session.wire_generation(), seq.0 + 1);
+    sample.auto_reverse = human.is_none_or(|driver| driver.auto_reverse);
     seq.0 += 1;
-    if link
-        .ctl()
-        .send_input(encode_input(input, session.wire_generation(), seq.0))
-        .is_ok()
-    {
+    if link.ctl().send_input(sample).is_ok() {
         report.inputs_sent += 1;
     }
 }
@@ -2085,20 +2091,21 @@ pub fn send_drive_input(
 pub fn apply_remote_inputs(
     host: Res<HostLink>,
     session: Res<Session>,
-    mut remotes: Query<(&NetPlayer, &mut VehicleInput), With<RemotePick>>,
+    mut remotes: Query<(&NetPlayer, &mut VehicleInput, &mut HumanDriver), With<RemotePick>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     if !session.is_playing() {
         return;
     }
     let inputs: RemoteInputs = host.remote_inputs();
-    for (wire, mut input) in &mut remotes {
+    for (wire, mut input, mut human) in &mut remotes {
         let fresh = inputs.latest(wire.0).filter(|s| {
             s.input.generation == session.wire_generation() && s.received.elapsed() <= INPUT_STALE
         });
         match fresh {
             Some(stamped) => {
                 *input = decode_input(&stamped.input);
+                human.auto_reverse = stamped.input.auto_reverse;
                 report.inputs_applied += 1;
             }
             None => {
@@ -3791,8 +3798,20 @@ mod tests {
         assert!((back.brake - 0.5).abs() < 0.01);
         assert_eq!(back.steering, -1.0);
         assert_eq!(back.handbrake, 0.0);
-        // A local gear command never rides the wire.
-        assert_eq!(back.forced_gear, None);
+        assert_eq!(back.forced_gear, input.forced_gear);
+    }
+
+    #[test]
+    fn manual_gear_indices_roundtrip_without_wrapping() {
+        for gear in [None, Some(0), Some(3), Some(usize::MAX)] {
+            let input = VehicleInput {
+                forced_gear: gear,
+                ..default()
+            };
+            let wire = encode_input(&input, 1, 1);
+            let expected = gear.map(|g| u32::try_from(g).unwrap_or(u32::MAX) as usize);
+            assert_eq!(decode_input(&wire).forced_gear, expected);
+        }
     }
 
     /// A client can put any byte in `steer`, including `i8::MIN`, one step
@@ -3809,6 +3828,8 @@ mod tests {
                     brake: byte,
                     steer,
                     handbrake: byte,
+                    auto_reverse: true,
+                    forced_gear: None,
                 });
                 assert!((-1.0..=1.0).contains(&back.steering), "steer {steer}");
                 assert!((0.0..=1.0).contains(&back.throttle), "throttle {byte}");
@@ -3823,6 +3844,8 @@ mod tests {
             brake: 0,
             steer: i8::MIN,
             handbrake: 0,
+            auto_reverse: true,
+            forced_gear: None,
         });
         assert_eq!(past.steering, -1.0);
     }

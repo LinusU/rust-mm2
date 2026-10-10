@@ -2636,6 +2636,8 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
             brake: 0,
             steer: -64,
             handbrake: 0,
+            auto_reverse: false,
+            forced_gear: Some(2),
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -2655,6 +2657,11 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
             input.throttle
         );
         assert!(input.steering < -0.4, "the wire steer drove the car");
+        assert_eq!(input.forced_gear, Some(2));
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mm2_vehicle::HumanDriver, With<RemotePick>>();
+        assert!(!q.single(app.world()).unwrap().auto_reverse);
     }
 
     // The host publishes — the peer sees its own seat's snapshot.
@@ -2790,6 +2797,207 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
     );
 }
 
+/// Wire humans retain the local retail pedal rules, rather than inheriting
+/// the AI's different reverse threshold and missing stopped handbrake hold.
+#[test]
+fn a_wire_humans_native_pedals_match_the_local_driver() {
+    fn compare_native_step(
+        cfg: &VehicleConfig,
+        input: VehicleInput,
+        remote_human: mm2_vehicle::HumanDriver,
+        auto_reverse: bool,
+        speed: f32,
+    ) -> [(mm2_vehicle::DriveDirection, usize, f32); 3] {
+        use avian3d::prelude::*;
+        let mut sim = App::new();
+        sim.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::asset::AssetPlugin::default())
+            .add_plugins(bevy::mesh::MeshPlugin)
+            .add_plugins(bevy::gizmos::GizmoPlugin)
+            .add_plugins(PhysicsPlugins::default())
+            .add_plugins(TransformPlugin)
+            .add_plugins(mm2_vehicle::VehiclePlugin)
+            .insert_resource(Time::<Fixed>::from_hz(60.0))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 60.0,
+            )))
+            .insert_resource(Gravity(Vec3::NEG_Y * 19.6));
+        sim.finish();
+        sim.cleanup();
+        sim.update();
+        let original = cfg.original.as_ref().unwrap();
+        let rear = *original
+            .free
+            .iter()
+            .find(|&&i| original.wheels[i].rear)
+            .unwrap();
+        let cars: Vec<Entity> = (0..3)
+            .map(|index| {
+                let car = sim
+                    .world_mut()
+                    .spawn((
+                        mm2_vehicle::vehicle_bundle(cfg),
+                        Transform::from_xyz(index as f32 * 20.0, 10.0, 0.0),
+                    ))
+                    .id();
+                sim.world_mut().entity_mut(car).insert(input);
+                // No contacts: seed a free rear wheel's spin so the
+                // stopped hold has an observable drivetrain effect.
+                let mut state = sim.world_mut().get_mut::<VehicleState>(car).unwrap();
+                state.forward_speed = speed;
+                let os = state.original.as_mut().unwrap();
+                os.player_speed = speed;
+                os.wheels[rear].omega = 1.0;
+                sim.world_mut().get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::NEG_Z * speed;
+                if index < 2 {
+                    let human = if index == 0 {
+                        mm2_vehicle::HumanDriver { auto_reverse }
+                    } else {
+                        remote_human
+                    };
+                    sim.world_mut().entity_mut(car).insert(human);
+                }
+                car
+            })
+            .collect();
+        sim.update();
+        std::array::from_fn(|index| {
+            let state = sim.world().get::<VehicleState>(cars[index]).unwrap();
+            (
+                state.direction,
+                state.gear,
+                state.original.as_ref().unwrap().wheels[rear].omega,
+            )
+        })
+    }
+
+    let install = tempfile::tempdir().unwrap();
+    support::tuned_car(install.path(), "vphuman", 1000.0);
+    // A front-driven authored fixture exposes a free rear wheel, whose
+    // spin isolates the human handbrake hold from engine coupling.
+    std::fs::write(
+        install.path().join("tune/vehicle/vphuman.vehcarsim"),
+        support::vehcarsim(1000.0)
+            .replace("DrivetrainType 0", "DrivetrainType 1")
+            // Retail AutoNumGears counts reverse and neutral as well:
+            // six entries expose four forward gears, including index 3.
+            .replace("AutoNumGears 4", "AutoNumGears 6"),
+    )
+    .unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let peer = remote_peer(link.addr(), "retail human", fp);
+    peer.ctl().unwrap().set_vehicle("vphuman", 0).unwrap();
+    peer.ctl().unwrap().set_ready(true).unwrap();
+    let mut app = host_app(vfs, link);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.ready && e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let remote = app
+        .world_mut()
+        .query_filtered::<Entity, With<RemotePick>>()
+        .single(app.world())
+        .unwrap();
+    let cfg = app
+        .world()
+        .get::<mm2_vehicle::Vehicle>(remote)
+        .unwrap()
+        .config
+        .clone();
+    assert!(
+        cfg.original.is_some(),
+        "the host loaded the authored native car"
+    );
+    assert_eq!(
+        cfg.original.as_ref().unwrap().gearbox.ratios.len() - mm2_vehicle::original::FIRST_GEAR,
+        4,
+        "the authored fixture has four forward gears for the manual command"
+    );
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::HumanDriver>(remote)
+            .is_some()
+    );
+
+    for (case, (speed, brake, auto_reverse, forced_gear)) in [
+        (3.0, 1.0, true, None),
+        (0.0, 0.0, true, None),
+        (0.0, 1.0, false, None),
+        (3.0, 1.0, true, Some(3)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = VehicleInput {
+            brake,
+            forced_gear,
+            ..default()
+        };
+        let seq = case as u64 + 1;
+        let mut wire = netdrive::encode_input(&input, generation, seq);
+        wire.auto_reverse = auto_reverse;
+        peer.ctl().unwrap().send_input(wire).unwrap();
+        spin(&mut app, |a| {
+            a.world()
+                .resource::<HostLink>()
+                .remote_inputs()
+                .latest(1)
+                .is_some_and(|s| s.input.seq == seq)
+        });
+        app.update();
+        let remote_input = *app.world().get::<VehicleInput>(remote).unwrap();
+        let remote_human = *app.world().get::<mm2_vehicle::HumanDriver>(remote).unwrap();
+        assert_eq!(remote_human.auto_reverse, auto_reverse);
+        assert_eq!(remote_input.forced_gear, forced_gear);
+        let [local, hosted, ai] =
+            compare_native_step(&cfg, remote_input, remote_human, auto_reverse, speed);
+        assert_eq!(
+            hosted, local,
+            "wire and local native behavior differ in case {case}"
+        );
+        let expected = if auto_reverse && brake > 0.8 && forced_gear.is_none() {
+            mm2_vehicle::DriveDirection::Reverse
+        } else {
+            mm2_vehicle::DriveDirection::Forward
+        };
+        assert_eq!(hosted.0, expected);
+        if case == 0 {
+            assert_eq!(
+                ai.0,
+                mm2_vehicle::DriveDirection::Forward,
+                "AI's reverse threshold differs at 3 m/s"
+            );
+        } else if case == 1 {
+            assert!(
+                hosted.2.abs() < ai.2.abs(),
+                "the human stopped hold brakes the free rear wheel"
+            );
+        } else if case == 2 {
+            assert_eq!(
+                ai.0,
+                mm2_vehicle::DriveDirection::Reverse,
+                "auto-reverse off must not inherit AI pedal rules"
+            );
+        } else {
+            assert_eq!(
+                hosted.1, 3,
+                "the wire manual gear reaches the native gearbox"
+            );
+        }
+    }
+}
+
 /// The client's half: the host seat (wire id 0 — carried by `Start`'s
 /// `host_pick`, never a roster entry) spawns as a *predicted* kinematic
 /// copy, the local car's input streams up, and snapshots blend the copy
@@ -2886,8 +3094,12 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 control: PlayerControl::Local,
             },
             mm2_game::AuthorityRole::Predicted,
+            mm2_vehicle::HumanDriver {
+                auto_reverse: false,
+            },
             VehicleInput {
                 throttle: 0.5,
+                forced_gear: Some(2),
                 ..VehicleInput::default()
             },
             mm2_game::VehicleDamage::new(DAMAGE_SPEC),
@@ -2930,6 +3142,12 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         "the quantized throttle round-trips: {}",
         sent.input.throttle
     );
+
+    assert!(
+        !sent.input.auto_reverse,
+        "the local human preference rides the wire"
+    );
+    assert_eq!(sent.input.forced_gear, Some(2));
 
     // A snapshot for seat 0 retargets the copy's lerp; the lerp drives
     // its `Position` toward the asserted pose.
@@ -4337,6 +4555,8 @@ fn a_snap_carries_the_remote_cars_drive_state() {
             brake: 255,
             steer: 0,
             handbrake: 0,
+            auto_reverse: true,
+            forced_gear: None,
         })
         .unwrap();
     spin_mut(&mut app, |a| {
@@ -6750,6 +6970,8 @@ fn an_impaired_link_still_converges_the_data_plane() {
             brake: 0,
             steer: 90,
             handbrake: 0,
+            auto_reverse: true,
+            forced_gear: None,
         })
         .unwrap();
     }
@@ -7953,6 +8175,8 @@ fn a_stalled_wire_seat_is_retired_and_releases_the_deferred_authority() {
                 brake: 0,
                 steer: 0,
                 handbrake: 0,
+                auto_reverse: true,
+                forced_gear: None,
             })
             .unwrap();
         host.update();

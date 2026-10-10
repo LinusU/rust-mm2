@@ -43,7 +43,7 @@ use crate::netdrive::{NetDriveReport, RemoteSnaps};
 /// Match ticks between the host's unprompted frames: about a second at
 /// the fixed rate. A change of state publishes at once; this is the
 /// repair for a lost frame and the way a late joiner learns the match.
-pub const PUBLISH_EVERY_TICKS: u64 = 120;
+pub const PUBLISH_EVERY_TICKS: u64 = mm2_game::RACE_TICK_HZ as u64;
 
 /// Runs of [`publish_cnr`] (one per rendered frame) between repeats of a
 /// *decided* match's final frame. A decided match's clock has stopped,

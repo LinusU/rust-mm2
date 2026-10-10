@@ -1,0 +1,70 @@
+{
+  "original_file": "tools/handling/evidence/original-vpbug-flat-turn-cold.json",
+  "native_file": "tools/handling/evidence/native-vpbug-flat-turn-cold.csv",
+  "car": "vpbug",
+  "scenario": "turn",
+  "hz": 60,
+  "frames": 900,
+  "frame_range": [
+    1,
+    900
+  ],
+  "native_offset": -1,
+  "input_byte_mismatches": {
+    "steering_byte": 0,
+    "throttle_byte": null,
+    "brake_byte": null,
+    "handbrake_byte": null
+  },
+  "errors": {
+    "speed_mps": {
+      "samples": 900,
+      "rms": 0.05817567966551908,
+      "max_absolute": 0.8729206379532926,
+      "mean": -0.032475553455668785
+    },
+    "lateral_speed_mps": {
+      "samples": 900,
+      "rms": 0.027741005136017502,
+      "max_absolute": 0.19527423337278138,
+      "mean": -0.003559463928915235
+    },
+    "slip_angle_radians": {
+      "samples": 879,
+      "rms": 0.0012705021860751821,
+      "max_absolute": 0.008773995547459279,
+      "mean": -0.00016158268358364245
+    },
+    "position_metres": {
+      "samples": 900,
+      "rms": 0.36903607508789005,
+      "max_absolute": 0.8777276337273391,
+      "mean": 0.24551506043283663
+    },
+    "height_metres": {
+      "samples": 900,
+      "rms": 0.00011135908911138773,
+      "max_absolute": 0.0006809469165801989,
+      "mean": 4.973007345199597e-06
+    },
+    "yaw_radians": {
+      "samples": 900,
+      "rms": 0.002444903235586465,
+      "max_absolute": 0.007998111894471194,
+      "mean": 0.0019288424370095209
+    },
+    "yaw_rate_radians_per_second": {
+      "samples": 900,
+      "rms": 0.019082997849349807,
+      "max_absolute": 0.1729857485656736,
+      "mean": 0.00019872153628183582
+    },
+    "rpm": {
+      "samples": 900,
+      "rms": 31.555710754052182,
+      "max_absolute": 254.08689843750017,
+      "mean": -1.8773522770182354
+    }
+  },
+  "interpretation": "Measured differences; inspect terrain/contact/input contamination before changing tuning"
+}

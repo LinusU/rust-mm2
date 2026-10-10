@@ -21,9 +21,9 @@
 //!   A corrupt file is never deleted or overwritten by a load; the
 //!   next successful `save` heals the main file while the backup
 //!   stays.
-//! - `version` stamps every write; a file whose schema is not
-//!   [`PROFILE_SCHEMA_VERSION`] is rejected rather than guessed at —
-//!   migrations land explicitly when a v2 exists.
+//! - `version` stamps every write. Schema 1 (120 Hz race times) is
+//!   migrated to schema 2 (60 Hz) in memory before validation; unsupported
+//!   versions are rejected. A load leaves the source files untouched.
 //! - Unknown fields are preserved verbatim in [`PlayerProfile::extra`]
 //!   so a file written by a newer build survives a round trip through
 //!   this one (spec req 4).
@@ -63,9 +63,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Difficulty, EventTableKind};
 
-/// Schema version written by this build. Files carrying any other
-/// version are rejected by [`ProfileStore::load`].
-pub const PROFILE_SCHEMA_VERSION: u32 = 1;
+/// Schema version written by this build. Schema 1 is migrated on load;
+/// other versions are rejected. Version 2 stores race times at 60 Hz.
+pub const PROFILE_SCHEMA_VERSION: u32 = 2;
 
 /// Display-name bound: non-empty, no control characters, at most this
 /// many chars. A bound exists so a corrupt/hostile file cannot inject
@@ -315,6 +315,17 @@ impl PlayerProfile {
     /// — the single check F16-B consumers make (spec req 5/AC03).
     pub fn records_progress(&self) -> bool {
         matches!(self.kind, ProfileKind::Standard)
+    }
+
+    /// Only time units change between schemas. Round half a new tick
+    /// upward without overflowing on a hand-edited u64::MAX time.
+    fn migrate_schema(&mut self) {
+        if self.version == 1 {
+            for record in &mut self.progress.events {
+                record.best_race_ticks = record.best_race_ticks.map(|ticks| ticks / 2 + ticks % 2);
+            }
+            self.version = PROFILE_SCHEMA_VERSION;
+        }
     }
 
     /// Content problems that make a parsed file untrustworthy — an
@@ -851,6 +862,7 @@ impl ProfileStore {
     /// one of the three names. Bumps `revision` and re-stamps
     /// `version` before serializing.
     pub fn save(&self, profile: &mut PlayerProfile) -> Result<(), ProfileError> {
+        profile.migrate_schema();
         profile.version = PROFILE_SCHEMA_VERSION;
         // Saturating would be wrong: load keeps the highest revision, so a
         // saturated document could never beat its own `.bak` and the save
@@ -989,11 +1001,12 @@ fn read_profile(path: &Path, expected: &ProfileId) -> Result<PlayerProfile, Stri
         return Err(format!("file exceeds {} bytes", MAX_FILE_BYTES));
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let profile: PlayerProfile =
+    let mut profile: PlayerProfile =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON: {e}"))?;
     if &profile.id != expected {
         return Err("file names a different profile id".to_string());
     }
+    profile.migrate_schema();
     profile.validate()?;
     Ok(profile)
 }

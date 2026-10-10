@@ -675,12 +675,36 @@ pub fn update_wheel_visuals(
             suspension.travel
         };
         xf.translation = Vec3::from(wheel.position) + mount.follow_offset + Vec3::NEG_Y * drop;
-        let steer = if wheel.steered {
+        let steer = if let Some(original) = &cfg.original {
+            let lock = original
+                .wheels
+                .iter()
+                .find(|w| !w.rear)
+                .map_or(0.0, |w| w.steering_limit);
+            let input = if lock.abs() > 1e-6 {
+                state.steer_angle / lock
+            } else {
+                0.0
+            };
+            original
+                .wheels
+                .get(mount.index)
+                .map_or(0.0, |w| mm2_vehicle::original::wheel_steer(w, input))
+        } else if wheel.steered {
             state.steer_angle * wheel.steer_scale
         } else {
             0.0
         };
         xf.rotation = Quat::from_rotation_y(-steer);
+        if let Some(w) = cfg
+            .original
+            .as_ref()
+            .and_then(|o| o.wheels.get(mount.index))
+        {
+            let inner_edge = w.side * w.width * 0.5;
+            let pivot_shift = inner_edge * (xf.rotation * Vec3::X - Vec3::X);
+            xf.translation += pivot_shift;
+        }
         for child in children {
             if let Ok(mut spin) = spins.get_mut(*child) {
                 spin.rotation = Quat::from_rotation_x(ws.spin);

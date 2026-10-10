@@ -13,8 +13,9 @@ use mm2_app::navarrow::{
 };
 use mm2_app::race::{
     COUNTDOWN_GO_TICKS, CountdownBanner, CountdownBannerText, LOW_TIME_BRIGHT, LOW_TIME_DIM,
-    LOW_TIME_TICKS, LowTimeWarning, advance_race, reanchor_teleported_participants,
-    spawn_countdown_banner, spawn_race_warning, update_countdown_banner, update_race_warning,
+    LOW_TIME_FLASH_TICKS, LOW_TIME_TICKS, LowTimeWarning, advance_race,
+    reanchor_teleported_participants, spawn_countdown_banner, spawn_race_warning,
+    update_countdown_banner, update_race_warning,
 };
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
@@ -2200,13 +2201,15 @@ fn low_time_warning_pulses_on_the_race_clock() {
 
     // The pulse reads the race clock, not a wall clock: each
     // `LOW_TIME_FLASH_TICKS` of remaining time flips the phase.
-    run(&mut app, 29); // 60 ticks of warning elapsed — still bright
+    // This harness intentionally runs two fixed ticks per update.
+    let half_pulse_updates = (LOW_TIME_FLASH_TICKS / 2) as usize;
+    run(&mut app, half_pulse_updates - 1); // just before the dim half
     assert_eq!(warning(&mut app).1, LOW_TIME_BRIGHT);
-    run(&mut app, 1); // 61 elapsed — dim half
+    run(&mut app, 1); // just past the half-period boundary
     assert_eq!(warning(&mut app).1, LOW_TIME_DIM);
-    run(&mut app, 29); // 119 elapsed — still dim
+    run(&mut app, half_pulse_updates - 1); // just before the bright half
     assert_eq!(warning(&mut app).1, LOW_TIME_DIM);
-    run(&mut app, 1); // 121 elapsed — bright again
+    run(&mut app, 1); // bright again
     assert_eq!(warning(&mut app).1, LOW_TIME_BRIGHT);
 
     // Paused, the race clock holds — so does the pulse phase.

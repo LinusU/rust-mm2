@@ -194,16 +194,16 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
         "record names the session difficulty: {}",
         rec.line()
     );
-    // The session clock ran on the fixed step: ~2 ticks per 60 Hz update
-    // at the 120 Hz timestep, minus the clock priming update (F01-AC03).
+    // The session clock ran on the fixed step: one tick per 60 Hz update,
+    // minus the clock priming update (F01-AC03).
     let ticks: u64 = rec
         .line()
         .split_whitespace()
         .find_map(|kv| kv.strip_prefix("ticks=").and_then(|v| v.parse().ok()))
         .expect("record reports ticks=");
     assert!(
-        (1100..=1200).contains(&ticks),
-        "600 updates should produce ~1200 fixed ticks, got {ticks}"
+        (550..=600).contains(&ticks),
+        "600 updates should produce ~600 fixed ticks, got {ticks}"
     );
 }
 
@@ -376,15 +376,15 @@ fn record_field_u64(line: &str, prefix: &str) -> u64 {
 /// ticks before the teardown — which is what distinguishes a
 /// mid-race restart leg from a just-spawned one. The record reports
 /// the *current* generation's clock as `ticks=`, so a restart at
-/// tick 600 inside a 600-update run (~1200 ticks available) leaves
+/// tick 300 inside a 600-update run (~600 ticks available) leaves
 /// generation 2 only the remainder — a tick-0 `--restart` would
-/// leave ~1190 instead.
+/// leave ~590 instead.
 #[test]
 fn restart_at_defers_the_restart_to_the_configured_tick() {
     let vfs = Vfs::new();
     let config = SessionConfig {
         dev: DevOverrides {
-            restart_at: Some(600),
+            restart_at: Some(300),
             ..DevOverrides::default()
         },
         ..SessionConfig::default()
@@ -414,7 +414,7 @@ fn restart_at_defers_the_restart_to_the_configured_tick() {
     );
     let ticks = record_field_u64(&line, "ticks=");
     assert!(
-        (1..900).contains(&ticks),
+        (1..450).contains(&ticks),
         "a mid-run restart leaves generation 2 only the remaining ticks, got {ticks} in {line}"
     );
     assert!(
@@ -502,8 +502,8 @@ fn restart_at_beyond_the_run_never_fires() {
     );
     let ticks = record_field_u64(&line, "ticks=");
     assert!(
-        ticks >= 1000,
-        "600 updates ≈ 1200 Playing ticks; got {ticks} in {line}"
+        ticks >= 500,
+        "600 updates ≈ 600 Playing ticks; got {ticks} in {line}"
     );
 }
 
@@ -621,7 +621,7 @@ fn a_cruise_reset_is_counted_once_with_later_travel_preserved() {
     let config = SessionConfig {
         world: WorldMode::DevWorld,
         dev: DevOverrides {
-            reset_at: Some(650),
+            reset_at: Some(325),
             ..DevOverrides::default()
         },
         ..SessionConfig::default()

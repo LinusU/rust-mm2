@@ -70,8 +70,13 @@
 /// same install and mods (F29). v23: `Message::Keepalive` — the host's
 /// periodic liveness frame, so an idle lobby client can tell a silent
 /// host from a quiet one and give up on a dead-but-open socket
-/// (F24-AC04).
-pub const PROTOCOL_VERSION: u16 = 23;
+/// (F24-AC04). v24: gameplay/world/race ticks now represent 1/60 second
+/// rather than 1/120, and vehicle prediction uses the reconstructed
+/// retail model. A v23 peer has the same asset fingerprint but incompatible
+/// simulation/time semantics, so the handshake must reject it. Input frames
+/// also carry the human auto-reverse preference and optional manual gear,
+/// keeping the authoritative seat's pedal/gear rules aligned with its client.
+pub const PROTOCOL_VERSION: u16 = 24;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -217,6 +222,11 @@ pub struct DriveInput {
     pub steer: i8,
     /// Quantized handbrake, 0..=255.
     pub handbrake: u8,
+    /// Human pedal swapping preference; 0/1 is strictly validated on the wire.
+    pub auto_reverse: bool,
+    /// Manual forward gear index (zero is first), absent for automatic.
+    /// The receiving vehicle clamps it to its own authored gearbox.
+    pub forced_gear: Option<u32>,
 }
 
 /// One participant's authoritative rigid state inside a [`Message::Snap`].
@@ -1119,6 +1129,11 @@ impl Message {
                 out.push(input.brake);
                 out.push(input.steer as u8);
                 out.push(input.handbrake);
+                out.push(u8::from(input.auto_reverse));
+                out.push(u8::from(input.forced_gear.is_some()));
+                if let Some(gear) = input.forced_gear {
+                    out.extend_from_slice(&gear.to_le_bytes());
+                }
             }
             Self::ResetRequest { generation } => {
                 out.push(TAG_RESET_REQUEST);
@@ -1380,6 +1395,8 @@ impl Message {
                 brake: cur.u8()?,
                 steer: cur.u8()? as i8,
                 handbrake: cur.u8()?,
+                auto_reverse: cur.bool()?,
+                forced_gear: if cur.bool()? { Some(cur.u32()?) } else { None },
             }),
             TAG_RESET_REQUEST => Self::ResetRequest {
                 generation: cur.u64()?,
@@ -1629,6 +1646,48 @@ mod tests {
     }
 
     #[test]
+    fn human_input_preferences_roundtrip_and_reject_malformed_tags() {
+        for auto_reverse in [false, true] {
+            for forced_gear in [None, Some(0), Some(3), Some(u32::MAX)] {
+                let message = Message::Input(DriveInput {
+                    generation: 7,
+                    seq: 1,
+                    throttle: 0,
+                    brake: 255,
+                    steer: 0,
+                    handbrake: 0,
+                    auto_reverse,
+                    forced_gear,
+                });
+                let encoded = message.encode().unwrap();
+                assert_eq!(Message::decode(&encoded), Ok(message));
+            }
+        }
+        let input = Message::Input(DriveInput {
+            generation: 7,
+            seq: 1,
+            throttle: 0,
+            brake: 0,
+            steer: 0,
+            handbrake: 0,
+            auto_reverse: false,
+            forced_gear: None,
+        });
+        let encoded = input.encode().unwrap();
+        for index in [encoded.len() - 2, encoded.len() - 1] {
+            for invalid in [2, 255] {
+                let mut bad = encoded.clone();
+                bad[index] = invalid;
+                assert_eq!(Message::decode(&bad), Err(ProtoError::InvalidBool(invalid)));
+            }
+        }
+        let mut truncated = encoded;
+        *truncated.last_mut().unwrap() = 1;
+        truncated.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(Message::decode(&truncated), Err(ProtoError::Truncated));
+    }
+
+    #[test]
     fn roundtrip_all_variants() {
         for msg in [
             Message::Hello(hello()),
@@ -1712,6 +1771,8 @@ mod tests {
                 brake: 0,
                 steer: -64,
                 handbrake: 12,
+                auto_reverse: true,
+                forced_gear: None,
             }),
             Message::ResetRequest { generation: 7 },
             Message::ResetRequest {
