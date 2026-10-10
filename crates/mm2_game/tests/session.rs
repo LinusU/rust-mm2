@@ -178,6 +178,7 @@ fn config_validation_rejects_bad_fields() {
         densities: Densities {
             traffic: 1.5,
             pedestrians: 0.0,
+            cops: 1.0,
         },
         ..SessionConfig::default()
     };
@@ -207,6 +208,7 @@ fn config_validation_rejects_bad_fields() {
         densities: Densities {
             traffic: f32::NAN,
             pedestrians: 0.0,
+            cops: 1.0,
         },
         ..SessionConfig::default()
     };

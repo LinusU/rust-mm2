@@ -383,3 +383,34 @@ fn retail_every_event_wires_its_tables_cop_count() {
     }
     assert_eq!(police_events, 25, "event builds fielding at least one cop");
 }
+
+/// The Cruise cop-density pick bounds the retail `roam` lineups
+/// (F20-B.3c): none at 0, the whole authored lineup at 1, a
+/// deterministic file-order prefix between. Opt-in (`MM2_RETAIL=<dir>`).
+#[test]
+fn retail_cruise_cop_density_bounds_each_roam_lineup() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    for (city, difficulty, authored) in [
+        ("sf", Difficulty::Amateur, 19),
+        ("sf", Difficulty::Professional, 20),
+        ("london", Difficulty::Amateur, 20),
+        ("london", Difficulty::Professional, 20),
+    ] {
+        let roster = cruise_police_roster(&vfs, city, difficulty).unwrap();
+        assert_eq!(roster.entries.len(), authored, "{city} {difficulty:?}");
+        assert_eq!(roster.clone().limited(0.0).entries.len(), 0);
+        assert_eq!(roster.clone().limited(1.0).entries.len(), authored);
+        let half = roster.clone().limited(0.5);
+        assert_eq!(half.entries.len(), (authored as f32 * 0.5).round() as usize);
+        assert_eq!(
+            half.entries[..],
+            roster.entries[..half.entries.len()],
+            "a prefix of the authored rows"
+        );
+    }
+}

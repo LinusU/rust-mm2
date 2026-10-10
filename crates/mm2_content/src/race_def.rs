@@ -203,6 +203,7 @@ pub(crate) fn event_params(p: &RaceParams) -> Result<EventParams, RaceBuildError
     let densities = Densities {
         traffic: p.ambient,
         pedestrians: p.peds,
+        cops: 1.0,
     };
     densities
         .validate()

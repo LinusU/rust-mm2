@@ -2933,11 +2933,19 @@ fn cruise_options_launch_a_customized_session() {
     open_options(&mut app, "testcity");
     let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(texts[0], "Weather: clear");
-    assert_eq!(texts[3], "Start cruise");
+    assert_eq!(texts[3], "Cop density: 100%");
+    assert_eq!(texts[4], "Start cruise");
 
     focus_row(&mut app, "Weather:");
     press(&mut app, KeyCode::ArrowRight);
     assert_eq!(shell(&app).rows[0].text, "Weather: cloudy");
+    // Cop density steps in quarters (wrapping 100% → 0% forward) and
+    // rides the customization into the session (COP-13).
+    focus_row(&mut app, "Cop density:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[3].text, "Cop density: 0%");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[3].text, "Cop density: 25%");
     activate_row(&mut app, "Start cruise");
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
     let config = app
@@ -2951,6 +2959,7 @@ fn cruise_options_launch_a_customized_session() {
         .expect("changed picks ride the session config");
     assert_eq!(picks.conditions.weather.get(), 1);
     assert_eq!(picks.conditions.time_of_day.get(), 0);
+    assert_eq!(picks.densities.cops, 0.25);
 }
 
 /// Bind Alice with `circuit0` beaten and navigate to its event list —

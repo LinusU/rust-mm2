@@ -637,6 +637,7 @@ mod tests {
             densities: Densities {
                 traffic: 0.5,
                 pedestrians: 0.75,
+                cops: 1.0,
             },
             race: None,
         });

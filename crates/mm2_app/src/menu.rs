@@ -64,7 +64,7 @@
 //!   (on/off toggles, device, stereo, quality, balance) are still open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
-//! pedestrian/cop density options (no consumers — F19/F20), Quick
+//! a pedestrian density option (no picker — F19; cop density is Cruise-only), Quick
 //! Race customization, Driver's Stats (no aggregate stats are
 //! persisted), original menu art and audio. The in-session overlays
 //! landed in their own modules — `crate::pause`, `crate::results`.
@@ -242,9 +242,9 @@ pub enum Screen {
         /// Working weather/time-of-day picks — seeded from the
         /// event's authored params, or the neutral defaults on cruise.
         conditions: SessionConditions,
-        /// Working densities — `traffic` is the only exposed control
-        /// (ambient traffic consumes it); `pedestrians` rides the
-        /// seed untouched pending its F19 consumer.
+        /// Working densities — `traffic` (ambient traffic) and, on
+        /// Cruise, `cops` (the roam lineup) are the exposed controls;
+        /// `pedestrians` rides the seed untouched.
         densities: Densities,
         /// Working race-shape picks — `Some` only on Circuit events
         /// (RACE-3's laps + opponents parenthetical), seeded from the
@@ -304,6 +304,9 @@ pub enum Action {
     CycleTimeOfDay,
     /// Cycle the Customize screen's traffic-density pick.
     CycleTrafficDensity,
+    /// Cycle the Customize screen's cop-density pick (Cruise only —
+    /// the only session whose cop lineup the pick bounds).
+    CycleCopDensity,
     /// Cycle the Customize screen's laps pick (Circuit rows only).
     CycleLaps,
     /// Cycle the Customize screen's opponent-count pick (Circuit rows
@@ -1168,6 +1171,7 @@ impl MenuShell {
             | Action::CycleWeather
             | Action::CycleTimeOfDay
             | Action::CycleTrafficDensity
+            | Action::CycleCopDensity
             | Action::CycleLaps
             | Action::CycleOpponents
             | Action::CycleShadows
@@ -1493,6 +1497,11 @@ impl MenuShell {
             Action::CycleTrafficDensity => {
                 if let Screen::Customize { densities, .. } = &mut self.screen {
                     densities.traffic = step_density(densities.traffic, forward);
+                }
+            }
+            Action::CycleCopDensity => {
+                if let Screen::Customize { densities, .. } = &mut self.screen {
+                    densities.cops = step_density(densities.cops, forward);
                 }
             }
             Action::CycleLaps => {
@@ -2074,6 +2083,17 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     side: None,
                 },
             ];
+            // Cop density bounds the Cruise roam lineup (COP-13); an
+            // event fields its authored `Cops` rows, so no row there.
+            if matches!(target, CustomizeTarget::Cruise { .. }) {
+                rows.push(Row {
+                    text: format!("Cop density: {:.0}%", densities.cops * 100.0),
+                    enabled: Ok(()),
+                    action: Action::CycleCopDensity,
+                    won: None,
+                    side: None,
+                });
+            }
             // RACE-3's parenthetical: Circuit options additionally
             // carry laps + opponents rows.
             if let Some(race) = race {
@@ -2775,6 +2795,7 @@ fn authored_seed(
     let densities = Densities {
         traffic: p.ambient,
         pedestrians: p.peds,
+        cops: 1.0,
     };
     let conditions = SessionConditions {
         time_of_day: u8::try_from(p.time_of_day)

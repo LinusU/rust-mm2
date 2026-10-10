@@ -533,6 +533,12 @@ pub struct Densities {
     pub traffic: f32,
     /// Pedestrian density.
     pub pedestrians: f32,
+    /// Cop density — the fraction of the Cruise `roam` police lineup
+    /// that is fielded ([`PoliceRoster::limited`](crate::police::PoliceRoster::limited)).
+    /// Only free-roam Cruise consumes it; events field their authored
+    /// `Cops` rows (COP-13). What the original option scales is unknown
+    /// (COP-7), so `1.0` — the whole authored lineup — is the default.
+    pub cops: f32,
 }
 
 impl Densities {
@@ -541,12 +547,17 @@ impl Densities {
     pub const DEFAULT: Self = Self {
         traffic: 0.5,
         pedestrians: 0.5,
+        cops: 1.0,
     };
 
     /// Densities are fractions; anything outside `0..=1` or non-finite
     /// is a config error, not something to clamp silently.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        for (field, value) in [("traffic", self.traffic), ("pedestrians", self.pedestrians)] {
+        for (field, value) in [
+            ("traffic", self.traffic),
+            ("pedestrians", self.pedestrians),
+            ("cops", self.cops),
+        ] {
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                 return Err(ConfigError::Density { field, value });
             }

@@ -2307,6 +2307,14 @@ struct ConditionsParams {
 struct DensitiesParams {
     traffic: f32,
     pedestrians: f32,
+    /// Absent from advertisements that predate the cop-density pick:
+    /// the whole authored lineup, today's behaviour.
+    #[serde(default = "full_cop_density")]
+    cops: f32,
+}
+
+fn full_cop_density() -> f32 {
+    Densities::DEFAULT.cops
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2368,6 +2376,7 @@ impl From<Densities> for DensitiesParams {
         Self {
             traffic: d.traffic,
             pedestrians: d.pedestrians,
+            cops: d.cops,
         }
     }
 }
@@ -2447,6 +2456,7 @@ impl DensitiesParams {
         Densities {
             traffic: self.traffic,
             pedestrians: self.pedestrians,
+            cops: self.cops,
         }
     }
 }
@@ -2650,6 +2660,7 @@ mod tests {
             densities: Densities {
                 traffic: 0.25,
                 pedestrians: 0.75,
+                cops: 0.5,
             },
             customization: Some(SessionCustomization {
                 conditions: SessionConditions {
@@ -2659,6 +2670,7 @@ mod tests {
                 densities: Densities {
                     traffic: 0.0,
                     pedestrians: 1.0,
+                    cops: 0.5,
                 },
                 race: Some(RaceCustomization {
                     laps: 4,

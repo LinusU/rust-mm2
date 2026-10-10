@@ -128,6 +128,24 @@ impl PoliceRoster {
         self.entries.iter().filter(|e| e.placeable())
     }
 
+    /// The roster with its lineup bounded by a cop `density` in
+    /// `0..=1` (the Cruise option, UI-2): the first
+    /// `round(density × entries)` authored rows in file order are kept
+    /// and the rest dropped, so the same pick always fields the same
+    /// cops. `0` fields none, `1` the whole lineup. The prefix rule is
+    /// an implementation choice — the original's semantics are unknown
+    /// (COP-7). Non-finite densities field none.
+    pub fn limited(mut self, density: f32) -> Self {
+        let density = if density.is_finite() {
+            density.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let keep = (density * self.entries.len() as f32).round() as usize;
+        self.entries.truncate(keep);
+        self
+    }
+
     /// Distinct authored vehicle ids, sorted.
     pub fn vehicles(&self) -> Vec<String> {
         let mut v: Vec<String> = self.entries.iter().map(|e| e.vehicle.clone()).collect();

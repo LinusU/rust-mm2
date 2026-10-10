@@ -1026,6 +1026,35 @@ fn a_cruise_city_fields_its_roam_lineup_with_the_road_graph() {
     assert!(app.world().get_resource::<PursuitReport>().is_some());
 }
 
+/// Cruise with a cop-density pick (UI-2): the Customize screen's
+/// `SessionCustomization` bounds the roam lineup deterministically.
+fn cruise_fleet_at_density(density: f32) -> (usize, usize) {
+    let rows = "vpcop 0 0 130 0 0 15 0.5 50\n".repeat(4);
+    let tmp = cruise_install(Some(&rows));
+    let mut config = cruise_config(SessionAuthority::Local);
+    config.customization = Some(mm2_game::SessionCustomization {
+        conditions: Default::default(),
+        densities: mm2_game::Densities {
+            cops: density,
+            ..mm2_game::Densities::DEFAULT
+        },
+        race: None,
+    });
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    let fleet = app.world().resource::<PoliceFleet>();
+    (fleet.authored, fleet.spawned)
+}
+
+#[test]
+fn the_cruise_cop_density_bounds_the_roam_lineup() {
+    assert_eq!(cruise_fleet_at_density(0.0), (0, 0), "density 0: no cops");
+    assert_eq!(cruise_fleet_at_density(0.5), (2, 2), "half the lineup");
+    assert_eq!(cruise_fleet_at_density(0.25), (1, 1), "a quarter");
+    assert_eq!(cruise_fleet_at_density(1.0), (4, 4), "full: whole lineup");
+    assert_eq!(cruise_fleet_at_density(0.5), (2, 2), "deterministic");
+}
+
 #[test]
 fn a_cruise_city_with_no_roam_record_fields_no_police() {
     let (_tmp, app) = cruise_app(None, SessionAuthority::Local);

@@ -238,6 +238,17 @@ pub fn cruise_roster(vfs: &Vfs, city: &str, difficulty: mm2_game::Difficulty) ->
     }
 }
 
+/// The Cruise cop-density pick (UI-2): the Customize screen's choice
+/// when the session carries one, else the config's default (`1.0`, the
+/// whole lineup). Bounds how much of the roam lineup is fielded via
+/// [`PoliceRoster::limited`]; what the original option scales is
+/// unknown (COP-7).
+pub fn cruise_cop_density(config: &mm2_game::SessionConfig) -> f32 {
+    config
+        .customization
+        .map_or(config.densities.cops, |c| c.densities.cops)
+}
+
 /// Insert the session's police resources after [`spawn_police`]: the
 /// fleet report, the pursuit policy and report, and — only when cops
 /// were fielded and the city's routing graph loaded — the graph the

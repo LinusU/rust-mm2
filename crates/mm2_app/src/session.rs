@@ -1997,7 +1997,8 @@ pub fn load_session_world(
                     .and_then(|s| s.to_str())
                     .unwrap_or(psdl.as_str());
                 let roster =
-                    police::cruise_roster(&vfs.0, &stem.to_ascii_lowercase(), config.difficulty);
+                    police::cruise_roster(&vfs.0, &stem.to_ascii_lowercase(), config.difficulty)
+                        .limited(police::cruise_cop_density(&config));
                 let fleet = police::spawn_police(
                     &mut commands,
                     &vfs.0,
