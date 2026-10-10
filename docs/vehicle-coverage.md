@@ -4,9 +4,12 @@ F02-C's published account of what the stock roster actually does under
 the project's own instruments — measured, not claimed. Every retail
 number below comes off the fingerprinted install
 (`fnv1a64:e91e6cd4b2ae30d9`, read-only); catalog/dynamic legs were run
-on 2026-09-22, the render captures and the per-car override sweep on
-2026-09-24; the synthetic legs are the `mm2_vehicle` / `mm2_app` test
-suites.
+on 2026-09-22, the first render captures and per-car override sweep on
+2026-09-24, and the F02-C follow-up pass on 2026-10-10 re-ran the
+override sweep through the new one-command `--override-matrix` leg,
+added the retail `handling_override` test, and captured the default
+plus first alternate paint of every car; the synthetic legs are the
+`mm2_vehicle` / `mm2_app` test suites.
 
 ## Instruments
 
@@ -18,8 +21,10 @@ cargo run -p mm2_app --example drive_probe -- <install>             # accel + co
 cargo run -p mm2_app --example drive_probe -- <install> --controls  # launch/brake/reverse/reset
 cargo run -p mm2_app --example drive_probe -- <install> --drop      # per-car landing
 cargo run -p mm2_app --example drive_probe -- <install> --city <c> --clearance  # spawn/reset/trailer on real roads
+cargo run -p mm2_app --example drive_probe -- <install> --override-matrix       # F02-AC04 sweep, whole roster
 cargo run -p mm2_app --example drive_probe -- <install> <id> --dump-config <file>
 cargo run -p mm2_app --example drive_probe -- <install> <id> --config <file>    # override through the --vehicle-config path
+cargo test -p mm2_content --test handling_override                 # per-car override channel + paint matrix (MM2_RETAIL)
 mm2 --mm2-path <install> --city sf --car <id> --headless --frames 120
 ```
 
@@ -29,7 +34,14 @@ simulation evidence, not parser evidence. `--drop`/`--controls`/`--city`
 run on a flat slab or real city colliders respectively; `--clearance`
 spawns every ready car (plus its trailer rig through the production
 `spawn_trailer` path) at the probe's city road midpoint, settles until
-still, then exercises `ResetVehicle` back to spawn. The `--car`
+still, then exercises `ResetVehicle` back to spawn; `--override-matrix`
+measures every ready car against halved-engine and halved-grip configs
+built through the production `apply_handling_override` (the
+`--vehicle-config` channel), making the F02-AC04 sweep below a one-command
+regression. The `mm2_content` `handling_override` test is the structural
+half of the same matrix (override reaches every ready car, rig stays
+pinned, wheel-count mismatch rejected, every declared paint carries
+identical handling) and skips without `MM2_RETAIL`. The `--car`
 headless records are the full app session on real SF geometry.
 
 ## The denominator (F02-AC01)
@@ -181,6 +193,31 @@ Beetle-based cars (`vpbug`/`vpvwcup`) and the two Minis
 re-textured. Captures stay local under `screenshots/f02c-render/`
 (gitignored — original content is not committed).
 
+Both-paints pass, 2026-10-10 — the remaining F02-AC03 render leg: the
+same pinned spawn/cam, now capturing the default paint **and** the
+first alternate paint of every car that declares one (`--paint 0` and
+`--paint 1`; `vpmoonrover` declares a single paint, so it is captured
+once): **41/41 `smoke=visual status=pass`**, captures under
+`$CARGO_TARGET_DIR/captures/f02c-render/`. Checks, because a passing
+smoke record alone would not prove the paint reached the render:
+
+- Every capture is contentful (~3.5 MB PNGs, no blank frames).
+- Captures are not byte-deterministic (ambient peds/traffic move), so
+  paint deltas are measured against a same-paint re-run noise baseline
+  on a crop around the car: clean-scene noise is ~0.10 mean abs pixel
+  diff, while **every** p0/p1 pair measures ≥ 0.99 (worst case 9× its
+  own baseline; most pairs 10–170× — e.g. `vpbus` 16.9, `vpsemi`
+  12.7, `vpddbus` 14.0).
+- Spot-checked by eye: `vpbug` paint 1 renders blue where paint 0 is
+  yellow; `vp4x4` paint 1 is the solid-olive scheme where paint 0 is
+  camouflage (the subtle pair the metric flagged — camo patches over
+  the same base green); `vpsemi` draws its hitched ladder trailer in
+  the alternate paint; `vpmoonrover` renders its six-wheel rover at
+  its single paint.
+
+Full-sweep renders of *every* declared variant (~88) remain open; this
+pass closes "default + one alternate per car".
+
 ## Override causality (F02-AC04)
 
 `--dump-config` writes the imported `VehicleConfig` TOML; `--config`
@@ -190,69 +227,73 @@ geometry stay pinned to the imported rig; a wheel-count change is
 rejected — vpbug + the 6-wheel `vpmoonrover` tune errors
 "override defines 6 wheels but the selected vehicle's rig has 4").
 
-Per-car sweep, 2026-09-24 (same install, this commit): each car's
-dumped config was edited twice — `peak_torque_nm` **and** `max_power_w`
-halved together (`engine ×0.5`, so the cap reaches the whole rev band,
-not only the power-limited top), and every `longitudinal_grip` field
-(the four wheel entries + the global `[tires]` value) halved
-(`grip ×0.5`) — then measured through the accel probe and the
-`--controls` brake leg. `n/r` = did not reach 100 km/h inside the
-25 s window.
+The sweep itself is now a one-command regression:
+`drive_probe --override-matrix` measures every ready car on its base
+config against the same two edits the 2026-09-24 sweep authored —
+`peak_torque_nm` **and** `max_power_w` halved together (`engine ×0.5`)
+and every `longitudinal_grip` field halved (`grip ×0.5`, the four wheel
+entries + the global `[tires]` value) — applied through the production
+`apply_handling_override`, with the acceleration columns from the
+default leg's probe and the brake columns from the `--controls` stop
+leg. `n/r` = did not finish inside the probe's window. The structural
+half — the override channel reaching every ready car, the rig staying
+pinned, wheel-count mismatches rejected, and every declared paint
+carrying identical handling — is the retail test
+`mm2_content --test handling_override` (21 cars, 88 declared paints,
+2026-10-10).
+
+Per-car sweep, 2026-10-10 (`drive_probe --override-matrix`, same
+fingerprinted install; the leg reports 21/21 `ok` — every car moved on
+both legs):
 
 | id | 0-100 base→eng | top base→eng m/s | stop base→grip s | dist base→grip m |
 | --- | --- | --- | --- | --- |
-| vp4x4 | 4.9→8.5 | 47.7→44.4 | 2.1→3.0 | 15.9→22.0 |
-| vpauditt | 3.0→4.3 | 67.1→66.8 | 1.4→2.3 | 10.3→17.0 |
-| vpbug | 5.4→7.5 | 59.1→44.9 | 1.1→1.9 | 8.2→14.5 |
-| vpbullet | 4.4→4.3 | 61.5→61.2 | 1.5→2.4 | 12.6→18.2 |
-| vpbus | 14.1→n/r | 29.0→22.1 | 1.8→3.4 | 13.7→25.3 |
-| vpcab | 5.7→6.1 | 62.4→51.3 | 2.0→2.7 | 13.7→20.4 |
-| vpcaddie | 3.1→4.4 | 61.5→61.2 | 1.8→2.2 | 13.6→17.0 |
-| vpcentury | 6.9→8.8 | 54.0→53.8 | 2.3→1.8 | 24.2→13.7 |
-| vpcoop | 6.7→7.4 | 52.8→50.7 | 1.1→1.8 | 8.2→13.6 |
-| vpcoop2k | 6.7→7.0 | 70.4→52.2 | 1.1→1.8 | 7.9→13.5 |
-| vpcop | 2.9→3.4 | 74.7→74.4 | 1.2→1.9 | 8.9→14.0 |
-| vpdb7 | 5.1→5.9 | 80.2→62.1 | 1.1→2.1 | 8.5→16.0 |
-| vpddbus | 9.4→17.7 | 46.7→33.7 | 1.2→1.8 | 8.6→13.6 |
-| vpdune | 5.7→6.1 | 69.6→53.5 | 1.4→2.1 | 7.9→16.0 |
-| vpford | 4.4→8.5 | 47.7→45.3 | 1.2→1.9 | 9.0→14.1 |
-| vpmoonrover | n/r→n/r | 12.9→1.6 | 0.1→0.2 | 0.1→0.2 |
-| vpmustang99 | 3.0→4.6 | 61.4→61.1 | 1.1→1.9 | 8.2→14.1 |
-| vppanoz | 5.2→5.3 | 80.2→77.8 | 1.0→2.0 | 7.8→14.8 |
-| vppanozgt | 2.8→3.2 | 124.0→99.4 | 1.2→2.3 | 8.8→17.4 |
-| vpsemi | 5.8→10.6 | 40.4→31.1 | 1.6→2.6 | 11.7→19.5 |
-| vpvwcup | 5.0→5.2 | 80.0→60.4 | 1.0→1.9 | 7.8→14.3 |
+| vp4x4 | 4.7→8.4 | 47.7→44.4 | 2.3→3.0 | 17.6→22.2 |
+| vpauditt | 3.1→4.4 | 67.1→66.8 | 1.3→2.3 | 9.9→17.2 |
+| vpbug | 5.3→7.5 | 59.1→44.9 | 1.1→1.9 | 7.9→14.5 |
+| vpbullet | 3.2→4.3 | 61.5→61.2 | 1.4→2.3 | 10.3→17.3 |
+| vpbus | 14.7→n/r | 28.9→22.1 | 2.0→3.8 | 15.3→28.3 |
+| vpcab | 3.7→5.8 | 62.4→51.4 | 1.1→2.5 | 8.6→19.1 |
+| vpcaddie | 3.4→4.6 | 61.5→61.2 | 2.0→2.4 | 14.8→18.1 |
+| vpcentury | 4.7→8.8 | 54.0→53.8 | 1.1→1.8 | 8.4→13.8 |
+| vpcoop | 5.1→6.4 | 52.8→51.2 | 1.5→1.9 | 10.6→14.5 |
+| vpcoop2k | 5.1→5.8 | 70.9→52.8 | 1.4→1.9 | 10.0→14.3 |
+| vpcop | 2.8→3.3 | 74.7→74.4 | 1.1→1.9 | 8.5→13.9 |
+| vpdb7 | 6.3→6.7 | 80.2→60.4 | 1.0→2.2 | 7.7→16.4 |
+| vpddbus | 8.6→17.8 | 46.7→33.5 | 1.4→1.9 | 10.0→14.3 |
+| vpdune | 5.5→6.0 | 69.6→53.6 | 1.5→2.1 | 9.9→16.0 |
+| vpford | 4.7→8.5 | 47.7→45.2 | 1.5→1.9 | 11.1→14.0 |
+| vpmoonrover | 4.2→8.2 | 47.8→47.6 | 1.2→2.0 | 8.1→14.1 |
+| vpmustang99 | 3.5→4.7 | 61.4→61.1 | 1.2→1.9 | 9.2→14.3 |
+| vppanoz | 5.1→5.2 | 80.2→78.0 | 1.0→2.0 | 7.9→14.8 |
+| vppanozgt | 3.0→3.3 | 129.2→99.0 | 1.2→2.3 | 9.1→17.2 |
+| vpsemi | 6.0→10.6 | 40.4→31.1 | 1.6→2.6 | 11.7→19.6 |
+| vpvwcup | 5.1→5.3 | 80.0→60.3 | 1.0→1.9 | 7.6→14.2 |
 
 Read: every ready car's measurement moves under both overrides — the
-override channel reaches the live simulation on the whole roster, not
-just on `vpbug` where the earlier pass stopped. Cells that saturate,
-recorded rather than argued away:
+override channel reaches the live simulation on the whole roster. Cells
+that saturate, recorded rather than argued away:
 
-- **Launch traction-limited.** `vpbullet`'s 0-100 sits at parity
-  (4.4→4.3): its engine already exceeds what the tires put down, so
-  halving output briefly *improves* the run before the unsaturated
-  midrange falls behind — the `--trace` comparison diverges from
-  t≈3 s (47.8 vs 38.9 m/s at t=8). The same masking keeps `vppanoz`'s
-  0-100 near parity while its trace diverges from t≈4 s (72.5 vs
-  64.6 m/s at t=14).
+- **Launch traction-limited.** `vppanoz`'s 0-100 sits at parity
+  (5.1→5.2): its engine already exceeds what the tires put down, the
+  same masking documented on the 2026-09-24 sweep. Its top still moves
+  (80.2→78.0).
 - **Top speed rev-limited, not power-limited.** `vpauditt`,
   `vpbullet`, `vpcaddie`, `vpcentury`, `vpcop`, `vpmustang99` and
-  `vppanoz` lose under 1% of top speed — they hit the limiter below
-  the speed half the power can still reach. Their engine-leg delta
-  shows in the 0-100/trace numbers instead.
+  `vpmoonrover` lose under 1% of top speed under the halved engine —
+  they hit the limiter below the speed half the power can still reach.
+  Their engine-leg delta shows in the 0-100 column instead.
 - **`vpbus`** no longer reaches 100 km/h in the window (n/r); its
   delta is the −24% top speed.
-- **`vpmoonrover`** never launches (authored nose-up equilibrium —
-  findings below); the halved engine collapses its top to 1.6 m/s.
-  Its stop leg is unsuitable either way: it brakes from ~1 m/s, so
-  0.1→0.2 m is noise, not a measurement.
-- **`vpcentury` stops *shorter* under halved grip** (24.2→13.7 m; a
-  0.75× point lands at 11.2 m — non-monotonic). The measurement moves
-  so the override is causal, but the direction is anomalous: the
-  truck brakes inside the wheel-lock regime, where the grip scale
-  changes which slip state the solver settles into rather than
-  scaling deceleration linearly. Mechanism unverified — flagged for
-  the handling owner, not retuned here.
+- **The `vpcentury` brake anomaly flagged on 2026-09-24 (stopping
+  *shorter* under halved grip) does not reproduce** on this build: the
+  stop is now 8.4→13.8 m, monotonic as expected. The September base
+  cells (2.3 s / 24.2 m) also predate later handling changes on main —
+  the fresh base stop is 1.1 s / 8.4 m — so the whole September brake
+  column, and several 0-100 cells, are stale relative to this build;
+  the table above supersedes them. (The Dynamic table further up still
+  carries the September accel/controls columns; re-deriving it from
+  current main is follow-up work, not part of this pass.)
 
 Single-car rows from the earlier pass, kept for the record (vpbug,
 same install): `longitudinal_grip` halved → 0-100 5.4→9.4 s
@@ -351,9 +392,12 @@ bottoms out — expected, not a defect).
   leg is `--drop` above. Left/right and teleport legs run only at the
   shared synthetic level (`mm2_vehicle::drive` tests).
 - **F02-AC03, remaining paints.** Every declared paint resolves
-  through the pipeline (the `paints` column) and the default paint of
-  every ready car is rendered-verified above; captures of the
-  *non-default* paints are not run (21 renders, not all ~90 variants).
+  through the pipeline (the `paints` column) and every ready car's
+  handling is identical across its declared paints (the
+  `handling_override` paint matrix). Rendered: the default paint of
+  every ready car (2026-09-24) plus the first alternate paint of each
+  car that declares one (2026-10-10, above); captures of the *rest*
+  of the variants (~86 more) are not run.
 - **F02-AC06, startup paths — re-run this pass.** Both cities launch
   headless (`status=pass`, 120 updates each, `city/sf.psdl` and
   `city/london.psdl`); an unknown `--car` exits 2 with
