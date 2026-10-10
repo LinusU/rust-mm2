@@ -1,0 +1,202 @@
+{
+  "original_file": "tools/handling/evidence/original-vpbullet-flat-turn.json",
+  "native_file": "tools/handling/evidence/native-vpbullet-flat-turn-with-axles.csv",
+  "car": "vpbullet",
+  "scenario": "turn",
+  "hz": 60,
+  "frames": 900,
+  "frame_range": [
+    1,
+    900
+  ],
+  "native_offset": -1,
+  "input_byte_mismatches": {
+    "steering_byte": 0,
+    "throttle_byte": null,
+    "brake_byte": null,
+    "handbrake_byte": null
+  },
+  "errors": {
+    "speed_mps": {
+      "samples": 900,
+      "rms": 0.003193419958152082,
+      "max_absolute": 0.03135937437485836,
+      "mean": -0.0010794534252482225
+    },
+    "lateral_speed_mps": {
+      "samples": 900,
+      "rms": 0.0018154069126290753,
+      "max_absolute": 0.024226034184789746,
+      "mean": -0.0002801521897115157
+    },
+    "slip_angle_radians": {
+      "samples": 890,
+      "rms": 6.600169682193972e-05,
+      "max_absolute": 0.0007793346547511071,
+      "mean": -1.0812958856569793e-05
+    },
+    "position_metres": {
+      "samples": 900,
+      "rms": 0.5121947215766376,
+      "max_absolute": 1.2522810502848707,
+      "mean": 0.3323522356057404
+    },
+    "height_metres": {
+      "samples": 900,
+      "rms": 1.897038862633309e-05,
+      "max_absolute": 7.561303281784044e-05,
+      "mean": -7.240927781528895e-06
+    },
+    "yaw_radians": {
+      "samples": 900,
+      "rms": 0.0025158750870031706,
+      "max_absolute": 0.0034149635185478644,
+      "mean": 0.0018928496801496263
+    },
+    "yaw_rate_radians_per_second": {
+      "samples": 900,
+      "rms": 0.001152522091809006,
+      "max_absolute": 0.007767594879150463,
+      "mean": 0.00022299748974693076
+    },
+    "rpm": {
+      "samples": 900,
+      "rms": 0.7593301725057259,
+      "max_absolute": 7.166359374999956,
+      "mean": -0.29794620659721405
+    }
+  },
+  "interpretation": "Measured differences; inspect terrain/contact/input contamination before changing tuning",
+  "orientation": {
+    "available": false,
+    "samples": 0,
+    "errors": {},
+    "interpretation": "Full basis rotation error remains valid through rollover; roll excluded near vertical pitch"
+  },
+  "wheel_contact_counts": {
+    "samples": 900,
+    "available": true,
+    "scope": "grounded wheel counts only; native trace has no individual-wheel flags",
+    "divergent_frames": 0,
+    "first_divergent_frame": null,
+    "first_divergent_counts": null,
+    "original_any_wheel_unloaded_frames": 0,
+    "native_any_wheel_unloaded_frames": 0,
+    "original_all_wheels_airborne_frames": 0,
+    "native_all_wheels_airborne_frames": 0,
+    "max_absolute_count_difference": 0
+  },
+  "switch_timing": {
+    "steering_sign": {
+      "original": [
+        {
+          "frame": 301,
+          "from": 0,
+          "to": 1
+        },
+        {
+          "frame": 432,
+          "from": 1,
+          "to": 0
+        }
+      ],
+      "native": [
+        {
+          "frame": 301,
+          "from": 0,
+          "to": 1
+        },
+        {
+          "frame": 432,
+          "from": 1,
+          "to": 0
+        }
+      ],
+      "matched": [
+        {
+          "from": 0,
+          "to": 1,
+          "original_frame": 301,
+          "native_frame": 301,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "original_frame": 432,
+          "native_frame": 432,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        }
+      ],
+      "unmatched_original": [],
+      "unmatched_native": []
+    },
+    "gear": {
+      "original": [
+        {
+          "frame": 133,
+          "from": 2,
+          "to": 3
+        },
+        {
+          "frame": 259,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 581,
+          "from": 4,
+          "to": 5
+        }
+      ],
+      "native": [
+        {
+          "frame": 133,
+          "from": 2,
+          "to": 3
+        },
+        {
+          "frame": 259,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 581,
+          "from": 4,
+          "to": 5
+        }
+      ],
+      "matched": [
+        {
+          "from": 2,
+          "to": 3,
+          "original_frame": 133,
+          "native_frame": 133,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 3,
+          "to": 4,
+          "original_frame": 259,
+          "native_frame": 259,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 4,
+          "to": 5,
+          "original_frame": 581,
+          "native_frame": 581,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        }
+      ],
+      "unmatched_original": [],
+      "unmatched_native": []
+    },
+    "interpretation": "Steering signs use quantized bytes; gear uses the retail index including reverse/neutral. Positive timing differences mean native later. Unmatched decisions are reported separately."
+  }
+}

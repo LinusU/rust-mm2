@@ -19,7 +19,7 @@ behind the adaptations.
 
 The original game's own vehicle model — 19.6 m/s² gravity, the
 stick–slip tyre, the drivetrain spin integration, the aero rotational
-damping, the gyro assists, the input ramps — is recovered in full in
+damping, the gyro assists, the input ramps — is documented in
 [research/vehicle-physics/](research/vehicle-physics/README.md), with a
 comparison against this implementation in
 [09-differences-from-rust-mm2.md](research/vehicle-physics/09-differences-from-rust-mm2.md).
@@ -34,7 +34,10 @@ existing configurable model. Imported cars use 19.6 m/s² gravity, authored
 centre of mass (`-CenterOfGravity` on every axis), the square-root-five
 engine curve, clutch and shaft inertia, per-wheel brake torques,
 stick–slip tyre displacements, rear counter-steering, aero angular damping
-and gyro yaw torques. Keyboard steering uses each car's `.asnode` rate
+and gyro yaw torques. Authored axle anti-roll springs and dampers act after
+the wheel update, including the original tyre-squash displacement. Live F350
+slalom measurements exposed this previously omitted force; axle `TorqueCoef`
+is not a drivetrain torque split. Keyboard steering uses each car's `.asnode` rate
 ramp and signed-byte quantization; full authored wheel lock stays
 available at every speed.
 Speed-sensitive human steering preserves the recorder/player cache order:
@@ -44,12 +47,31 @@ in the original Beetle powerslide.
 The application and trajectory probe run at 60 Hz. Vehicle forces from
 tick k are cached for tick k+1. Suspension rank-one Jacobians are solved
 as a coupled linear/angular velocity increment applied once before Avian
-advances the body. Original cars bypass Avian's velocity integrator; its
-six contact-solver substeps remain enabled. Avian still supplies body collision detection, contact resolution
-and pose integration. Bump-stop penetration moves position without
-introducing artificial velocities. These collision/integration choices
-remain adaptations, so formula fidelity alone does not establish a match
-to a driven retail trajectory.
+advances the body. Original cars bypass Avian's velocity integrator. Their
+four-wheel configuration retains the authored collision hull, including its
+underside, and the steering pivot uses the full measured wheel-mesh width
+(previously imported as a half width); radius remains a half extent.
+
+Marked static-world contacts use the recovered source effective-mass response:
+contact impulses and angular impulses wait for the next body integration,
+while penetration pushes change position without adding body velocity.
+Wheel point velocities account for the preceding positional push. Hull
+`BoundFriction` and `BoundElasticity` remain raw; `OriginalContactMaterial`
+carries raw world coefficients. Pair friction is their product and pair
+elasticity is `min(product, 1)`. These products also replace Avian's material
+combination for pairs of original hulls. Generic dynamic props and unmarked
+terrain retain their existing response.
+
+Avian supplies collision geometry and pose integration. For the marked static
+contacts, manifold points are temporarily removed before constraint preparation
+to suppress Avian's impulse solve, then restored after the solver and before
+sleeping. The original response runs after vehicle force evaluation. Its
+swept midpoint contact reconstruction is **inferred** from planar measurements:
+the swept hit must belong to the same world collider and have a compatible
+normal (dot product at least 0.999), unless the solid ray starts inside that collider; otherwise the manifold point is used.
+This does not establish exact original collision detection on arbitrary
+geometry. The six Avian solver substeps remain enabled for other contacts.
+Formula fidelity alone does not establish a match to a driven retail trajectory.
 
 Modern traction control, countersteering, slide recovery, roll/pitch
 cancellation and airborne levelling are disabled for imported cars.
@@ -59,7 +81,7 @@ AI, telemetry and tooling; `original` carries the actual simulation
 parameters. Explicit original tuning takes precedence in overrides;
 legacy scalar overrides are propagated when representable.
 
-Record deterministic inputs on a flat `_default` road with:
+Record deterministic keyboard-target inputs on a flat half-space with:
 
 ```sh
 cargo run -p mm2_app --example handling_trace -- <install> vpmustang99 launch 15
@@ -69,20 +91,30 @@ cargo run -p mm2_app --example handling_trace -- <install> vpbullet powerslide 1
 
 The CSV records every simulated frame's pose, velocity, yaw, RPM, gear,
 steering and grounded-wheel count. Scenarios include `launch`, `coast`,
-`brake`, `turn`, `handbrake` and `powerslide`. The powerslide keeps full
+`brake`, `turn`, `handbrake`, `powerslide`, `slalom`, `lift_turn` and
+`brake_turn`. The last three exercise repeated steering reversals, throttle
+lift during a turn, and braking followed by powered countersteering. CSV
+orientation bases also let the comparator measure body roll and pitch.
+The powerslide keeps full
 throttle, flicks the handbrake at 5.5–5.8 seconds, countersteers at
 6.25–7.25 seconds and then recovers with neutral steering. The turn and
 handbrake scenarios steer from five to seven seconds. The default
 settling period is ten seconds. The optional arguments after duration set
 surface friction and settlement ticks: use friction `1.0` when comparing
 the generated original-game course.
-Positions are relative center-of-mass coordinates. This is a measurement instrument,
+The cold spawn is model pose `(1200, 1, 1200)` with identity rotation,
+matching the generated original-course fixture. The half-space replaces a
+giant cuboid whose numerical contact geometry could produce spurious oblique
+normals on a nominally flat road. Positions are relative center-of-mass
+coordinates. This is a measurement instrument,
 not a substitute for recorded original-game evidence.
 
 Race/profile ticks now use 60 Hz. Schema-1 best times are migrated to schema 2
 on load without rewriting the source file; older builds cannot read schema 2.
-Network protocol 24 rejects older peers because simulation and wire-clock
-semantics changed even when their asset fingerprints match. Human drivers
+Network protocol 25 rejects older peers: version 24 introduced the retail
+model and 60 Hz clock; version 25 adds authored axle anti-roll, corrected
+wheel width and the source static-world hull response.
+An older peer would predict different motion with the same asset fingerprint. Human drivers
 also transmit their auto-reverse preference and optional manual gear, so
 the host applies the same pedal rules as their local simulation.
 
@@ -547,9 +579,10 @@ is set upright on its heading and dropped back on the surface beneath it.
   and wobble are not animated.
 - Legacy `SSSValue`, `SSSThreshold` and `CarFrictionHandling` switches are
   retained in parsed data. Human steering uses the recovered `.asnode` law.
-- Body/world impacts still use Avian contacts, the raised underside and
-  capped body friction/restitution described above. Impact trajectories
-  have not been established as matching the original solver.
+- Static-world response uses recovered impulse formulas with Avian collision
+  geometry and an inferred swept midpoint reconstruction for compatible planar
+  contacts. General impact trajectories, collision detection and dynamic-body
+  response have not been established as matching the original solver.
 - Passive trailers retain the generic suspension model. A clean spawn/reset
   with an aligned hitch does not establish original trailer dynamics.
 - Device mappings, mouse cursor interpretation, AI controllers and optional

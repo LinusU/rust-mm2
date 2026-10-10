@@ -29,9 +29,9 @@ use mm2_formats::veh::{
     AsNode, DrivetrainType, VehCarSim, VehGyro, VehStuck, VehTrailer, VehWheel,
 };
 use mm2_vehicle::config::{
-    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, GyroConfig, OriginalAero, OriginalEngine,
-    OriginalGearbox, OriginalHandling, OriginalTrain, OriginalWheel, SteeringConfig,
-    SuspensionConfig, TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
+    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, GyroConfig, OriginalAero, OriginalAxle,
+    OriginalEngine, OriginalGearbox, OriginalHandling, OriginalTrain, OriginalWheel,
+    SteeringConfig, SuspensionConfig, TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
 };
 
 use mm2_vehicle::original;
@@ -1008,6 +1008,17 @@ fn apply_original(
         "vehCarSim.Wheel*.CamberLimit/WobbleLimit",
         "visual camber and wobble are not simulated; tyre displacement and damping are imported",
     );
+    // The recovered static-world response needs the authored shell, not
+    // the raised underside used to keep the former arcade solver from snagging.
+    config.collider_points = config.striker_points.clone();
+    report
+        .entries
+        .retain(|e| e.source != "bound/<id>_bound.bnd (underside)");
+    report.imported(
+        "bound/<id>_bound.bnd",
+        "collider_points",
+        "authored hull retained for retail static-world contact response",
+    );
     let mass = config.mass;
     let cog = sim.center_of_gravity;
     let gravity = ORIGINAL_GRAVITY;
@@ -1077,6 +1088,11 @@ fn apply_original(
         "vehCarSim.WheelFront/WheelBack",
         "original.wheels[]",
         "suspension, steering, brake and stick–slip tyre tokens verbatim",
+    );
+    report.imported(
+        "vehCarSim.AxleFront/AxleBack",
+        "original.axles[]",
+        "authored anti-roll stiffness and damping with left/right wheel pairs",
     );
 
     // --- drivetrains ----------------------------------------------------------
@@ -1252,12 +1268,30 @@ fn apply_original(
         "original model: no traction control, yaw damper, slide recovery, countersteer or roll/pitch assist; air levelling disabled; optional self-righting remains",
     );
 
+    report.imported(
+        "vehCarSim.BoundFriction/BoundElasticity",
+        "original.bound_friction/bound_elasticity",
+        "raw hull materials; paired friction and elasticity multiply (research 01 contact solver)",
+    );
     config.original = Some(OriginalHandling {
+        bound_friction: sim.bound_friction.unwrap_or(0.3),
+        bound_elasticity: sim.bound_elasticity.unwrap_or(0.2),
         gravity,
         surface_friction: ORIGINAL_ROAD_FRICTION,
         wheels,
         driven,
         free,
+        axles: [
+            ([fl, fr], sim.axle_front.as_ref()),
+            ([rl, rr], sim.axle_back.as_ref()),
+        ]
+        .into_iter()
+        .map(|(wheels, tuning)| OriginalAxle {
+            wheels,
+            torque_coef: tuning.map_or(0.0, |a| a.torque_coef),
+            damp_coef: tuning.map_or(0.0, |a| a.damp_coef),
+        })
+        .collect(),
         drivetrain,
         freetrain,
         engine,
@@ -1681,10 +1715,59 @@ mod tests {
     }
 
     #[test]
+    fn native_hull_materials_preserve_authored_values_and_validate() {
+        let mut sim = sim_with_cog([0.0; 3]);
+        sim.bound_friction = Some(0.9);
+        sim.bound_elasticity = Some(0.5);
+        let mut cfg = convert_with(&sim, &wheels(1.3), 1.5).config;
+        let original = cfg.original.as_ref().unwrap();
+        assert_eq!(original.bound_friction, 0.9);
+        assert_eq!(original.bound_elasticity, 0.5);
+        for bad in [f32::NAN, f32::INFINITY, -0.1] {
+            cfg.original.as_mut().unwrap().bound_friction = bad;
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("original.bound_friction"))
+            );
+            cfg.original.as_mut().unwrap().bound_friction = 0.9;
+            cfg.original.as_mut().unwrap().bound_elasticity = bad;
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("original.bound_elasticity"))
+            );
+            cfg.original.as_mut().unwrap().bound_elasticity = 0.5;
+        }
+    }
+
+    #[test]
     fn native_configuration_rejects_bad_indices_arrays_and_numbers() {
         let sim = sim_with_cog([0.0, -0.1, 0.0]);
         let baseline = convert_with(&sim, &wheels(1.3), 1.5).config;
         baseline.validate().unwrap();
+        for (wheels, torque_coef, damp_coef, field) in [
+            ([0, 4], 1.0, 0.5, "wheels"),
+            ([0, 0], 1.0, 0.5, "wheels"),
+            ([0, 1], -1.0, 0.5, "torque_coef"),
+            ([0, 1], 1.0, f32::NAN, "damp_coef"),
+        ] {
+            let mut config = baseline.clone();
+            config.original.as_mut().unwrap().axles = vec![OriginalAxle {
+                wheels,
+                torque_coef,
+                damp_coef,
+            }];
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .iter()
+                    .any(|p| p.contains(&format!("original.axles[0].{field}")))
+            );
+        }
         let mut config = baseline.clone();
         config.original.as_mut().unwrap().driven.push(99);
         assert!(

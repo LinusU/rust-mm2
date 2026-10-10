@@ -81,6 +81,17 @@ fn effective_mass(mass: f32, inv_inertia: Mat3, arm: Vec3, dir: Vec3) -> f32 {
     1.0 / (1.0 / mass.max(1e-3) + rn.dot(inv_inertia * rn)).max(1e-6)
 }
 
+/// Retail corrects wheel point velocities for positional pushes larger
+/// than one centimetre, without changing actual body velocity (0x4790e0).
+fn corrected_point_velocity(velocity: Vec3, push: Vec3, dt: f32) -> Vec3 {
+    let length_squared = push.length_squared();
+    if length_squared > 1e-4 {
+        velocity + push * (1.0 / dt).min(-push.dot(velocity) / length_squared)
+    } else {
+        velocity
+    }
+}
+
 /// Step the original model for one car.
 #[allow(clippy::too_many_arguments)] // the car, its tuning and state, its input and the world: one step's whole context
 pub(crate) fn step(
@@ -290,6 +301,8 @@ pub(crate) fn step(
     // --- contacts: probe, suspension, surface --------------------------------
     let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
     let mut contacts = [Contact::default(); 4];
+    let mut compression_rate = [0.0; 4];
+    let mut suspension_load = [0.0; 4];
     // Wheels past their bump stop this step: contact point, normal and
     // how far the body has to move along it to sit back at the stop.
     let mut overshoots: Vec<(Vec3, Vec3, f32)> = Vec::new();
@@ -329,11 +342,14 @@ pub(crate) fn step(
         let probe = ground.map(|(h, _, _)| above + w.radius - h.distance);
         let sus = original::suspension(ows.x, probe, ow, k, dt);
         ows.x = sus.x;
+        compression_rate[i] = sus.xdot;
+        suspension_load[i] = sus.force;
         let Some((h, n, rear)) = ground else {
             continue;
         };
         let point = start - up * h.distance;
-        let v_n = forces.velocity_at_point(point).dot(n);
+        let v_n =
+            corrected_point_velocity(forces.velocity_at_point(point), os.last_push, dt).dot(n);
         let cos_theta = up.dot(n);
         let bump = original::bump_stop_force(
             effective_mass(cfg.mass, inv_inertia, point - com, n),
@@ -342,6 +358,7 @@ pub(crate) fn step(
             dt,
         );
         let depth = sus.overshoot * cos_theta.max(0.0);
+        suspension_load[i] += bump;
         if depth > 0.0 {
             overshoots.push((point, n, depth));
         }
@@ -465,7 +482,7 @@ pub(crate) fn step(
             ows.reaction = 0.0;
             continue;
         }
-        let v = forces.velocity_at_point(c.point);
+        let v = corrected_point_velocity(forces.velocity_at_point(c.point), os.last_push, dt);
         let v_lat = v.dot(c.lateral);
         let v_fwd = v.dot(c.forward);
         let rolling = ows.omega * w.radius;
@@ -548,6 +565,27 @@ pub(crate) fn step(
         };
     }
     state.wheels = wheel_states;
+
+    // --- axle anti-roll (`vehAxle::Update`, 0x4d9b10) --------------------------
+    // The axle reads wheel displacement after the tyre's visual squash
+    // update. TorqueCoef controls this spring, not drivetrain torque split.
+    for axle in &orig.axles {
+        if axle.torque_coef == 0.0 {
+            continue;
+        }
+        let [left, right] = axle.wheels;
+        let displacement = |i: usize| {
+            let radius = cfg.wheels[i].radius;
+            let squash = (radius * 0.05 * suspension_load[i] / orig.wheels[i].static_load)
+                .clamp(0.0, radius * 0.3);
+            os.wheels[i].x - squash
+        };
+        let stiffness = axle.torque_coef * inertia.z;
+        let damping = 2.0 * (stiffness * inertia.z).sqrt() * axle.damp_coef;
+        let torque = -(stiffness * (displacement(left) - displacement(right))
+            + damping * (compression_rate[left] - compression_rate[right]));
+        body_torque += back * torque;
+    }
 
     // --- gyro (`vehGyro::Update`) ---------------------------------------------
     if let Some(gyro) = &cfg.gyro {
@@ -670,24 +708,32 @@ pub(crate) fn integrate(
             continue;
         };
         let mass = cfg.mass.max(1e-3);
+        os.step_start_position = forces.position().0;
+        os.step_start_rotation = forces.rotation().0;
         let rotation = Mat3::from_quat(forces.rotation().0);
         let inertia = rotation
             * Mat3::from_diagonal(Vec3::from(cfg.inertia.unwrap_or([mass; 3])))
             * rotation.transpose();
         let linear_accel = forces.accumulated_linear_acceleration();
         let angular_accel = forces.accumulated_angular_acceleration();
-        let dp = dt * (os.pending_force + mass * (Vec3::NEG_Y * orig.gravity + linear_accel));
+        os.last_push = std::mem::take(&mut os.applied_push);
+        let impulse = std::mem::take(&mut os.collision_impulse);
+        let angular_impulse = std::mem::take(&mut os.collision_angular_impulse);
+        let dp =
+            impulse + dt * (os.pending_force + mass * (Vec3::NEG_Y * orig.gravity + linear_accel));
         let torque = os.pending_torque + inertia * angular_accel;
         let t1 = (Mat3::IDENTITY + os.implicit_a * (dt / mass)).inverse();
         let m2 = inertia + dt * os.implicit_c
             - (dt * dt / mass) * os.implicit_b * t1 * os.implicit_b.transpose();
         let angular = forces.angular_velocity();
-        let mut dw = m2.inverse() * (dt * torque - (dt / mass) * os.implicit_b * (t1 * dp));
+        let mut dw = m2.inverse()
+            * (angular_impulse + dt * torque - (dt / mass) * os.implicit_b * (t1 * dp));
         if os.implicit_a == Mat3::ZERO {
             // Retail's airborne mode keeps world angular momentum instead
             // of angular velocity fixed as the anisotropic body rotates.
             let momentum = os.angular_momentum.unwrap_or(inertia * angular);
-            let local_next = rotation.transpose() * (inertia.inverse() * (momentum + dt * torque));
+            let local_next = rotation.transpose()
+                * (inertia.inverse() * (momentum + angular_impulse + dt * torque));
             let bound = Vec3::splat(orig.max_angular_speed);
             dw = rotation * local_next.clamp(-bound, bound) - angular;
         }
@@ -771,7 +817,8 @@ pub(crate) fn push_out(
 ) {
     for (mut state, mut position) in &mut vehicles {
         if let Some(os) = state.original.as_mut() {
-            position.0 += std::mem::take(&mut os.push);
+            os.applied_push = std::mem::take(&mut os.push);
+            position.0 += os.applied_push;
         }
     }
 }

@@ -1,0 +1,157 @@
+{
+  "car": "vpmoonrover",
+  "car_identity_verified": true,
+  "expected_tuning": {
+    "car": "vpmoonrover",
+    "live_tuning": {
+      "frontRadius": 0.3900284767150879,
+      "horsepower": 550,
+      "idleRpm": 750,
+      "inertiaBox": [
+        4.499999523162842,
+        2.500000238418579,
+        7
+      ],
+      "mass": 2500,
+      "maxRpm": 5000,
+      "optimalRpm": 4000,
+      "rearRadius": 0.3900284767150879
+    }
+  },
+  "vehicle_selection": {
+    "additionalRegistryFlags": [
+      {
+        "name": "vpauditt",
+        "address": 72317016,
+        "locked": 1,
+        "paintLocked": 16
+      }
+    ],
+    "name": "vpmoonrover",
+    "originalRegistryName": "vpbus",
+    "selectionMethod": "temporary_registry_alias",
+    "registryAddress": 72314648,
+    "originalLocked": 0,
+    "originalPaintLocked": 0,
+    "selectedPaint": 0
+  },
+  "scene": "flat-track-archive-replacement",
+  "fixture_sha256": "7450117dd967bb39df4b9ea22de07b13b6b2c547a86216d1cb0d6507af23bba5",
+  "provenance": {
+    "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+    "signatures_verified": true
+  },
+  "initial_pose_override": [
+    1200,
+    1,
+    1200,
+    0
+  ],
+  "baseline": "save",
+  "settle_frames": 600,
+  "total_cold_settle_frames": 600,
+  "pre_warm_state": {
+    "rpm": 750,
+    "engineOmega": 0,
+    "gear": 2,
+    "pos": [
+      1200,
+      1,
+      1200
+    ],
+    "vel": [
+      0,
+      0,
+      0
+    ]
+  },
+  "renderer_diagnostic": {
+    "forceMissingTextureMagenta": false,
+    "debugView": "normal",
+    "forceDisableAlphaBlend": false,
+    "forceDisableLighting": false,
+    "forceDisableZTest": false,
+    "forceDisableZWrite": false,
+    "forceWireColor": false,
+    "forceZMidpoint": false,
+    "forceCullNone": false,
+    "forceDisableAlphaTest": false,
+    "forceTextureResync": false,
+    "forcePointFilter": false,
+    "disableContainedUvClamp": false,
+    "textureConverterDebugMode": 0,
+    "disableMegaBatch": false,
+    "disableMegaBatchAccumulate": false,
+    "disableGeometryStaging": false,
+    "disableCpuTextureHash": false,
+    "disableTextureOverwriteSubmit": false,
+    "skipMegaBatchDrawsRender": false,
+    "skipMegaBatchMinIdx": 0,
+    "forceCpuVertexPath": false,
+    "forceColorWriteMask": -1,
+    "disableRhwDepthClamp": false,
+    "disableRhwCpuPin": false,
+    "drawScrubMax": -1,
+    "drawSkipFrom": 0,
+    "drawSkipTo": 2147483646,
+    "scrubLastFrameDraws": 9
+  },
+  "renderer_events": [
+    {
+      "command": "drawScrub(2147483647,-1)",
+      "sampleBefore": null,
+      "frame": 33154,
+      "settleTick": 497,
+      "previousFlags": {
+        "forceMissingTextureMagenta": false,
+        "debugView": "normal",
+        "forceDisableAlphaBlend": false,
+        "forceDisableLighting": false,
+        "forceDisableZTest": false,
+        "forceDisableZWrite": false,
+        "forceWireColor": false,
+        "forceZMidpoint": false,
+        "forceCullNone": false,
+        "forceDisableAlphaTest": false,
+        "forceTextureResync": false,
+        "forcePointFilter": false,
+        "disableContainedUvClamp": false,
+        "textureConverterDebugMode": 0,
+        "disableMegaBatch": false,
+        "disableMegaBatchAccumulate": false,
+        "disableGeometryStaging": false,
+        "disableCpuTextureHash": false,
+        "disableTextureOverwriteSubmit": false,
+        "skipMegaBatchDrawsRender": false,
+        "skipMegaBatchMinIdx": 0,
+        "forceCpuVertexPath": false,
+        "forceColorWriteMask": -1,
+        "disableRhwDepthClamp": false,
+        "disableRhwCpuPin": false,
+        "drawScrubMax": -1,
+        "drawSkipFrom": -1,
+        "drawSkipTo": -1,
+        "scrubLastFrameDraws": 1473
+      }
+    }
+  ],
+  "live_tuning": {
+    "mass": 2500,
+    "inertiaBox": [
+      4.5,
+      2.5,
+      7
+    ],
+    "horsepower": 550,
+    "idleRpm": 750,
+    "optimalRpm": 4000,
+    "maxRpm": 5000,
+    "frontRadius": 0.3900284767150879,
+    "rearRadius": 0.3900284767150879
+  },
+  "scenario": "lift_turn",
+  "hz": 60,
+  "error": "Initial state must be stationary, upright, with all four wheels grounded; reset the cruise before capturing",
+  "complete": false,
+  "rows": []
+}

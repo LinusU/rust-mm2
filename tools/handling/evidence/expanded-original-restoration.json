@@ -1,0 +1,102 @@
+{
+  "scope": "Isolated BottleShip guest CoW archive and guest-memory selection only; original installation unchanged. Normal in-game vehicle selection may update isolated guest profile.",
+  "restoration": {
+    "selection": {
+      "additionalRegistryFlagsRestored": [
+        {
+          "name": "vpsemi",
+          "lockedAfter": 1,
+          "paintLockedAfter": 4
+        }
+      ],
+      "selectionRestored": true,
+      "registryEntryNameRestored": true,
+      "name": "vpford",
+      "registryAddress": 72313128,
+      "lockedAfter": 0,
+      "paintLockedAfter": 0,
+      "selectedModelBytesRestored": true,
+      "paintAfter": 0
+    },
+    "renderer": {
+      "backend": "ddraw",
+      "min": 0,
+      "max": -1,
+      "lastFrameDraws": 1464
+    },
+    "before_reload": {
+      "hooksRestored": true,
+      "clocksRestored": [
+        0,
+        0.10000000149011612,
+        9.999999747378752e-05
+      ],
+      "mode": 0,
+      "keysReleased": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "archiveSha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+      "looseOverride": {
+        "reverted": false,
+        "hadOverlay": false,
+        "hadWhiteout": false,
+        "romExists": false,
+        "existsAfter": false
+      }
+    },
+    "fresh_reload": {
+      "path": "/apps/midtown-madness-2.wgb",
+      "loaded": true,
+      "progress": {
+        "type": "loading_progress",
+        "phase": "done",
+        "percent": 100,
+        "label": ""
+      }
+    },
+    "after_reload": {
+      "reloaded": true,
+      "archiveSha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+      "looseExistsAfter": false
+    },
+    "moon_selection": {
+      "additionalRegistryFlagsRestored": [
+        {
+          "name": "vpsemi",
+          "lockedAfter": 1,
+          "paintLockedAfter": 4
+        }
+      ],
+      "selectionRestored": true,
+      "registryEntryNameRestored": true,
+      "name": "vpmoonrover",
+      "registryAddress": 72314648,
+      "lockedAfter": 0,
+      "paintLockedAfter": 0,
+      "paintAfter": 0
+    },
+    "audi_selection": {
+      "selectionRestored": true,
+      "registryEntryNameRestored": true,
+      "name": "vpauditt",
+      "registryAddress": 72317016,
+      "lockedAfter": 1,
+      "paintLockedAfter": 16,
+      "paintAfter": 0
+    }
+  },
+  "proof_files": {
+    "/tmp/expanded-original-selection-restored.json": "a0ff7b2d71221c2f31c83c4d64d27aed6357858229de9e8da9a467f54476f41d",
+    "/tmp/expanded-original-renderer-restored.json": "d0a68c3e2f41906cb9a097c9502e29716ee0143db3f9bf712d36a04ff15a58bd",
+    "/tmp/expanded-original-pre-reload-restored.json": "007d62b0e274ef32e905cedcba5a1474760aa6db6c5223e8815c6b220a49b7c6",
+    "/tmp/expanded-original-fresh-reload.json": "0b6c23164e897908217e143dd5e81c2e0bf3fbde16ea55d71c39484cf34e5ede",
+    "/tmp/expanded-original-fresh-reload-verified.json": "516ac640111cfa9714d98b034cf1eb001258429b5fb7441318beb7d4e0eebf2c",
+    "/tmp/original-vpmoonrover-selection-restored.json": "5969d033ce59f0ee6b8d1932574e27d4680e187de897cf31fadfdaef7f67c235",
+    "/tmp/original-vpauditt-selection-restored.json": "7bf8741fc97e0dc729f41971c75961077f59397423b9a91b7e3a33c1799fa47c"
+  },
+  "verified_at": "2026-10-10T16:43:45.596321+00:00"
+}

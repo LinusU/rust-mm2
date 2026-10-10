@@ -1,0 +1,26 @@
+{
+  "branch": "codex/original-handling",
+  "base_commit": "692fcfb6",
+  "changed_rust_source_sha256": "b793fa84c5469a18d49ef59147d482424a76dbbb6205cb462cae99361e375189",
+  "changed_rust_files": 14,
+  "source_hash_method": "SHA-256 of sorted changed/untracked Rust paths, each path + NUL + contents + NUL",
+  "gates": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "RUSTC_WRAPPER= cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "RUSTC_WRAPPER= cargo test --locked --workspace",
+      "exit_code": 0,
+      "suites": 59,
+      "passed": 3071,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "environment": "macOS Apple Silicon; localhost TCP allowed for networking tests; calibration completed before running full workspace tests"
+}

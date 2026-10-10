@@ -1,0 +1,1212 @@
+{
+  "description": "Post-axle-fix native complex-input coverage; paired original recordings are listed separately",
+  "hz": 60,
+  "friction": 1.0,
+  "settle_frames": 600,
+  "expected_cars": 21,
+  "expected_runs": 63,
+  "attempted_runs": 63,
+  "passed_finite_runs": 63,
+  "failed_runs": 0,
+  "unsupported_runs": 0,
+  "unverified_original_runs": 63,
+  "runs": [
+    {
+      "car": "vp4x4",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 1.9618123431220296,
+      "final_speed_mps": 44.632576
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 6.142594748214177,
+      "final_speed_mps": 44.515831
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 9.747769790386188,
+      "final_speed_mps": 43.994362
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.205341119878178,
+      "final_speed_mps": 50.398991
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.6959169433567243,
+      "final_speed_mps": 50.055649
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 17.31308949186988,
+      "final_speed_mps": 43.100151
+    },
+    {
+      "car": "vpbug",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.5471838343900193,
+      "final_speed_mps": 38.537422
+    },
+    {
+      "car": "vpbug",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 5.870228475143306,
+      "final_speed_mps": 37.736713
+    },
+    {
+      "car": "vpbug",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 16.669297691822358,
+      "final_speed_mps": 31.184547
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.883142234004071,
+      "final_speed_mps": 52.408859
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 5.425195954894946,
+      "final_speed_mps": 51.008938
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 10.995638164204228,
+      "final_speed_mps": 46.49781
+    },
+    {
+      "car": "vpbus",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 15.303957452606376,
+      "final_speed_mps": 25.010597
+    },
+    {
+      "car": "vpbus",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 21.299427224850536,
+      "final_speed_mps": 25.882627
+    },
+    {
+      "car": "vpbus",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 23.841968989375168,
+      "final_speed_mps": 22.35601
+    },
+    {
+      "car": "vpcab",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 1.0504671705388773,
+      "final_speed_mps": 43.563988
+    },
+    {
+      "car": "vpcab",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.3949473131105212,
+      "final_speed_mps": 40.148731
+    },
+    {
+      "car": "vpcab",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 8.31019798436281,
+      "final_speed_mps": 33.232933
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.733018384945137,
+      "final_speed_mps": 52.491863
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.506769663896681,
+      "final_speed_mps": 51.200882
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 11.278895660812184,
+      "final_speed_mps": 40.954277
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.342912587013204,
+      "final_speed_mps": 34.418602
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 6.630707738871098,
+      "final_speed_mps": 32.519962
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 11.049612748590055,
+      "final_speed_mps": 29.139874
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 7.271141871771226,
+      "final_speed_mps": 34.448029
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 10.277141948600532,
+      "final_speed_mps": 31.878199
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 15.505096685469542,
+      "final_speed_mps": 27.944153
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.503276030577982,
+      "final_speed_mps": 37.73624
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 8.23570092460237,
+      "final_speed_mps": 35.428883
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 21.193948654905977,
+      "final_speed_mps": 31.43627
+    },
+    {
+      "car": "vpcop",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 6.141246675363151,
+      "final_speed_mps": 65.351601
+    },
+    {
+      "car": "vpcop",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.862968868529448,
+      "final_speed_mps": 62.296032
+    },
+    {
+      "car": "vpcop",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 8.04420624037922,
+      "final_speed_mps": 58.016541
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 1.3597095611394765,
+      "final_speed_mps": 51.92374
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.168068541619477,
+      "final_speed_mps": 50.096809
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 8.250350303613665,
+      "final_speed_mps": 44.91246
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 11.604401288584903,
+      "final_speed_mps": 33.022461
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 12.106070769037881,
+      "final_speed_mps": 32.203323
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 14.201539842421584,
+      "final_speed_mps": 24.928612
+    },
+    {
+      "car": "vpdune",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.5618482576084785,
+      "final_speed_mps": 49.883575
+    },
+    {
+      "car": "vpdune",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.881102452936201,
+      "final_speed_mps": 48.392078
+    },
+    {
+      "car": "vpdune",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 16.007791740410028,
+      "final_speed_mps": 43.955856
+    },
+    {
+      "car": "vpford",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 7.4198563627452065,
+      "final_speed_mps": 37.978638
+    },
+    {
+      "car": "vpford",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 11.072918710375248,
+      "final_speed_mps": 38.432476
+    },
+    {
+      "car": "vpford",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 15.997481089612105,
+      "final_speed_mps": 34.534897
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 3,
+      "peak_abs_body_slip_degrees_above_5mps": 20.503399325939103,
+      "final_speed_mps": 34.168201
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 0,
+      "peak_abs_body_slip_degrees_above_5mps": 26.681029472472876,
+      "final_speed_mps": 33.066933
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_abs_body_slip_degrees_above_5mps": 30.000766416856038,
+      "final_speed_mps": 29.212259
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 16.00210614135786,
+      "final_speed_mps": 43.2355
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 6.890228750452586,
+      "final_speed_mps": 44.658821
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 14.236423959754845,
+      "final_speed_mps": 39.690601
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 2.479013823412526,
+      "final_speed_mps": 59.997536
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 65.21573170437526,
+      "final_speed_mps": 46.899162
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 13.642022678792895,
+      "final_speed_mps": 47.416611
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.550799942855443,
+      "final_speed_mps": 67.416664
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 3.550799942855443,
+      "final_speed_mps": 66.44397
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 15.49764794420399,
+      "final_speed_mps": 60.895267
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.181815778675693,
+      "final_speed_mps": 32.440372
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 4.971724034875937,
+      "final_speed_mps": 31.951088
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 11.321404165214565,
+      "final_speed_mps": 29.386635
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 5.544342267659751,
+      "final_speed_mps": 57.601814
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 17.16255453667695,
+      "final_speed_mps": 50.145538
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "frames": 901,
+      "exit_code": 0,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_abs_body_slip_degrees_above_5mps": 7.418632648626542,
+      "final_speed_mps": 48.240387
+    }
+  ]
+}

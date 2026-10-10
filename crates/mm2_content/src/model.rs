@@ -433,7 +433,9 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
         let measured = part
             .best_nonempty_lod()
             .and_then(|g| mesh_aabb(g))
-            .map(|(mn, mx)| ((mx[1] - mn[1]) * 0.5, (mx[0] - mn[0]) * 0.5));
+            // Radius is a half extent; the retail steering pivot uses
+            // the full wheel width (vehWheel +0x1c0), as the MTX fallback does.
+            .map(|(mn, mx)| ((mx[1] - mn[1]) * 0.5, mx[0] - mn[0]));
         let (radius, width) = match measured {
             Some((r, w)) if !usable_f32(r) || !usable_f32(w) => {
                 warnings.push(format!(
@@ -700,6 +702,7 @@ mod tests {
         let w = model.wheels.iter().find(|w| w.index == 0).unwrap();
         assert_eq!(w.origin, [0.0, 0.0, 0.15]);
         assert!((w.radius - 0.3).abs() < 1e-6, "radius: {}", w.radius);
+        assert!((w.width - 0.6).abs() < 1e-6, "full width: {}", w.width);
         for field in ["bounds_min", "bounds_max", "pivot", "origin"] {
             assert!(
                 model.warnings.iter().any(|w| w.contains(field)),

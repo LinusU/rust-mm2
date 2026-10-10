@@ -1,0 +1,2808 @@
+{
+  "description": "Final full-width, axle, original static-contact production keyboard model. Native stability coverage; unpaired runs do not verify original equivalence.",
+  "hz": 60,
+  "friction": 1.0,
+  "settle_frames": 600,
+  "expected_cars": 21,
+  "expected_runs": 147,
+  "attempted_runs": 147,
+  "passed_finite_runs": 147,
+  "failed_runs": 0,
+  "unsupported_runs": 0,
+  "unverified_original_runs": 147,
+  "runs": [
+    {
+      "car": "vp4x4",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.642532,
+      "csv_sha256": "6d8ab4a10054ad47348def17aeea03d80c8e6859343e4fefeecb326f36e0fc60"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 45.920696,
+      "csv_sha256": "9742fb996a1e3e5c0b43551be869d32326f226797f313e0f3ec60a5ee801f043"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.245274,
+      "csv_sha256": "f184ae7ba544b4d661a383be428655d94d7a42df34450439a5bf8ae29e5b907b"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 37.983414,
+      "csv_sha256": "ee6fb90b1f01b4af4e4c73be780c0b4c26cfd1e168f80b09f8304ed49e4804ac"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 44.63345,
+      "csv_sha256": "e41b1bb48fdb09889e3a517b63695542bd8b1fb96a52eb1f9dc20d20473ad8e7"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 45.050381,
+      "csv_sha256": "e875e2343fb623b37672237ff96381c39b97ae8efa008bb0dd1340ab3505a6d3"
+    },
+    {
+      "car": "vp4x4",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vp4x4",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.984505,
+      "csv_sha256": "58206e5ea65f22a73d5fc195631502646887c3e71a41215466f5fd7a83798634"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 60.483677,
+      "csv_sha256": "bc128fef520afd0e3c7df46ab938f04e1b31e94b140f19f9432408d7cae90073"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 54.830299,
+      "csv_sha256": "7672adea9b7ab8308bb43ca809740e870df2ee282b3ea4316e81ab9371464cdd"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.181536,
+      "csv_sha256": "454ec321de4eb62e22aead2a1b827f252c581a22b7bbbd7666c0e6ef20d30b2a"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.18116,
+      "csv_sha256": "e4932989ad12b31d8d90ee49ce1cb8e1296c65061fa62a8fc82281a364c41264"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 50.395607,
+      "csv_sha256": "19be37decdd5d21a3241913eba9b8d43c1f11910eff3fb3e1a1ba84faf381c7e"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 50.048683,
+      "csv_sha256": "057dbd1c32453f601fac69d2d55b8a6ebba7245a2fc0e3759492e90619dd99ce"
+    },
+    {
+      "car": "vpauditt",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpauditt",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.100029,
+      "csv_sha256": "08b872cefcd9f056cb5deb53afc3d1bb63a3ce2dd71cb9bb14bd670e1b6aa54d"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 42.573673,
+      "csv_sha256": "b4a38a634c9b6506df2076ede7dcf0e6a3115bc1437b8b77996ad6b8afc40b00"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 40.080242,
+      "csv_sha256": "41b7b6dd09ea202c5964827d2c756c305445a0190f2aeddc998d06dd45f248bc"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 20.15731,
+      "csv_sha256": "410d2ae15efe00fc9cfad39d0768e042625b212b0816cda5dd8503d17cacf56a"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.096138,
+      "csv_sha256": "ba9365fb697a7ebb779ed6758bf540d4e4b3acfdfafba25c059fc4c448077eff"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 38.550415,
+      "csv_sha256": "bc5fee15a4fe9a8fde0884f7e5ccf9dae1f7165e77b66788c330e9d91cf3098c"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 37.750977,
+      "csv_sha256": "89248f8845da0e769550ea859cd61cfb8408babceb66a2d9ef7878fa45c91b25"
+    },
+    {
+      "car": "vpbug",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbug",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.183548,
+      "csv_sha256": "f71b425a08204fcf17d0e0a34880f2ffe75f960f5d7fc1527ace701fa616c9c8"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 56.80537,
+      "csv_sha256": "6059e6020e9ca0144f13fc9286f5d3227db6fe1ff40f531b5b3118dbfc81c02a"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 54.660526,
+      "csv_sha256": "3d47663d486eab9458affb8309c9b9c6d24b82b1e90df49f809ada88d5a1dfc9"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 30.589174,
+      "csv_sha256": "88481c9b2c82f084600549d02cabaeeb1f53682fab85df0b96205c731f540638"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 44.831635,
+      "csv_sha256": "d3e3cb0cb7504b5c0360d1883452004955e2c991c6884e11b62d7185e5a05d8f"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 52.419182,
+      "csv_sha256": "4d54c80ca18a87213eca893b3b6d82dcae31d005ca047e4cbdd4531b72599962"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 51.016422,
+      "csv_sha256": "411ef3b7e77d3d87f53dbb9c38197929bea3f6fd2216d6eeee47563887ec2af3"
+    },
+    {
+      "car": "vpbullet",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbullet",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.50069,
+      "csv_sha256": "ef33acce6bea5f3d38465ea7d0883b33cc225614b91294d4a596f94bc7358899"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 28.522497,
+      "csv_sha256": "0e5d15e918580da7f6f155ddfb14145293e7d0fdcf07ad60a9e34bc6568c2a85"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 27.248583,
+      "csv_sha256": "acf6739e2bf2b546f9eb26dd44379f3bcea666255f15fb88af6955a870644b40"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 14.806584,
+      "csv_sha256": "cb045573067b170101c91918ee71ced18c788c81d22ad8c9107b406300902a05"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 26.56052,
+      "csv_sha256": "7b88d823a4888ea8488a8564990ce371c1cdcd1dc654dbda6e09983b478ba9d8"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 25.031898,
+      "csv_sha256": "d2d9af315f0afccce74f3a542d7398b40fc4d959219508f814c7d26ca3116c4f"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 25.919079,
+      "csv_sha256": "aa8720b315b7f2c61048db24f91dac8a7247901f7444917510a09d49389c058b"
+    },
+    {
+      "car": "vpbus",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpbus",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 22.374767,
+      "csv_sha256": "2810ce42381352fb617a0e14ac1068b5fcafa0ea76acf14d01aacc0a3d856f5a"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 45.331158,
+      "csv_sha256": "70ba00ec00b71cb385cb6435576a7f09aa82139dfc188f6a6b7d93a15d7c21f4"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.120789,
+      "csv_sha256": "41cf7b2c3c5f335e3de553923323dc12976f8e2d8a33f97480d2ff13471f27d6"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 22.146383,
+      "csv_sha256": "3c3205c5032062b3d77e6e1bad3221531801cdfaefb30ef828b6ab48a09cbe6f"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 41.028419,
+      "csv_sha256": "e3dfd59b182d6520c767e061ff07e057f07803261b95c9b45281c55b19d5f0dd"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.561432,
+      "csv_sha256": "343a03e91fad078647cc718c43fd7ddb69a1e332f59d58bdec96fafa576c5578"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 40.14238,
+      "csv_sha256": "2749e6250157ce285e7ddb0adae7a3dc508dc6d7f1d916ec1f7fb7aeae130a6d"
+    },
+    {
+      "car": "vpcab",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcab",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 33.232388,
+      "csv_sha256": "2889fcfd2cbd9bb9b86882c8646e331bdad1ab3fbe1f4c85f8447bd03ee0a802"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 56.240509,
+      "csv_sha256": "3715793c65d4c14fafd6a0c022a30f688fb68ba34c2c5f92b73a0887f56100b7"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 54.389656,
+      "csv_sha256": "4a8fc5dff99c1cec1d58aeaf46f4aca87483d1af0194589f0a01e7f82eaf618b"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 29.899263,
+      "csv_sha256": "430d5e2ada3812494a08c27cb48ce53db694640b4ab3e1d6510078e776bab454"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.907169,
+      "csv_sha256": "46ebcf2fc27c27a1791f8da8bfd485ead981088e6c9bd8f41f6468c344eedd8e"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 52.515606,
+      "csv_sha256": "55af9923f4e2647b5236d46d90775fbbbd12fabb512dc38a01af78a8f987c4f0"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 51.2108,
+      "csv_sha256": "d8cd0c4192a71c53650818974242981f315d038c0b9f44bd9c461a2001b575d2"
+    },
+    {
+      "car": "vpcaddie",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcaddie",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 40.952171,
+      "csv_sha256": "a4ec54a886e1b8310c39dcb28fffe82cd75b9c4bf5918186d87c87f4c373d6f6"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 37.193211,
+      "csv_sha256": "4cd83df8a909660d72dfdd9fa911fe3427eb7ebffb0ddad4301eb4ac9f807154"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.264374,
+      "csv_sha256": "07db9c4b3e40b8e7bc2b878aaf51a54194a84beb142e3b6f86f1dc41045a9d7d"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 18.929298,
+      "csv_sha256": "63ae1ef35fae5cb78db42da1723a410c38a3baf2242344ea8e775aebbb1c727c"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.185768,
+      "csv_sha256": "cda635bb5eb282f11f96b8812581b0c40d96ae0c05ff3e585c290cc5e035f0df"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.428074,
+      "csv_sha256": "80850ff8a1e179b0c4c71b5c1e08cfdf643928a0786c4bc08b54fdc7890ab3d1"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 32.524696,
+      "csv_sha256": "635fd2c5294005d9cd047614bcf58ace59bb4923ce50ed49adf2f6b347b1c493"
+    },
+    {
+      "car": "vpcentury",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcentury",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 29.142054,
+      "csv_sha256": "7bd68bd228e4ae91d928051b0d278171839288559b2563058f7778b35578905d"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 36.056965,
+      "csv_sha256": "3834d4eb0a38f7ad18812620aea37a1241b8c1cc6a73f2b7db92a487ebf50bde"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.56332,
+      "csv_sha256": "13cf1bf6e0553b0b07e9ef7f4286a6662af4dedaa21a53a530751f159b08c9e9"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 17.94964,
+      "csv_sha256": "bd39ac0fedc5c2c32408f33135a1df002ade7b597d6788ca99332aa26fa93272"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.490707,
+      "csv_sha256": "12b56bfed033ab123ace1777a594d70876a5fa8358bb84838457168a8adbbaad"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.444031,
+      "csv_sha256": "dac8ce75f6bacc08207e4b71c34d8f83193e688e57e7923b7c728e76e918c61d"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.88081,
+      "csv_sha256": "ad4a0fd92ff80c05664b5e43c00825dccd443dd70df6bf42bcb71abad277c900"
+    },
+    {
+      "car": "vpcoop",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 26.509045,
+      "csv_sha256": "c43210165dcaef0bf0a010a224f83fc9cf0ad3e1b8ceb3fd749dfbd5e336236e"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 39.871586,
+      "csv_sha256": "583c566a9e4f78dacfad3379008ad605609250f7c2cbe10ca9f8da3350608add"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.693474,
+      "csv_sha256": "bfb1ee7bc925f502d7c25f63e64b3ab3737ed040d8b8eb3da2aa7d497332edb5"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 20.000193,
+      "csv_sha256": "239e72547430996034ca229473b36005765b074aa7fe3192383230d25964795a"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 36.053288,
+      "csv_sha256": "b025fcdfc75aa6130901dd27032e8b713d3027445af71156f7531d640eb4a9ac"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 37.735424,
+      "csv_sha256": "20e3c5a071b2b7f81bfc2ec076365c42cb4ff4bbfd9c84a7026e321e63be637e"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.428215,
+      "csv_sha256": "7ce2a727ff41acf3afea0a0f262e887383bb3112c87894830be309d85b520593"
+    },
+    {
+      "car": "vpcoop2k",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcoop2k",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.428604,
+      "csv_sha256": "9968a5df7a8246deed23df3de1491ef4c7295291f69ff9b5f06d55041d5eb12b"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 71.653618,
+      "csv_sha256": "ed1e8a5ea20fac0606c02eeb0beff4406b66edf5d21efcd834377fbfb86f7cfa"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 67.356972,
+      "csv_sha256": "ab09c33bde359bd20b65c75046438229b3851673cb7d03bdf2b1d5438cce18ac"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 39.24622,
+      "csv_sha256": "0a97d162b1f9a0bc01a6eb2e2e6d17ea325cf9acc2420caa0513a830f2ac7004"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 56.564735,
+      "csv_sha256": "81306298d4b1f2ab1e9b12640b38c45c6d41c3d30514b2dff20d02efe7a430ac"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 65.363052,
+      "csv_sha256": "b0999354d098cb5b9a65306b5e9097846e438717c012d85da2527ecd858f98e9"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 62.330727,
+      "csv_sha256": "8f6afe3e5a8a86fdfa3119b5673c8b67a27c5105ec4719308e93693beedcdd6b"
+    },
+    {
+      "car": "vpcop",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpcop",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 58.019844,
+      "csv_sha256": "bf181ebe03eb28e8a77485a1141b351817f81e080782d8883f90e1a6be99025b"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 59.216408,
+      "csv_sha256": "2373d26d6235e4d6e7741681dc93d33d16ba2e2b08130301a679891c224d4cdd"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 54.776451,
+      "csv_sha256": "15bf8b2cec501d6b3bcde2ef5e1c7e2788eaf5c28a4f0c617bc882212c05d7a9"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 28.998753,
+      "csv_sha256": "a3370e2f9b1b2d7640d2b55d97f4434776fe6bc2bc5b3d503f09c7c67365af0d"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 45.547546,
+      "csv_sha256": "b5cd588cbbc9cf42366bf1a47aa1cd1fc24a4d37016be4d5e7f6a773f3c42ac7"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 51.914547,
+      "csv_sha256": "c2771b65330654e2aefb4211d3ace0ed7fc4be1c019045d64c7ae5c92b7d3d97"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 50.093956,
+      "csv_sha256": "a261c6186742d31636653d405c11bc5f5e4e6ecd22c4fb9680b7502bb788f7ca"
+    },
+    {
+      "car": "vpdb7",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdb7",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 44.901329,
+      "csv_sha256": "ca5827e330bc3a7a36243591d33cdda47f21a7cb996b6a87e0a0a983d047179f"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.231171,
+      "csv_sha256": "d8c48b7696f36327348151f8919d7b5f3e7a9b0efd4051f94c431974a2c34da9"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 33.862984,
+      "csv_sha256": "5644dd461c894ac75d605ba7028b3aab1fea20d67a94ba5494a6790a8d36832c"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 17.615669,
+      "csv_sha256": "029a2bc2ba01d306f24a2cf4536d7760c1f9ad72911cce3662070f7c45068d5b"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_speed_mps": 25.804144,
+      "csv_sha256": "d4c8a75df4ea813da69d177deabbceea1fb202061cd43db75bed726d12058e0a"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 33.035133,
+      "csv_sha256": "47e4696287cb2ac87d11da3f872a65680b9e35fec92c2119eb8d143170e86e08"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 32.232742,
+      "csv_sha256": "dd779ddbc90b81485c9495a82a8170519103a0e88debdf3552f0775f371ef36f"
+    },
+    {
+      "car": "vpddbus",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpddbus",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 25.163311,
+      "csv_sha256": "83769623e206df67ddad0663a323ab3bc9c49be8fc51c37aa3efe1fb73c43590"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 55.008266,
+      "csv_sha256": "b428b6898c23eb241a24988053a0484d7001d46b72c87ee4d7c4e7ab766741a6"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 51.427628,
+      "csv_sha256": "6288ace72d74c534f25926cd723e44fd9d124b9b9589871ccc847fd846652999"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 29.564543,
+      "csv_sha256": "30b38be55310c753ecf4131c753514900359d672cad38eaf9afc855b9b66b91c"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 44.79863,
+      "csv_sha256": "5b7087979c89984e411bb0e3bc11f36b8c6464a0a8d401745eef2531d4aceff0"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 49.905228,
+      "csv_sha256": "deda2b7475b52b3fdf4a8d81f1d6d09a206608626d66fd228314a854c9a4370a"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 48.407269,
+      "csv_sha256": "ac349b5497ee4178a9d1c370395591e85fd524fa0614fbbf83534fb7aee363d5"
+    },
+    {
+      "car": "vpdune",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpdune",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.954044,
+      "csv_sha256": "67eb93ba30956d345bd78097726fe484e915301f59162e8acfc9cfca6108c504"
+    },
+    {
+      "car": "vpford",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 42.634739,
+      "csv_sha256": "ec251bd6061efca0cb90a85aff00dd38b8c7d2dcbd93d7f54e79ab219fa0b751"
+    },
+    {
+      "car": "vpford",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.48048,
+      "csv_sha256": "da459bf72878d4b71241bc2e3a2663d86c39515fef8004c376f745d5c08c26ce"
+    },
+    {
+      "car": "vpford",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 22.996344,
+      "csv_sha256": "889a3010f6aa52a59533ccb04db92f20cabba308f764f2d2545f53f13187a3f6"
+    },
+    {
+      "car": "vpford",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 3,
+      "peak_speed_mps": 34.823307,
+      "csv_sha256": "c0e2494e0770ebeef3cfdcaf5bb8bd1aec26e82799ecd4c48c8de685f71a586e"
+    },
+    {
+      "car": "vpford",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 38.026627,
+      "csv_sha256": "bca25a90f1b62004ba92f2e990ffe043085f5714fd4520cdf0f4f7d8db70593a"
+    },
+    {
+      "car": "vpford",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 38.453281,
+      "csv_sha256": "59efac0e5b89e6caa7f9e5a47854bf9c7f313d81ac86426125aefb71da3da44e"
+    },
+    {
+      "car": "vpford",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpford",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 34.487286,
+      "csv_sha256": "726e54e36bb54909e6fd79060895e72795e561c196632b851e8635e830579d7e"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 41.355221,
+      "csv_sha256": "b1b75d6c95e9ec4369253bf6807b4e5dadf06ae4db010771c16862c4b5a46502"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 3,
+      "peak_speed_mps": 37.735577,
+      "csv_sha256": "8d287170726c3ad1c505c402762c643ae8a0b7051a997505cbe00e00bd99bfc2"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_speed_mps": 22.253128,
+      "csv_sha256": "b8b8f0fe211448e028253d4eaa46d397c51bc6ecc534c1e48e735899c8ed602a"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_speed_mps": 33.955162,
+      "csv_sha256": "6224afeb000ebb848fd4060af4496488b4799c34c7e26db483fde024836ab2da"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 3,
+      "peak_speed_mps": 34.519466,
+      "csv_sha256": "4acc0047f49ee9996473e1dd24db63a0bb98bed4c49cf3890c5fb7ce7b71a364"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 2,
+      "peak_speed_mps": 33.571609,
+      "csv_sha256": "f3b18bfd59a0ba6f87e5c31b6140a70d3d3dbbf121f23f543317ad3baaa7cfe9"
+    },
+    {
+      "car": "vpmoonrover",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmoonrover",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 1,
+      "peak_speed_mps": 28.992579,
+      "csv_sha256": "8bb06bd60d18455c5e0c81105d631b9efdf821ae99266bfde41e7b1cc390f110"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 52.62394,
+      "csv_sha256": "2b37f30dcc07988b9758af0185cb23622dd913ba35f8fcde1fd2b1750bc05554"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 41.563408,
+      "csv_sha256": "794b2a2901860d19d42ce477249095ab2a2f7dfdaceac15857f0c217e2e7ae5c"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 25.975115,
+      "csv_sha256": "bbe9a91717b074419f2f1b6052d44c464aefdabbf8e232bbe3b7ebb3d597ba52"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 42.60318,
+      "csv_sha256": "79d2c0027c51feabb16b762a0531ef5b120b1d17e7ee0de8380efc66076d7540"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 43.437679,
+      "csv_sha256": "648c649cfb5de20ae2a96c268976acc62d5393eae557b52c59c3e3662e51ccc6"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 44.678333,
+      "csv_sha256": "affe8fa1cd96cf4b20b107929b9b793bad6d83c35ce448fdff75e3b587774d59"
+    },
+    {
+      "car": "vpmustang99",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpmustang99",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 39.6563,
+      "csv_sha256": "87df38569fb63100d72eb6aabb36f52346b8b44455e2942b807c3045c3858368"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 62.466694,
+      "csv_sha256": "cdcdb6fe8a5c1c407c0b48999e138d1ba5dd930e27feabc9897f308830299892"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 52.15435,
+      "csv_sha256": "631456ff4d8bfcbb78158003b8bbd4e05f273fc175bf1ed5432b5a2e47873e37"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 30.414282,
+      "csv_sha256": "36f66b53a1392377c96071ebbf67bc2d1b074926032848e2b94456144cce0ad4"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 54.910393,
+      "csv_sha256": "1c6a5b99ac8f7ddd9bd8cd00ca9b7f00e91cfac4a1aba745ef101e2f73e94f1f"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 59.99807,
+      "csv_sha256": "dfb4029189dc7962411f56ae309ab5daaea1a38f84b03c782f80c0e08543aa98"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.853752,
+      "csv_sha256": "4d6e57b6510c2b6ddd60175c946d13de1e75dd17ddbc48ab367c47823a5d51da"
+    },
+    {
+      "car": "vppanoz",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanoz",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 47.396503,
+      "csv_sha256": "93572d8160c24a2187893a0ad095cd96d70c4643b1c6d2ba35d0de1273147b05"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 81.536926,
+      "csv_sha256": "43afc7e59cf0ded6d23b65d5bc6bfee49234ba8a18367b1b1f159a82e24ed8e9"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 72.892113,
+      "csv_sha256": "4c3839014201b9d0daaa5b76fd60644dd3da6da2c6fb5cc7ae70909f6498a839"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 41.779091,
+      "csv_sha256": "c2fe3f3695b3e3bf2d38f6d640c2af9a38e59b7ddc6b365fcc2657cd0360b534"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 57.5383,
+      "csv_sha256": "eea895704de0af952296189a133d1cba4e0a52fe60d276138e800af7003bebce"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 67.428261,
+      "csv_sha256": "0c55d3fda6976f6c5ceb143a361a1e02d51ffed587c3ad5a57a80a7c955cec9b"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 66.463898,
+      "csv_sha256": "8feb7b21c5d0762b88eef1f6a0a7a7beccd529c98fca4dff3472c49493c83f0a"
+    },
+    {
+      "car": "vppanozgt",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vppanozgt",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 60.899445,
+      "csv_sha256": "a5632e973afa808a1b0063266b63061c6c168c23cf057a6f172f04e25e6c3e12"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 35.886627,
+      "csv_sha256": "403879f924a7eabc65ea01f7d9f98dc97450a7a5a34be5bd7e62d816cf58920d"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 33.58559,
+      "csv_sha256": "acd948117915a100c6c3b8033f339c0142a088a0b6738e4c02cde5531e9a28c9"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 19.531128,
+      "csv_sha256": "53fbf31fd9411172c9eb8750c211bcf662a09beb39c1ac7f9f18b4534f1efe55"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 33.762756,
+      "csv_sha256": "bfbfcf4f5c9df7aa1cc7a3d39d30b2e3c6603c4702e3825ed4a8beaab7c95b94"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 32.441795,
+      "csv_sha256": "174c7f3b889fbe9cd3976b387b4506801b7a932c25914403fc05db81c269a1db"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 31.950796,
+      "csv_sha256": "7031e46022222572393666695eeecba4d6d76544291da38abe178162536a064b"
+    },
+    {
+      "car": "vpsemi",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpsemi",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 29.387909,
+      "csv_sha256": "940b62450b62dba396c32639c9411529acaf58edf09550141f60eda8aa631fcf"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "launch",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "launch",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 60.390865,
+      "csv_sha256": "7781d15fced477d91e826e3c5257c3f19a94dcc0de1039c9c910cddee2e82505"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 46.472317,
+      "csv_sha256": "c6deb0e6358f4f9f2b1b94c1ac3e260ed9802f3ffa60a13c0f71839a670660c9"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "brake",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "brake",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 32.788719,
+      "csv_sha256": "468ab816e80f9fe742eadc1082150858f85ecb96981ca10b2196f006bac3306b"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "powerslide",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "powerslide",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 47.578285,
+      "csv_sha256": "058aff12a1b3e60d633aefe1f663c03f257267346c0b109a5ab433a51e5f9e9d"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "slalom",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "slalom",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 57.603729,
+      "csv_sha256": "e525d187d24b559a4966c6777510aacd0f33d6e566fa3c03da0fcf18764b34a4"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "lift_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "lift_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 50.144043,
+      "csv_sha256": "a2f848228f828c279bca04c2f7c7bad9acdbc7c3d8ecec4e3fb0d4eacc791a53"
+    },
+    {
+      "car": "vpvwcup",
+      "scenario": "brake_turn",
+      "command": [
+        "target/debug/examples/handling_trace",
+        "/Users/linus/coding/rust-mm2/retail",
+        "vpvwcup",
+        "brake_turn",
+        "15",
+        "1.0",
+        "600"
+      ],
+      "exit_code": 0,
+      "frames": 901,
+      "finite": true,
+      "grounded_min": 4,
+      "peak_speed_mps": 48.279999,
+      "csv_sha256": "3bc3e16ff3f5aa16a24dc0202f879a2721f0ebca6a00e9d69ecbf728d6b2607e"
+    }
+  ]
+}

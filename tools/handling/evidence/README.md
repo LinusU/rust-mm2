@@ -1,5 +1,7 @@
 # Retail handling comparison, 2026-10-10
 
+Current expanded measurements and corrections: [expanded verification](expanded-README.md). The baseline results below are historical.
+
 These are measured trajectories and probe results from the production vehicle
 model, not targets fed back into its simulation. The implementation uses the
 recovered retail formulas and the user's installation tuning.

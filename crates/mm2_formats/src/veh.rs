@@ -274,10 +274,10 @@ pub struct VehEndTrain {
 /// `AxleFront`/`AxleBack` tuning.
 #[derive(Debug, Clone)]
 pub struct VehAxle {
-    /// `TorqueCoef` — torque split fraction to this axle when both axles
-    /// are driven (only meaningful for 4WD).
+    /// `TorqueCoef` — anti-roll spring stiffness divided by the body's
+    /// roll inertia (`vehAxle::ComputeConstants`, retail `0x4d9a10`).
     pub torque_coef: f32,
-    /// `DampCoef` — differential damping.
+    /// `DampCoef` — fraction of critical anti-roll damping.
     pub damp_coef: f32,
 }
 

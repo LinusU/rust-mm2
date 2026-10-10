@@ -1,0 +1,421 @@
+{
+  "original_file": "tools/handling/evidence/original-vpford-flat-powerslide.json",
+  "native_file": "tools/handling/evidence/native-vpford-flat-powerslide.csv",
+  "car": "vpford",
+  "scenario": "powerslide",
+  "hz": 60,
+  "frames": 900,
+  "frame_range": [
+    1,
+    900
+  ],
+  "native_offset": -1,
+  "input_byte_mismatches": {
+    "steering_byte": 0,
+    "throttle_byte": 0,
+    "brake_byte": 0,
+    "handbrake_byte": 0
+  },
+  "errors": {
+    "speed_mps": {
+      "samples": 900,
+      "rms": 0.0028731873043113766,
+      "max_absolute": 0.030241713229713696,
+      "mean": -0.000245048366866622
+    },
+    "lateral_speed_mps": {
+      "samples": 900,
+      "rms": 0.0005666140158665156,
+      "max_absolute": 0.014874948329242965,
+      "mean": -7.043821722370122e-05
+    },
+    "slip_angle_radians": {
+      "samples": 892,
+      "rms": 4.2454224692991085e-05,
+      "max_absolute": 0.0010117815848538214,
+      "mean": -5.4210164307530936e-06
+    },
+    "position_metres": {
+      "samples": 900,
+      "rms": 0.02572018280816637,
+      "max_absolute": 0.06624604630200952,
+      "mean": 0.016747364123471976
+    },
+    "height_metres": {
+      "samples": 900,
+      "rms": 3.6596154704873553e-06,
+      "max_absolute": 1.3662509918212912e-05,
+      "mean": 3.0833351135254346e-07
+    },
+    "yaw_radians": {
+      "samples": 900,
+      "rms": 0.0002306771161593416,
+      "max_absolute": 0.0003210450626700556,
+      "mean": -0.00015901480610989812
+    },
+    "yaw_rate_radians_per_second": {
+      "samples": 900,
+      "rms": 0.00022841000151314051,
+      "max_absolute": 0.006171758514404324,
+      "mean": -2.2971271362460315e-05
+    },
+    "rpm": {
+      "samples": 900,
+      "rms": 0.9600106461735923,
+      "max_absolute": 12.224605468749814,
+      "mean": -0.07579144585503172
+    }
+  },
+  "interpretation": "Measured differences; inspect terrain/contact/input contamination before changing tuning",
+  "powerslide": {
+    "original": {
+      "load_up": {
+        "frames": 30,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 2.9634207996094313,
+        "peak_abs_slip_degrees": 7.387735566198229,
+        "last_slip_degrees": 7.359677473151273,
+        "last_forward_speed_mps": 22.825061254403277,
+        "peak_abs_yaw_rate_radians_per_second": 2.0062897205352783,
+        "last_yaw_rate_radians_per_second": -2.0062897205352783
+      },
+      "handbrake_flick": {
+        "frames": 18,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 2.9324056542504806,
+        "peak_abs_slip_degrees": 7.323356990398728,
+        "last_slip_degrees": -0.848101336373122,
+        "last_forward_speed_mps": 21.027473154485705,
+        "peak_abs_yaw_rate_radians_per_second": 3.2960023880004883,
+        "last_yaw_rate_radians_per_second": -3.2960023880004883
+      },
+      "powered_sustain": {
+        "frames": 27,
+        "sliding_seconds": 0.15,
+        "peak_abs_lateral_speed_mps": 6.718852494092038,
+        "peak_abs_slip_degrees": 25.10615469921206,
+        "last_slip_degrees": -25.10615469921206,
+        "last_forward_speed_mps": 14.339204243878255,
+        "peak_abs_yaw_rate_radians_per_second": 4.268550395965576,
+        "last_yaw_rate_radians_per_second": -4.092086315155029
+      },
+      "countersteer": {
+        "frames": 60,
+        "sliding_seconds": 0.65,
+        "peak_abs_lateral_speed_mps": 7.778172312417778,
+        "peak_abs_slip_degrees": 36.2005595932691,
+        "last_slip_degrees": -13.33163087780478,
+        "last_forward_speed_mps": 13.81617256430851,
+        "peak_abs_yaw_rate_radians_per_second": 4.040082931518555,
+        "last_yaw_rate_radians_per_second": 1.4795559644699097
+      },
+      "recovery": {
+        "frames": 465,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 3.293148317096789,
+        "peak_abs_slip_degrees": 13.322828539533683,
+        "last_slip_degrees": -1.9697383836811722e-05,
+        "last_forward_speed_mps": 34.79366422533335,
+        "peak_abs_yaw_rate_radians_per_second": 1.4725782871246338,
+        "last_yaw_rate_radians_per_second": -0.0001582293916726485
+      },
+      "stable_recovery": {
+        "criterion": "30 consecutive samples with |body slip|<5deg at speed>=5m/s after neutral steering",
+        "first_frame": 446,
+        "seconds_after_neutral": 0.18333333333333332
+      }
+    },
+    "native": {
+      "load_up": {
+        "frames": 30,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 2.963382081742175,
+        "peak_abs_slip_degrees": 7.387653080427619,
+        "last_slip_degrees": 7.359417983910966,
+        "last_forward_speed_mps": 22.8251053823701,
+        "peak_abs_yaw_rate_radians_per_second": 2.00631,
+        "last_yaw_rate_radians_per_second": -2.00631
+      },
+      "handbrake_flick": {
+        "frames": 18,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 2.93231378164694,
+        "peak_abs_slip_degrees": 7.323111551358006,
+        "last_slip_degrees": -0.8479085057713428,
+        "last_forward_speed_mps": 21.02746402042638,
+        "peak_abs_yaw_rate_radians_per_second": 3.295903,
+        "last_yaw_rate_radians_per_second": -3.295903
+      },
+      "powered_sustain": {
+        "frames": 27,
+        "sliding_seconds": 0.15,
+        "peak_abs_lateral_speed_mps": 6.719722627329193,
+        "peak_abs_slip_degrees": 25.108848850494773,
+        "last_slip_degrees": -25.108848850494773,
+        "last_forward_speed_mps": 14.339306297734387,
+        "peak_abs_yaw_rate_radians_per_second": 4.268513,
+        "last_yaw_rate_radians_per_second": -4.092084
+      },
+      "countersteer": {
+        "frames": 60,
+        "sliding_seconds": 0.65,
+        "peak_abs_lateral_speed_mps": 7.778663741921454,
+        "peak_abs_slip_degrees": 36.20504306047833,
+        "last_slip_degrees": -13.331015140617053,
+        "last_forward_speed_mps": 13.81558336932143,
+        "peak_abs_yaw_rate_radians_per_second": 4.040088,
+        "last_yaw_rate_radians_per_second": 1.479632
+      },
+      "recovery": {
+        "frames": 465,
+        "sliding_seconds": 0.0,
+        "peak_abs_lateral_speed_mps": 3.2926890660993626,
+        "peak_abs_slip_degrees": 13.321621980497735,
+        "last_slip_degrees": -0.00014233040697278753,
+        "last_forward_speed_mps": 34.7930770530546,
+        "peak_abs_yaw_rate_radians_per_second": 1.472697,
+        "last_yaw_rate_radians_per_second": -0.00016
+      },
+      "stable_recovery": {
+        "criterion": "30 consecutive samples with |body slip|<5deg at speed>=5m/s after neutral steering",
+        "first_frame": 446,
+        "seconds_after_neutral": 0.18333333333333332
+      }
+    }
+  },
+  "orientation": {
+    "available": true,
+    "samples": 900,
+    "errors": {
+      "rotation_radians": {
+        "samples": 900,
+        "rms": 0.00023025525765436958,
+        "max_absolute": 0.00032045158103518066,
+        "mean": 0.0001811821556578866
+      },
+      "pitch_radians": {
+        "samples": 900,
+        "rms": 3.171888479509521e-06,
+        "max_absolute": 2.4951095620182398e-05,
+        "mean": 4.056168139157235e-07
+      },
+      "roll_radians": {
+        "samples": 900,
+        "rms": 1.210584096571767e-05,
+        "max_absolute": 3.180800273527851e-05,
+        "mean": 6.52472175159365e-06
+      }
+    },
+    "interpretation": "Full basis rotation error remains valid through rollover; roll excluded near vertical pitch"
+  },
+  "wheel_contact_counts": {
+    "samples": 900,
+    "available": true,
+    "scope": "grounded wheel counts; individual flags compared separately when available",
+    "divergent_frames": 0,
+    "first_divergent_frame": null,
+    "first_divergent_counts": null,
+    "original_any_wheel_unloaded_frames": 9,
+    "native_any_wheel_unloaded_frames": 9,
+    "original_all_wheels_airborne_frames": 0,
+    "native_all_wheels_airborne_frames": 0,
+    "max_absolute_count_difference": 0,
+    "individual_wheels": {
+      "available": true,
+      "samples": 900,
+      "divergent_frames": 0,
+      "first_divergent_frame": null,
+      "per_wheel_divergent_frames": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "switch_timing": {
+    "steering_sign": {
+      "original": [
+        {
+          "frame": 301,
+          "from": 0,
+          "to": 1
+        },
+        {
+          "frame": 387,
+          "from": 1,
+          "to": 0
+        },
+        {
+          "frame": 388,
+          "from": 0,
+          "to": -1
+        },
+        {
+          "frame": 447,
+          "from": -1,
+          "to": 0
+        }
+      ],
+      "native": [
+        {
+          "frame": 301,
+          "from": 0,
+          "to": 1
+        },
+        {
+          "frame": 387,
+          "from": 1,
+          "to": 0
+        },
+        {
+          "frame": 388,
+          "from": 0,
+          "to": -1
+        },
+        {
+          "frame": 447,
+          "from": -1,
+          "to": 0
+        }
+      ],
+      "matched": [
+        {
+          "from": 0,
+          "to": 1,
+          "original_frame": 301,
+          "native_frame": 301,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "original_frame": 387,
+          "native_frame": 387,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 0,
+          "to": -1,
+          "original_frame": 388,
+          "native_frame": 388,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": -1,
+          "to": 0,
+          "original_frame": 447,
+          "native_frame": 447,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        }
+      ],
+      "unmatched_original": [],
+      "unmatched_native": []
+    },
+    "gear": {
+      "original": [
+        {
+          "frame": 117,
+          "from": 2,
+          "to": 3
+        },
+        {
+          "frame": 220,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 412,
+          "from": 4,
+          "to": 3
+        },
+        {
+          "frame": 506,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 721,
+          "from": 4,
+          "to": 5
+        }
+      ],
+      "native": [
+        {
+          "frame": 117,
+          "from": 2,
+          "to": 3
+        },
+        {
+          "frame": 220,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 412,
+          "from": 4,
+          "to": 3
+        },
+        {
+          "frame": 506,
+          "from": 3,
+          "to": 4
+        },
+        {
+          "frame": 721,
+          "from": 4,
+          "to": 5
+        }
+      ],
+      "matched": [
+        {
+          "from": 2,
+          "to": 3,
+          "original_frame": 117,
+          "native_frame": 117,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 3,
+          "to": 4,
+          "original_frame": 220,
+          "native_frame": 220,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 4,
+          "to": 3,
+          "original_frame": 412,
+          "native_frame": 412,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 3,
+          "to": 4,
+          "original_frame": 506,
+          "native_frame": 506,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        },
+        {
+          "from": 4,
+          "to": 5,
+          "original_frame": 721,
+          "native_frame": 721,
+          "native_minus_original_frames": 0,
+          "native_minus_original_seconds": 0.0
+        }
+      ],
+      "unmatched_original": [],
+      "unmatched_native": []
+    },
+    "interpretation": "Steering signs use quantized bytes; gear uses the retail index including reverse/neutral. Positive timing differences mean native later. Unmatched decisions are reported separately."
+  }
+}

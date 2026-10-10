@@ -85,3 +85,75 @@ impl Default for TireConditions {
         Self { traction: 1.0 }
     }
 }
+
+/// Raw source material for a world collider's contact with a native hull.
+/// Generic Avian bodies retain their existing collider coefficients.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct OriginalContactMaterial {
+    pub friction: f32,
+    pub elasticity: f32,
+}
+
+impl OriginalContactMaterial {
+    /// Source material-pair products (research 01, `0x46cce0`).
+    /// Invalid external components do not replace valid Avian coefficients.
+    pub fn combined(self, other: Self) -> Option<(f32, f32)> {
+        if [
+            self.friction,
+            self.elasticity,
+            other.friction,
+            other.elasticity,
+        ]
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return None;
+        }
+        let friction = self.friction * other.friction;
+        friction
+            .is_finite()
+            .then_some((friction, (self.elasticity * other.elasticity).min(1.0)))
+    }
+}
+
+#[cfg(test)]
+mod original_material_tests {
+    use super::*;
+
+    #[test]
+    fn original_pair_products_retain_raw_coefficients() {
+        let rover = OriginalContactMaterial {
+            friction: 0.9,
+            elasticity: 0.5,
+        };
+        let ground = OriginalContactMaterial {
+            friction: 1.0,
+            elasticity: 0.5,
+        };
+        assert_eq!(rover.combined(ground), Some((0.9, 0.25)));
+        assert_eq!(rover.combined(rover), Some((0.9 * 0.9, 0.25)));
+        let high = OriginalContactMaterial {
+            friction: 2.0,
+            elasticity: 2.0,
+        };
+        assert_eq!(high.combined(high), Some((4.0, 1.0)));
+        for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+            assert!(
+                rover
+                    .combined(OriginalContactMaterial {
+                        friction: invalid,
+                        ..ground
+                    })
+                    .is_none()
+            );
+            assert!(
+                rover
+                    .combined(OriginalContactMaterial {
+                        elasticity: invalid,
+                        ..ground
+                    })
+                    .is_none()
+            );
+        }
+    }
+}

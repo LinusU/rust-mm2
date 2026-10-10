@@ -198,6 +198,17 @@ pub struct OriginalState {
     pub implicit_c: Mat3,
     /// Position-only bump-stop correction. Never adds kinetic energy.
     pub push: Vec3,
+    /// The preceding position correction, used by retail wheel point
+    /// velocity queries (`phInertialCS::GetVelocity`, 0x4790e0).
+    pub last_push: Vec3,
+    /// Position correction applied after the preceding wheel update.
+    pub applied_push: Vec3,
+    /// Static-world contact momentum, consumed by the next coupled solve.
+    pub collision_impulse: Vec3,
+    pub collision_angular_impulse: Vec3,
+    /// Hull pose before this sample's movement, for swept world contacts.
+    pub step_start_position: Vec3,
+    pub step_start_rotation: Quat,
 }
 
 impl OriginalState {
@@ -210,6 +221,12 @@ impl OriginalState {
             drive_bias: 1.0,
             wheels: vec![OriginalWheelState::default(); original.wheels.len()],
             push: Vec3::ZERO,
+            last_push: Vec3::ZERO,
+            applied_push: Vec3::ZERO,
+            collision_impulse: Vec3::ZERO,
+            collision_angular_impulse: Vec3::ZERO,
+            step_start_position: Vec3::ZERO,
+            step_start_rotation: Quat::IDENTITY,
             pending_force: Vec3::ZERO,
             pending_torque: Vec3::ZERO,
             angular_momentum: None,

@@ -1,0 +1,55 @@
+{
+  "car": "vpmoonrover",
+  "source": "Live Midtown2.exe (same executable/fixture fingerprints as expanded captures)",
+  "wheel_widths": [
+    0.38884660601615906,
+    0.38884657621383667,
+    0.38884663581848145,
+    0.38884657621383667
+  ],
+  "bound_material": {
+    "friction": 0.8999999761581421,
+    "elasticity": 0.5
+  },
+  "world_materials": [
+    {
+      "friction": 1,
+      "elasticity": 0.5,
+      "effective_tyre_friction": 1
+    },
+    {
+      "friction": 1,
+      "elasticity": 0.5,
+      "effective_tyre_friction": 1
+    },
+    {
+      "friction": 1,
+      "elasticity": 0.5,
+      "effective_tyre_friction": 1
+    },
+    {
+      "friction": 1,
+      "elasticity": 0.5,
+      "effective_tyre_friction": 1
+    }
+  ],
+  "first_body_contact": {
+    "scenario": "lift_turn",
+    "sample_before": 348,
+    "contact_point": [
+      1204.862060546875,
+      -0.0026199668645858765,
+      1113.4022216796875
+    ],
+    "normal": [
+      0,
+      -1,
+      0
+    ],
+    "depth": 0.005239933729171753,
+    "friction": 0.8999999761581421,
+    "elasticity": 0.25,
+    "relative_velocity": "Unavailable: original scratch reused before read; no value accepted"
+  },
+  "public_data_scope": "Decoded numeric physics observations only; raw memory, executable bytes and authored hull vertices retained outside git"
+}

@@ -29,8 +29,14 @@ handling and feel can be reproduced exactly.
   (read in the code), **inferred** (reasoned, with the reason given),
   **unknown**. Unless a paragraph says otherwise, it is
   verified_original.
-- Nothing was measured by running the original; the claims are about
-  what the code computes.
+- The initial recovery described what the code computes. Later driven
+  measurements are recorded in `tools/handling/evidence/`; the axle correction
+  in document 04 includes live retail verification from 2026-10-10.
+- Source static-world impulse formulas and material products are recovered in
+  document 01. The port's swept midpoint contact reconstruction is **inferred**
+  from compatible planar contacts, with an Avian manifold fallback; exact
+  original collision detection on arbitrary geometry remains unestablished.
+  See document 08 for the current engine integration boundary.
 
 ## Documents
 
@@ -108,7 +114,7 @@ vehCarSim::Update                                        # 04
         for each wheel: ray, suspension, surface, contact velocities              # 02
         limited-slip bias; integrate shaft spin implicitly; engine limiter
         for each wheel: Update — stick–slip tyre forces + suspension → body       # 02
-    Axles (anti-roll, 0 in retail), visual suspension
+    Axles (authored anti-roll spring and damper), visual suspension
 vehGyro::Update      drift / handbrake-spin yaw torques, air levelling            # 04
 vehStuck::Update     unstick / flip                                               # 04
 splash, particles, damage

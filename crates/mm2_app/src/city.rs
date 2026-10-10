@@ -4073,6 +4073,9 @@ fn load_city_part(
         if let Some(tire) = surfaces.as_ref().and_then(|t| t.tire_surface_for(surface)) {
             entity.insert(tire);
         }
+        if let Some(material) = surfaces.as_ref().and_then(|t| t.raw_contact_for(surface)) {
+            entity.insert(material);
+        }
         // The same material's `elasticity` becomes the collider's
         // contact restitution (scaled — `SurfaceTables` owns the
         // policy): banger/prop bounces off authored surfaces differ by

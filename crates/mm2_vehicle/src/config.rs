@@ -315,6 +315,13 @@ pub struct GyroConfig {
     pub roll: Option<f32>,
 }
 
+fn default_original_bound_friction() -> f32 {
+    0.3
+}
+fn default_original_bound_elasticity() -> f32 {
+    0.2
+}
+
 /// The original game's vehicle model, carried as authored tuning.
 ///
 /// When a [`VehicleConfig`] has one, the simulation runs the retail
@@ -333,6 +340,12 @@ pub struct GyroConfig {
 /// departures from the original are named on the code that makes them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginalHandling {
+    /// Raw hull material coefficients (`vehCarSim.BoundFriction/BoundElasticity`).
+    /// Pair response multiplies materials; these retain the source values.
+    #[serde(default = "default_original_bound_friction")]
+    pub bound_friction: f32,
+    #[serde(default = "default_original_bound_elasticity")]
+    pub bound_elasticity: f32,
     /// Gravity the car falls at and its wheel loads are built on, m/s².
     /// The original's is 19.6 for every car.
     pub gravity: f32,
@@ -346,6 +359,9 @@ pub struct OriginalHandling {
     pub driven: Vec<usize>,
     /// Wheels that each spin on their own engineless freetrain.
     pub free: Vec<usize>,
+    /// Authored anti-roll axles, with each wheel pair ordered left/right.
+    #[serde(default)]
+    pub axles: Vec<OriginalAxle>,
     /// `Drivetrain` block.
     pub drivetrain: OriginalTrain,
     /// `Freetrain` block, shared by both freetrains.
@@ -412,6 +428,17 @@ pub struct OriginalWheel {
     pub static_fric: f32,
     /// `SlidingFric` — sliding μ floor.
     pub sliding_fric: f32,
+}
+
+/// A `vehAxle` anti-roll spring and damper (`0x4d9a10`, `0x4d9b10`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OriginalAxle {
+    /// Wheel indices ordered left/right.
+    pub wheels: [usize; 2],
+    /// `TorqueCoef`: spring stiffness divided by body roll inertia.
+    pub torque_coef: f32,
+    /// `DampCoef`: fraction of critical roll damping.
+    pub damp_coef: f32,
 }
 
 /// A `Drivetrain`/`Freetrain` block.
@@ -1071,6 +1098,14 @@ impl VehicleConfig {
             let nonnegative = |v: f32| v.is_finite() && v >= 0.0;
             check!("original.gravity", positive(original.gravity));
             check!(
+                "original.bound_friction",
+                nonnegative(original.bound_friction)
+            );
+            check!(
+                "original.bound_elasticity",
+                nonnegative(original.bound_elasticity)
+            );
+            check!(
                 "original.surface_friction",
                 nonnegative(original.surface_friction)
             );
@@ -1089,6 +1124,20 @@ impl VehicleConfig {
                 "original.driven/free",
                 indices == [0, 1, 2, 3] && !original.driven.is_empty()
             );
+            for (i, axle) in original.axles.iter().enumerate() {
+                let prefix = format!("original.axles[{i}]");
+                check!(
+                    format!("{prefix}.wheels"),
+                    axle.wheels[0] < original.wheels.len()
+                        && axle.wheels[1] < original.wheels.len()
+                        && axle.wheels[0] != axle.wheels[1]
+                );
+                check!(
+                    format!("{prefix}.torque_coef"),
+                    nonnegative(axle.torque_coef)
+                );
+                check!(format!("{prefix}.damp_coef"), nonnegative(axle.damp_coef));
+            }
             for (i, w) in original.wheels.iter().enumerate() {
                 let prefix = format!("original.wheels[{i}]");
                 for (field, value) in [

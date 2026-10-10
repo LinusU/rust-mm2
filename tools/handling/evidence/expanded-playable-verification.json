@@ -1,0 +1,57 @@
+{
+  "platform": "macOS Apple Silicon / Metal",
+  "command": [
+    "target/debug/mm2",
+    "--mm2-path",
+    "/Users/linus/coding/rust-mm2/retail",
+    "--city",
+    "sf",
+    "--car",
+    "vpbug",
+    "--no-profile"
+  ],
+  "binary_sha256": "407213a34114d0cac4b47abcacc67212081e31684e9ba64af5ce8dbf5156aad3",
+  "build_command": "RUSTC_WRAPPER= cargo build --locked -p mm2_app --bin mm2",
+  "build_exit_code": 0,
+  "observations": [
+    {
+      "action": "Up held 4500 ms",
+      "speed_kmh": 53.4,
+      "gear": "D2",
+      "rpm": 4878,
+      "wheels": "4/4",
+      "camera": [
+        -1319.4,
+        64.1,
+        295.8,
+        -180,
+        -9
+      ]
+    },
+    {
+      "action": "Up 3500 ms, Right 600 ms, Space 250 ms, Left 500 ms (sequential live keyboard)",
+      "result": "Visible steering response and stable wall contact; no crash or runaway pose",
+      "wheels": "4/4",
+      "camera": [
+        -1327.4,
+        52.8,
+        445.4,
+        171,
+        -11
+      ]
+    },
+    {
+      "action": "R reset",
+      "result": "Returned to original road spawn with four grounded wheels",
+      "camera": [
+        -1319.4,
+        68.8,
+        217.4,
+        180,
+        -11
+      ]
+    }
+  ],
+  "scope": "Rendered live smoke check of production keyboard path; simultaneous-key powerslide fidelity is established separately by paired handling traces. CUA supports one nonmodifier key at a time.",
+  "left_open": true
+}

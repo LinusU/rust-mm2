@@ -211,8 +211,20 @@ c = 2·sqrt(k · body.angularInertia.z) · DampCoef
 τ = −(Δx·k + (xdotL − xdotR)·c)  about the body's roll axis (row2)
 ```
 
-Every retail axle authors `TorqueCoef 0`, so there is **no anti-roll
-bar in retail**; the axle node only positions the visual axle.
+The earlier claim that every retail axle authors `TorqueCoef 0` was false.
+The retail F350 authors front `1 / 0.510` and rear `1 / 0.500` for
+`TorqueCoef / DampCoef`; these values were verified in the live simulator
+and archived tuning on 2026-10-10. Several other cars also author nonzero
+coefficients (see the roster in [07](07-tuning-reference.md), where available).
+Zero stiffness disables the torque, including damping. `TorqueCoef` is an
+anti-roll stiffness coefficient, not a drivetrain torque split.
+
+The wheel visual displacement is physically relevant here:
+`visualDisp = clamp(radius · 0.05 · Fs / staticLoad, 0, 0.3 · radius)`
+(`0x4d4020`), with `Fs` including the bump-stop force. The axle reads the
+current wheel displacement and compression rate after wheel updates.
+Omitting this update made the native F350 lose wheel contacts in a slalom
+that the original completed with all four wheels grounded.
 
 ## `vehStuck` (`0x4d6130`) — getting unstuck
 

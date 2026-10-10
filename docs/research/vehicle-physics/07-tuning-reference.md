@@ -108,7 +108,7 @@ the player file (RACE-13, `docs/research/opponent-ai.md`).
 
 | Token | Off | Effect |
 | --- | --- | --- |
-| `TorqueCoef` | `0x94` | anti-roll stiffness × roll inertia (0 on every retail car) |
+| `TorqueCoef` | `0x94` | anti-roll stiffness × roll inertia (nonzero on several retail cars) |
 | `DampCoef` | `0x98` | anti-roll damping |
 
 ## `vehGyro` (`FileIO` `0x4d5ed0`, ctor `0x4d5b70`; all default 0)

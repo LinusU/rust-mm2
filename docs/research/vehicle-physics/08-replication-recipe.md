@@ -45,12 +45,23 @@ step:   (mode A) p += impulse + dt·F ; L += angImpulse + dt·T ; ω from L via 
 gravity: F.y += −19.6·Mass at the start of every car update
 ```
 
-A port to a different engine (Avian, Rapier, Jolt) can keep its own
-contact solver; what matters for feel is the order — forces computed
-*after* the step and integrated by the next — the 2 g gravity, the
-absence of any body damping beyond `vehAero`, and the implicit
-suspension (or a step small enough that an explicit spring at
-`ks = L/Extent`, `L = m·19.6/4`, stays stable).
+A port to a different engine can use its collision geometry, but retaining
+its generic contact solver is an adaptation: the original contact response
+accumulates impulses for the next integration, not immediate velocity changes
+([01, contact solver](01-rigid-body.md#contact-solver-0x46cce0)). Preserve the
+force lag, 2 g gravity, absence of body damping beyond `vehAero`, and implicit
+suspension. Matching those formulas alone does not prove matching trajectories.
+
+The current rust-mm2 port retains the authored four-wheel-car hull and uses
+raw material products (`frictionA·frictionB`, `min(elasticityA·elasticityB, 1)`).
+For marked static-world contacts it suppresses Avian's constraint solve by
+removing manifold points temporarily, restores them before sleeping, then
+computes source effective-mass impulses for the next integration and positional
+pushes for this step. Dynamic contacts remain an adaptation. The swept midpoint
+used to reconstruct a contact arm is **inferred** from planar measurements:
+the sweep must hit the same collider with a normal dot product at least 0.999,
+or the Avian manifold point is retained. This is not a recovered general
+collision-detection algorithm.
 
 ## Load time
 
@@ -63,7 +74,7 @@ for each wheel w (whl0..3; front block → whl0, copied to whl1; back block → 
 body.InitBoxMass(Mass, InertiaBox)                                      # 01
 gear ratios, auto shift points                                          # 03 § Ratios
 engine constants (ωidle/opt/max, P, A=(√5+1)/2, B=(√5−1)/2)            # 03 § Engine
-axle k, c (0 in retail)                                                 # 04 § vehAxle
+axle k, c (from authored TorqueCoef/DampCoef)                                                 # 04 § vehAxle
 trains: type 0 → drive {whl2,whl3}, free {whl0},{whl1}
         type 1 → drive {whl0,whl1}, free {whl2},{whl3}
         type 2 → drive {whl0,whl1,whl2,whl3}
@@ -71,6 +82,11 @@ gear = first (index 2), gearChanged = 1                                 # Reset
 engine.ωe = 0 ; engine.RPM = engine.rpmAtShift = IdleRPM                # cold reset, 03
 engine.inGearChange = 1 ; engine.gclTimer = GCL
 ```
+
+In rust-mm2, wheel geometry is measured from the available mesh, with MTX
+bounds as a fallback: radius is the vertical half extent, while width is the
+full lateral extent used by the inner-edge steering pivot. Importing mesh
+width as a half extent was a port error.
 
 ## Per step, per car
 
@@ -97,7 +113,7 @@ transmission.update()                              # 03 § vehTransmission::Upda
 aero.update()                                      # 04 § vehAero
 for train in (freeL, freeR, drive) or (drive):     # 03 § The step
     train.update()   # brakes+engine+τreact → contacts → bias → ω → wheels' Update (02 § Step 3)
-axles.update()                                     # no-op in retail
+axles.update()                                     # authored anti-roll, after tyre squash
 
 # ---- after vehCarSim
 gyro.update()                                      # 04 § vehGyro

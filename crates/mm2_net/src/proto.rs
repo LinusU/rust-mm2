@@ -76,7 +76,10 @@
 /// simulation/time semantics, so the handshake must reject it. Input frames
 /// also carry the human auto-reverse preference and optional manual gear,
 /// keeping the authoritative seat's pedal/gear rules aligned with its client.
-pub const PROTOCOL_VERSION: u16 = 24;
+/// v25: authored axle anti-roll forces are included in retail vehicle
+/// prediction. A v24 peer would predict different roll and wheel contacts
+/// for the same assets, so reject it before entering a session.
+pub const PROTOCOL_VERSION: u16 = 25;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;

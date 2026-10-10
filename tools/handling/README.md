@@ -15,14 +15,23 @@ target/debug/examples/handling_trace /path/to/install vpbullet launch 15 1.0 > n
 
 Cars use their imported tuning, human auto-reverse, keyboard steering ramp,
 signed-byte quantization and the production Avian vehicle plugin. The body
-settles for ten seconds on a flat slab. The optional final argument selects
-its material friction (default `0.9`); the generated original course uses
+starts at model pose `(1200, 1, 1200)` with identity rotation and settles
+for ten seconds on a flat half-space. The half-space replaces the giant cuboid
+fixture, which could generate spurious oblique contact normals. The optional
+argument after duration selects its material friction (default `0.9`); the generated original course uses
 `1.0`, so pass that value for course comparisons. Positions record the
 center of mass relative to its initial position. An optional final
 `settle_frames` argument overrides the default 600 physics ticks. Use 780
 when reproducing a Beetle baseline that has already idled for 180 ticks
 before a further 600-tick original warm-up. Each row is the
-state **after** applying that frame's input and advancing one step. Scenarios:
+state **after** applying that frame's input and advancing one step. Steering
+schedule values are keyboard targets passed through the per-car ramp and
+quantization, rather than immediate wheel lock. The CSV also carries body
+orientation, per-wheel suspension/tyre state, pending forces and torques,
+collision impulses and positional pushes. `MM2_TRACE_CONTACTS=1` logs contact
+geometry to stderr; `MM2_TRACE_DISABLE_BODY_CONTACT=1` makes the car a sensor
+for a diagnostic run that excludes body contact response. Such a run is not a
+production-physics comparison. Scenarios:
 
 | Scenario | Inputs |
 | --- | --- |
@@ -32,6 +41,9 @@ state **after** applying that frame's input and advancing one step. Scenarios:
 | `turn` | Full throttle; right steering from five through seven seconds |
 | `handbrake` | Full throttle for five seconds; release throttle and apply right steering plus handbrake for two seconds |
 | `powerslide` | Full throttle throughout; right at frame300, handbrake flick330–347, release handbrake348, left countersteer375–434, neutral435 onward |
+| `slalom` | Full throttle; alternate right/left/right/left every 60 frames from frame300, neutral540 onward |
+| `lift_turn` | Right steering300–449; release throttle330–389, then reapply full throttle |
+| `brake_turn` | Right steering300–419; replace throttle with full brake330–389, reapply throttle390, countersteer left420–479, neutral480 onward |
 
 ## Original trace
 
@@ -50,10 +62,32 @@ bun tools/handling/capture_original.ts turn original.json
 
 The recorder fixes the original frame step to 1/60 second, hooks the keyboard
 poll, settles for 600 frames, then records 901 frames with the same input
-schedule. It rejects a moving, tilted or ungrounded initial state. It saves
+schedule. It rejects a moving, unexpectedly tilted or ungrounded initial state. It saves
 live mass/engine/wheel tuning, per-wheel friction and contact normals alongside
 the trajectory. Hooks, keys and clock settings are restored afterward. The
 emulator remains paused so it does not drive away unattended.
+
+For a capture that independently verifies its car identity, export the native
+imported parameters and supply them to the recorder:
+
+```sh
+target/debug/examples/handling_trace /path/to/install vpbus fingerprint > /tmp/expected-vpbus.json
+ORIGINAL_EXPECTED_TUNING=/tmp/expected-vpbus.json \
+BOTTLESHIP_ROOT=/path/to/bottleship ORIGINAL_CAR_ID=vpbus \
+bun tools/handling/capture_original.ts slalom original.json
+```
+
+Some authored models naturally settle with a pitched body on a level road.
+The hidden Moonrover settles at about 15.4 degrees in both simulations. For
+that case, `ORIGINAL_EXPECTED_INITIAL_UP=x,y,z` can verify its independently
+measured, unit-length initial up vector within one degree. The expected and
+observed vectors are recorded. It does not move the body after settlement;
+stationary and four-contact checks still apply. Without that explicit reference,
+the existing world-up threshold remains mandatory.
+
+The recorder compares live mass, engine tuning, inertia-box dimensions and
+wheel radii before installing its input hooks. A selected menu label alone
+does not establish which vehicle the guest actually loaded.
 
 On the generated course, the original can assign a reserved room (`0`) to its
 spawn. `dgPhysManager::DeclareMover` at `0x468360` rejects an instance whose
@@ -117,6 +151,14 @@ post-step. The default alignment therefore compares original frame `n` with
 native row `n-1`. Positions are transformed into the original initial car axes,
 yaw errors wrap at ±π, and speed is projected onto the car's forward direction.
 The report gives RMS and maximum differences in metres, m/s, radians and RPM.
+Complex scenarios include phase summaries, steering-sign and gear-switch
+timing, grounded-wheel count differences and stable recovery timing. When
+both traces contain orientation bases it also compares full body rotation,
+pitch and roll. Count agreement does not establish individual-wheel agreement.
+Pedal-byte comparisons are restricted to the powerslide: the original reports
+effective pedals, while the native instrument records requested pedals, so
+auto-reverse and stopped-handbrake transformations otherwise make these
+fields unsuitable for a direct equality check.
 It also compares signed sideways velocity, body slip angle, yaw rate and
 quantized input bytes. Body slip is measured from horizontal COM velocity
 against the body's forward/right axes; below 1 m/s its angle is excluded

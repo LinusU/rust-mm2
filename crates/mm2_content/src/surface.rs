@@ -22,7 +22,7 @@ use mm2_formats::FormatError;
 use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS, PtxChannels};
 use mm2_formats::tex::frame_base_stem;
 use mm2_game::{RecoveryPolicy, SurfaceMaterial};
-use mm2_vehicle::TireSurface;
+use mm2_vehicle::{OriginalContactMaterial, TireSurface};
 
 /// Cap applied to authored `elasticity` when it becomes an Avian
 /// restitution coefficient — matching `convert`'s `BoundElasticity`
@@ -226,6 +226,31 @@ impl SurfaceTables {
         }
     }
 
+    /// Raw source contact coefficients, separate from generic prop restitution.
+    /// Unspecified/dead identities and absent fields inherit `_default`.
+    /// Without usable authored/default coefficients the collider stays unmarked.
+    pub fn raw_contact_for(&self, material: SurfaceMaterial) -> Option<OriginalContactMaterial> {
+        let fallback = self.set.default_def();
+        let selected = match self.classify(material) {
+            SurfaceMaterial::Authored(i) => self.set.defs.get(i as usize),
+            SurfaceMaterial::Unspecified => fallback,
+        };
+        let coefficient = |name| {
+            selected
+                .and_then(|d| d.f32(name))
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .or_else(|| {
+                    fallback
+                        .and_then(|d| d.f32(name))
+                        .filter(|v| v.is_finite() && *v >= 0.0)
+                })
+        };
+        Some(OriginalContactMaterial {
+            friction: coefficient("friction")?,
+            elasticity: coefficient("elasticity")?,
+        })
+    }
+
     /// The contact restitution a collider of one authored material
     /// exposes to Avian: the def's `elasticity` scaled into
     /// `0..MAX_SURFACE_RESTITUTION` — the same conservative policy
@@ -363,4 +388,43 @@ pub fn load_surface_tables(vfs: &Vfs) -> Result<Option<SurfaceTables>, SurfaceLo
     let set = MaterialSet::parse(&text(mtl, MTL_PATH)?).map_err(SurfaceLoadError::Parse)?;
     let map = MaterialMap::parse(&text(csv, CSV_PATH)?).map_err(SurfaceLoadError::Parse)?;
     Ok(Some(SurfaceTables { set, map }))
+}
+
+#[cfg(test)]
+mod raw_contact_tests {
+    use super::*;
+
+    #[test]
+    fn raw_contacts_preserve_values_and_inherit_default_material() {
+        let tables = SurfaceTables {
+            set: MaterialSet::parse("mtl _default {\n friction: 0.9\n elasticity: 0.9\n }\nmtl terrain {\n friction: 1.0\n elasticity: 0.5\n }\nmtl incomplete {\n friction: 0.4\n }\n").unwrap(),
+            map: MaterialMap::parse("texture,physics\n").unwrap(),
+        };
+        assert_eq!(
+            tables.raw_contact_for(SurfaceMaterial::Authored(1)),
+            Some(OriginalContactMaterial {
+                friction: 1.0,
+                elasticity: 0.5
+            })
+        );
+        assert_eq!(
+            tables.raw_contact_for(SurfaceMaterial::Authored(2)),
+            Some(OriginalContactMaterial {
+                friction: 0.4,
+                elasticity: 0.9
+            })
+        );
+        let default = Some(OriginalContactMaterial {
+            friction: 0.9,
+            elasticity: 0.9,
+        });
+        assert_eq!(
+            tables.raw_contact_for(SurfaceMaterial::Unspecified),
+            default
+        );
+        assert_eq!(
+            tables.raw_contact_for(SurfaceMaterial::Authored(u16::MAX)),
+            default
+        );
+    }
 }

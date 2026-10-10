@@ -650,6 +650,16 @@ fn synchronize_original_override(
     if original.wheels.len() != over.wheels.len() {
         return Err("original.wheels must match the imported vehicle's physics rig".into());
     }
+    if original.bound_friction == source.bound_friction
+        && over.collider_friction != imported.collider_friction
+    {
+        original.bound_friction = over.collider_friction;
+    }
+    if original.bound_elasticity == source.bound_elasticity
+        && over.collider_restitution != imported.collider_restitution
+    {
+        original.bound_elasticity = over.collider_restitution;
+    }
     let ratio = |new: f32, old: f32| if old > 0.0 { new / old } else { 1.0 };
     let power_changed = over.engine.max_power_w != imported.engine.max_power_w;
     let power_scale = if power_changed {

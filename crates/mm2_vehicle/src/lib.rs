@@ -19,6 +19,7 @@ pub mod analysis;
 pub mod config;
 pub mod debug;
 pub mod original;
+mod original_contacts;
 mod original_step;
 pub mod player_input;
 pub mod sim;
@@ -29,7 +30,7 @@ pub mod vehicle;
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
-pub use surface::{TireConditions, TireSurface};
+pub use surface::{OriginalContactMaterial, TireConditions, TireSurface};
 pub use systems::{UprightLanding, seat_level, seated_upright_pose, upright_recovery_pose};
 pub use vehicle::{
     DriveDirection, EngineImpairment, HumanDriver, PreStepVelocity, RemoteReplica, ResetAuthority,
@@ -52,6 +53,7 @@ impl Plugin for VehiclePlugin {
             // The tire path reads this every physics step; sessions
             // overwrite it at load with their environment modifier.
             .init_resource::<TireConditions>()
+            .init_resource::<original_contacts::OriginalContactSnapshots>()
             .add_systems(
                 PhysicsSchedule,
                 (
@@ -67,7 +69,26 @@ impl Plugin for VehiclePlugin {
             )
             .add_systems(
                 PhysicsSchedule,
-                (original_step::evaluate, original_step::push_out)
+                (
+                    original_contacts::apply_original_contact_materials,
+                    original_contacts::suppress_original_static_contacts,
+                )
+                    .chain()
+                    .in_set(NarrowPhaseSystems::Last),
+            )
+            .add_systems(
+                PhysicsSchedule,
+                original_contacts::restore_original_static_contacts
+                    .after(PhysicsStepSystems::Solver)
+                    .before(PhysicsStepSystems::Sleeping),
+            )
+            .add_systems(
+                PhysicsSchedule,
+                (
+                    original_step::evaluate,
+                    original_contacts::respond_original_static_contacts,
+                    original_step::push_out,
+                )
                     .chain()
                     .in_set(PhysicsStepSystems::Last),
             )

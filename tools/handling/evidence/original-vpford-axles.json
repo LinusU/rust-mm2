@@ -1,0 +1,16 @@
+{
+  "car": "vpford",
+  "axles": [
+    {
+      "offset": 3688,
+      "torqueCoef": 1,
+      "dampCoef": 0.5099999904632568
+    },
+    {
+      "offset": 3844,
+      "torqueCoef": 1,
+      "dampCoef": 0.5
+    }
+  ],
+  "source": "Live retail vehCarSim axles after the completed slalom; numeric tuning only"
+}
