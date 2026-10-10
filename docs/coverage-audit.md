@@ -82,7 +82,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F08 ambience/commentary/music | active (A), B/C queued | retail-data (classification) | commentary beyond pre-race weather/time cues, music (DirectMusic), AC05 capture; no listening evidence |
 | F09 road network | implemented | retail-data | AC04 sampled-road overlay comparison in both cities is local/visual only; UNK-18/19 |
 | F10 ambient traffic | active | retail-data (soak) | signals/right-of-way fidelity (UNK-12), player-hit feel (manual), original population constants |
-| F11 race catalog/runtime | checked (A) / active | retail-data | AC02–05 rest on runtime-slice tests, not an aggregate matrix |
+| F11 race catalog/runtime | checked (A) / active | retail-data | AC02–05 rest on runtime-slice tests, not an aggregate matrix; **AC05 is half-covered**: event unload removing its aimap traffic exceptions without touching the city's own is tested (`unloading_an_event_removes_its_aimap_exceptions_but_not_the_citys`, synthetic), but the event-prop-override half is an open remainder — no event-prop override system exists yet, so nothing claims it |
 | F12 Blitz | implemented | retail-data (headless 20/20) | no human play of representative events; reward leg (F16); UNK-4 time unit provisional |
 | F13 Checkpoint | active | retail-data | original-fidelity comparison (placing, pacing, AI competence) absent; traversal stalls on london-2/5/6/9, sf-7/9 |
 | F14 Circuit | implemented | retail-data | same stalls; catalog-wide completability claim gated on F15-B; UNK-11/38 |
