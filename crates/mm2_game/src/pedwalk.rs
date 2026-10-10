@@ -257,6 +257,9 @@ impl CrossingLink {
         let mut tangent = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
         let n =
             (tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]).sqrt();
+        // A zero-length leg (a crosswalk end on its curve end) has no
+        // direction of its own; keep the tangent finite.
+        let n = if n > 0.0 { n } else { 1.0 };
         for c in &mut tangent {
             *c = if forward { *c / n } else { -*c / n };
         }
