@@ -9,8 +9,12 @@
 //! scene stays finite and inside the actor/animation budgets — and the
 //! F19-AC03 movement half (walkers really walked, every loaded
 //! archetype carries the reaction states) against the real authored
-//! sidewalk networks and archetypes. It does not judge the look of the
-//! figures or a reaction; that is F19-C's rendered leg.
+//! sidewalk networks and archetypes. A second, identical soak per city
+//! then asserts the F19-AC06 contract — a fresh session restores the
+//! density/seed behaviour, every crowd counter of the second run
+//! matching the first. It does not judge the look of the figures or a
+//! reaction; that is F19-C's rendered leg (recorded in
+//! `docs/research/pedanim.md`).
 
 use std::process::Command;
 
@@ -140,5 +144,40 @@ fn retail_crowd_soak_walks_the_real_sidewalks_stays_finite_and_bounded() {
         num(&record, "pwary");
         num(&record, "pdive");
         num(&record, "prej");
+    }
+}
+
+/// The crowd fields an identical fresh session must reproduce verbatim
+/// (F19-AC06): the population target comes from the density, the
+/// placements from the seed, and every counter from what those walkers
+/// then did — drift between two identical runs would mean a session
+/// restart no longer restores the density/seed behaviour.
+const CROWD_FIELDS: [&str; 11] = [
+    "peds", "psp", "prec", "pdrop", "puns", "phop", "pturn", "pwary", "pdive", "prej", "prx",
+];
+
+#[test]
+fn retail_session_restart_restores_the_same_seeded_crowd() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; retail pedestrian restart NOT run");
+        return;
+    };
+    for city in ["london", "sf"] {
+        let (first, _) = soak(&retail, city);
+        let (second, _) = soak(&retail, city);
+        for key in CROWD_FIELDS {
+            assert_eq!(
+                field(&first, key),
+                field(&second, key),
+                "{city}: `{key}=` changed between two identical fresh sessions — \
+                 density/seed behaviour is not restored:\n1: {first}\n2: {second}"
+            );
+        }
+        let crowd = CROWD_FIELDS
+            .iter()
+            .map(|k| format!("{k}={:?}", field(&first, k)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("{city}: restart restored the crowd verbatim ({crowd})");
     }
 }

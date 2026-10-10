@@ -355,3 +355,61 @@ F19-C owns the rendered inspection). Single no-crowd baseline runs on
 the same machine measured 13.2 ms/frame (SF) and 11.1 ms (London);
 the machine is shared, so wall-clock figures are order-of-magnitude
 evidence, not a benchmark (F30-A owns the frame budget proper).
+
+## Stock-archetype coverage and rendered validation (F19-C)
+
+`mm2-inspect peds` now gives every archetype a runtime coverage
+status (F19-AC01): each discovered `pedmodel_*` stem is loaded
+end-to-end through `mm2_content::PedArchetype::load` — the same call
+the crowd spawner and the `--ped-lab` line-up make — so "supported"
+claims the runtime path works, not just that files parse. On retail
+(fingerprint `e91e6cd4b2ae30d9`):
+
+```
+coverage (F19-AC01), by the runtime loader:
+  pedmodel_man: supported — runtime loads 24 clips, 48 paint jobs
+  pedmodel_manw: supported — runtime loads 24 clips, 24 paint jobs
+  pedmodel_woman: supported — runtime loads 24 clips, 48 paint jobs
+  pedmodel_womanw: supported — runtime loads 24 clips, 24 paint jobs
+  pedmodel_wolf (extra): missing — anim/pedmodel_wolf.mod absent
+coverage summary: expected 4 — supported 4, missing 0, unsupported 0
+```
+
+`--strict` now also fails when any expected archetype is not
+supported by the runtime (it still exits 0 on retail); an absent
+expected archetype counts as missing, so the denominator never
+shrinks. The `inventory` command's pedestrian family accepts on the
+same runtime load instead of presence alone (retail: 4 accepted of 4
+expected, `pedmodel_wolf` rejected as the authored partial it is).
+
+Rendered inspection (F19-AC02, F19-AC03's visual half): the
+`--ped-lab` line-up was captured on retail `sf` (default spawn
+`-1319.9,68.6,219.6`), at fixed `--cam` poses and frame counts that
+pin each authored hold (`LAB_HOLD_SECS` = 3 s per state, 60 fps):
+STAND at frame 90, WALK at 270, ANTIC at 990, the `WALK_LDIVE` chain
+mid-pose at 1350 (its request fires at t=21 s; the chain plays 3.6 s).
+In every capture all four archetypes stand on the ground the ray
+found, with coherent limbs, feet planted (or deliberately airborne in
+the dive), authored paint-job colours, and no bind-transform breakage;
+the dive frame shows the lateral lunge with arms flung out and the
+figure displaced sideways off its slot — the authored chain's ±4.38 m
+carry, not a transform glitch. Captures live under
+`$CARGO_TARGET_DIR/captures/f19-c/` (not committed: original
+content). A plain windowed run (no `--ped-lab` — the lab suppresses
+the crowd by design) captured the fielded crowd with walkers on the
+sidewalks beside vehicle lanes, its record `peds=24/24 psp=32 prec=8
+phop=17 prx=4/4`.
+
+Population stability (F19-AC05/AC06): the retail soak is now also run
+twice per city by `pedestrian_retail.rs`
+(`retail_session_restart_restores_the_same_seeded_crowd`), and every
+crowd counter of the second fresh process matches the first verbatim
+(London `peds=24/24 psp=108 prec=84 phop=64 pturn=22 pwary=1 pdive=1
+prej=1`, SF `peds=24/24 psp=134 prec=110 phop=25 pwary=0 pdive=0`) —
+a session restart restores the density/seed behaviour on retail data.
+
+Still open for F19, deliberately: crosswalk crossings (UNK-42 — no
+verified original rule; joins crossing vehicle lanes stay refused),
+the original car-sensing rule (UNK-43 — the runtime's constant-velocity
+time-to-contact test is designed, DSN-89), pedestrian audio, and any
+human play-test judgement of the figures' feel (owner evidence).
