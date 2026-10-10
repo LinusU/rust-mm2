@@ -1653,6 +1653,32 @@ red with `weather=0`). Still no *windowed* host menu that picks a mode, and
 the summary line does not name conditions, so the process leg proves them
 by the client's traction rather than the ad text.
 
+### Rematch on a retail city, process level (F26-AC02/AC05)
+
+`net_drive::a_rematch_on_a_retail_city_restamps_the_world_for_the_same_client`
+is the F26-C.5 in-process pin's retail-city, two-process sibling for
+what an end-of-run record can see: one lobby on retail sf, one
+`--ready` client, two rounds without a reconnect. Round 1 runs a
+bounded wall-clock window (the host's full-throttle seat drives the
+city), the host `cancel`s, the same client process readies itself
+again and `start` mints generation 2. The client's frame cap is
+sized to land inside round 2, and its record must show the restarted
+world: the same non-empty `SiteTable` digest the host stamps, every
+prop row accepted for the new generation (`mism0` — a prop stage or
+ledger carried over from round 1 is scoped to the old generation and
+would be refused or applied as stale), and the networked-cruise
+parked-car skip (`parked0`) still in force, all under `mp=gen2
+phase=playing`. One recorded run (Apple M1, 2026-10-10, ~2.5 min
+wall): both processes stamped `sites5806:19d53566f26987fb`, the
+client refused no row, and its census (`bng=5802d/2a/5s/3b`) shows
+the round-two world really evolved under the clean `mism0` row.
+
+What this leg cannot see — and the in-process
+`net_app::a_rematch_does_not_carry_the_last_rounds_broken_props_to_the_client`
+still pins — is the phase-level dormancy: an end-of-run record
+carries one instant per run, and prop phases are not on the wire
+record.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
@@ -2000,6 +2026,33 @@ delay/jitter/loss matrix exists at both levels now — in-process (see
 "Measured impairment matrix" above) and process-level over this
 harness ("Process-level grid", same cell table). LAN and Internet
 scope remain open.
+
+One impaired leg does leave the synthetic world:
+`net_drive::a_networked_retail_race_agrees_across_an_impaired_link`
+(F26-AC03's real run) hosts retail sf `checkpoint:0` from a real
+`mm2 --host` with a `--bot` course-follower seat, joins a `--parked`
+client through a seeded `ImpairProxy`, and arms the reset leg's
+recipe (30 % loss, 10 % duplication, 10 % reordering, 40 ms ± 30 ms
+hold, both directions) 400 ms after `event=started` — the one-shot
+`Start` verb crosses the clean lane, everything after pays. A
+networked race fields none of the authored opponents (MP-4), so the
+two humans are the whole field. One recorded run (Apple M1,
+2026-10-10, ~5 min wall — the frame budgets, not the loads, dominate:
+both caps are frame counts rather than durations): the host's bot
+finished the six-gate course (`cp=6/6 outcome=finished place=1`,
+both seats in its ledger, `results=2`), and the client's mid-race
+record read `mp=gen1 pos=2/2 cp=1/6 results=1` — one recorded result
+(the host's finish) had already crossed the lossy link into the
+client's own ledger while the client's own seat was still racing.
+14 584 race rows and 15 311 progress tails landed (`race0d`/`prog0d`
+— nothing refused), 16 704 duplicated/reordered pose frames dropped
+counted stale at the push watermark, and both directions observed
+the recipe in the proxy's `LinkStats`. Both processes stamped the
+same prop-world digest and refused no prop row. Not covered: loss on
+the join handshake itself (armed after `Start`, like every other
+leg), a client that drives, the terminal-standings comparison at the
+moment both seats resolve (that is the in-process race-results
+matrix's pin), LAN/Internet scope, rendering.
 
 ## Wait-shape audit of the net/thread tests (OPR-6.4)
 
