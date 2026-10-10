@@ -1434,6 +1434,90 @@ fn teardown_removes_traffic_and_restart_replans() {
     assert!(!first.is_empty(), "restart replanned the population");
 }
 
+/// F11-AC05 (aimap half): an event's traffic exceptions live in the
+/// session's `AmbientTraffic` and die with it. Unloading the event
+/// back to the menu removes them, and a following Cruise session on
+/// the same city loads the city's own aimap again — roster, density
+/// and an empty exception list — from the untouched install.
+#[test]
+fn unloading_an_event_removes_its_aimap_exceptions_but_not_the_citys() {
+    let (tmp, event_config) = event_install();
+    let d = tmp.path();
+    // Close road 1 and slow road 0 for this event only.
+    write(
+        d,
+        "race/testcity/race0.aimap",
+        "[Exceptions]\n2\n1\t0.00\t0\n0\t0.50\t8\n",
+    );
+    let mut app = test_app(event_config, vfs_of(d));
+    assert!(
+        run_until(&mut app, 30, |a| {
+            matches!(
+                a.world().resource::<Session>().phase(),
+                SessionPhase::Playing | SessionPhase::Countdown
+            )
+        }),
+        "event session never left Loading"
+    );
+    {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        let roads: Vec<u32> = traffic
+            .overrides()
+            .exceptions
+            .iter()
+            .map(|e| e.road)
+            .collect();
+        assert_eq!(roads, vec![1, 0], "the event's exceptions are applied");
+        assert!(traffic.overrides().is_closed(1));
+    }
+
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        run_until(&mut app, 30, |a| phase_is(a, SessionPhase::Menu)),
+        "quit never reached Menu"
+    );
+    assert!(
+        app.world().get_resource::<AmbientTraffic>().is_none(),
+        "the event's exceptions leaked past unload"
+    );
+
+    // The same city, now as Cruise: the city's own aimap is intact.
+    // The quit intent is level-triggered, so release it first or it
+    // tears the new session straight back down.
+    app.world_mut().resource_mut::<SessionControl>().quit = false;
+    app.world_mut()
+        .resource_mut::<Session>()
+        .begin(SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/testcity.psdl".into(),
+            },
+            dev: DevOverrides {
+                spawn: Some(SpawnPose {
+                    position: Vec3::new(0.0, 1.5, 200.0),
+                    yaw: 0.0,
+                }),
+                ..DevOverrides::default()
+            },
+            ..SessionConfig::default()
+        })
+        .unwrap();
+    let reached = run_until(&mut app, 300, |a| phase_is(a, SessionPhase::Playing));
+    assert!(
+        reached,
+        "the follow-up Cruise never reached Playing: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    let traffic = app.world().resource::<AmbientTraffic>();
+    assert!(
+        traffic.overrides().exceptions.is_empty(),
+        "the event's exceptions carried into the next session"
+    );
+    assert!(!traffic.overrides().is_closed(1));
+    assert_eq!(traffic.roster().entries.len(), 2, "the city roster loads");
+    assert_eq!(traffic.target, 8, "the city's own [Density] 0.25 applies");
+    assert!(!ambient_cars(&mut app).is_empty());
+}
+
 /// F10-B.1 obstruction response: a participant parked on the lane is a
 /// corridor blocker — the follower brakes to the hold gap and waits
 /// instead of driving through it, then pulls away when it clears. Runs

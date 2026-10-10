@@ -370,6 +370,13 @@ pub struct TrafficSignal {
 }
 
 impl AmbientTraffic {
+    /// The aimap overrides this session's plan runs under (city aimap
+    /// layered with the event's) — exposed so teardown tests can see
+    /// that an event's exceptions do not outlive it.
+    pub fn overrides(&self) -> &NavOverrides {
+        &self.overrides
+    }
+
     /// The merged roster the class draws index — what a frame's roster
     /// digest vouches for.
     pub fn roster(&self) -> &AmbientRoster {
