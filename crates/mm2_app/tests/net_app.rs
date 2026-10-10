@@ -7354,6 +7354,317 @@ fn the_deferred_authority_delivers_the_wire_seats_terminal_edge() {
     }
 }
 
+/// A participant's standing reduced to what must agree between two
+/// processes: the variant and its race-clock stamp. The minted
+/// `ResultId` is each ledger's own and is not compared.
+fn standing(state: &mm2_game::ParticipantState) -> (&'static str, u64) {
+    use mm2_game::ParticipantState as P;
+    match state {
+        P::AwaitingStart => ("awaiting", 0),
+        P::Racing => ("racing", 0),
+        P::Finished { race_ticks, .. } => ("finished", *race_ticks),
+        P::TimedOut { race_ticks, .. } => ("timed-out", *race_ticks),
+    }
+}
+
+/// The sorted `(variant, ticks)` outcomes a ledger holds.
+fn ledger_outcomes(app: &App) -> Vec<String> {
+    let mut rows: Vec<String> = app
+        .world()
+        .resource::<mm2_game::ResultLedger>()
+        .iter()
+        .map(|r| format!("{:?}", r.outcome))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Update both halves in lockstep until `pred` holds, on a wall-clock
+/// deadline: an impaired link delivers late, never on a frame count.
+fn spin_pair(host: &mut App, client: &mut App, what: &str, pred: impl Fn(&App, &App) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        host.update();
+        client.update();
+        if pred(host, client) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(4));
+    }
+    panic!("never reached: {what}");
+}
+
+/// F26-AC03: one recipe cell of the race-results matrix. A hosted
+/// event race and a joined client share the real publish/apply path
+/// through a seeded [`ImpairProxy`]; the host's own seat finishes, the
+/// deadline then times the client's seat out, and both processes must
+/// land on the same standings and the same recorded outcomes.
+fn run_race_results_cell(cell: &MatrixCell, seed: u64) {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), seed).unwrap();
+    let mut host = host_app(vfs, link);
+    host.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )));
+    host.add_systems(
+        FixedLast,
+        (
+            mm2_app::race::reanchor_teleported_participants,
+            mm2_app::race::advance_race,
+        )
+            .chain(),
+    );
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), cell.name.to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    let mut client = bridge_app(mount(install.path()), link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut client);
+    host.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut host, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    until_begun(&mut client);
+
+    let mut def = wire_race_def(0);
+    def.time_limit_ticks = Some(10_000);
+    for app in [&mut host, &mut client] {
+        let generation = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            session.generation()
+        };
+        let mut race = mm2_game::RaceState::new(def.clone(), generation);
+        race.phase = mm2_game::RacePhase::Running;
+        app.world_mut().insert_resource(race);
+    }
+    let mut seat_progress = mm2_game::RaceProgress::new(&def);
+    seat_progress.state = mm2_game::ParticipantState::Racing;
+    let host_seat = host
+        .world_mut()
+        .spawn((
+            NetPlayer(0),
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            netdrive::ResetEpoch(0),
+            mm2_game::ObjectIdentity(mm2_game::ObjectId {
+                generation: 1,
+                slot: 100,
+            }),
+            seat_progress,
+            avian3d::prelude::Position(Vec3::new(0.0, 0.0, -100.0)),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    let mut client_progress = mm2_game::RaceProgress::new(&def);
+    client_progress.state = mm2_game::ParticipantState::Racing;
+    let client_seat = client
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            client_progress,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut client, |a| {
+        a.world().get::<NetPlayer>(client_seat).is_some()
+    });
+    spin_mut(&mut host, |a| {
+        a.world_mut()
+            .query_filtered::<&mm2_game::RaceProgress, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some_and(|p| p.state == mm2_game::ParticipantState::Racing)
+    });
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = client
+            .world_mut()
+            .query_filtered::<Entity, With<RemotePick>>();
+        q.single(client.world()).expect("the host copy")
+    };
+    client
+        .world_mut()
+        .entity_mut(host_copy)
+        .insert(mm2_game::RaceProgress::new(&def));
+
+    // The lobby and staging crossed clean; the race runs impaired.
+    proxy.set(LinkDir::Up, cell.impair);
+    proxy.set(LinkDir::Down, cell.impair);
+
+    // A stretch of racing under the recipe, so the link has carried
+    // enough progress rows for the loss/reorder/duplication draws to
+    // fire before the finish and the terminal frame.
+    for _ in 0..120 {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(4));
+    }
+
+    // The authority's seat crosses the checkpoint and finishes.
+    host.update();
+    *host
+        .world_mut()
+        .get_mut::<avian3d::prelude::Position>(host_seat)
+        .unwrap() = avian3d::prelude::Position(Vec3::new(0.0, 0.0, -300.0));
+    spin_pair(
+        &mut host,
+        &mut client,
+        "the host finish mirrored",
+        |h, c| {
+            let host_done = matches!(
+                h.world()
+                    .get::<mm2_game::RaceProgress>(host_seat)
+                    .map(|p| &p.state),
+                Some(mm2_game::ParticipantState::Finished { .. })
+            );
+            host_done
+                && matches!(
+                    c.world()
+                        .get::<mm2_game::RaceProgress>(host_copy)
+                        .map(|p| &p.state),
+                    Some(mm2_game::ParticipantState::Finished { .. })
+                )
+        },
+    );
+    assert_eq!(session_phase(&host), SessionPhase::Playing, "{}", cell.name);
+    assert_eq!(
+        session_phase(&client),
+        SessionPhase::Playing,
+        "{}",
+        cell.name
+    );
+
+    // The deadline resolves the client's seat and ends the race.
+    host.world_mut().resource_mut::<mm2_game::RaceState>().clock = 9_997;
+    spin_pair(
+        &mut host,
+        &mut client,
+        "both sessions in Results",
+        |h, c| {
+            session_phase(h) == SessionPhase::Results && session_phase(c) == SessionPhase::Results
+        },
+    );
+
+    // Agreement: standings, race-clock stamps and recorded outcomes.
+    let host_standing = standing(
+        &host
+            .world()
+            .get::<mm2_game::RaceProgress>(host_seat)
+            .unwrap()
+            .state,
+    );
+    let host_copy_standing = standing(
+        &client
+            .world()
+            .get::<mm2_game::RaceProgress>(host_copy)
+            .unwrap()
+            .state,
+    );
+    assert_eq!(host_standing, host_copy_standing, "cell {}", cell.name);
+    assert_eq!(host_standing.0, "finished");
+    let wire_seat = {
+        let mut q = host
+            .world_mut()
+            .query_filtered::<&mm2_game::RaceProgress, With<RemotePick>>();
+        standing(&q.single(host.world()).expect("the wire seat").state)
+    };
+    let client_standing = standing(
+        &client
+            .world()
+            .get::<mm2_game::RaceProgress>(client_seat)
+            .unwrap()
+            .state,
+    );
+    assert_eq!(wire_seat, client_standing, "cell {}", cell.name);
+    assert_eq!(wire_seat.0, "timed-out");
+    assert_eq!(
+        ledger_outcomes(&host),
+        ledger_outcomes(&client),
+        "cell {}: host and client recorded different results",
+        cell.name
+    );
+    let (up, down) = (proxy.stats(LinkDir::Up), proxy.stats(LinkDir::Down));
+    let impair = cell.impair;
+    if impair.loss >= 0.10 {
+        assert!(
+            down.dropped > 0,
+            "cell {} dropped nothing: {down:?}",
+            cell.name
+        );
+    }
+    if impair.duplicate > 0.0 {
+        assert!(
+            down.duplicated > 0,
+            "cell {} duplicated nothing: {down:?}",
+            cell.name
+        );
+    }
+    if impair.reorder > 0.0 {
+        assert!(
+            down.reordered > 0,
+            "cell {} reordered nothing: {down:?}",
+            cell.name
+        );
+    }
+    if impair.delay > Duration::ZERO || impair.jitter > Duration::ZERO {
+        assert!(
+            down.delayed > 0,
+            "cell {} delayed nothing: {down:?}",
+            cell.name
+        );
+    }
+    eprintln!(
+        "race-results cell={} seed={seed} up={:?} down={:?}",
+        cell.name, up, down,
+    );
+}
+
+/// F26-AC03: the networked race's progress and results agree between
+/// the host and a joined client under every F25-AC03 impairment
+/// recipe — loss, delay, jitter, duplication, reorder and the combined
+/// cell. Evidence level: synthetic integration (in-process host and
+/// client over real loopback through a seeded proxy; synthetic dev
+/// world, no retail data).
+#[test]
+fn race_progress_and_results_agree_under_each_impairment_recipe() {
+    for (index, (name, impair)) in support::impair_cells().into_iter().enumerate() {
+        run_race_results_cell(&MatrixCell { name, impair }, 0xF26A + index as u64);
+    }
+}
+
 /// Shared staging for the deferral's endpoint legs — the same build
 /// `the_deferred_authority_delivers_the_wire_seats_terminal_edge`
 /// runs, stopped inside the held window: the host's own seat has
