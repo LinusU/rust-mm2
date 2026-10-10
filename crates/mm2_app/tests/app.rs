@@ -10,6 +10,7 @@ mod bot;
 mod breakaway;
 mod build_docs;
 mod cablecar;
+mod camframe_retail;
 mod camtrack;
 mod chunked_city;
 mod cnrvoice;
