@@ -567,9 +567,17 @@ fn spawn_lane(
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_QUEUED);
     let slot = shared.alloc_stats();
     let reader = thread::spawn(move || {
+        // A writer that ended early (its destination closed) drops the
+        // receiver, but the source keeps being read and discarded: a
+        // relay whose far side vanished must not stop reading, or the
+        // sender's socket buffer fills and the sender stalls on a write
+        // the vanished peer will never take — and, if it serves other
+        // peers from one loop, starves them (the reset leg's control
+        // client lost its host that way).
+        let mut sink = false;
         while let Ok(payload) = read_frame(&mut src) {
-            if tx.send(payload).is_err() {
-                break;
+            if !sink && tx.send(payload).is_err() {
+                sink = true;
             }
         }
     });
@@ -994,6 +1002,33 @@ mod tests {
         assert_eq!(received(&in_rx, 1), [10]);
         let stats = stats_at_least(&proxy, LinkDir::Up, 2);
         assert_eq!(stats.dropped, 1);
+    }
+
+    /// A peer that vanished must not back-pressure the target: the
+    /// Down lane keeps reading and discarding, so the target's writes
+    /// to the dead link complete rather than filling its socket buffer.
+    #[test]
+    fn a_vanished_peer_does_not_stall_the_targets_writes() {
+        let (target, _in_rx, out_tx) = sink();
+        let proxy = ImpairProxy::loopback(target).unwrap();
+        let mut c = client(&proxy);
+        // One round trip so the lane pair is wired before the close.
+        out_tx.send(frame(1)).unwrap();
+        read_frame(&mut c).unwrap();
+        drop(c);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            // Far past any socket buffer the dead link could absorb.
+            for _ in 0..4096 {
+                if out_tx.send(vec![0u8; 8192]).is_err() {
+                    return;
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the target's writes stalled behind a vanished peer");
     }
 
     /// A seeded recipe replays identically over identical traffic —
