@@ -10232,3 +10232,302 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
     };
     assert_eq!(decode_view(g, &frame).unwrap().carrier(), Some(PlayerId(2)));
 }
+
+/// A hosted session and a joined client in `Playing`, the client
+/// dialled through a seeded [`ImpairProxy`] that is still transparent:
+/// the lobby crossed clean, the caller arms the lanes for the measured
+/// window. The harness the F26-AC01/AC03 replicated-state cells
+/// (`Props`, `World`) share, set up like [`run_matrix_cell`] minus the
+/// driver seat — these frames need no vehicle.
+fn impaired_pair(name: &str, seed: u64) -> (ImpairProxy, App, App) {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), seed).unwrap();
+    let mut host = host_app(vfs, link);
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), name.to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    let mut client = bridge_app(mount(install.path()), link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut client);
+    hosted_playing(&mut host);
+    until_begun(&mut client);
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    (proxy, host, client)
+}
+
+/// Each armed knob must show in the host→client lane's counter it
+/// claims to turn — the cell proves the recipe really fired on the
+/// wire, not just that the state converged.
+fn assert_recipe_fired(name: &str, impair: Impair, down: mm2_net::LinkStats) {
+    assert_eq!(
+        down.overflowed, 0,
+        "cell {name} overflowed a lane: {down:?}"
+    );
+    if impair.delay > Duration::ZERO || impair.jitter > Duration::ZERO {
+        assert!(down.delayed > 0, "cell {name} delayed nothing: {down:?}");
+    }
+    if impair.loss >= 0.10 {
+        assert!(down.dropped > 0, "cell {name} dropped nothing: {down:?}");
+    }
+    if impair.duplicate > 0.0 {
+        assert!(
+            down.duplicated > 0,
+            "cell {name} duplicated nothing: {down:?}"
+        );
+    }
+    if impair.reorder > 0.0 {
+        assert!(
+            down.reordered > 0,
+            "cell {name} reordered nothing: {down:?}"
+        );
+    }
+    if impair == Impair::default() {
+        assert_eq!(
+            down.delayed + down.dropped + down.duplicated + down.reordered,
+            0,
+            "cell {name} impaired a clean lane: {down:?}"
+        );
+    }
+}
+
+/// How far along its one-way lifecycle a prop is — a replicated prop
+/// may only move up this order (`Settled` and `Broken` are both
+/// terminal), so a reordered or duplicated row can never walk it back.
+fn phase_rank(phase: mm2_game::BangerPhase) -> u8 {
+    use mm2_game::BangerPhase;
+    match phase {
+        BangerPhase::Dormant => 0,
+        BangerPhase::Active => 1,
+        BangerPhase::Settled | BangerPhase::Broken => 2,
+    }
+}
+
+/// F26-AC01/AC03 (props, v17/v18) under impairment: every cell of the
+/// shared matrix arms the host→client lane while the host's world
+/// changes — one prop is knocked, comes to rest, another is knocked
+/// later and rests — and the production `publish_props`/`apply_props`
+/// pair carries it across the storm. Two claims per cell: during the
+/// window no replicated prop's phase ever regresses (a delayed,
+/// reordered or duplicated row is older state, never newer), and once
+/// the link is clean again the rolling resend window (state, not
+/// events) brings the client to exactly the host's props — within a
+/// deadline, whatever loss ate. The recorded rows are `eprintln!`ed.
+///
+/// Evidence level: synthetic integration over real loopback sockets —
+/// synthetic placements, not a retail city.
+#[test]
+fn the_prop_phases_converge_through_each_impairment_cell() {
+    use mm2_game::BangerPhase;
+
+    for (index, (name, impair)) in support::impair_cells().into_iter().enumerate() {
+        let (proxy, mut host, mut client) = impaired_pair(name, 100 + index as u64);
+        let homes = [
+            (BangerPhase::Dormant, Vec3::new(10.0, 0.0, 0.0), 0),
+            (BangerPhase::Active, Vec3::new(20.0, 0.0, 0.0), 0),
+            (BangerPhase::Broken, Vec3::new(30.0, 0.0, 0.0), 2),
+            (BangerPhase::Settled, Vec3::new(40.0, 0.0, 0.0), 0),
+            (BangerPhase::Dormant, Vec3::new(50.0, 0.0, 0.0), 0),
+        ];
+        let host_props: Vec<Entity> = homes
+            .iter()
+            .map(|(phase, pos, pieces)| stamp_prop(&mut host, *phase, *pos, *pieces))
+            .collect();
+        let client_props: Vec<Entity> = homes
+            .iter()
+            .map(|(_, pos, pieces)| stamp_prop(&mut client, BangerPhase::Dormant, *pos, *pieces))
+            .collect();
+        let set_host = |host: &mut App, i: usize, phase: BangerPhase, pos: Vec3| {
+            let world = host.world_mut();
+            world
+                .get_mut::<mm2_game::Banger>(host_props[i])
+                .unwrap()
+                .phase = phase;
+            world
+                .get_mut::<avian3d::prelude::Position>(host_props[i])
+                .unwrap()
+                .0 = pos;
+        };
+
+        proxy.set(LinkDir::Down, impair);
+        let mut ranks = [0u8; 5];
+        for step in 0..120 {
+            match step {
+                30 => set_host(
+                    &mut host,
+                    1,
+                    BangerPhase::Settled,
+                    Vec3::new(22.0, 0.0, 1.0),
+                ),
+                60 => set_host(&mut host, 4, BangerPhase::Active, Vec3::new(50.0, 3.0, 0.0)),
+                90 => set_host(
+                    &mut host,
+                    4,
+                    BangerPhase::Settled,
+                    Vec3::new(50.0, 0.0, 2.0),
+                ),
+                _ => {}
+            }
+            host.update();
+            client.update();
+            for (i, prop) in client_props.iter().enumerate() {
+                let rank = phase_rank(prop_state(&client, *prop).0);
+                assert!(
+                    rank >= ranks[i],
+                    "cell {name}: prop {i} regressed from rank {} to {rank} at step {step}",
+                    ranks[i]
+                );
+                ranks[i] = rank;
+            }
+            thread::sleep(Duration::from_millis(4));
+        }
+        let down = proxy.stats(LinkDir::Down);
+        assert_recipe_fired(name, impair, down);
+
+        // The storm over: the resend window cycles the inventory until
+        // the client holds the host's final world.
+        proxy.set(LinkDir::Down, Impair::default());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            host.update();
+            client.update();
+            let converged = (0..5).all(|i| {
+                let (host_phase, _, host_pos) = prop_state(&host, host_props[i]);
+                let (phase, _, pos) = prop_state(&client, client_props[i]);
+                if host_phase == BangerPhase::Dormant {
+                    phase == BangerPhase::Dormant
+                } else {
+                    phase == host_phase && pos == host_pos
+                }
+            });
+            if converged {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell {name}: the client never reached the host's props"
+            );
+            thread::sleep(Duration::from_millis(4));
+        }
+        let props = client.world().resource::<netdrive::RemoteSnaps>().props();
+        eprintln!(
+            "props cell={name} landed={} stale={} unresolved={} refused={} mismatched={} down={down:?}",
+            props.landed(),
+            props.stale(),
+            props.unresolved(),
+            props.refused(),
+            props.mismatched(),
+        );
+        assert_eq!(props.unresolved(), 0, "cell {name}: a row named no prop");
+        assert_eq!(props.refused(), 0, "cell {name}: a row was refused");
+        assert_eq!(props.mismatched(), 0, "cell {name}: the worlds disagreed");
+        assert!(props.divergence().is_none(), "cell {name}: worlds diverged");
+        assert_eq!(
+            prop_state(&client, client_props[0]).0,
+            BangerPhase::Dormant,
+            "cell {name}: an untouched prop is not replicated"
+        );
+        client.world_mut().resource_mut::<LobbyLink>().leave();
+    }
+}
+
+/// F26-AC01/AC03 (world clock, v20) under impairment: the host's clock
+/// climbs one publish cadence per update through every cell of the
+/// shared matrix while the client consumes the production
+/// `apply_world_clock` seeks the way `advance_world_clock` does. During
+/// the window the client's clock never moves backwards — a delayed,
+/// reordered or duplicated frame is an older clock, dropped as stale,
+/// never a seek back — and once the link is clean the next frame lands
+/// it on the host's tick, within a deadline. Loss may eat frames, never
+/// the later convergence: a frame is the whole state.
+///
+/// Evidence level: synthetic integration over real loopback sockets.
+#[test]
+fn the_world_clock_converges_through_each_impairment_cell() {
+    use mm2_app::worldclock::{PUBLISH_EVERY_TICKS, SYNC_TOLERANCE_TICKS, WorldClock, WorldLimits};
+
+    for (index, (name, impair)) in support::impair_cells().into_iter().enumerate() {
+        let (proxy, mut host, mut client) = impaired_pair(name, 200 + index as u64);
+        host.insert_resource(WorldClock {
+            ticks: 7,
+            seek: None,
+        });
+        // `bridge_app` runs no `advance_world_clock`: this leg consumes
+        // the queued seek itself, as the system would.
+        client.insert_resource(WorldClock::default());
+        // The host steps a cadence per update, far faster than the
+        // default rate bound allows; the bound has its own leg.
+        client
+            .world_mut()
+            .resource_mut::<netdrive::RemoteSnaps>()
+            .set_world_limits(WorldLimits::UNBOUNDED);
+
+        let consume = |client: &mut App| {
+            let mut clock = client.world_mut().resource_mut::<WorldClock>();
+            if let Some(target) = clock.seek.take() {
+                clock.ticks = target;
+            }
+            clock.ticks
+        };
+        proxy.set(LinkDir::Down, impair);
+        let mut last = 0;
+        for _ in 0..120 {
+            host.world_mut().resource_mut::<WorldClock>().ticks += PUBLISH_EVERY_TICKS;
+            host.update();
+            client.update();
+            let now = consume(&mut client);
+            assert!(
+                now >= last,
+                "cell {name}: the client's clock went back from {last} to {now}"
+            );
+            last = now;
+            thread::sleep(Duration::from_millis(4));
+        }
+        let down = proxy.stats(LinkDir::Down);
+        assert_recipe_fired(name, impair, down);
+        assert!(last > 0, "cell {name}: no clock frame ever landed");
+
+        proxy.set(LinkDir::Down, Impair::default());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            host.world_mut().resource_mut::<WorldClock>().ticks += PUBLISH_EVERY_TICKS;
+            host.update();
+            client.update();
+            let now = consume(&mut client);
+            assert!(now >= last, "cell {name}: the clock went back in the tail");
+            last = now;
+            let host_ticks = host.world().resource::<WorldClock>().ticks;
+            // One cadence of lag is the frame still on the wire.
+            if host_ticks - now <= PUBLISH_EVERY_TICKS + SYNC_TOLERANCE_TICKS {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell {name}: the client clock {now} never caught the host's {host_ticks}"
+            );
+            thread::sleep(Duration::from_millis(4));
+        }
+        let world = client.world().resource::<netdrive::RemoteSnaps>().world();
+        eprintln!(
+            "world cell={name} clock={last} landed={} stale={} refused={} seeks={} down={down:?}",
+            world.landed(),
+            world.stale(),
+            world.refused(),
+            world.seeks(),
+        );
+        assert_eq!(world.refused(), 0, "cell {name}: a frame was refused");
+        client.world_mut().resource_mut::<LobbyLink>().leave();
+    }
+}
