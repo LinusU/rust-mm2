@@ -1976,7 +1976,7 @@ sleep standing in for "the datum has crossed a socket or thread").
   `netdrive::INPUT_STALE` wait, and the 300 ms writer-flush grace in
   `net_drive.rs` before reading proxy counters.
 - **Not convertible from the test side.** `net_drive.rs` sleeps 400 ms
-  (ten sites) between `event=started` on the host and arming the
+  (seven sites) between `event=started` on the host and arming the
   impairment proxy so the one-shot `Start` verb crosses the clean lane
   first, and `net_edge.rs::a_killed_host_ends_a_driving_client` sleeps 2 s
   to let snapshots flow before the kill. The `mm2` client prints no record
