@@ -7102,6 +7102,34 @@ fn run_matrix_cell(cell: &MatrixCell, seed: u64) {
     }
 }
 
+/// The `Results` debt is the transition frame plus at most
+/// `RESULTS_FRAME_REPEATS` repeats: after that window the publisher
+/// goes quiet.
+fn assert_results_debt_is_bounded(host: &mut App) {
+    let sent = |host: &App| {
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent
+    };
+    let before = sent(host);
+    for _ in 0..(netdrive::RESULTS_FRAME_REPEATS + 8) {
+        host.update();
+    }
+    let after_window = sent(host);
+    assert!(
+        after_window - before <= u64::from(netdrive::RESULTS_FRAME_REPEATS),
+        "Results repeats exceeded the bound: {before} -> {after_window}"
+    );
+    for _ in 0..4 {
+        host.update();
+    }
+    assert_eq!(
+        sent(host),
+        after_window,
+        "the Results stream ends after its repeat window"
+    );
+}
+
 /// F25-B repair leg, the v14 candidate's blocking finding over the
 /// real path: the authority's own `Playing → Results` used to kill both
 /// producers a racing remote client lives on — `advance_race`
@@ -7312,22 +7340,10 @@ fn the_deferred_authority_delivers_the_wire_seats_terminal_edge() {
         mm2_game::RacePhase::Complete
     );
 
-    // The owed `Results`-phase frame publishes exactly once — the
-    // publisher does not stream a quiescent phase.
-    let sent_at_results = host
-        .world()
-        .resource::<netdrive::NetDriveReport>()
-        .snaps_sent;
-    for _ in 0..4 {
-        host.update();
-    }
-    assert_eq!(
-        host.world()
-            .resource::<netdrive::NetDriveReport>()
-            .snaps_sent,
-        sent_at_results,
-        "the Results debt is the one unpublished transition frame"
-    );
+    // The owed `Results`-phase frame repeats a bounded number of
+    // times (a lost datagram must not strand the client) — the
+    // publisher does not stream a quiescent phase past that.
+    assert_results_debt_is_bounded(&mut host);
 
     // And it lands: the client's own terminal edge mints the same
     // `TimedOut` `advance_race` recorded on the authority and ends its
@@ -7566,14 +7582,6 @@ fn run_race_results_cell(cell: &MatrixCell, seed: u64) {
         "{}",
         cell.name
     );
-
-    // The host sends the Results-phase frame exactly once, so a drop
-    // on a lossy cell would strand the client (a protocol gap tracked
-    // as its own task, not something this test may flake on). Progress
-    // was proven under the recipe above; the terminal edge crosses a
-    // clean link.
-    proxy.set(LinkDir::Up, Impair::default());
-    proxy.set(LinkDir::Down, Impair::default());
 
     // The deadline resolves the client's seat and ends the race.
     host.world_mut().resource_mut::<mm2_game::RaceState>().clock = 9_997;
@@ -7863,20 +7871,7 @@ fn a_departing_wire_seat_releases_the_deferred_authority() {
 
     // The transition still owes its one `Results`-phase frame — to an
     // empty wire now, but the debt bounds the stream the same.
-    let sent_at_results = host
-        .world()
-        .resource::<netdrive::NetDriveReport>()
-        .snaps_sent;
-    for _ in 0..4 {
-        host.update();
-    }
-    assert_eq!(
-        host.world()
-            .resource::<netdrive::NetDriveReport>()
-            .snaps_sent,
-        sent_at_results,
-        "the Results debt stays exactly one unpublished transition frame"
-    );
+    assert_results_debt_is_bounded(&mut host);
 }
 
 /// The stranded client's recovery over the same staging: a client

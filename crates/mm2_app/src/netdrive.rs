@@ -2522,6 +2522,13 @@ type SnapTrailerSourceRow<'a> = (
     Option<&'a VehicleInput>,
 );
 
+/// How many extra times the `Results`-phase terminal frame is re-sent
+/// after its first send (F26): an unacknowledged datagram can be lost,
+/// and a client that never sees it never leaves `Playing`. A designed
+/// bound, not an original rule — 30 updates is half a second at 60 Hz,
+/// so even a 30% loss lane misses every copy with probability ~1e-16.
+pub const RESULTS_FRAME_REPEATS: u32 = 30;
+
 /// Host-side: every participant's authoritative pose, broadcast once per
 /// update while the session is live. `tick` is the host's session tick —
 /// physics only moves inside fixed steps, so a same-tick snapshot is a
@@ -2555,7 +2562,7 @@ pub fn publish_snapshots(
     // The `(wire generation, session tick)` of the last broadcast —
     // bounds the `Results`-phase debt below to the one unpublished
     // transition frame.
-    mut published: Local<Option<(u64, u64)>>,
+    mut published: Local<Option<((u64, u64), u32)>>,
     players: Query<SnapSourceRow<'_>, With<Player>>,
     // Every trailer towing a `NetPlayer` seat — the host's own rig's
     // trailer included — publishes under the owner's wire id.
@@ -2584,8 +2591,15 @@ pub fn publish_snapshots(
     // `Playing`-only), so the debt is exactly one unpublished
     // `(generation, tick)`; everything earlier already left inside the
     // live phases `advance_race`'s wire-seat deferral preserves.
-    let owed =
-        *session.phase() == SessionPhase::Results && published.is_none_or(|last| last != key);
+    //
+    // Snaps ride an unreliable lane and the client never acknowledges
+    // one, so a single send could be dropped and strand the client in
+    // `Playing` forever. The frame is therefore repeated for
+    // [`RESULTS_FRAME_REPEATS`] further updates: the same frozen
+    // `(generation, tick)`, so a copy landing after the first is a
+    // counted stale drop on the receiver, and the stream still ends.
+    let owed = *session.phase() == SessionPhase::Results
+        && published.is_none_or(|(last, sent)| last != key || sent <= RESULTS_FRAME_REPEATS);
     if !matches!(
         session.phase(),
         SessionPhase::Ready | SessionPhase::Countdown | SessionPhase::Playing
@@ -2776,7 +2790,10 @@ pub fn publish_snapshots(
         })
         .is_ok()
     {
-        *published = Some(key);
+        let sent = published
+            .filter(|&(last, _)| last == key)
+            .map_or(0, |(_, sent)| sent);
+        *published = Some((key, sent + 1));
         report.snaps_sent += 1;
         report.impacts_sent += sent_rows;
         report.surfaces_sent += sent_surfaces;
