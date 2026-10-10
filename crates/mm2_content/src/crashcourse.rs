@@ -630,6 +630,110 @@ impl CourseCatalog {
     }
 }
 
+/// One lesson's row in the coverage report (F21-AC06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LessonCoverage {
+    /// File stem (`crash<N>`).
+    pub stem: String,
+    /// Authored tag decoded.
+    pub stage: LessonStage,
+    /// Sub-events (legs) in the Amateur / Professional table.
+    pub legs: [usize; 2],
+    /// Distinct objective families across both tables, first-seen order.
+    pub objectives: Vec<LessonObjective>,
+    /// Weakest evidence of any leg in either table; a lesson with no
+    /// legs at all is `Unresolved`, never vacuously verified.
+    pub evidence: RuleEvidence,
+}
+
+/// Every lesson of one city bucketed by [`RuleEvidence`]: the four-way
+/// split F21-AC06 asks for. Structural catalog success is not rule
+/// coverage — a lesson that merely builds and runs on the gate-run
+/// baseline is `Unresolved` here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CourseCoverage {
+    /// City stem.
+    pub city: String,
+    /// One row per lesson, authored order — nothing filtered.
+    pub lessons: Vec<LessonCoverage>,
+}
+
+impl CourseCoverage {
+    /// Lessons at exactly `evidence`.
+    pub fn count(&self, evidence: RuleEvidence) -> usize {
+        self.lessons
+            .iter()
+            .filter(|l| l.evidence == evidence)
+            .count()
+    }
+
+    /// One audit line per lesson plus a summary line.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for l in &self.lessons {
+            let families: Vec<String> = l.objectives.iter().map(|o| o.label()).collect();
+            out.push_str(&format!(
+                "{} {:?} legs {}/{} [{}] {}\n",
+                l.stem,
+                l.stage,
+                l.legs[0],
+                l.legs[1],
+                families.join(","),
+                l.evidence.label()
+            ));
+        }
+        out.push_str(&format!(
+            "{}: {} lessons — {} original-verified, {} synthetic-only, {} unresolved\n",
+            self.city,
+            self.lessons.len(),
+            self.count(RuleEvidence::OriginalVerified),
+            self.count(RuleEvidence::SyntheticOnly),
+            self.count(RuleEvidence::Unresolved),
+        ));
+        out
+    }
+}
+
+impl CrashLesson {
+    /// This lesson's coverage row.
+    pub fn coverage(&self) -> LessonCoverage {
+        let mut legs = [0usize; 2];
+        let mut objectives: Vec<LessonObjective> = Vec::new();
+        let mut evidence: Option<RuleEvidence> = None;
+        for table in &self.tables {
+            let slot = match table.role {
+                LessonTableRole::Amateur => 0,
+                LessonTableRole::Professional => 1,
+            };
+            legs[slot] += table.sub_events.len();
+            for sub in &table.sub_events {
+                if !objectives.contains(&sub.objective) {
+                    objectives.push(sub.objective);
+                }
+                let e = sub.objective.rule_evidence();
+                evidence = Some(evidence.map_or(e, |w| w.min(e)));
+            }
+        }
+        LessonCoverage {
+            stem: self.stem.clone(),
+            stage: self.stage.clone(),
+            legs,
+            objectives,
+            evidence: evidence.unwrap_or(RuleEvidence::Unresolved),
+        }
+    }
+}
+
+impl CourseCatalog {
+    /// The F21-AC06 coverage report over every lesson.
+    pub fn coverage(&self) -> CourseCoverage {
+        CourseCoverage {
+            city: self.city.clone(),
+            lessons: self.lessons.iter().map(CrashLesson::coverage).collect(),
+        }
+    }
+}
+
 /// The basename of a record's logical path.
 fn record_basename(record: &EventRecord) -> &str {
     record.logical.rsplit('/').next().unwrap_or(&record.logical)

@@ -7,6 +7,7 @@ use std::path::Path;
 use mm2_assets::Vfs;
 use mm2_content::{
     CourseCatalog, EventCatalog, EventStatus, LessonObjective, LessonStage, LessonTableRole,
+    RuleEvidence,
 };
 
 const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
@@ -302,4 +303,20 @@ fn each_school_names_its_required_vehicle() {
     assert_eq!(mm2_content::required_vehicle("london"), Some("vpcab"));
     assert_eq!(mm2_content::required_vehicle("testcity"), None);
     assert_eq!(mm2_content::required_vehicle(""), None);
+}
+
+#[test]
+fn coverage_lists_every_lesson_and_claims_no_verified_rule() {
+    let d = synthetic_install();
+    let (_, cc) = course(d.path());
+    let cov = cc.coverage();
+    assert_eq!(cov.lessons.len(), cc.lessons.len());
+    assert!(!cov.lessons.is_empty());
+    for (row, lesson) in cov.lessons.iter().zip(&cc.lessons) {
+        assert_eq!(row.stem, lesson.stem);
+        assert_eq!(row.evidence, RuleEvidence::Unresolved, "{}", row.stem);
+    }
+    assert_eq!(cov.count(RuleEvidence::Unresolved), cov.lessons.len());
+    assert_eq!(cov.count(RuleEvidence::OriginalVerified), 0);
+    assert!(cov.render().contains("unresolved"));
 }
