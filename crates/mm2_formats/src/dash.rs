@@ -317,6 +317,14 @@ impl PovCamSpec {
         crate::camtrack::usable1(self.pitch)
     }
 
+    /// The near plane `Midtown2.exe` actually uses for a loaded
+    /// `camPovCS`, metres. `Load` (`0x4a1110`) calls the class's
+    /// post-load virtual after every successful parse, and
+    /// `camPovCS`'s (`0x51d6f0`) stores 0.1 into `CameraNear`, so the
+    /// authored value is dead data (verified_original — UNK-37,
+    /// `docs/research/camtrack.md`).
+    pub const RUNTIME_NEAR_M: f32 = 0.1;
+
     /// `CameraNear` when authored *and* usable — a `nan` survives
     /// `f32::clamp` into the projection, so it reads unauthored.
     /// [`Self::validate`] names it.

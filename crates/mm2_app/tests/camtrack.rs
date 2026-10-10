@@ -1138,3 +1138,66 @@ fn report_names_the_bound_lenses() {
     );
     assert_eq!(TrackReport::default().smoke_detail(), "sized");
 }
+
+/// Retail sweep behind the UNK-37 reading: `Midtown2.exe`'s `Load`
+/// (`0x4a1110`) calls the class's post-load virtual after a successful
+/// parse, and `camPovCS`'s (`0x51d6f0`) stores 0.1 into `CameraNear`
+/// while `camTrackCS`'s (`0x51dad0`) stores 0.5. This lists what the
+/// stock records author, so the overwritten values are visible.
+#[test]
+fn retail_authored_camera_near_values_are_what_the_loader_overwrites() {
+    let Some((retail, _slot)) = crate::support::retail_slot() else {
+        return;
+    };
+    let vfs = crate::support::mount(&retail);
+    let mut pov = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut track = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for path in vfs.list() {
+        let lower = path.to_ascii_lowercase();
+        let (map, is_pov) = if lower.ends_with(".campovcs") {
+            (&mut pov, true)
+        } else if lower.ends_with(".camtrackcs") {
+            (&mut track, false)
+        } else {
+            continue;
+        };
+        let (bytes, _) = vfs.read_path(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let near = if is_pov {
+            // Other `.campovcs` blocks (`PovCamCS`) are a different class.
+            match mm2_formats::dash::PovCamSpec::parse(&text) {
+                Ok(spec) => spec.camera_near,
+                Err(e) => {
+                    eprintln!("skipped {path}: {e}");
+                    continue;
+                }
+            }
+        } else {
+            TrackCamSpec::parse(&text).unwrap().camera_near
+        };
+        map.entry(format!("{near:?}")).or_default().push(path);
+    }
+    for (name, m) in [("campovcs", &pov), ("camtrackcs", &track)] {
+        for (near, paths) in m {
+            eprintln!(
+                "{name} CameraNear {near}: {} records {paths:?}",
+                paths.len()
+            );
+        }
+    }
+    assert!(
+        !pov.is_empty() && !track.is_empty(),
+        "no retail camera records"
+    );
+}
+
+/// `camTrackCS`'s post-load virtual stores 0.5 into `CameraNear`
+/// (UNK-37), so five retail records that author 1.0 still bind 0.5.
+#[test]
+fn chase_lens_near_is_the_loaders_constant() {
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    for authored in [1.0, 0.02, 9.0] {
+        spec.camera_near = Some(authored);
+        assert_eq!(ChaseLens::authored(&spec).clip_near, 0.5, "{authored}");
+    }
+}

@@ -318,6 +318,12 @@ impl TrackCamSpec {
         usable1(self.max_speed)
     }
 
+    /// The near plane `Midtown2.exe` actually uses for a loaded
+    /// `camTrackCS`, metres: the class's post-load virtual (`0x51dad0`)
+    /// stores 0.5 into `CameraNear` after every successful parse, so the
+    /// authored value is dead data (verified_original — UNK-37).
+    pub const RUNTIME_NEAR_M: f32 = 0.5;
+
     /// [`Self::min_dist_m`] for `CameraNear`.
     pub fn camera_near_m(&self) -> Option<f32> {
         usable1(self.camera_near)

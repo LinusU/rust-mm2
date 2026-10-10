@@ -765,13 +765,13 @@ fn spawn_dash_reports_absent_without_authored_records() {
     assert_eq!(q.iter(app.world()).count(), 0);
 }
 
-/// Four retail `_dash.campovcs` records author `CameraNear 3.0`, which
-/// would clip the entire interior cluster (~1 m ahead of the eye) into
-/// a bare windshield view. The cockpit camera caps the authored near
-/// plane at the designed 0.5 m bound (UNK-37); smaller authored values
-/// pass through untouched.
+/// The original's `camPovCS` post-load virtual overwrites `CameraNear`
+/// with 0.1 after every parse (UNK-37), so the cockpit camera's near
+/// plane is that constant whatever the record authors — four retail
+/// `_dash.campovcs` records author 3.0, which would otherwise clip the
+/// whole interior cluster.
 #[test]
-fn cockpit_near_clip_is_capped_for_the_interior() {
+fn cockpit_near_clip_is_the_loaders_constant() {
     fn pov(near: f32) -> PovCamSpec {
         PovCamSpec {
             type_tag: None,
@@ -824,7 +824,7 @@ fn cockpit_near_clip_is_capped_for_the_interior() {
         app
     }
 
-    for (authored, want) in [(3.0_f32, 0.5_f32), (0.1, 0.1)] {
+    for (authored, want) in [(3.0_f32, 0.1_f32), (0.1, 0.1), (0.02, 0.1)] {
         let mut app = spawn_with(authored);
         let mut q = app
             .world_mut()

@@ -131,7 +131,7 @@ impl ChaseLens {
             // (non-finite or outside `(0, 180)`) as unauthored — the
             // designed 70° stands in, `validate` reports the record.
             fov_deg: spec.camera_fov_deg().unwrap_or(70.0),
-            clip_near: spec.camera_near_m().unwrap_or(0.5).max(0.01),
+            clip_near: TrackCamSpec::RUNTIME_NEAR_M,
             clip_far: spec.camera_far_m().unwrap_or(600.0).max(1.0),
             authored: true,
         }
