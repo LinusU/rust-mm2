@@ -553,6 +553,56 @@ fn a_player_who_is_no_longer_racing_stands_the_cops_down() {
     assert!(app.world().get::<EmergencyLights>(cop).is_none());
 }
 
+/// F20 edge case "pursuit during race finish" (AC03): a result — a
+/// finish or a timeout, as the race authority writes them — ends a
+/// chase and keeps the cops at their posts; being in sight afterwards
+/// starts nothing. There is no bust or arrest outcome (UNK-9).
+#[test]
+fn a_finish_or_timeout_mid_chase_ends_it_and_a_finished_player_in_sight_starts_none() {
+    use mm2_game::{EventRef, PlayerId, ResultId};
+    for timed_out in [false, true] {
+        let (_tmp, mut app) = pursuit_app(NEAR);
+        let player = local_car(&mut app);
+        run_to_racing(&mut app);
+        run(&mut app, 180);
+        let cop = cop_at(&mut app, 0);
+        assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+
+        let result = ResultId {
+            generation: 0,
+            participant: PlayerId(0),
+            event: None::<EventRef>,
+            sequence: 0,
+        };
+        app.world_mut()
+            .get_mut::<RaceProgress>(player)
+            .unwrap()
+            .state = if timed_out {
+            ParticipantState::TimedOut {
+                race_ticks: 1,
+                result,
+            }
+        } else {
+            ParticipantState::Finished {
+                race_ticks: 1,
+                result,
+            }
+        };
+        run(&mut app, 2);
+        assert_eq!(phase_of(&app, cop), PursuitPhase::Idle, "{timed_out}");
+        assert!(app.world().get::<EmergencyLights>(cop).is_none());
+
+        // The player is still within sight of the cop for a long while:
+        // no chase starts, none is counted, the lights stay off.
+        let chases = app.world().resource::<PursuitReport>().committed;
+        run(&mut app, 600);
+        assert_eq!(phase_of(&app, cop), PursuitPhase::Idle, "{timed_out}");
+        assert_eq!(app.world().resource::<PursuitReport>().committed, chases);
+        assert_eq!(app.world().resource::<PursuitReport>().pursuing, 0);
+        assert!(app.world().get::<EmergencyLights>(cop).is_none());
+    }
+}
+
 /// F20 edge case "respawn while chased": the driver's own reset (the
 /// `R` key's `ResetVehicle` bundle) is a teleport, not an escape the
 /// cop can follow. The chase ends within the bound, the cop is never
