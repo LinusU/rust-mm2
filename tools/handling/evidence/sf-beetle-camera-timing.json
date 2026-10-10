@@ -1,0 +1,3738 @@
+{
+  "command": "MM2_TRACE_STATIC_CONTACTS=1 target/debug/mm2 --mm2-path <install> --city sf --car vpbug --seq --no-profile",
+  "instrumentation": "Temporary Update observer ordered after chase_follow recorded root Transform, GlobalTransform, ChaseCamera.last_pos; removed from production source after measurement. Identical default graphics, Retina native window. Before binary compiled before camera fix; after binary includes it.",
+  "captures": {
+    "before": {
+      "raw_log_sha256": "aa3f425b56ce71cc5103be27ee2e7f033c52de67a298f723f631c47463ceda28",
+      "sample_window_sim_seconds": [
+        6,
+        12
+      ],
+      "target_to_render_pose_distance_m": {
+        "count": 268,
+        "min": 0.0008578914,
+        "median": 0.125091645,
+        "max": 0.4865175,
+        "mean": 0.15523113091791044,
+        "stddev": 0.11313799294552526
+      },
+      "frame_delta_seconds": {
+        "count": 268,
+        "min": 0.019951291,
+        "median": 0.0225702075,
+        "max": 0.025893291,
+        "mean": 0.022452722320895523,
+        "stddev": 0.000988073284068259
+      },
+      "samples": [
+        {
+          "sim": 6.0,
+          "render_z": 224.09839,
+          "global_z": 224.02335,
+          "followed_z": 224.02335,
+          "follow_error": 0.0753211
+        },
+        {
+          "sim": 6.0333333,
+          "render_z": 224.22098,
+          "global_z": 224.20097,
+          "followed_z": 224.20097,
+          "follow_error": 0.020078445
+        },
+        {
+          "sim": 6.05,
+          "render_z": 224.35248,
+          "global_z": 224.2921,
+          "followed_z": 224.2921,
+          "follow_error": 0.060604125
+        },
+        {
+          "sim": 6.0666666,
+          "render_z": 224.4768,
+          "global_z": 224.38455,
+          "followed_z": 224.38455,
+          "follow_error": 0.09260047
+        },
+        {
+          "sim": 6.1,
+          "render_z": 224.60052,
+          "global_z": 224.57346,
+          "followed_z": 224.57346,
+          "follow_error": 0.027170895
+        },
+        {
+          "sim": 6.116667,
+          "render_z": 224.72708,
+          "global_z": 224.66966,
+          "followed_z": 224.66966,
+          "follow_error": 0.057635874
+        },
+        {
+          "sim": 6.1333337,
+          "render_z": 224.85431,
+          "global_z": 224.76689,
+          "followed_z": 224.76689,
+          "follow_error": 0.08774857
+        },
+        {
+          "sim": 6.166667,
+          "render_z": 224.9828,
+          "global_z": 224.9646,
+          "followed_z": 224.9646,
+          "follow_error": 0.018272774
+        },
+        {
+          "sim": 6.1833334,
+          "render_z": 225.11441,
+          "global_z": 225.06479,
+          "followed_z": 225.06479,
+          "follow_error": 0.049810447
+        },
+        {
+          "sim": 6.2000003,
+          "render_z": 225.24577,
+          "global_z": 225.16597,
+          "followed_z": 225.16597,
+          "follow_error": 0.08010755
+        },
+        {
+          "sim": 6.2333336,
+          "render_z": 225.379,
+          "global_z": 225.3709,
+          "followed_z": 225.3709,
+          "follow_error": 0.008133424
+        },
+        {
+          "sim": 6.25,
+          "render_z": 225.51569,
+          "global_z": 225.47458,
+          "followed_z": 225.47458,
+          "follow_error": 0.04126394
+        },
+        {
+          "sim": 6.266667,
+          "render_z": 225.65134,
+          "global_z": 225.57924,
+          "followed_z": 225.57924,
+          "follow_error": 0.07237267
+        },
+        {
+          "sim": 6.2833333,
+          "render_z": 225.78831,
+          "global_z": 225.68478,
+          "followed_z": 225.68478,
+          "follow_error": 0.10392621
+        },
+        {
+          "sim": 6.3166666,
+          "render_z": 225.9272,
+          "global_z": 225.8976,
+          "followed_z": 225.8976,
+          "follow_error": 0.029714823
+        },
+        {
+          "sim": 6.3333335,
+          "render_z": 226.0686,
+          "global_z": 226.0054,
+          "followed_z": 226.0054,
+          "follow_error": 0.063442275
+        },
+        {
+          "sim": 6.35,
+          "render_z": 226.21143,
+          "global_z": 226.11415,
+          "followed_z": 226.11415,
+          "follow_error": 0.09764478
+        },
+        {
+          "sim": 6.3833337,
+          "render_z": 226.35376,
+          "global_z": 226.33456,
+          "followed_z": 226.33456,
+          "follow_error": 0.0192688
+        },
+        {
+          "sim": 6.4,
+          "render_z": 226.5007,
+          "global_z": 226.44629,
+          "followed_z": 226.44629,
+          "follow_error": 0.05461872
+        },
+        {
+          "sim": 6.416667,
+          "render_z": 226.64938,
+          "global_z": 226.5591,
+          "followed_z": 226.5591,
+          "follow_error": 0.09062825
+        },
+        {
+          "sim": 6.4500003,
+          "render_z": 226.80055,
+          "global_z": 226.78816,
+          "followed_z": 226.78816,
+          "follow_error": 0.0124367485
+        },
+        {
+          "sim": 6.4666667,
+          "render_z": 226.95435,
+          "global_z": 226.90453,
+          "followed_z": 226.90453,
+          "follow_error": 0.050008062
+        },
+        {
+          "sim": 6.4833336,
+          "render_z": 227.10736,
+          "global_z": 227.02217,
+          "followed_z": 227.02217,
+          "follow_error": 0.08551141
+        },
+        {
+          "sim": 6.516667,
+          "render_z": 227.26329,
+          "global_z": 227.26106,
+          "followed_z": 227.26106,
+          "follow_error": 0.0022359332
+        },
+        {
+          "sim": 6.5333333,
+          "render_z": 227.42241,
+          "global_z": 227.38223,
+          "followed_z": 227.38223,
+          "follow_error": 0.040328242
+        },
+        {
+          "sim": 6.55,
+          "render_z": 227.5847,
+          "global_z": 227.50444,
+          "followed_z": 227.50444,
+          "follow_error": 0.08056368
+        },
+        {
+          "sim": 6.5666666,
+          "render_z": 227.74751,
+          "global_z": 227.62784,
+          "followed_z": 227.62784,
+          "follow_error": 0.12012569
+        },
+        {
+          "sim": 6.6000004,
+          "render_z": 227.91284,
+          "global_z": 227.87778,
+          "followed_z": 227.87778,
+          "follow_error": 0.035197247
+        },
+        {
+          "sim": 6.616667,
+          "render_z": 228.0795,
+          "global_z": 228.00432,
+          "followed_z": 228.00432,
+          "follow_error": 0.07546384
+        },
+        {
+          "sim": 6.633333,
+          "render_z": 228.24742,
+          "global_z": 228.13202,
+          "followed_z": 228.13202,
+          "follow_error": 0.1158375
+        },
+        {
+          "sim": 6.666667,
+          "render_z": 228.41898,
+          "global_z": 228.39047,
+          "followed_z": 228.39047,
+          "follow_error": 0.028611064
+        },
+        {
+          "sim": 6.6833334,
+          "render_z": 228.59244,
+          "global_z": 228.52121,
+          "followed_z": 228.52121,
+          "follow_error": 0.071496926
+        },
+        {
+          "sim": 6.7000003,
+          "render_z": 228.76666,
+          "global_z": 228.6531,
+          "followed_z": 228.6531,
+          "follow_error": 0.113985576
+        },
+        {
+          "sim": 6.7333336,
+          "render_z": 228.94208,
+          "global_z": 228.91992,
+          "followed_z": 228.91992,
+          "follow_error": 0.022239685
+        },
+        {
+          "sim": 6.75,
+          "render_z": 229.1211,
+          "global_z": 229.05482,
+          "followed_z": 229.05482,
+          "follow_error": 0.066519454
+        },
+        {
+          "sim": 6.766667,
+          "render_z": 229.29863,
+          "global_z": 229.19086,
+          "followed_z": 229.19086,
+          "follow_error": 0.10818068
+        },
+        {
+          "sim": 6.8,
+          "render_z": 229.48128,
+          "global_z": 229.4659,
+          "followed_z": 229.4659,
+          "follow_error": 0.015439361
+        },
+        {
+          "sim": 6.8166666,
+          "render_z": 229.66391,
+          "global_z": 229.60489,
+          "followed_z": 229.60489,
+          "follow_error": 0.059243917
+        },
+        {
+          "sim": 6.8333335,
+          "render_z": 229.84822,
+          "global_z": 229.74493,
+          "followed_z": 229.74493,
+          "follow_error": 0.10367776
+        },
+        {
+          "sim": 6.866667,
+          "render_z": 230.03145,
+          "global_z": 230.028,
+          "followed_z": 230.028,
+          "follow_error": 0.003463451
+        },
+        {
+          "sim": 6.883333,
+          "render_z": 230.22324,
+          "global_z": 230.17105,
+          "followed_z": 230.17105,
+          "follow_error": 0.05238279
+        },
+        {
+          "sim": 6.9,
+          "render_z": 230.41367,
+          "global_z": 230.31502,
+          "followed_z": 230.31502,
+          "follow_error": 0.099021494
+        },
+        {
+          "sim": 6.916667,
+          "render_z": 230.60571,
+          "global_z": 230.46005,
+          "followed_z": 230.46005,
+          "follow_error": 0.14621198
+        },
+        {
+          "sim": 6.9500003,
+          "render_z": 230.8033,
+          "global_z": 230.75294,
+          "followed_z": 230.75294,
+          "follow_error": 0.050544076
+        },
+        {
+          "sim": 6.9666667,
+          "render_z": 231.00113,
+          "global_z": 230.90082,
+          "followed_z": 230.90082,
+          "follow_error": 0.100691006
+        },
+        {
+          "sim": 6.9833336,
+          "render_z": 231.19847,
+          "global_z": 231.04968,
+          "followed_z": 231.04968,
+          "follow_error": 0.1493514
+        },
+        {
+          "sim": 7.016667,
+          "render_z": 231.3993,
+          "global_z": 231.35022,
+          "followed_z": 231.35022,
+          "follow_error": 0.049273107
+        },
+        {
+          "sim": 7.0333333,
+          "render_z": 231.59854,
+          "global_z": 231.50186,
+          "followed_z": 231.50186,
+          "follow_error": 0.09704531
+        },
+        {
+          "sim": 7.05,
+          "render_z": 231.80031,
+          "global_z": 231.65448,
+          "followed_z": 231.65448,
+          "follow_error": 0.14637986
+        },
+        {
+          "sim": 7.0833335,
+          "render_z": 232.00679,
+          "global_z": 231.9624,
+          "followed_z": 231.9624,
+          "follow_error": 0.044555377
+        },
+        {
+          "sim": 7.1000004,
+          "render_z": 232.21342,
+          "global_z": 232.11784,
+          "followed_z": 232.11784,
+          "follow_error": 0.09594222
+        },
+        {
+          "sim": 7.116667,
+          "render_z": 232.42581,
+          "global_z": 232.2741,
+          "followed_z": 232.2741,
+          "follow_error": 0.15229122
+        },
+        {
+          "sim": 7.15,
+          "render_z": 232.6431,
+          "global_z": 232.58926,
+          "followed_z": 232.58926,
+          "follow_error": 0.05403644
+        },
+        {
+          "sim": 7.166667,
+          "render_z": 232.86162,
+          "global_z": 232.74814,
+          "followed_z": 232.74814,
+          "follow_error": 0.11390897
+        },
+        {
+          "sim": 7.2000003,
+          "render_z": 233.07579,
+          "global_z": 233.06851,
+          "followed_z": 233.06851,
+          "follow_error": 0.0073069567
+        },
+        {
+          "sim": 7.2166667,
+          "render_z": 233.29193,
+          "global_z": 233.23003,
+          "followed_z": 233.23003,
+          "follow_error": 0.0621388
+        },
+        {
+          "sim": 7.2333336,
+          "render_z": 233.51031,
+          "global_z": 233.39227,
+          "followed_z": 233.39227,
+          "follow_error": 0.118488565
+        },
+        {
+          "sim": 7.266667,
+          "render_z": 233.72694,
+          "global_z": 233.71942,
+          "followed_z": 233.71942,
+          "follow_error": 0.007551143
+        },
+        {
+          "sim": 7.2833333,
+          "render_z": 233.9461,
+          "global_z": 233.8842,
+          "followed_z": 233.8842,
+          "follow_error": 0.0621388
+        },
+        {
+          "sim": 7.3,
+          "render_z": 234.16417,
+          "global_z": 234.04977,
+          "followed_z": 234.04977,
+          "follow_error": 0.11482766
+        },
+        {
+          "sim": 7.3333335,
+          "render_z": 234.38489,
+          "global_z": 234.38327,
+          "followed_z": 234.38327,
+          "follow_error": 0.0016239145
+        },
+        {
+          "sim": 7.3500004,
+          "render_z": 234.61282,
+          "global_z": 234.55118,
+          "followed_z": 234.55118,
+          "follow_error": 0.06187839
+        },
+        {
+          "sim": 7.366667,
+          "render_z": 234.8396,
+          "global_z": 234.71985,
+          "followed_z": 234.71985,
+          "follow_error": 0.12020434
+        },
+        {
+          "sim": 7.4,
+          "render_z": 235.06375,
+          "global_z": 235.05943,
+          "followed_z": 235.05943,
+          "follow_error": 0.004336108
+        },
+        {
+          "sim": 7.416667,
+          "render_z": 235.29446,
+          "global_z": 235.23032,
+          "followed_z": 235.23032,
+          "follow_error": 0.06439059
+        },
+        {
+          "sim": 7.4333334,
+          "render_z": 235.52528,
+          "global_z": 235.40193,
+          "followed_z": 235.40193,
+          "follow_error": 0.12381831
+        },
+        {
+          "sim": 7.4666667,
+          "render_z": 235.75287,
+          "global_z": 235.74727,
+          "followed_z": 235.74727,
+          "follow_error": 0.005621223
+        },
+        {
+          "sim": 7.4833336,
+          "render_z": 235.98251,
+          "global_z": 235.92097,
+          "followed_z": 235.92097,
+          "follow_error": 0.061771322
+        },
+        {
+          "sim": 7.5,
+          "render_z": 236.21397,
+          "global_z": 236.09537,
+          "followed_z": 236.09537,
+          "follow_error": 0.119055636
+        },
+        {
+          "sim": 7.516667,
+          "render_z": 236.4435,
+          "global_z": 236.27042,
+          "followed_z": 236.27042,
+          "follow_error": 0.17373514
+        },
+        {
+          "sim": 7.55,
+          "render_z": 236.67648,
+          "global_z": 236.6225,
+          "followed_z": 236.6225,
+          "follow_error": 0.054189775
+        },
+        {
+          "sim": 7.5666666,
+          "render_z": 236.91528,
+          "global_z": 236.7995,
+          "followed_z": 236.7995,
+          "follow_error": 0.11622157
+        },
+        {
+          "sim": 7.5833335,
+          "render_z": 237.15292,
+          "global_z": 236.97714,
+          "followed_z": 236.97714,
+          "follow_error": 0.17644624
+        },
+        {
+          "sim": 7.616667,
+          "render_z": 237.39134,
+          "global_z": 237.33427,
+          "followed_z": 237.33427,
+          "follow_error": 0.057283595
+        },
+        {
+          "sim": 7.6333337,
+          "render_z": 237.62973,
+          "global_z": 237.51375,
+          "followed_z": 237.51375,
+          "follow_error": 0.11642117
+        },
+        {
+          "sim": 7.666667,
+          "render_z": 237.89716,
+          "global_z": 237.87447,
+          "followed_z": 237.87447,
+          "follow_error": 0.0227757
+        },
+        {
+          "sim": 7.6833334,
+          "render_z": 238.15302,
+          "global_z": 238.0557,
+          "followed_z": 238.0557,
+          "follow_error": 0.097688325
+        },
+        {
+          "sim": 7.7000003,
+          "render_z": 238.39766,
+          "global_z": 238.23749,
+          "followed_z": 238.23749,
+          "follow_error": 0.16077693
+        },
+        {
+          "sim": 7.7333336,
+          "render_z": 238.6405,
+          "global_z": 238.60274,
+          "followed_z": 238.60274,
+          "follow_error": 0.037908386
+        },
+        {
+          "sim": 7.75,
+          "render_z": 238.88525,
+          "global_z": 238.78618,
+          "followed_z": 238.78618,
+          "follow_error": 0.0994497
+        },
+        {
+          "sim": 7.766667,
+          "render_z": 239.12671,
+          "global_z": 238.97015,
+          "followed_z": 238.97015,
+          "follow_error": 0.1571471
+        },
+        {
+          "sim": 7.8,
+          "render_z": 239.37317,
+          "global_z": 239.33966,
+          "followed_z": 239.33966,
+          "follow_error": 0.033634804
+        },
+        {
+          "sim": 7.8166666,
+          "render_z": 239.62053,
+          "global_z": 239.52518,
+          "followed_z": 239.52518,
+          "follow_error": 0.095712796
+        },
+        {
+          "sim": 7.8333335,
+          "render_z": 239.87466,
+          "global_z": 239.7112,
+          "followed_z": 239.7112,
+          "follow_error": 0.16408621
+        },
+        {
+          "sim": 7.866667,
+          "render_z": 240.15512,
+          "global_z": 240.1051,
+          "followed_z": 240.1051,
+          "follow_error": 0.050207004
+        },
+        {
+          "sim": 7.8833337,
+          "render_z": 240.4362,
+          "global_z": 240.31003,
+          "followed_z": 240.31003,
+          "follow_error": 0.12664968
+        },
+        {
+          "sim": 7.9,
+          "render_z": 240.72366,
+          "global_z": 240.5191,
+          "followed_z": 240.5191,
+          "follow_error": 0.20532767
+        },
+        {
+          "sim": 7.9333334,
+          "render_z": 241.01834,
+          "global_z": 240.94727,
+          "followed_z": 240.94727,
+          "follow_error": 0.07134161
+        },
+        {
+          "sim": 7.9500003,
+          "render_z": 241.32343,
+          "global_z": 241.1657,
+          "followed_z": 241.1657,
+          "follow_error": 0.15832086
+        },
+        {
+          "sim": 7.9833336,
+          "render_z": 241.63144,
+          "global_z": 241.61507,
+          "followed_z": 241.61507,
+          "follow_error": 0.016434062
+        },
+        {
+          "sim": 8.0,
+          "render_z": 241.95267,
+          "global_z": 241.84601,
+          "followed_z": 241.84601,
+          "follow_error": 0.10705902
+        },
+        {
+          "sim": 8.016666,
+          "render_z": 242.28474,
+          "global_z": 242.08112,
+          "followed_z": 242.08112,
+          "follow_error": 0.20439246
+        },
+        {
+          "sim": 8.05,
+          "render_z": 242.627,
+          "global_z": 242.56525,
+          "followed_z": 242.56525,
+          "follow_error": 0.061984144
+        },
+        {
+          "sim": 8.066667,
+          "render_z": 242.96811,
+          "global_z": 242.81343,
+          "followed_z": 242.81343,
+          "follow_error": 0.15526013
+        },
+        {
+          "sim": 8.083334,
+          "render_z": 243.31181,
+          "global_z": 243.06451,
+          "followed_z": 243.06451,
+          "follow_error": 0.24823005
+        },
+        {
+          "sim": 8.116667,
+          "render_z": 243.65479,
+          "global_z": 243.57262,
+          "followed_z": 243.57262,
+          "follow_error": 0.08247896
+        },
+        {
+          "sim": 8.133333,
+          "render_z": 244.00293,
+          "global_z": 243.82841,
+          "followed_z": 243.82841,
+          "follow_error": 0.17517531
+        },
+        {
+          "sim": 8.166667,
+          "render_z": 244.35518,
+          "global_z": 244.3436,
+          "followed_z": 244.3436,
+          "follow_error": 0.011625124
+        },
+        {
+          "sim": 8.183333,
+          "render_z": 244.71251,
+          "global_z": 244.603,
+          "followed_z": 244.603,
+          "follow_error": 0.109928116
+        },
+        {
+          "sim": 8.2,
+          "render_z": 245.06285,
+          "global_z": 244.86359,
+          "followed_z": 244.86359,
+          "follow_error": 0.20002301
+        },
+        {
+          "sim": 8.233334,
+          "render_z": 245.42386,
+          "global_z": 245.38824,
+          "followed_z": 245.38824,
+          "follow_error": 0.03574979
+        },
+        {
+          "sim": 8.25,
+          "render_z": 245.78558,
+          "global_z": 245.6523,
+          "followed_z": 245.6523,
+          "follow_error": 0.13379376
+        },
+        {
+          "sim": 8.266666,
+          "render_z": 246.14487,
+          "global_z": 245.9175,
+          "followed_z": 245.9175,
+          "follow_error": 0.22823855
+        },
+        {
+          "sim": 8.3,
+          "render_z": 246.50812,
+          "global_z": 246.45128,
+          "followed_z": 246.45128,
+          "follow_error": 0.057055578
+        },
+        {
+          "sim": 8.316667,
+          "render_z": 246.87589,
+          "global_z": 246.71986,
+          "followed_z": 246.71986,
+          "follow_error": 0.15661539
+        },
+        {
+          "sim": 8.333334,
+          "render_z": 247.24547,
+          "global_z": 246.98956,
+          "followed_z": 246.98956,
+          "follow_error": 0.2568791
+        },
+        {
+          "sim": 8.366667,
+          "render_z": 247.61655,
+          "global_z": 247.53229,
+          "followed_z": 247.53229,
+          "follow_error": 0.08457917
+        },
+        {
+          "sim": 8.383333,
+          "render_z": 247.98495,
+          "global_z": 247.80531,
+          "followed_z": 247.80531,
+          "follow_error": 0.18032344
+        },
+        {
+          "sim": 8.416667,
+          "render_z": 248.36084,
+          "global_z": 248.35466,
+          "followed_z": 248.35466,
+          "follow_error": 0.0062035047
+        },
+        {
+          "sim": 8.433333,
+          "render_z": 248.74115,
+          "global_z": 248.63098,
+          "followed_z": 248.63098,
+          "follow_error": 0.110585146
+        },
+        {
+          "sim": 8.45,
+          "render_z": 249.12384,
+          "global_z": 248.90839,
+          "followed_z": 248.90839,
+          "follow_error": 0.21626884
+        },
+        {
+          "sim": 8.483334,
+          "render_z": 249.50241,
+          "global_z": 249.46645,
+          "followed_z": 249.46645,
+          "follow_error": 0.036101278
+        },
+        {
+          "sim": 8.5,
+          "render_z": 249.88596,
+          "global_z": 249.7471,
+          "followed_z": 249.7471,
+          "follow_error": 0.1393796
+        },
+        {
+          "sim": 8.516666,
+          "render_z": 250.27036,
+          "global_z": 250.02884,
+          "followed_z": 250.02884,
+          "follow_error": 0.24242818
+        },
+        {
+          "sim": 8.55,
+          "render_z": 250.66264,
+          "global_z": 250.59552,
+          "followed_z": 250.59552,
+          "follow_error": 0.06737712
+        },
+        {
+          "sim": 8.566667,
+          "render_z": 251.06253,
+          "global_z": 250.88046,
+          "followed_z": 250.88046,
+          "follow_error": 0.182755
+        },
+        {
+          "sim": 8.583334,
+          "render_z": 251.45164,
+          "global_z": 251.16647,
+          "followed_z": 251.16647,
+          "follow_error": 0.28624788
+        },
+        {
+          "sim": 8.616667,
+          "render_z": 251.84964,
+          "global_z": 251.74165,
+          "followed_z": 251.74165,
+          "follow_error": 0.10839416
+        },
+        {
+          "sim": 8.633333,
+          "render_z": 252.27594,
+          "global_z": 252.03082,
+          "followed_z": 252.03082,
+          "follow_error": 0.24604294
+        },
+        {
+          "sim": 8.666667,
+          "render_z": 252.70221,
+          "global_z": 252.6123,
+          "followed_z": 252.6123,
+          "follow_error": 0.09024433
+        },
+        {
+          "sim": 8.683333,
+          "render_z": 253.10991,
+          "global_z": 252.90462,
+          "followed_z": 252.90462,
+          "follow_error": 0.20606753
+        },
+        {
+          "sim": 8.716667,
+          "render_z": 253.51527,
+          "global_z": 253.49234,
+          "followed_z": 253.49234,
+          "follow_error": 0.023020899
+        },
+        {
+          "sim": 8.733334,
+          "render_z": 253.92764,
+          "global_z": 253.78775,
+          "followed_z": 253.78775,
+          "follow_error": 0.14042139
+        },
+        {
+          "sim": 8.75,
+          "render_z": 254.3494,
+          "global_z": 254.08418,
+          "followed_z": 254.08418,
+          "follow_error": 0.26621574
+        },
+        {
+          "sim": 8.783334,
+          "render_z": 254.76495,
+          "global_z": 254.6801,
+          "followed_z": 254.6801,
+          "follow_error": 0.08517559
+        },
+        {
+          "sim": 8.8,
+          "render_z": 255.18503,
+          "global_z": 254.97957,
+          "followed_z": 254.97957,
+          "follow_error": 0.20623673
+        },
+        {
+          "sim": 8.833334,
+          "render_z": 255.61075,
+          "global_z": 255.58153,
+          "followed_z": 255.58153,
+          "follow_error": 0.029331403
+        },
+        {
+          "sim": 8.85,
+          "render_z": 256.03702,
+          "global_z": 255.884,
+          "followed_z": 255.884,
+          "follow_error": 0.15359432
+        },
+        {
+          "sim": 8.883333,
+          "render_z": 256.49277,
+          "global_z": 256.4919,
+          "followed_z": 256.4919,
+          "follow_error": 0.0008578914
+        },
+        {
+          "sim": 8.900001,
+          "render_z": 256.93387,
+          "global_z": 256.79736,
+          "followed_z": 256.79736,
+          "follow_error": 0.13702156
+        },
+        {
+          "sim": 8.916667,
+          "render_z": 257.36215,
+          "global_z": 257.10376,
+          "followed_z": 257.10376,
+          "follow_error": 0.25937048
+        },
+        {
+          "sim": 8.95,
+          "render_z": 257.79672,
+          "global_z": 257.71948,
+          "followed_z": 257.71948,
+          "follow_error": 0.07753232
+        },
+        {
+          "sim": 8.966667,
+          "render_z": 258.22995,
+          "global_z": 258.02878,
+          "followed_z": 258.02878,
+          "follow_error": 0.20193276
+        },
+        {
+          "sim": 9.0,
+          "render_z": 258.664,
+          "global_z": 258.65027,
+          "followed_z": 258.65027,
+          "follow_error": 0.013785049
+        },
+        {
+          "sim": 9.016666,
+          "render_z": 259.1016,
+          "global_z": 258.96243,
+          "followed_z": 258.96243,
+          "follow_error": 0.13968676
+        },
+        {
+          "sim": 9.033334,
+          "render_z": 259.53513,
+          "global_z": 259.2755,
+          "followed_z": 259.2755,
+          "follow_error": 0.26059517
+        },
+        {
+          "sim": 9.066667,
+          "render_z": 259.9726,
+          "global_z": 259.90448,
+          "followed_z": 259.90448,
+          "follow_error": 0.068372816
+        },
+        {
+          "sim": 9.083334,
+          "render_z": 260.4316,
+          "global_z": 260.22034,
+          "followed_z": 260.22034,
+          "follow_error": 0.21207234
+        },
+        {
+          "sim": 9.116667,
+          "render_z": 260.89975,
+          "global_z": 260.8548,
+          "followed_z": 260.8548,
+          "follow_error": 0.04512262
+        },
+        {
+          "sim": 9.133333,
+          "render_z": 261.3588,
+          "global_z": 261.17337,
+          "followed_z": 261.17337,
+          "follow_error": 0.18612595
+        },
+        {
+          "sim": 9.150001,
+          "render_z": 261.8063,
+          "global_z": 261.49286,
+          "followed_z": 261.49286,
+          "follow_error": 0.3146321
+        },
+        {
+          "sim": 9.183333,
+          "render_z": 262.24985,
+          "global_z": 262.1345,
+          "followed_z": 262.1345,
+          "follow_error": 0.11579314
+        },
+        {
+          "sim": 9.2,
+          "render_z": 262.70282,
+          "global_z": 262.45663,
+          "followed_z": 262.45663,
+          "follow_error": 0.2471171
+        },
+        {
+          "sim": 9.233334,
+          "render_z": 263.158,
+          "global_z": 263.10352,
+          "followed_z": 263.10352,
+          "follow_error": 0.054680325
+        },
+        {
+          "sim": 9.25,
+          "render_z": 263.61264,
+          "global_z": 263.42825,
+          "followed_z": 263.42825,
+          "follow_error": 0.18466157
+        },
+        {
+          "sim": 9.266666,
+          "render_z": 264.06213,
+          "global_z": 263.75436,
+          "followed_z": 263.75436,
+          "follow_error": 0.3078549
+        },
+        {
+          "sim": 9.3,
+          "render_z": 264.52295,
+          "global_z": 264.41058,
+          "followed_z": 264.41058,
+          "follow_error": 0.11245432
+        },
+        {
+          "sim": 9.316667,
+          "render_z": 264.97583,
+          "global_z": 264.7398,
+          "followed_z": 264.7398,
+          "follow_error": 0.23626101
+        },
+        {
+          "sim": 9.35,
+          "render_z": 265.4404,
+          "global_z": 265.3994,
+          "followed_z": 265.3994,
+          "follow_error": 0.041035127
+        },
+        {
+          "sim": 9.366667,
+          "render_z": 265.89722,
+          "global_z": 265.72998,
+          "followed_z": 265.72998,
+          "follow_error": 0.16744053
+        },
+        {
+          "sim": 9.383333,
+          "render_z": 266.3538,
+          "global_z": 266.06155,
+          "followed_z": 266.06155,
+          "follow_error": 0.29244068
+        },
+        {
+          "sim": 9.416667,
+          "render_z": 266.81418,
+          "global_z": 266.72717,
+          "followed_z": 266.72717,
+          "follow_error": 0.08701614
+        },
+        {
+          "sim": 9.433333,
+          "render_z": 267.27197,
+          "global_z": 267.0609,
+          "followed_z": 267.0609,
+          "follow_error": 0.21106651
+        },
+        {
+          "sim": 9.45,
+          "render_z": 267.7289,
+          "global_z": 267.39487,
+          "followed_z": 267.39487,
+          "follow_error": 0.3340466
+        },
+        {
+          "sim": 9.483334,
+          "render_z": 268.1999,
+          "global_z": 268.0644,
+          "followed_z": 268.0644,
+          "follow_error": 0.13550115
+        },
+        {
+          "sim": 9.5,
+          "render_z": 268.66022,
+          "global_z": 268.40012,
+          "followed_z": 268.40012,
+          "follow_error": 0.26010272
+        },
+        {
+          "sim": 9.533334,
+          "render_z": 269.12094,
+          "global_z": 269.07336,
+          "followed_z": 269.07336,
+          "follow_error": 0.04757754
+        },
+        {
+          "sim": 9.55,
+          "render_z": 269.58722,
+          "global_z": 269.41104,
+          "followed_z": 269.41104,
+          "follow_error": 0.17618272
+        },
+        {
+          "sim": 9.566667,
+          "render_z": 270.0456,
+          "global_z": 269.7493,
+          "followed_z": 269.7493,
+          "follow_error": 0.29630715
+        },
+        {
+          "sim": 9.6,
+          "render_z": 270.51117,
+          "global_z": 270.4278,
+          "followed_z": 270.4278,
+          "follow_error": 0.08337884
+        },
+        {
+          "sim": 9.616667,
+          "render_z": 270.97647,
+          "global_z": 270.76794,
+          "followed_z": 270.76794,
+          "follow_error": 0.20853913
+        },
+        {
+          "sim": 9.633333,
+          "render_z": 271.4497,
+          "global_z": 271.10867,
+          "followed_z": 271.10867,
+          "follow_error": 0.34105393
+        },
+        {
+          "sim": 9.666667,
+          "render_z": 271.91608,
+          "global_z": 271.7918,
+          "followed_z": 271.7918,
+          "follow_error": 0.1242736
+        },
+        {
+          "sim": 9.683333,
+          "render_z": 272.3816,
+          "global_z": 272.13422,
+          "followed_z": 272.13422,
+          "follow_error": 0.2473857
+        },
+        {
+          "sim": 9.716667,
+          "render_z": 272.84958,
+          "global_z": 272.82062,
+          "followed_z": 272.82062,
+          "follow_error": 0.028962066
+        },
+        {
+          "sim": 9.733334,
+          "render_z": 273.3203,
+          "global_z": 273.16464,
+          "followed_z": 273.16464,
+          "follow_error": 0.15567343
+        },
+        {
+          "sim": 9.75,
+          "render_z": 273.79752,
+          "global_z": 273.5092,
+          "followed_z": 273.5092,
+          "follow_error": 0.28833488
+        },
+        {
+          "sim": 9.783334,
+          "render_z": 274.26874,
+          "global_z": 274.1999,
+          "followed_z": 274.1999,
+          "follow_error": 0.06884803
+        },
+        {
+          "sim": 9.8,
+          "render_z": 274.7406,
+          "global_z": 274.54602,
+          "followed_z": 274.54602,
+          "follow_error": 0.19458142
+        },
+        {
+          "sim": 9.816667,
+          "render_z": 275.2179,
+          "global_z": 274.8927,
+          "followed_z": 274.8927,
+          "follow_error": 0.32519704
+        },
+        {
+          "sim": 9.85,
+          "render_z": 275.71716,
+          "global_z": 275.58762,
+          "followed_z": 275.58762,
+          "follow_error": 0.12954804
+        },
+        {
+          "sim": 9.866667,
+          "render_z": 276.19687,
+          "global_z": 275.93588,
+          "followed_z": 275.93588,
+          "follow_error": 0.26098776
+        },
+        {
+          "sim": 9.900001,
+          "render_z": 276.68536,
+          "global_z": 276.64056,
+          "followed_z": 276.64056,
+          "follow_error": 0.0448
+        },
+        {
+          "sim": 9.916667,
+          "render_z": 277.19928,
+          "global_z": 277.0017,
+          "followed_z": 277.0017,
+          "follow_error": 0.19757189
+        },
+        {
+          "sim": 9.933333,
+          "render_z": 277.73557,
+          "global_z": 277.36725,
+          "followed_z": 277.36725,
+          "follow_error": 0.3683186
+        },
+        {
+          "sim": 9.966667,
+          "render_z": 278.29337,
+          "global_z": 278.1089,
+          "followed_z": 278.1089,
+          "follow_error": 0.18447989
+        },
+        {
+          "sim": 9.983334,
+          "render_z": 278.83807,
+          "global_z": 278.48495,
+          "followed_z": 278.48495,
+          "follow_error": 0.35312048
+        },
+        {
+          "sim": 10.016666,
+          "render_z": 279.3742,
+          "global_z": 279.25,
+          "followed_z": 279.25,
+          "follow_error": 0.12420714
+        },
+        {
+          "sim": 10.033334,
+          "render_z": 279.9182,
+          "global_z": 279.63705,
+          "followed_z": 279.63705,
+          "follow_error": 0.2811595
+        },
+        {
+          "sim": 10.066667,
+          "render_z": 280.4646,
+          "global_z": 280.41513,
+          "followed_z": 280.41513,
+          "follow_error": 0.04946915
+        },
+        {
+          "sim": 10.083334,
+          "render_z": 281.0705,
+          "global_z": 280.80505,
+          "followed_z": 280.80505,
+          "follow_error": 0.26544294
+        },
+        {
+          "sim": 10.116667,
+          "render_z": 281.6509,
+          "global_z": 281.58536,
+          "followed_z": 281.58536,
+          "follow_error": 0.06555188
+        },
+        {
+          "sim": 10.133333,
+          "render_z": 282.2036,
+          "global_z": 281.97556,
+          "followed_z": 281.97556,
+          "follow_error": 0.22805905
+        },
+        {
+          "sim": 10.150001,
+          "render_z": 282.753,
+          "global_z": 282.36572,
+          "followed_z": 282.36572,
+          "follow_error": 0.38727
+        },
+        {
+          "sim": 10.183333,
+          "render_z": 283.32294,
+          "global_z": 283.14642,
+          "followed_z": 283.14642,
+          "follow_error": 0.17651473
+        },
+        {
+          "sim": 10.2,
+          "render_z": 283.9047,
+          "global_z": 283.53766,
+          "followed_z": 283.53766,
+          "follow_error": 0.36703783
+        },
+        {
+          "sim": 10.233334,
+          "render_z": 284.4586,
+          "global_z": 284.32297,
+          "followed_z": 284.32297,
+          "follow_error": 0.13562149
+        },
+        {
+          "sim": 10.25,
+          "render_z": 285.01453,
+          "global_z": 284.717,
+          "followed_z": 284.717,
+          "follow_error": 0.29751837
+        },
+        {
+          "sim": 10.283334,
+          "render_z": 285.57184,
+          "global_z": 285.50705,
+          "followed_z": 285.50705,
+          "follow_error": 0.06478928
+        },
+        {
+          "sim": 10.3,
+          "render_z": 286.12802,
+          "global_z": 285.9033,
+          "followed_z": 285.9033,
+          "follow_error": 0.22473307
+        },
+        {
+          "sim": 10.316667,
+          "render_z": 286.67935,
+          "global_z": 286.3003,
+          "followed_z": 286.3003,
+          "follow_error": 0.37906167
+        },
+        {
+          "sim": 10.35,
+          "render_z": 287.25574,
+          "global_z": 287.09668,
+          "followed_z": 287.09668,
+          "follow_error": 0.1590588
+        },
+        {
+          "sim": 10.366667,
+          "render_z": 287.81036,
+          "global_z": 287.49606,
+          "followed_z": 287.49606,
+          "follow_error": 0.31430244
+        },
+        {
+          "sim": 10.400001,
+          "render_z": 288.35922,
+          "global_z": 288.29715,
+          "followed_z": 288.29715,
+          "follow_error": 0.062073234
+        },
+        {
+          "sim": 10.416667,
+          "render_z": 288.91742,
+          "global_z": 288.69888,
+          "followed_z": 288.69888,
+          "follow_error": 0.2185376
+        },
+        {
+          "sim": 10.433333,
+          "render_z": 289.47815,
+          "global_z": 289.10138,
+          "followed_z": 289.10138,
+          "follow_error": 0.3767724
+        },
+        {
+          "sim": 10.466667,
+          "render_z": 290.03906,
+          "global_z": 289.90872,
+          "followed_z": 289.90872,
+          "follow_error": 0.13034149
+        },
+        {
+          "sim": 10.483334,
+          "render_z": 290.60507,
+          "global_z": 290.31357,
+          "followed_z": 290.31357,
+          "follow_error": 0.29150596
+        },
+        {
+          "sim": 10.516666,
+          "render_z": 291.15878,
+          "global_z": 291.1256,
+          "followed_z": 291.1256,
+          "follow_error": 0.03317283
+        },
+        {
+          "sim": 10.533334,
+          "render_z": 291.71317,
+          "global_z": 291.5328,
+          "followed_z": 291.5328,
+          "follow_error": 0.18036038
+        },
+        {
+          "sim": 10.55,
+          "render_z": 292.27454,
+          "global_z": 291.94077,
+          "followed_z": 291.94077,
+          "follow_error": 0.333773
+        },
+        {
+          "sim": 10.583334,
+          "render_z": 292.83527,
+          "global_z": 292.75903,
+          "followed_z": 292.75903,
+          "follow_error": 0.07623379
+        },
+        {
+          "sim": 10.6,
+          "render_z": 293.4062,
+          "global_z": 293.1693,
+          "followed_z": 293.1693,
+          "follow_error": 0.23687898
+        },
+        {
+          "sim": 10.616667,
+          "render_z": 293.98785,
+          "global_z": 293.58038,
+          "followed_z": 293.58038,
+          "follow_error": 0.40747967
+        },
+        {
+          "sim": 10.650001,
+          "render_z": 294.5509,
+          "global_z": 294.40002,
+          "followed_z": 294.40002,
+          "follow_error": 0.15090486
+        },
+        {
+          "sim": 10.666667,
+          "render_z": 295.1144,
+          "global_z": 294.80914,
+          "followed_z": 294.80914,
+          "follow_error": 0.30536625
+        },
+        {
+          "sim": 10.7,
+          "render_z": 295.68338,
+          "global_z": 295.6263,
+          "followed_z": 295.6263,
+          "follow_error": 0.05711412
+        },
+        {
+          "sim": 10.716667,
+          "render_z": 296.2411,
+          "global_z": 296.0345,
+          "followed_z": 296.0345,
+          "follow_error": 0.20689903
+        },
+        {
+          "sim": 10.733334,
+          "render_z": 296.80518,
+          "global_z": 296.44263,
+          "followed_z": 296.44263,
+          "follow_error": 0.36335528
+        },
+        {
+          "sim": 10.766666,
+          "render_z": 297.3559,
+          "global_z": 297.25876,
+          "followed_z": 297.25876,
+          "follow_error": 0.09755973
+        },
+        {
+          "sim": 10.783334,
+          "render_z": 297.9114,
+          "global_z": 297.66675,
+          "followed_z": 297.66675,
+          "follow_error": 0.24604596
+        },
+        {
+          "sim": 10.8,
+          "render_z": 298.4609,
+          "global_z": 298.07468,
+          "followed_z": 298.07468,
+          "follow_error": 0.38899702
+        },
+        {
+          "sim": 10.833334,
+          "render_z": 299.02792,
+          "global_z": 298.8904,
+          "followed_z": 298.8904,
+          "follow_error": 0.13898025
+        },
+        {
+          "sim": 10.85,
+          "render_z": 299.6028,
+          "global_z": 299.2982,
+          "followed_z": 299.2982,
+          "follow_error": 0.30849263
+        },
+        {
+          "sim": 10.883333,
+          "render_z": 300.16483,
+          "global_z": 300.1136,
+          "followed_z": 300.1136,
+          "follow_error": 0.052120928
+        },
+        {
+          "sim": 10.900001,
+          "render_z": 300.71228,
+          "global_z": 300.5212,
+          "followed_z": 300.5212,
+          "follow_error": 0.1948457
+        },
+        {
+          "sim": 10.916667,
+          "render_z": 301.24948,
+          "global_z": 300.92877,
+          "followed_z": 300.92877,
+          "follow_error": 0.32791123
+        },
+        {
+          "sim": 10.95,
+          "render_z": 301.7964,
+          "global_z": 301.7437,
+          "followed_z": 301.7437,
+          "follow_error": 0.05405058
+        },
+        {
+          "sim": 10.966667,
+          "render_z": 302.3604,
+          "global_z": 302.1578,
+          "followed_z": 302.1578,
+          "follow_error": 0.2077528
+        },
+        {
+          "sim": 10.983334,
+          "render_z": 302.93134,
+          "global_z": 302.58087,
+          "followed_z": 302.58087,
+          "follow_error": 0.3591873
+        },
+        {
+          "sim": 11.016666,
+          "render_z": 303.4994,
+          "global_z": 303.4487,
+          "followed_z": 303.4487,
+          "follow_error": 0.0519539
+        },
+        {
+          "sim": 11.033334,
+          "render_z": 304.08282,
+          "global_z": 303.88745,
+          "followed_z": 303.88745,
+          "follow_error": 0.20030403
+        },
+        {
+          "sim": 11.05,
+          "render_z": 304.68948,
+          "global_z": 304.32852,
+          "followed_z": 304.32852,
+          "follow_error": 0.3692665
+        },
+        {
+          "sim": 11.083334,
+          "render_z": 305.2849,
+          "global_z": 305.20035,
+          "followed_z": 305.20035,
+          "follow_error": 0.08612265
+        },
+        {
+          "sim": 11.1,
+          "render_z": 305.85083,
+          "global_z": 305.63177,
+          "followed_z": 305.63177,
+          "follow_error": 0.22174965
+        },
+        {
+          "sim": 11.116667,
+          "render_z": 306.4128,
+          "global_z": 306.0647,
+          "followed_z": 306.0647,
+          "follow_error": 0.35152084
+        },
+        {
+          "sim": 11.150001,
+          "render_z": 306.98367,
+          "global_z": 306.9372,
+          "followed_z": 306.9372,
+          "follow_error": 0.046986166
+        },
+        {
+          "sim": 11.166667,
+          "render_z": 307.5544,
+          "global_z": 307.3748,
+          "followed_z": 307.3748,
+          "follow_error": 0.18170585
+        },
+        {
+          "sim": 11.183333,
+          "render_z": 308.11768,
+          "global_z": 307.8132,
+          "followed_z": 307.8132,
+          "follow_error": 0.30810997
+        },
+        {
+          "sim": 11.2,
+          "render_z": 308.68765,
+          "global_z": 308.25262,
+          "followed_z": 308.25262,
+          "follow_error": 0.44012725
+        },
+        {
+          "sim": 11.233334,
+          "render_z": 309.26028,
+          "global_z": 309.13565,
+          "followed_z": 309.13565,
+          "follow_error": 0.12590969
+        },
+        {
+          "sim": 11.25,
+          "render_z": 309.83612,
+          "global_z": 309.57947,
+          "followed_z": 309.57947,
+          "follow_error": 0.25928512
+        },
+        {
+          "sim": 11.266666,
+          "render_z": 310.41135,
+          "global_z": 310.02448,
+          "followed_z": 310.02448,
+          "follow_error": 0.3907495
+        },
+        {
+          "sim": 11.3,
+          "render_z": 310.98016,
+          "global_z": 310.9184,
+          "followed_z": 310.9184,
+          "follow_error": 0.062364772
+        },
+        {
+          "sim": 11.316667,
+          "render_z": 311.56146,
+          "global_z": 311.36722,
+          "followed_z": 311.36722,
+          "follow_error": 0.19610548
+        },
+        {
+          "sim": 11.333334,
+          "render_z": 312.13593,
+          "global_z": 311.81723,
+          "followed_z": 311.81723,
+          "follow_error": 0.3217396
+        },
+        {
+          "sim": 11.35,
+          "render_z": 312.7162,
+          "global_z": 312.26837,
+          "followed_z": 312.26837,
+          "follow_error": 0.4520992
+        },
+        {
+          "sim": 11.383333,
+          "render_z": 313.29083,
+          "global_z": 313.1741,
+          "followed_z": 313.1741,
+          "follow_error": 0.1178607
+        },
+        {
+          "sim": 11.400001,
+          "render_z": 313.87265,
+          "global_z": 313.62848,
+          "followed_z": 313.62848,
+          "follow_error": 0.24656115
+        },
+        {
+          "sim": 11.416667,
+          "render_z": 314.45496,
+          "global_z": 314.08377,
+          "followed_z": 314.08377,
+          "follow_error": 0.37486035
+        },
+        {
+          "sim": 11.45,
+          "render_z": 315.02817,
+          "global_z": 314.9971,
+          "followed_z": 314.9971,
+          "follow_error": 0.031381767
+        },
+        {
+          "sim": 11.466667,
+          "render_z": 315.6057,
+          "global_z": 315.45523,
+          "followed_z": 315.45523,
+          "follow_error": 0.15202989
+        },
+        {
+          "sim": 11.483334,
+          "render_z": 316.19232,
+          "global_z": 315.9143,
+          "followed_z": 315.9143,
+          "follow_error": 0.2809069
+        },
+        {
+          "sim": 11.5,
+          "render_z": 316.77106,
+          "global_z": 316.3743,
+          "followed_z": 316.3743,
+          "follow_error": 0.40093216
+        },
+        {
+          "sim": 11.533334,
+          "render_z": 317.35458,
+          "global_z": 317.29715,
+          "followed_z": 317.29715,
+          "follow_error": 0.058050033
+        },
+        {
+          "sim": 11.55,
+          "render_z": 317.9477,
+          "global_z": 317.76,
+          "followed_z": 317.76,
+          "follow_error": 0.18971127
+        },
+        {
+          "sim": 11.566667,
+          "render_z": 318.53088,
+          "global_z": 318.22385,
+          "followed_z": 318.22385,
+          "follow_error": 0.3103774
+        },
+        {
+          "sim": 11.583334,
+          "render_z": 319.1061,
+          "global_z": 318.68863,
+          "followed_z": 318.68863,
+          "follow_error": 0.42204756
+        },
+        {
+          "sim": 11.616667,
+          "render_z": 319.67737,
+          "global_z": 319.62112,
+          "followed_z": 319.62112,
+          "follow_error": 0.056863725
+        },
+        {
+          "sim": 11.633333,
+          "render_z": 320.2631,
+          "global_z": 320.08887,
+          "followed_z": 320.08887,
+          "follow_error": 0.1761508
+        },
+        {
+          "sim": 11.650001,
+          "render_z": 320.84827,
+          "global_z": 320.5576,
+          "followed_z": 320.5576,
+          "follow_error": 0.2938967
+        },
+        {
+          "sim": 11.666667,
+          "render_z": 321.43274,
+          "global_z": 321.0273,
+          "followed_z": 321.0273,
+          "follow_error": 0.40991512
+        },
+        {
+          "sim": 11.7,
+          "render_z": 322.0203,
+          "global_z": 321.96973,
+          "followed_z": 321.96973,
+          "follow_error": 0.051127497
+        },
+        {
+          "sim": 11.716667,
+          "render_z": 322.60962,
+          "global_z": 322.44244,
+          "followed_z": 322.44244,
+          "follow_error": 0.16902311
+        },
+        {
+          "sim": 11.733334,
+          "render_z": 323.1983,
+          "global_z": 322.91617,
+          "followed_z": 322.91617,
+          "follow_error": 0.2852511
+        },
+        {
+          "sim": 11.75,
+          "render_z": 323.79022,
+          "global_z": 323.39087,
+          "followed_z": 323.39087,
+          "follow_error": 0.4037561
+        },
+        {
+          "sim": 11.783334,
+          "render_z": 324.3829,
+          "global_z": 324.34326,
+          "followed_z": 324.34326,
+          "follow_error": 0.04007768
+        },
+        {
+          "sim": 11.8,
+          "render_z": 324.9661,
+          "global_z": 324.82095,
+          "followed_z": 324.82095,
+          "follow_error": 0.1467333
+        },
+        {
+          "sim": 11.816667,
+          "render_z": 325.5602,
+          "global_z": 325.29962,
+          "followed_z": 325.29962,
+          "follow_error": 0.26344326
+        },
+        {
+          "sim": 11.833334,
+          "render_z": 326.15222,
+          "global_z": 325.7793,
+          "followed_z": 325.7793,
+          "follow_error": 0.3770024
+        },
+        {
+          "sim": 11.85,
+          "render_z": 326.7412,
+          "global_z": 326.25995,
+          "followed_z": 326.25995,
+          "follow_error": 0.4865175
+        },
+        {
+          "sim": 11.883333,
+          "render_z": 327.3358,
+          "global_z": 327.22418,
+          "followed_z": 327.22418,
+          "follow_error": 0.11281899
+        },
+        {
+          "sim": 11.900001,
+          "render_z": 327.9176,
+          "global_z": 327.70776,
+          "followed_z": 327.70776,
+          "follow_error": 0.21212128
+        },
+        {
+          "sim": 11.916667,
+          "render_z": 328.4983,
+          "global_z": 328.19232,
+          "followed_z": 328.19232,
+          "follow_error": 0.3092951
+        },
+        {
+          "sim": 11.933333,
+          "render_z": 329.09042,
+          "global_z": 328.67786,
+          "followed_z": 328.67786,
+          "follow_error": 0.41704926
+        },
+        {
+          "sim": 11.966667,
+          "render_z": 329.6881,
+          "global_z": 329.6518,
+          "followed_z": 329.6518,
+          "follow_error": 0.036710653
+        },
+        {
+          "sim": 11.983334,
+          "render_z": 330.27457,
+          "global_z": 330.1402,
+          "followed_z": 330.1402,
+          "follow_error": 0.13582663
+        },
+        {
+          "sim": 12.0,
+          "render_z": 330.86737,
+          "global_z": 330.62958,
+          "followed_z": 330.62958,
+          "follow_error": 0.24037303
+        }
+      ]
+    },
+    "after": {
+      "raw_log_sha256": "eeea45d0fd9959e5a15f9e77e42265a5de843bf23a2087ca778454c86bac7a5d",
+      "sample_window_sim_seconds": [
+        6,
+        12
+      ],
+      "target_to_render_pose_distance_m": {
+        "count": 258,
+        "min": 0.0,
+        "median": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "stddev": 0.0
+      },
+      "frame_delta_seconds": {
+        "count": 258,
+        "min": 0.021313207,
+        "median": 0.023369083,
+        "max": 0.026708208,
+        "mean": 0.023346484108527132,
+        "stddev": 0.0010213722771013655
+      },
+      "samples": [
+        {
+          "sim": 6.0,
+          "render_z": 224.24997,
+          "global_z": 224.19977,
+          "followed_z": 224.24997,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.016667,
+          "render_z": 224.37215,
+          "global_z": 224.2908,
+          "followed_z": 224.37215,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.05,
+          "render_z": 224.49414,
+          "global_z": 224.47697,
+          "followed_z": 224.49414,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.0666666,
+          "render_z": 224.6369,
+          "global_z": 224.57208,
+          "followed_z": 224.6369,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.0833335,
+          "render_z": 224.7631,
+          "global_z": 224.66826,
+          "followed_z": 224.7631,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.116667,
+          "render_z": 224.89137,
+          "global_z": 224.86388,
+          "followed_z": 224.89137,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.1333337,
+          "render_z": 225.02097,
+          "global_z": 224.96315,
+          "followed_z": 225.02097,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.15,
+          "render_z": 225.15651,
+          "global_z": 225.06337,
+          "followed_z": 225.15651,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.1833334,
+          "render_z": 225.2875,
+          "global_z": 225.26651,
+          "followed_z": 225.2875,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.2000003,
+          "render_z": 225.42377,
+          "global_z": 225.36935,
+          "followed_z": 225.42377,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.2166667,
+          "render_z": 225.55873,
+          "global_z": 225.47307,
+          "followed_z": 225.55873,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.25,
+          "render_z": 225.69617,
+          "global_z": 225.68288,
+          "followed_z": 225.69617,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.266667,
+          "render_z": 225.83534,
+          "global_z": 225.78883,
+          "followed_z": 225.83534,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.2833333,
+          "render_z": 225.9746,
+          "global_z": 225.89561,
+          "followed_z": 225.9746,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.3166666,
+          "render_z": 226.11482,
+          "global_z": 226.11179,
+          "followed_z": 226.11482,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.3333335,
+          "render_z": 226.25952,
+          "global_z": 226.22128,
+          "followed_z": 226.25952,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.35,
+          "render_z": 226.40552,
+          "global_z": 226.3318,
+          "followed_z": 226.40552,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.366667,
+          "render_z": 226.55298,
+          "global_z": 226.4434,
+          "followed_z": 226.55298,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.4,
+          "render_z": 226.70203,
+          "global_z": 226.6701,
+          "followed_z": 226.70203,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.416667,
+          "render_z": 226.85349,
+          "global_z": 226.78531,
+          "followed_z": 226.85349,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.4333334,
+          "render_z": 227.00613,
+          "global_z": 226.90181,
+          "followed_z": 227.00613,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.4666667,
+          "render_z": 227.15956,
+          "global_z": 227.13847,
+          "followed_z": 227.15956,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.4833336,
+          "render_z": 227.31711,
+          "global_z": 227.2585,
+          "followed_z": 227.31711,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.5,
+          "render_z": 227.48051,
+          "global_z": 227.37965,
+          "followed_z": 227.48051,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.5333333,
+          "render_z": 227.64734,
+          "global_z": 227.62523,
+          "followed_z": 227.64734,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.55,
+          "render_z": 227.8193,
+          "global_z": 227.74962,
+          "followed_z": 227.8193,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.5666666,
+          "render_z": 227.99623,
+          "global_z": 227.87515,
+          "followed_z": 227.99623,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.6000004,
+          "render_z": 228.17236,
+          "global_z": 228.12938,
+          "followed_z": 228.17236,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.616667,
+          "render_z": 228.35043,
+          "global_z": 228.25801,
+          "followed_z": 228.35043,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.65,
+          "render_z": 228.53073,
+          "global_z": 228.51869,
+          "followed_z": 228.53073,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.666667,
+          "render_z": 228.71095,
+          "global_z": 228.65063,
+          "followed_z": 228.71095,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.6833334,
+          "render_z": 228.89252,
+          "global_z": 228.78346,
+          "followed_z": 228.89252,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.7166667,
+          "render_z": 229.07532,
+          "global_z": 229.05238,
+          "followed_z": 229.07532,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.7333336,
+          "render_z": 229.26187,
+          "global_z": 229.18832,
+          "followed_z": 229.26187,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.75,
+          "render_z": 229.45041,
+          "global_z": 229.32535,
+          "followed_z": 229.45041,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.7833333,
+          "render_z": 229.64006,
+          "global_z": 229.60239,
+          "followed_z": 229.64006,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.8,
+          "render_z": 229.83401,
+          "global_z": 229.74234,
+          "followed_z": 229.83401,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.8333335,
+          "render_z": 230.02837,
+          "global_z": 230.02542,
+          "followed_z": 230.02837,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.8500004,
+          "render_z": 230.23235,
+          "global_z": 230.16843,
+          "followed_z": 230.23235,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.866667,
+          "render_z": 230.43614,
+          "global_z": 230.31241,
+          "followed_z": 230.43614,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.9,
+          "render_z": 230.63953,
+          "global_z": 230.6033,
+          "followed_z": 230.63953,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.916667,
+          "render_z": 230.84503,
+          "global_z": 230.75021,
+          "followed_z": 230.84503,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.9500003,
+          "render_z": 231.05566,
+          "global_z": 231.04689,
+          "followed_z": 231.05566,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.9666667,
+          "render_z": 231.26224,
+          "global_z": 231.19667,
+          "followed_z": 231.26224,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 6.9833336,
+          "render_z": 231.47176,
+          "global_z": 231.3474,
+          "followed_z": 231.47176,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.016667,
+          "render_z": 231.68329,
+          "global_z": 231.65166,
+          "followed_z": 231.68329,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.0333333,
+          "render_z": 231.89694,
+          "global_z": 231.80515,
+          "followed_z": 231.89694,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.05,
+          "render_z": 232.1128,
+          "global_z": 231.9596,
+          "followed_z": 232.1128,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.0833335,
+          "render_z": 232.3299,
+          "global_z": 232.27116,
+          "followed_z": 232.3299,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.1000004,
+          "render_z": 232.55545,
+          "global_z": 232.42824,
+          "followed_z": 232.55545,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.1333337,
+          "render_z": 232.77505,
+          "global_z": 232.74515,
+          "followed_z": 232.77505,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.15,
+          "render_z": 233.0039,
+          "global_z": 232.90492,
+          "followed_z": 233.0039,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.166667,
+          "render_z": 233.22655,
+          "global_z": 233.06555,
+          "followed_z": 233.22655,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.2000003,
+          "render_z": 233.45468,
+          "global_z": 233.38931,
+          "followed_z": 233.45468,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.2166667,
+          "render_z": 233.67944,
+          "global_z": 233.55241,
+          "followed_z": 233.67944,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.25,
+          "render_z": 233.90768,
+          "global_z": 233.8811,
+          "followed_z": 233.90768,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.266667,
+          "render_z": 234.13428,
+          "global_z": 234.04669,
+          "followed_z": 234.13428,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.2833333,
+          "render_z": 234.36383,
+          "global_z": 234.21297,
+          "followed_z": 234.36383,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.3166666,
+          "render_z": 234.59421,
+          "global_z": 234.54803,
+          "followed_z": 234.59421,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.3333335,
+          "render_z": 234.82637,
+          "global_z": 234.7167,
+          "followed_z": 234.82637,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.366667,
+          "render_z": 235.05786,
+          "global_z": 235.05626,
+          "followed_z": 235.05786,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.3833337,
+          "render_z": 235.29498,
+          "global_z": 235.22713,
+          "followed_z": 235.29498,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.4,
+          "render_z": 235.53061,
+          "global_z": 235.39873,
+          "followed_z": 235.53061,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.4333334,
+          "render_z": 235.76912,
+          "global_z": 235.74403,
+          "followed_z": 235.76912,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.4500003,
+          "render_z": 236.01144,
+          "global_z": 235.91772,
+          "followed_z": 236.01144,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.4666667,
+          "render_z": 236.2507,
+          "global_z": 236.0921,
+          "followed_z": 236.2507,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.5,
+          "render_z": 236.48914,
+          "global_z": 236.44286,
+          "followed_z": 236.48914,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.516667,
+          "render_z": 236.73213,
+          "global_z": 236.6192,
+          "followed_z": 236.73213,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.55,
+          "render_z": 236.9841,
+          "global_z": 236.97383,
+          "followed_z": 236.9841,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.5666666,
+          "render_z": 237.24115,
+          "global_z": 237.15208,
+          "followed_z": 237.24115,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.5833335,
+          "render_z": 237.49129,
+          "global_z": 237.33095,
+          "followed_z": 237.49129,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.616667,
+          "render_z": 237.73982,
+          "global_z": 237.69046,
+          "followed_z": 237.73982,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.6333337,
+          "render_z": 237.9967,
+          "global_z": 237.8711,
+          "followed_z": 237.9967,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.666667,
+          "render_z": 238.24481,
+          "global_z": 238.23409,
+          "followed_z": 238.24481,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.6833334,
+          "render_z": 238.49814,
+          "global_z": 238.41643,
+          "followed_z": 238.49814,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.7000003,
+          "render_z": 238.74956,
+          "global_z": 238.59932,
+          "followed_z": 238.74956,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.7333336,
+          "render_z": 238.99838,
+          "global_z": 238.9667,
+          "followed_z": 238.99838,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.75,
+          "render_z": 239.25433,
+          "global_z": 239.15118,
+          "followed_z": 239.25433,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.766667,
+          "render_z": 239.5081,
+          "global_z": 239.33618,
+          "followed_z": 239.5081,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.8,
+          "render_z": 239.7625,
+          "global_z": 239.70769,
+          "followed_z": 239.7625,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.8166666,
+          "render_z": 240.03432,
+          "global_z": 239.90164,
+          "followed_z": 240.03432,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.8500004,
+          "render_z": 240.32704,
+          "global_z": 240.30647,
+          "followed_z": 240.32704,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.866667,
+          "render_z": 240.62201,
+          "global_z": 240.51553,
+          "followed_z": 240.62201,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.8833337,
+          "render_z": 240.92493,
+          "global_z": 240.72809,
+          "followed_z": 240.92493,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.916667,
+          "render_z": 241.22815,
+          "global_z": 241.1621,
+          "followed_z": 241.22815,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.9333334,
+          "render_z": 241.5409,
+          "global_z": 241.38469,
+          "followed_z": 241.5409,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.9666667,
+          "render_z": 241.86742,
+          "global_z": 241.84238,
+          "followed_z": 241.86742,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 7.9833336,
+          "render_z": 242.19681,
+          "global_z": 242.07747,
+          "followed_z": 242.19681,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.0,
+          "render_z": 242.53888,
+          "global_z": 242.31718,
+          "followed_z": 242.53888,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.033334,
+          "render_z": 242.88232,
+          "global_z": 242.80975,
+          "followed_z": 242.88232,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.05,
+          "render_z": 243.24335,
+          "global_z": 243.06084,
+          "followed_z": 243.24335,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.083334,
+          "render_z": 243.60022,
+          "global_z": 243.56892,
+          "followed_z": 243.60022,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.1,
+          "render_z": 243.95706,
+          "global_z": 243.8247,
+          "followed_z": 243.95706,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.116667,
+          "render_z": 244.32028,
+          "global_z": 244.08167,
+          "followed_z": 244.32028,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.150001,
+          "render_z": 244.6867,
+          "global_z": 244.59926,
+          "followed_z": 244.6867,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.166667,
+          "render_z": 245.05482,
+          "global_z": 244.85983,
+          "followed_z": 245.05482,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.2,
+          "render_z": 245.42133,
+          "global_z": 245.38446,
+          "followed_z": 245.42133,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.216667,
+          "render_z": 245.79674,
+          "global_z": 245.6485,
+          "followed_z": 245.79674,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.233334,
+          "render_z": 246.17067,
+          "global_z": 245.91368,
+          "followed_z": 246.17067,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.266666,
+          "render_z": 246.54985,
+          "global_z": 246.44743,
+          "followed_z": 246.54985,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.283334,
+          "render_z": 246.92288,
+          "global_z": 246.716,
+          "followed_z": 246.92288,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.316667,
+          "render_z": 247.31596,
+          "global_z": 247.25648,
+          "followed_z": 247.31596,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.333334,
+          "render_z": 247.70221,
+          "global_z": 247.5284,
+          "followed_z": 247.70221,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.366667,
+          "render_z": 248.08699,
+          "global_z": 248.07552,
+          "followed_z": 248.08699,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.383333,
+          "render_z": 248.47604,
+          "global_z": 248.35072,
+          "followed_z": 248.47604,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.400001,
+          "render_z": 248.86887,
+          "global_z": 248.62703,
+          "followed_z": 248.86887,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.433333,
+          "render_z": 249.25919,
+          "global_z": 249.18289,
+          "followed_z": 249.25919,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.45,
+          "render_z": 249.65607,
+          "global_z": 249.46246,
+          "followed_z": 249.65607,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.483334,
+          "render_z": 250.056,
+          "global_z": 250.02483,
+          "followed_z": 250.056,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.5,
+          "render_z": 250.453,
+          "global_z": 250.30762,
+          "followed_z": 250.453,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.516666,
+          "render_z": 250.85985,
+          "global_z": 250.59148,
+          "followed_z": 250.85985,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.55,
+          "render_z": 251.27216,
+          "global_z": 251.1624,
+          "followed_z": 251.27216,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.566667,
+          "render_z": 251.68187,
+          "global_z": 251.44945,
+          "followed_z": 251.68187,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.6,
+          "render_z": 252.11423,
+          "global_z": 252.0267,
+          "followed_z": 252.11423,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.616667,
+          "render_z": 252.55017,
+          "global_z": 252.31691,
+          "followed_z": 252.55017,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.650001,
+          "render_z": 252.9685,
+          "global_z": 252.90047,
+          "followed_z": 252.9685,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.666667,
+          "render_z": 253.39014,
+          "global_z": 253.1938,
+          "followed_z": 253.39014,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.7,
+          "render_z": 253.81027,
+          "global_z": 253.78357,
+          "followed_z": 253.81027,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.716667,
+          "render_z": 254.24263,
+          "global_z": 254.07999,
+          "followed_z": 254.24263,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.75,
+          "render_z": 254.67693,
+          "global_z": 254.67587,
+          "followed_z": 254.67693,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.766666,
+          "render_z": 255.1106,
+          "global_z": 254.97534,
+          "followed_z": 255.1106,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.783334,
+          "render_z": 255.5467,
+          "global_z": 255.27582,
+          "followed_z": 255.5467,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.816667,
+          "render_z": 255.98862,
+          "global_z": 255.87975,
+          "followed_z": 255.98862,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.833334,
+          "render_z": 256.4358,
+          "global_z": 256.1832,
+          "followed_z": 256.4358,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.866667,
+          "render_z": 256.89484,
+          "global_z": 256.79306,
+          "followed_z": 256.89484,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.883333,
+          "render_z": 257.34485,
+          "global_z": 257.09946,
+          "followed_z": 257.34485,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.916667,
+          "render_z": 257.78662,
+          "global_z": 257.71518,
+          "followed_z": 257.78662,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.933333,
+          "render_z": 258.26062,
+          "global_z": 258.02448,
+          "followed_z": 258.26062,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.966667,
+          "render_z": 258.7594,
+          "global_z": 258.6459,
+          "followed_z": 258.7594,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 8.983334,
+          "render_z": 259.23807,
+          "global_z": 258.95804,
+          "followed_z": 259.23807,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.016666,
+          "render_z": 259.70242,
+          "global_z": 259.5851,
+          "followed_z": 259.70242,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.033334,
+          "render_z": 260.16495,
+          "global_z": 259.90005,
+          "followed_z": 260.16495,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.066667,
+          "render_z": 260.62366,
+          "global_z": 260.53268,
+          "followed_z": 260.62366,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.083334,
+          "render_z": 261.10464,
+          "global_z": 260.85037,
+          "followed_z": 261.10464,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.116667,
+          "render_z": 261.58112,
+          "global_z": 261.4884,
+          "followed_z": 261.58112,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.133333,
+          "render_z": 262.0439,
+          "global_z": 261.80878,
+          "followed_z": 262.0439,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.166667,
+          "render_z": 262.51373,
+          "global_z": 262.45215,
+          "followed_z": 262.51373,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.183333,
+          "render_z": 262.9839,
+          "global_z": 262.77515,
+          "followed_z": 262.9839,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.216667,
+          "render_z": 263.4513,
+          "global_z": 263.4237,
+          "followed_z": 263.4513,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.233334,
+          "render_z": 263.92078,
+          "global_z": 263.74982,
+          "followed_z": 263.92078,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.25,
+          "render_z": 264.4006,
+          "global_z": 264.07727,
+          "followed_z": 264.4006,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.283334,
+          "render_z": 264.8739,
+          "global_z": 264.73523,
+          "followed_z": 264.8739,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.3,
+          "render_z": 265.3582,
+          "global_z": 265.06482,
+          "followed_z": 265.3582,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.333334,
+          "render_z": 265.8289,
+          "global_z": 265.7254,
+          "followed_z": 265.8289,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.35,
+          "render_z": 266.30853,
+          "global_z": 266.05698,
+          "followed_z": 266.30853,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.383333,
+          "render_z": 266.78827,
+          "global_z": 266.7226,
+          "followed_z": 266.78827,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.400001,
+          "render_z": 267.26328,
+          "global_z": 267.05634,
+          "followed_z": 267.26328,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.433333,
+          "render_z": 267.7335,
+          "global_z": 267.72482,
+          "followed_z": 267.7335,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.45,
+          "render_z": 268.22192,
+          "global_z": 268.0598,
+          "followed_z": 268.22192,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.466667,
+          "render_z": 268.70398,
+          "global_z": 268.3954,
+          "followed_z": 268.70398,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.5,
+          "render_z": 269.2142,
+          "global_z": 269.06866,
+          "followed_z": 269.2142,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.516666,
+          "render_z": 269.69583,
+          "global_z": 269.40634,
+          "followed_z": 269.69583,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.55,
+          "render_z": 270.18707,
+          "global_z": 270.0836,
+          "followed_z": 270.18707,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.566667,
+          "render_z": 270.67352,
+          "global_z": 270.42313,
+          "followed_z": 270.67352,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.6,
+          "render_z": 271.15994,
+          "global_z": 271.10394,
+          "followed_z": 271.15994,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.616667,
+          "render_z": 271.65173,
+          "global_z": 271.44522,
+          "followed_z": 271.65173,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.650001,
+          "render_z": 272.14874,
+          "global_z": 272.12943,
+          "followed_z": 272.14874,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.666667,
+          "render_z": 272.6407,
+          "global_z": 272.47235,
+          "followed_z": 272.6407,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.683333,
+          "render_z": 273.1312,
+          "global_z": 272.81583,
+          "followed_z": 273.1312,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.716667,
+          "render_z": 273.62683,
+          "global_z": 273.50436,
+          "followed_z": 273.62683,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.733334,
+          "render_z": 274.12198,
+          "global_z": 273.84943,
+          "followed_z": 274.12198,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.766666,
+          "render_z": 274.6117,
+          "global_z": 274.54117,
+          "followed_z": 274.6117,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.783334,
+          "render_z": 275.10315,
+          "global_z": 274.88782,
+          "followed_z": 275.10315,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.816667,
+          "render_z": 275.6092,
+          "global_z": 275.58273,
+          "followed_z": 275.6092,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.833334,
+          "render_z": 276.1012,
+          "global_z": 275.93097,
+          "followed_z": 276.1012,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.85,
+          "render_z": 276.61014,
+          "global_z": 276.27975,
+          "followed_z": 276.61014,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.883333,
+          "render_z": 277.14322,
+          "global_z": 276.99677,
+          "followed_z": 277.14322,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.900001,
+          "render_z": 277.67432,
+          "global_z": 277.36227,
+          "followed_z": 277.67432,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.933333,
+          "render_z": 278.21625,
+          "global_z": 278.10382,
+          "followed_z": 278.21625,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.95,
+          "render_z": 278.76218,
+          "global_z": 278.47986,
+          "followed_z": 278.76218,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 9.983334,
+          "render_z": 279.30057,
+          "global_z": 279.2448,
+          "followed_z": 279.30057,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.0,
+          "render_z": 279.87656,
+          "global_z": 279.63184,
+          "followed_z": 279.87656,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.033334,
+          "render_z": 280.4477,
+          "global_z": 280.4099,
+          "followed_z": 280.4477,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.05,
+          "render_z": 281.06183,
+          "global_z": 280.7998,
+          "followed_z": 281.06183,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.083334,
+          "render_z": 281.66074,
+          "global_z": 281.5801,
+          "followed_z": 281.66074,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.1,
+          "render_z": 282.22406,
+          "global_z": 281.9703,
+          "followed_z": 282.22406,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.133333,
+          "render_z": 282.7904,
+          "global_z": 282.75058,
+          "followed_z": 282.7904,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.150001,
+          "render_z": 283.3581,
+          "global_z": 283.14114,
+          "followed_z": 283.3581,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.166667,
+          "render_z": 283.92236,
+          "global_z": 283.53238,
+          "followed_z": 283.92236,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.2,
+          "render_z": 284.49695,
+          "global_z": 284.3177,
+          "followed_z": 284.49695,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.216667,
+          "render_z": 285.07593,
+          "global_z": 284.7117,
+          "followed_z": 285.07593,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.25,
+          "render_z": 285.66525,
+          "global_z": 285.5017,
+          "followed_z": 285.66525,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.266666,
+          "render_z": 286.2484,
+          "global_z": 285.89792,
+          "followed_z": 286.2484,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.3,
+          "render_z": 286.83163,
+          "global_z": 286.69272,
+          "followed_z": 286.83163,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.316667,
+          "render_z": 287.40424,
+          "global_z": 287.0913,
+          "followed_z": 287.40424,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.35,
+          "render_z": 287.97934,
+          "global_z": 287.8908,
+          "followed_z": 287.97934,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.366667,
+          "render_z": 288.5614,
+          "global_z": 288.29175,
+          "followed_z": 288.5614,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.400001,
+          "render_z": 289.13635,
+          "global_z": 289.09595,
+          "followed_z": 289.13635,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.416667,
+          "render_z": 289.7336,
+          "global_z": 289.49924,
+          "followed_z": 289.7336,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.45,
+          "render_z": 290.36414,
+          "global_z": 290.30814,
+          "followed_z": 290.36414,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.466667,
+          "render_z": 290.9869,
+          "global_z": 290.71375,
+          "followed_z": 290.9869,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.5,
+          "render_z": 291.56998,
+          "global_z": 291.5273,
+          "followed_z": 291.56998,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.516666,
+          "render_z": 292.17078,
+          "global_z": 291.93527,
+          "followed_z": 292.17078,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.55,
+          "render_z": 292.7769,
+          "global_z": 292.7535,
+          "followed_z": 292.7769,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.566667,
+          "render_z": 293.38678,
+          "global_z": 293.1638,
+          "followed_z": 293.38678,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.6,
+          "render_z": 294.00528,
+          "global_z": 293.98492,
+          "followed_z": 294.00528,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.616667,
+          "render_z": 294.6018,
+          "global_z": 294.3945,
+          "followed_z": 294.6018,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.650001,
+          "render_z": 295.2176,
+          "global_z": 295.2123,
+          "followed_z": 295.2176,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.666667,
+          "render_z": 295.81573,
+          "global_z": 295.62073,
+          "followed_z": 295.81573,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.683333,
+          "render_z": 296.40646,
+          "global_z": 296.0289,
+          "followed_z": 296.40646,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.716667,
+          "render_z": 296.98746,
+          "global_z": 296.84512,
+          "followed_z": 296.98746,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.733334,
+          "render_z": 297.59274,
+          "global_z": 297.25314,
+          "followed_z": 297.59274,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.766666,
+          "render_z": 298.18814,
+          "global_z": 298.06906,
+          "followed_z": 298.18814,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.783334,
+          "render_z": 298.7641,
+          "global_z": 298.47693,
+          "followed_z": 298.7641,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.816667,
+          "render_z": 299.3465,
+          "global_z": 299.29254,
+          "followed_z": 299.3465,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.833334,
+          "render_z": 299.9692,
+          "global_z": 299.70026,
+          "followed_z": 299.9692,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.866667,
+          "render_z": 300.58963,
+          "global_z": 300.51553,
+          "followed_z": 300.58963,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.883333,
+          "render_z": 301.16162,
+          "global_z": 300.9231,
+          "followed_z": 301.16162,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.900001,
+          "render_z": 301.73383,
+          "global_z": 301.3306,
+          "followed_z": 301.73383,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.933333,
+          "render_z": 302.31726,
+          "global_z": 302.15225,
+          "followed_z": 302.31726,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.95,
+          "render_z": 302.9138,
+          "global_z": 302.5754,
+          "followed_z": 302.9138,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 10.983334,
+          "render_z": 303.50537,
+          "global_z": 303.44333,
+          "followed_z": 303.50537,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.0,
+          "render_z": 304.10315,
+          "global_z": 303.88208,
+          "followed_z": 304.10315,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.016666,
+          "render_z": 304.6941,
+          "global_z": 304.32312,
+          "followed_z": 304.6941,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.05,
+          "render_z": 305.28406,
+          "global_z": 305.19492,
+          "followed_z": 305.28406,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.066667,
+          "render_z": 305.87234,
+          "global_z": 305.62637,
+          "followed_z": 305.87234,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.083334,
+          "render_z": 306.44553,
+          "global_z": 306.05936,
+          "followed_z": 306.44553,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.116667,
+          "render_z": 307.03748,
+          "global_z": 306.93185,
+          "followed_z": 307.03748,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.133333,
+          "render_z": 307.6192,
+          "global_z": 307.3695,
+          "followed_z": 307.6192,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.150001,
+          "render_z": 308.2027,
+          "global_z": 307.80792,
+          "followed_z": 308.2027,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.183333,
+          "render_z": 308.79968,
+          "global_z": 308.68802,
+          "followed_z": 308.79968,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.2,
+          "render_z": 309.40442,
+          "global_z": 309.13016,
+          "followed_z": 309.40442,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.216667,
+          "render_z": 310.00693,
+          "global_z": 309.5738,
+          "followed_z": 310.00693,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.25,
+          "render_z": 310.61893,
+          "global_z": 310.4651,
+          "followed_z": 310.61893,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.266666,
+          "render_z": 311.2274,
+          "global_z": 310.9127,
+          "followed_z": 311.2274,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.3,
+          "render_z": 311.83243,
+          "global_z": 311.81155,
+          "followed_z": 311.83243,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.316667,
+          "render_z": 312.45117,
+          "global_z": 312.2627,
+          "followed_z": 312.45117,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.333334,
+          "render_z": 313.09622,
+          "global_z": 312.71503,
+          "followed_z": 313.09622,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.366667,
+          "render_z": 313.72263,
+          "global_z": 313.6228,
+          "followed_z": 313.72263,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.383333,
+          "render_z": 314.34143,
+          "global_z": 314.0781,
+          "followed_z": 314.34143,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.400001,
+          "render_z": 314.9531,
+          "global_z": 314.53424,
+          "followed_z": 314.9531,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.433333,
+          "render_z": 315.577,
+          "global_z": 315.44952,
+          "followed_z": 315.577,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.45,
+          "render_z": 316.2093,
+          "global_z": 315.9086,
+          "followed_z": 316.2093,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.483334,
+          "render_z": 316.8383,
+          "global_z": 316.82953,
+          "followed_z": 316.8383,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.5,
+          "render_z": 317.45483,
+          "global_z": 317.29144,
+          "followed_z": 317.45483,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.516666,
+          "render_z": 318.0625,
+          "global_z": 317.7543,
+          "followed_z": 318.0625,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.533334,
+          "render_z": 318.66827,
+          "global_z": 318.2181,
+          "followed_z": 318.66827,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.566667,
+          "render_z": 319.2887,
+          "global_z": 319.14865,
+          "followed_z": 319.2887,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.583334,
+          "render_z": 319.89703,
+          "global_z": 319.6154,
+          "followed_z": 319.89703,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.6,
+          "render_z": 320.51285,
+          "global_z": 320.08313,
+          "followed_z": 320.51285,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.633333,
+          "render_z": 321.1347,
+          "global_z": 321.02158,
+          "followed_z": 321.1347,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.650001,
+          "render_z": 321.7663,
+          "global_z": 321.49228,
+          "followed_z": 321.7663,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.666667,
+          "render_z": 322.39093,
+          "global_z": 321.964,
+          "followed_z": 322.39093,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.7,
+          "render_z": 323.01868,
+          "global_z": 322.9104,
+          "followed_z": 323.01868,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.716667,
+          "render_z": 323.65228,
+          "global_z": 323.3851,
+          "followed_z": 323.65228,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.733334,
+          "render_z": 324.27823,
+          "global_z": 323.8608,
+          "followed_z": 324.27823,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.766666,
+          "render_z": 324.9041,
+          "global_z": 324.8152,
+          "followed_z": 324.9041,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.783334,
+          "render_z": 325.52747,
+          "global_z": 325.29385,
+          "followed_z": 325.52747,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.8,
+          "render_z": 326.1678,
+          "global_z": 325.77353,
+          "followed_z": 326.1678,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.833334,
+          "render_z": 326.7919,
+          "global_z": 326.7358,
+          "followed_z": 326.7919,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.85,
+          "render_z": 327.41504,
+          "global_z": 327.2184,
+          "followed_z": 327.41504,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.866667,
+          "render_z": 328.05783,
+          "global_z": 327.702,
+          "followed_z": 328.05783,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.900001,
+          "render_z": 328.6848,
+          "global_z": 328.6721,
+          "followed_z": 328.6848,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.916667,
+          "render_z": 329.31503,
+          "global_z": 329.15857,
+          "followed_z": 329.31503,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.933333,
+          "render_z": 329.9514,
+          "global_z": 329.64603,
+          "followed_z": 329.9514,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.95,
+          "render_z": 330.60892,
+          "global_z": 330.13443,
+          "followed_z": 330.60892,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 11.983334,
+          "render_z": 331.25726,
+          "global_z": 331.1141,
+          "followed_z": 331.25726,
+          "follow_error": 0.0
+        },
+        {
+          "sim": 12.0,
+          "render_z": 331.88605,
+          "global_z": 331.60538,
+          "followed_z": 331.88605,
+          "follow_error": 0.0
+        }
+      ]
+    }
+  }
+}

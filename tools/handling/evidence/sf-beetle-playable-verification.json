@@ -1,0 +1,75 @@
+{
+  "platform": "macOS Apple Silicon / Metal",
+  "bundle": "target/Rust MM2 Handling.app",
+  "command": [
+    "target/debug/mm2",
+    "--mm2-path",
+    "<install>",
+    "--city",
+    "sf",
+    "--car",
+    "vpbug",
+    "--no-profile"
+  ],
+  "binary_sha256": "acc2e2bfc1fe86e12c8d58a7916fda3c3244999517039e5b40c371512110a25f",
+  "build_command": "RUSTC_WRAPPER= cargo build --locked -p mm2_app --bin mm2",
+  "build_exit_code": 0,
+  "temporary_instrumentation_removed": true,
+  "observations": [
+    {
+      "action": "Up held 5000 ms",
+      "speed_kmh": 78.0,
+      "gear": "D3",
+      "rpm": 4323,
+      "wheels": "4/4",
+      "camera": [
+        -1319.2,
+        61.1,
+        315.4,
+        -180,
+        -8
+      ]
+    },
+    {
+      "action": "Right held 500 ms",
+      "result": "Steering changed heading; subsequent wall contact retained finite stable pose",
+      "wheels": "4/4",
+      "camera": [
+        -1327.1,
+        52.8,
+        475.1,
+        165,
+        -11
+      ]
+    },
+    {
+      "action": "r reset, Up held 3500 ms, space held 500 ms",
+      "result": "Reset returned to spawn; keyboard throttle and handbrake responded",
+      "speed_kmh": 16.6,
+      "rpm": 2900,
+      "wheels": "4/4",
+      "camera": [
+        -1319.2,
+        65.0,
+        264.1,
+        -178,
+        -8
+      ]
+    },
+    {
+      "action": "r reset",
+      "result": "Left at road spawn",
+      "speed_kmh": 0.1,
+      "wheels": "4/4",
+      "camera": [
+        -1319.4,
+        68.8,
+        217.4,
+        180,
+        -11
+      ]
+    }
+  ],
+  "scope": "Visible native production-input smoke check. Static screenshots do not establish subjective smoothness; before/after camera timing records establish removal of the measured pose mismatch. Sequential single-key actions do not constitute a new simultaneous-input powerslide comparison.",
+  "left_open": true
+}

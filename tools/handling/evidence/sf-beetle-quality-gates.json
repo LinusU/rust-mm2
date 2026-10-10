@@ -1,0 +1,21 @@
+{
+  "fmt": {
+    "command": "cargo fmt --all -- --check",
+    "exit_code": 0
+  },
+  "clippy": {
+    "command": "RUSTC_WRAPPER= cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+    "exit_code": 0
+  },
+  "tests": {
+    "command": "RUSTC_WRAPPER= cargo test --locked --workspace",
+    "exit_code": 0,
+    "suites": 59,
+    "passed": 3072,
+    "failed": 0,
+    "ignored": 0,
+    "log_sha256": "3a0aea5759c007e7f6a3545e312e4d29fe4b04b15ec1f2a66f7c5a3157d4ff71"
+  },
+  "new_regression": "chase_follows_current_render_pose_before_global_propagation",
+  "policy": "Full tests run only after the driving measurements established the final fix; no repeated calibration test runs."
+}

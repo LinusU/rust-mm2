@@ -52,6 +52,13 @@ four-wheel configuration retains the authored collision hull, including its
 underside, and the steering pivot uses the full measured wheel-mesh width
 (previously imported as a half width); radius remains a half extent.
 
+The chase camera samples the player's current interpolated root `Transform`
+during `Update`. Its `GlobalTransform` has not yet propagated at that point;
+sampling it produced visible car/camera jitter in the rendered SF Beetle
+launch despite smooth interpolation. The corrected camera shares the body's
+render pose. City height measurements and before/after camera timing are in
+[the SF investigation](../tools/handling/evidence/sf-beetle-README.md).
+
 Marked static-world contacts use the recovered source effective-mass response:
 contact impulses and angular impulses wait for the next body integration,
 while penetration pushes change position without adding body velocity.

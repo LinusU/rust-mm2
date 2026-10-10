@@ -4,6 +4,7 @@
 //! occlusion pull-in, and VFS loading of the `_near`/`_far` records.
 
 use avian3d::prelude::{Collider, Gravity, LinearVelocity, PhysicsPlugins, RigidBody};
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
@@ -241,6 +242,51 @@ fn pad_walks_the_same_chain() {
     assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
     pad_press(&mut app, GamepadButton::West);
     assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+}
+
+/// Interpolation runs before Update while global propagation follows it.
+/// The chase boom must share the current root render pose with the body.
+#[test]
+fn chase_follows_current_render_pose_before_global_propagation() {
+    let mut app = base_app(CameraMode::Chase);
+    let previous = Transform::from_xyz(12.0, 2.0, -10.0);
+    let car = spawn_vehicle(&mut app, previous.translation, Vec3::NEG_Z * 20.0);
+    let lens = near_lens();
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: lens.clone(),
+            far: None,
+            ..default()
+        },
+        true,
+    );
+    app.update();
+    // Reproduce the point between interpolation and PostUpdate: the rendered
+    // root has moved, but GlobalTransform deliberately retains the old pose.
+    let current = Transform::from_xyz(12.0, 2.0, -10.44).with_rotation(Quat::from_rotation_y(0.15));
+    *app.world_mut().get_mut::<Transform>(car).unwrap() = current;
+    *app.world_mut().get_mut::<GlobalTransform>(car).unwrap() = previous.into();
+    app.world_mut().run_system_once(chase_follow).unwrap();
+
+    let expected = desired_eye(current.translation, current.rotation, &lens).1;
+    let actual = app.world().get::<Transform>(cam).unwrap().translation;
+    assert!(
+        actual.distance(expected) < 1e-5,
+        "chase targets current render pose: {actual:?} vs {expected:?}"
+    );
+    assert_eq!(
+        app.world().get::<ChaseCamera>(cam).unwrap().last_pos,
+        Some(current.translation)
+    );
+    assert_eq!(
+        app.world()
+            .get::<GlobalTransform>(car)
+            .unwrap()
+            .translation(),
+        previous.translation,
+        "the fixture must retain the stale global pose during the camera update"
+    );
 }
 
 /// The active lens owns the boom and the projection.

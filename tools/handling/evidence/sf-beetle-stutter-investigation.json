@@ -1,0 +1,143 @@
+{
+  "car": "vpbug",
+  "city": "sf",
+  "original_provenance": {
+    "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+    "signatures_verified": true
+  },
+  "initial_original_com_pose": [
+    -1319.45,
+    68.05,
+    221.2775,
+    180
+  ],
+  "initial_room": 687,
+  "settling": "600 explicit fixed updates holding handbrake after player-ready pose override; original total constructor-to-settle updates unknown. No forced engine state. Native starts constructor cold and receives the same 600 held-handbrake updates.",
+  "original_samples": 901,
+  "source_first_significant_pending_contact_impulse_n": 667,
+  "comparison_limit": "Original develops a body collision at n=667 around Z=490, absent in native run. Suffix is retained and reported separately. Obstruction identity not established. Lateral drift reaches 0.86 m before collision; this comparison does not establish exact city collision or lateral-trajectory equivalence.",
+  "comparisons": [
+    {
+      "scope": "unobstructed prefix",
+      "first_n": 0,
+      "last_n": 666,
+      "count": 667,
+      "height_error_m": {
+        "count": 667,
+        "min": 2.6855467183395376e-08,
+        "median": 0.0007252246093685244,
+        "max": 0.004142300048826542,
+        "mean": 0.0011837600869975577,
+        "stddev": 0.0012906663407813916
+      },
+      "horizontal_position_error_m": {
+        "count": 667,
+        "min": 0.0002979153373396686,
+        "median": 0.09522352600982756,
+        "max": 0.859878071055639,
+        "mean": 0.22073840723743998,
+        "stddev": 0.2545987702799743
+      },
+      "speed_error_m_s": {
+        "count": 667,
+        "min": 8.22123036870858e-06,
+        "median": 0.0011649254171430812,
+        "max": 0.09374408327011707,
+        "mean": 0.004276803401341989,
+        "stddev": 0.011671650923826174
+      }
+    },
+    {
+      "scope": "complete recording including unmatched impact suffix",
+      "first_n": 0,
+      "last_n": 900,
+      "count": 901,
+      "height_error_m": {
+        "count": 901,
+        "min": 2.6855467183395376e-08,
+        "median": 0.0010151699218710064,
+        "max": 0.45659978271484647,
+        "mean": 0.07737223757186071,
+        "stddev": 0.1392853041255914
+      },
+      "horizontal_position_error_m": {
+        "count": 901,
+        "min": 0.0002979153373396686,
+        "median": 0.25269596134859423,
+        "max": 108.04891060248067,
+        "mean": 10.761447275911841,
+        "stddev": 24.20474525980322
+      },
+      "speed_error_m_s": {
+        "count": 901,
+        "min": 8.22123036870858e-06,
+        "median": 0.0015563892604504304,
+        "max": 43.67697214913145,
+        "mean": 6.9673395782788905,
+        "stddev": 13.267375001623758
+      }
+    }
+  ],
+  "settled_com_height_difference_m": 2.3160644531117214e-05,
+  "max_source_positional_push_m": 0.08242365848763805,
+  "max_native_positional_push_m": 0.065515116,
+  "diagnosis": "chase_follow sampled stale GlobalTransform during Update while renderer used current interpolated root Transform. Native camera target/render mismatch up to 0.4865 m in the 6\u201312 s launch window; corrected capture has exactly zero mismatch.",
+  "fix": "Read current root Transform in chase_follow, with disjoint camera/player queries. No physics, ride-height, rendering-quality or keyboard-tuning changes.",
+  "source_restoration": {
+    "selection": {
+      "additionalRegistryFlagsRestored": [],
+      "selectionRestored": true,
+      "registryEntryNameRestored": true,
+      "name": "vpbug",
+      "registryAddress": 72312216,
+      "lockedAfter": 0,
+      "paintLockedAfter": 0,
+      "selectedModelBytesRestored": true,
+      "paintAfter": 0
+    },
+    "renderer": {
+      "backend": "ddraw",
+      "min": 0,
+      "max": -1,
+      "lastFrameDraws": 2356
+    },
+    "before_reload": {
+      "hooksRestored": true,
+      "clocksRestored": [
+        0,
+        0.10000000149011612,
+        9.999999747378752e-05
+      ],
+      "mode": 0,
+      "keysReleased": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "archiveSha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+      "looseExistsAfter": false,
+      "archiveModifiedThisSession": false
+    },
+    "fresh_reload": {
+      "path": "/apps/midtown-madness-2.wgb",
+      "loaded": true,
+      "progress": {
+        "type": "loading_progress",
+        "phase": "done",
+        "percent": 100,
+        "label": ""
+      }
+    },
+    "after_reload": {
+      "reloaded": true,
+      "archiveSha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+      "looseExistsAfter": false
+    }
+  },
+  "original_guest_bundle_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+  "guest_bundle_path": "/apps/midtown-madness-2.wgb",
+  "fixture_sha256": null,
+  "fixture_note": "Actual retail SF; no generated fixture archive used."
+}

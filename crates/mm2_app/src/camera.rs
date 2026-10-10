@@ -711,6 +711,8 @@ const OCCLUSION_FLOOR: f32 = 0.05;
 /// reset/transition camera behavior is unrecovered (UNK-36).
 const BOOM_SNAP_SPEED: f32 = 120.0;
 
+type RootPlayer = (With<PlayerVehicle>, Without<ChildOf>);
+
 /// Chase follow on the active chase lens (recovered `camTrackCS`
 /// runtime, UNK-36): the desired eye is `Offset` in the car's yaw-only
 /// frame around the `TrackTo` aim point, the live follow rate lerps with
@@ -728,8 +730,8 @@ pub fn chase_follow(
     spatial: Option<SpatialQuery>,
     spawn: Option<Res<crate::session::SpawnPoint>>,
     settings: Option<Res<crate::settings::GraphicsSettings>>,
-    mut cams: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
-    vehicle: Query<(Entity, &GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
+    mut cams: Query<(&mut ChaseCamera, &mut Transform, &mut Projection), Without<PlayerVehicle>>,
+    vehicle: Query<(Entity, &Transform, &LinearVelocity), RootPlayer>,
 ) {
     if !matches!(*mode, CameraMode::Chase | CameraMode::ChaseFar) {
         return;
@@ -737,8 +739,11 @@ pub fn chase_follow(
     let Ok((veh_ent, veh_xf, vel)) = vehicle.single() else {
         return;
     };
-    let veh_pos = veh_xf.translation();
-    let veh_rot = veh_xf.rotation();
+    // PlayerVehicle is a root entity, so its local transform is its world
+    // render pose. Interpolation writes this before Update; GlobalTransform
+    // is propagated in PostUpdate and still describes the previous frame.
+    let veh_pos = veh_xf.translation;
+    let veh_rot = veh_xf.rotation;
     // `|forward velocity|` (`carsim+0x248`): the car's −Z axis.
     let speed = vel.dot(veh_rot * Vec3::NEG_Z).abs();
     let dt = time.delta_secs();
