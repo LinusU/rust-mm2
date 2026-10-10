@@ -24,6 +24,7 @@ mod environment_retail;
 mod event;
 mod game_keys;
 mod hud;
+mod hudjourney;
 mod hudmap;
 mod huge_texture;
 mod import_pipeline;
