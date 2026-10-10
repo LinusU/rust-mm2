@@ -59,7 +59,8 @@ use mm2_game::pedreact::{
     Approacher, DiveSide, Order, Phase, ReactPolicy, Reaction, most_urgent, rejoin_step,
 };
 use mm2_game::pedwalk::{
-    SidewalkNet, WalkPolicy, Walker, candidate_curves, draw_pedestrian, target_population,
+    SidewalkNet, WalkPolicy, Walker, candidate_curves, crossings_from_psdl, draw_pedestrian,
+    target_population,
 };
 use mm2_game::{
     Mm2Vfs, NavGraph, NavOverrides, NavRng, Player, Session, SessionConfig, SessionEntity,
@@ -172,6 +173,12 @@ pub struct PedCrowd {
     pub hops: u64,
     /// Dead-end turn-arounds walkers have made.
     pub turned_around: u64,
+    /// Verified crosswalk crossings walkers have stepped onto
+    /// (F19-B.6).
+    pub crossings: u64,
+    /// Crosswalk sites verified against the sidewalk curves, of the
+    /// city's crosswalk rectangles; set when the map is built.
+    pub crossing_sites: (usize, usize),
     /// Walkers that stopped to watch an approaching car.
     pub alerts: u64,
     /// Dives walkers have made.
@@ -195,11 +202,12 @@ impl PedCrowd {
 
     /// The smoke-record field: `peds=<live>/<target> psp=<spawned>
     /// prec=<recycled> pdrop=<dropped> puns=<unspawnable> phop=<hops>
-    /// pturn=<turn-arounds> pwary=<alerts> pdive=<dives>
+    /// pturn=<turn-arounds> pxsite=<verified>/<crosswalks>
+    /// pcross=<crossings taken> pwary=<alerts> pdive=<dives>
     /// prej=<rejoined> prx=<reacting>/<archetypes>`, given the live walker count.
     pub fn smoke_detail(&self, live: usize) -> String {
         format!(
-            " peds={live}/{} psp={} prec={} pdrop={} puns={} phop={} pturn={} pwary={} pdive={} prej={} prx={}/{}",
+            " peds={live}/{} psp={} prec={} pdrop={} puns={} phop={} pturn={} pxsite={}/{} pcross={} pwary={} pdive={} prej={} prx={}/{}",
             self.target,
             self.spawned,
             self.recycled,
@@ -207,6 +215,9 @@ impl PedCrowd {
             self.unspawnable,
             self.hops,
             self.turned_around,
+            self.crossing_sites.0,
+            self.crossing_sites.1,
+            self.crossings,
             self.alerts,
             self.dives,
             self.rejoined,
@@ -245,6 +256,8 @@ fn build_crowd(
         unspawnable: 0,
         hops: 0,
         turned_around: 0,
+        crossings: 0,
+        crossing_sites: (0, 0),
         alerts: 0,
         dives: 0,
         rejoined: 0,
@@ -280,7 +293,22 @@ fn build_crowd(
             NavOverrides::default()
         }
     };
-    let net = SidewalkNet::build(&build.graph, &overrides, &crowd.policy);
+    // The crosswalk rectangles are the candidate crossings; the net
+    // keeps the ones that reach sidewalk curve ends at both ends.
+    let sites = match vfs
+        .read_path(&format!("city/{stem}.psdl"))
+        .map_err(|e| e.to_string())
+        .and_then(|(bytes, _)| mm2_formats::psdl::Psdl::parse(&bytes).map_err(|e| e.to_string()))
+    {
+        Ok(psdl) => crossings_from_psdl(&psdl),
+        Err(e) => {
+            warn!(error = %e, "pedestrians: psdl failed — walking without crossings");
+            crowd.issues.push(format!("psdl: {e}"));
+            Vec::new()
+        }
+    };
+    let net = SidewalkNet::build_with_crossings(&build.graph, &overrides, &crowd.policy, &sites);
+    crowd.crossing_sites = (net.stats().crossings, sites.len());
     if net.stats().walkable == 0 {
         crowd.issues.push("no walkable sidewalks".to_string());
         return crowd;
@@ -375,6 +403,7 @@ pub fn walk_pedestrians(
         let step = map.net.advance(&mut walk.walker, ds, &mut crowd.rng);
         crowd.hops += u64::from(step.hops);
         crowd.turned_around += u64::from(step.turned_around);
+        crowd.crossings += u64::from(step.crossings);
         let Some(sample) = map.net.sample(&map.graph, &walk.walker) else {
             continue;
         };

@@ -124,6 +124,21 @@ fn retail_crowd_soak_walks_the_real_sidewalks_stays_finite_and_bounded() {
             num(&record, "phop") > 0,
             "{city}: no corner hops:\n{record}"
         );
+        // Retail authors each crosswalk against sidewalk curve ends, so
+        // the crossing sites verify (UNK-42 geometry); how many walkers
+        // happened to cross inside this short soak is reported, not
+        // required.
+        let sites = field(&record, "pxsite")
+            .and_then(|p| p.split_once('/'))
+            .map(|(v, t)| (v.parse::<usize>().unwrap(), t.parse::<usize>().unwrap()))
+            .unwrap_or_else(|| panic!("{city}: no pxsite= field:\n{record}"));
+        assert!(
+            sites.0 > 0 && sites.0 == sites.1,
+            "{city}: only {}/{} crosswalks verified as crossings:\n{record}",
+            sites.0,
+            sites.1
+        );
+        num(&record, "pcross");
         // Every stock archetype must carry the reaction states, so the
         // whole crowd can react (the F19-AC03 precondition).
         let prx =
@@ -152,8 +167,9 @@ fn retail_crowd_soak_walks_the_real_sidewalks_stays_finite_and_bounded() {
 /// placements from the seed, and every counter from what those walkers
 /// then did — drift between two identical runs would mean a session
 /// restart no longer restores the density/seed behaviour.
-const CROWD_FIELDS: [&str; 11] = [
-    "peds", "psp", "prec", "pdrop", "puns", "phop", "pturn", "pwary", "pdive", "prej", "prx",
+const CROWD_FIELDS: [&str; 13] = [
+    "peds", "psp", "prec", "pdrop", "puns", "phop", "pturn", "pxsite", "pcross", "pwary", "pdive",
+    "prej", "prx",
 ];
 
 #[test]

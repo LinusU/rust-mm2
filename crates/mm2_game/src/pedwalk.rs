@@ -7,8 +7,8 @@
 //! 758 on San Francisco). Those curves are the only ground a walker is
 //! ever placed on or moved along, so a pedestrian can never be planned
 //! onto a vehicle lane (F19 req 3: "keep pedestrians off ordinary
-//! vehicle-only lanes except verified crossings" — no crossing is
-//! verified yet, so there are none).
+//! vehicle-only lanes except verified crossings" — see the crossings
+//! below).
 //!
 //! What the original does at the end of a sidewalk curve — how a walker
 //! gets round a corner, or across a street — is **unrecovered**
@@ -20,8 +20,17 @@
 //! neighbour is a dead end and the walker turns round. A join is also
 //! refused when the straight line between the two ends crosses a
 //! vehicle lane, so no radius can make a walker step across a
-//! carriageway; crossing a street mouth at a crosswalk is not modelled
-//! (no crossing is verified) and stays open under F19-AC04.
+//! carriageway. The one way across a street is a **verified crossing**
+//! (F19-B.6): a PSDL `Crosswalk` rectangle whose two short ends each
+//! sit within [`WalkPolicy::crossing_attach`] of a distinct sidewalk
+//! curve end. Retail authors every crosswalk that way (all 697 London
+//! and 648 San Francisco rectangles have both ends 1.1–4.3 m from a
+//! curve end; `docs/research/pedanim.md`), so the *sites* are evidence.
+//! Whether the original's walkers cross there, and how they choose to,
+//! is still unrecovered (UNK-42): a walker reaching an attached end
+//! takes the crossing as one more equally-weighted continuation (a
+//! designed choice), and walks the whole path — curve end, crosswalk
+//! end, crosswalk end, curve end — so it never pops across a street.
 //!
 //! Everything is deterministic from a seed: the planner and the
 //! [`NavRng`] choices use no hash-ordered iteration, so one seed gives
@@ -78,6 +87,14 @@ pub struct WalkPolicy {
     /// Vertical gap (m) above which two nearby ends are different
     /// levels (a bridge over a street) and never join.
     pub join_rise: f32,
+    /// Furthest (m) a crosswalk's short end may sit from a sidewalk
+    /// curve end and still attach to it. Retail's farthest attachment
+    /// is 4.3 m; the bound is that measurement rounded up.
+    pub crossing_attach: f32,
+    /// Longest crossing path (m) a walker will take: a crosswalk longer
+    /// than this (retail's longest rectangle is 35.2 m) is refused
+    /// rather than walked.
+    pub max_crossing: f32,
 }
 
 impl Default for WalkPolicy {
@@ -90,6 +107,8 @@ impl Default for WalkPolicy {
             spacing: 2.0,
             join_radius: 8.0,
             join_rise: 1.0,
+            crossing_attach: 4.5,
+            max_crossing: 45.0,
         }
     }
 }
@@ -125,6 +144,55 @@ pub struct Walker {
     /// Curve the walker arrived from at its last corner, so the next
     /// corner prefers somewhere new.
     pub from: Option<LaneId>,
+    /// Set while the walker is on a verified crossing; `lane` then still
+    /// names the curve it left.
+    pub crossing: Option<CrossingWalk>,
+}
+
+/// A walker's progress along a verified crossing's path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrossingWalk {
+    /// Index into the net's crossings.
+    pub index: usize,
+    /// Distance along the crossing path (m).
+    pub s: f32,
+    /// Whether the walker goes from the crossing's first end to its
+    /// second.
+    pub forward: bool,
+}
+
+/// A crosswalk rectangle, reduced to the midpoints of its two short
+/// ends. `a` and `b` are the places a walker steps on and off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrosswalkSite {
+    /// Midpoint of one short end.
+    pub a: [f32; 3],
+    /// Midpoint of the other short end.
+    pub b: [f32; 3],
+}
+
+/// The crosswalk rectangles of a city's PSDL, as [`CrosswalkSite`]s. These
+/// are candidates only: [`SidewalkNet::build_with_crossings`] verifies
+/// each against the sidewalk curves.
+pub fn crossings_from_psdl(psdl: &mm2_formats::psdl::Psdl) -> Vec<CrosswalkSite> {
+    let mid = |p: [f32; 3], q: [f32; 3]| {
+        [
+            (p[0] + q[0]) * 0.5,
+            (p[1] + q[1]) * 0.5,
+            (p[2] + q[2]) * 0.5,
+        ]
+    };
+    crate::props::carriageways(psdl)
+        .into_iter()
+        .filter(|c| c.kind == mm2_formats::psdl::AttributeType::Crosswalk)
+        .filter(|c| c.ring.len() == 4)
+        // The ring is [p0, p1, p3, p2]: (p0, p1) is one short end and
+        // (p2, p3) the other.
+        .map(|c| CrosswalkSite {
+            a: mid(c.ring[0], c.ring[1]),
+            b: mid(c.ring[3], c.ring[2]),
+        })
+        .collect()
 }
 
 /// What one [`SidewalkNet::advance`] call did besides moving.
@@ -134,6 +202,8 @@ pub struct WalkStep {
     pub hops: u32,
     /// Dead ends turned round at.
     pub turned_around: u32,
+    /// Verified crossings stepped onto.
+    pub crossings: u32,
 }
 
 /// One end of a sidewalk curve.
@@ -153,6 +223,52 @@ struct WalkLane {
     /// Ends of other curves that share this curve's `Start` / `Finish`
     /// corner, nearest first.
     joins: [Vec<EndRef>; 2],
+    /// Verified crossings attached to this curve's `Start` / `Finish`:
+    /// `(crossing index, whether this end is the crossing's first)`.
+    crossings: [Vec<(usize, bool)>; 2],
+}
+
+/// A verified crossing: the path from one curve end over the crosswalk
+/// to another curve end.
+#[derive(Debug, Clone)]
+struct CrossingLink {
+    /// Curve end, crosswalk end, crosswalk end, curve end.
+    path: [[f32; 3]; 4],
+    /// Cumulative path length at each point.
+    cum: [f32; 4],
+    ends: [EndRef; 2],
+}
+
+impl CrossingLink {
+    fn length(&self) -> f32 {
+        self.cum[3]
+    }
+
+    fn sample(&self, s: f32, forward: bool) -> LaneSample {
+        let s = s.clamp(0.0, self.length());
+        let seg = (0..3).find(|&i| s <= self.cum[i + 1]).unwrap_or(2);
+        let (p, q) = (self.path[seg], self.path[seg + 1]);
+        let span = self.cum[seg + 1] - self.cum[seg];
+        let t = if span > 0.0 {
+            (s - self.cum[seg]) / span
+        } else {
+            0.0
+        };
+        let mut tangent = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let n =
+            (tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]).sqrt();
+        for c in &mut tangent {
+            *c = if forward { *c / n } else { -*c / n };
+        }
+        LaneSample {
+            position: [
+                p[0] + (q[0] - p[0]) * t,
+                p[1] + (q[1] - p[1]) * t,
+                p[2] + (q[2] - p[2]) * t,
+            ],
+            tangent,
+        }
+    }
 }
 
 /// Census of one network build.
@@ -172,6 +288,12 @@ pub struct WalkNetStats {
     /// Candidate joins refused because the line between the two ends
     /// crosses a vehicle lane (each pair counted from both ends).
     pub severed: usize,
+    /// Crosswalk candidates verified as crossings.
+    pub crossings: usize,
+    /// Crosswalk candidates refused: an end with no sidewalk curve end
+    /// in reach, both ends on one curve end, a path longer than
+    /// [`WalkPolicy::max_crossing`], or non-finite geometry.
+    pub crossings_refused: usize,
 }
 
 /// A problem found while planning.
@@ -188,6 +310,7 @@ pub enum WalkIssue {
 #[derive(Debug, Clone)]
 pub struct SidewalkNet {
     lanes: Vec<WalkLane>,
+    crossings: Vec<CrossingLink>,
     index: HashMap<u64, usize>,
     stats: WalkNetStats,
 }
@@ -197,6 +320,20 @@ impl SidewalkNet {
     /// ends into corners under `policy`. Curves on roads the event
     /// closes are left out.
     pub fn build(graph: &NavGraph, overrides: &NavOverrides, policy: &WalkPolicy) -> Self {
+        Self::build_with_crossings(graph, overrides, policy, &[])
+    }
+
+    /// [`build`](Self::build), then verify each crosswalk candidate: it
+    /// becomes a crossing only when both its short ends reach a
+    /// walkable sidewalk curve end within [`WalkPolicy::crossing_attach`]
+    /// (and [`WalkPolicy::join_rise`] vertically), the two curve ends
+    /// differ, and the path is at most [`WalkPolicy::max_crossing`] long.
+    pub fn build_with_crossings(
+        graph: &NavGraph,
+        overrides: &NavOverrides,
+        policy: &WalkPolicy,
+        candidates: &[CrosswalkSite],
+    ) -> Self {
         let mut stats = WalkNetStats::default();
         let mut lanes: Vec<WalkLane> = Vec::new();
         let mut ends: Vec<[f32; 3]> = Vec::new();
@@ -222,6 +359,7 @@ impl SidewalkNet {
                 id: lane.id,
                 length: lane.length,
                 joins: [Vec::new(), Vec::new()],
+                crossings: [Vec::new(), Vec::new()],
             });
         }
         stats.walkable = lanes.len();
@@ -272,6 +410,72 @@ impl SidewalkNet {
                 .collect();
         }
 
+        // Verify the crosswalk candidates against the curve ends.
+        let attach = |p: [f32; 3]| -> Option<usize> {
+            let mut best: Option<(f32, usize)> = None;
+            for (i, q) in ends.iter().enumerate() {
+                let (ex, ey, ez) = (q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+                let d2 = ex * ex + ey * ey + ez * ez;
+                if d2 <= policy.crossing_attach * policy.crossing_attach
+                    && ey.abs() <= policy.join_rise
+                    && best.is_none_or(|(b, _)| d2 < b)
+                {
+                    best = Some((d2, i));
+                }
+            }
+            best.map(|(_, i)| i)
+        };
+        let end_ref = |i: usize| -> EndRef {
+            (
+                i / 2,
+                if i.is_multiple_of(2) {
+                    End::Start
+                } else {
+                    End::Finish
+                },
+            )
+        };
+        let mut crossings: Vec<CrossingLink> = Vec::new();
+        for c in candidates {
+            let finite = c.a.iter().chain(c.b.iter()).all(|v| v.is_finite());
+            let link = finite
+                .then(|| Some((attach(c.a)?, attach(c.b)?)))
+                .flatten()
+                .filter(|(ia, ib)| ia != ib)
+                .and_then(|(ia, ib)| {
+                    let path = [ends[ia], c.a, c.b, ends[ib]];
+                    let mut cum = [0.0f32; 4];
+                    for k in 1..4 {
+                        let (p, q) = (path[k - 1], path[k]);
+                        cum[k] = cum[k - 1]
+                            + ((q[0] - p[0]).powi(2)
+                                + (q[1] - p[1]).powi(2)
+                                + (q[2] - p[2]).powi(2))
+                            .sqrt();
+                    }
+                    (cum[3] >= MIN_WALK_LANE && cum[3] <= policy.max_crossing).then(|| {
+                        (
+                            ia,
+                            ib,
+                            CrossingLink {
+                                path,
+                                cum,
+                                ends: [end_ref(ia), end_ref(ib)],
+                            },
+                        )
+                    })
+                });
+            let Some((ia, ib, link)) = link else {
+                stats.crossings_refused += 1;
+                continue;
+            };
+            let k = crossings.len();
+            crossings.push(link);
+            lanes[ia / 2].crossings[ia % 2].push((k, true));
+            lanes[ib / 2].crossings[ib % 2].push((k, false));
+            stats.crossings += 1;
+        }
+
         let index = lanes
             .iter()
             .enumerate()
@@ -279,6 +483,7 @@ impl SidewalkNet {
             .collect();
         Self {
             lanes,
+            crossings,
             index,
             stats,
         }
@@ -320,6 +525,9 @@ impl SidewalkNet {
     /// direction it is facing (the curve tangent, flipped for a
     /// backward walker). `None` for a curve the net does not carry.
     pub fn sample(&self, graph: &NavGraph, walker: &Walker) -> Option<LaneSample> {
+        if let Some(c) = walker.crossing {
+            return Some(self.crossings.get(c.index)?.sample(c.s, c.forward));
+        }
         let i = *self.index.get(&walker.lane.key())?;
         let mut sample =
             graph.sample_lane(walker.lane, walker.s.clamp(0.0, self.lanes[i].length))?;
@@ -349,6 +557,36 @@ impl SidewalkNet {
         };
         let mut guard = 0;
         loop {
+            if let Some(mut c) = walker.crossing {
+                // Walking a crossing: finish it, then step onto the
+                // curve end it leads to.
+                let Some(link) = self.crossings.get(c.index) else {
+                    walker.crossing = None;
+                    return step;
+                };
+                let len = link.length();
+                c.s = c.s.clamp(0.0, len);
+                let room = if c.forward { len - c.s } else { c.s };
+                if left <= room {
+                    c.s += if c.forward { left } else { -left };
+                    c.s = c.s.clamp(0.0, len);
+                    walker.crossing = Some(c);
+                    return step;
+                }
+                left -= room;
+                guard += 1;
+                if guard > MAX_HOPS {
+                    c.s = if c.forward { len } else { 0.0 };
+                    walker.crossing = Some(c);
+                    return step;
+                }
+                let (next, next_end) = link.ends[usize::from(c.forward)];
+                walker.crossing = None;
+                walker.from = Some(self.lanes[cur].id);
+                self.enter(walker, next, next_end);
+                cur = next;
+                continue;
+            }
             let len = self.lanes[cur].length;
             walker.s = walker.s.clamp(0.0, len);
             let room = match walker.dir {
@@ -377,6 +615,7 @@ impl SidewalkNet {
                 return step;
             }
             let all = &self.lanes[cur].joins[(end == End::Finish) as usize];
+            let crossings = &self.lanes[cur].crossings[(end == End::Finish) as usize];
             // Prefer a curve other than the one just left, when the
             // corner offers any other.
             let fresh: Vec<EndRef> = all
@@ -385,27 +624,54 @@ impl SidewalkNet {
                 .filter(|(j, _)| Some(self.lanes[*j].id) != walker.from)
                 .collect();
             let options = if fresh.is_empty() { all } else { &fresh };
+            if !crossings.is_empty() {
+                // A crosswalk is one more way on, weighted like a corner.
+                let n = options.len() + crossings.len();
+                let pick = (rng.next_u64() % n as u64) as usize;
+                if pick >= options.len() {
+                    let (index, first) = crossings[pick - options.len()];
+                    let len = self.crossings[index].length();
+                    walker.crossing = Some(CrossingWalk {
+                        index,
+                        s: if first { 0.0 } else { len },
+                        forward: first,
+                    });
+                    step.crossings += 1;
+                    continue;
+                }
+                let (next, next_end) = options[pick];
+                walker.from = Some(self.lanes[cur].id);
+                self.enter(walker, next, next_end);
+                cur = next;
+                step.hops += 1;
+                continue;
+            }
             match rng.pick(options).copied() {
                 Some((next, next_end)) => {
                     walker.from = Some(self.lanes[cur].id);
+                    self.enter(walker, next, next_end);
                     cur = next;
-                    walker.lane = self.lanes[next].id;
-                    match next_end {
-                        End::Start => {
-                            walker.s = 0.0;
-                            walker.dir = WalkDir::Forward;
-                        }
-                        End::Finish => {
-                            walker.s = self.lanes[next].length;
-                            walker.dir = WalkDir::Backward;
-                        }
-                    }
                     step.hops += 1;
                 }
                 None => {
                     walker.dir = walker.dir.flipped();
                     step.turned_around += 1;
                 }
+            }
+        }
+    }
+
+    /// Put `walker` on curve `next` at `end`, heading away from it.
+    fn enter(&self, walker: &mut Walker, next: usize, end: End) {
+        walker.lane = self.lanes[next].id;
+        match end {
+            End::Start => {
+                walker.s = 0.0;
+                walker.dir = WalkDir::Forward;
+            }
+            End::Finish => {
+                walker.s = self.lanes[next].length;
+                walker.dir = WalkDir::Backward;
             }
         }
     }
@@ -575,6 +841,7 @@ pub fn draw_pedestrian(
             s,
             dir,
             from: None,
+            crossing: None,
         };
         let Some(sample) = net.sample(graph, &walker) else {
             continue;

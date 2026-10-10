@@ -10,9 +10,9 @@ use mm2_formats::bai::{
     Bai, Culling, END_FILL, Intersection, Road, RoadEnd, RoadSection, RoadSide,
 };
 use mm2_game::pedwalk::{
-    MAX_ADVANCE, MIN_WALK_LANE, PedPlan, SidewalkNet, WalkDir, WalkIssue, WalkPolicy, Walker,
-    candidate_curves, draw_pedestrian, in_walk_band, plan_pedestrians, target_population,
-    within_bubble,
+    CrosswalkSite, MAX_ADVANCE, MIN_WALK_LANE, PedPlan, SidewalkNet, WalkDir, WalkIssue,
+    WalkPolicy, Walker, candidate_curves, draw_pedestrian, in_walk_band, plan_pedestrians,
+    target_population, within_bubble,
 };
 use mm2_game::*;
 
@@ -283,6 +283,7 @@ fn walker(lane: LaneId, s: f32, dir: WalkDir) -> Walker {
         s,
         dir,
         from: None,
+        crossing: None,
     }
 }
 
@@ -359,6 +360,7 @@ fn a_corner_prefers_a_curve_other_than_the_one_just_left() {
             s: 0.0,
             dir: WalkDir::Backward,
             from: Some(sw(0)),
+            crossing: None,
         };
         // ... then step backward off its start: the corner offers road 0
         // and road 2; the one just left (road 0) is skipped.
@@ -623,4 +625,143 @@ fn a_refill_draw_without_candidates_or_interest_is_none() {
     let curves = candidate_curves(&net, &g, &[[20.0, 0.0, 20.0]], &p);
     assert!(draw_pedestrian(&net, &g, &curves, &mut rng, &[], &[], &p).is_none());
     assert!(candidate_curves(&net, &g, &[], &p).is_empty());
+}
+
+// ---------- verified crossings (F19-B.6) ----------
+
+/// Two sidewalks facing each other over a street (vehicle lane at
+/// x = 23.75): road 0's curve at x = 8 and road 1's at x = 28, both
+/// ending at z = 40.
+fn street_graph() -> NavGraph {
+    graph(vec![
+        road_with(0, 0.0, 0.0, vec![vec![[8.0, 0.0, 0.0], [8.0, 0.0, 40.0]]]),
+        road_with(
+            1,
+            20.0,
+            0.0,
+            vec![vec![[28.0, 0.0, 0.0], [28.0, 0.0, 40.0]]],
+        ),
+    ])
+}
+
+/// A crosswalk over the street's mouth, a couple of metres past both
+/// curve ends.
+fn crosswalk() -> CrosswalkSite {
+    CrosswalkSite {
+        a: [10.0, 0.0, 42.0],
+        b: [26.0, 0.0, 42.0],
+    }
+}
+
+fn crossing_net(g: &NavGraph, candidates: &[CrosswalkSite]) -> SidewalkNet {
+    SidewalkNet::build_with_crossings(
+        g,
+        &NavOverrides::default(),
+        &WalkPolicy::default(),
+        candidates,
+    )
+}
+
+#[test]
+fn only_a_crosswalk_reaching_two_distinct_curve_ends_is_verified() {
+    let g = street_graph();
+    let far = CrosswalkSite {
+        a: [10.0, 0.0, 42.0],
+        b: [26.0, 0.0, 80.0],
+    };
+    let one_end = CrosswalkSite {
+        a: [10.0, 0.0, 42.0],
+        b: [10.0, 0.0, 43.0],
+    };
+    let raised = CrosswalkSite {
+        a: [10.0, 6.0, 42.0],
+        b: [26.0, 6.0, 42.0],
+    };
+    let nan = CrosswalkSite {
+        a: [f32::NAN, 0.0, 42.0],
+        b: [26.0, 0.0, 42.0],
+    };
+    let net = crossing_net(&g, &[crosswalk(), far, one_end, raised, nan]);
+    assert_eq!(net.stats().crossings, 1);
+    assert_eq!(net.stats().crossings_refused, 4);
+
+    // Longer than the policy allows: refused.
+    let strict = WalkPolicy {
+        max_crossing: 10.0,
+        ..WalkPolicy::default()
+    };
+    let net =
+        SidewalkNet::build_with_crossings(&g, &NavOverrides::default(), &strict, &[crosswalk()]);
+    assert_eq!(
+        (net.stats().crossings, net.stats().crossings_refused),
+        (0, 1)
+    );
+
+    // The plain build has no crossings at all.
+    assert_eq!(net_of(&g).stats().crossings, 0);
+}
+
+#[test]
+fn a_walker_crosses_the_street_only_by_a_verified_crossing() {
+    let g = street_graph();
+
+    // Without the crossing the walker just turns round at the curve end.
+    let plain = net_of(&g);
+    let mut rng = NavRng::new(3);
+    let mut w = walker(sw(0), 39.0, WalkDir::Forward);
+    let step = plain.advance(&mut w, 40.0, &mut rng);
+    assert_eq!((step.crossings, step.hops), (0, 0));
+    assert_eq!(w.lane, sw(0));
+
+    // With it, the end offers the crossing as its only way on.
+    let net = crossing_net(&g, &[crosswalk()]);
+    let mut rng = NavRng::new(3);
+    let mut w = walker(sw(0), 39.0, WalkDir::Forward);
+    let step = net.advance(&mut w, 1.5, &mut rng);
+    assert_eq!(step.crossings, 1);
+    let c = w.crossing.expect("on the crossing");
+    assert!(c.forward);
+
+    // Mid-crossing the pose is on the crosswalk path, never off it.
+    net.advance(&mut w, 10.0, &mut rng);
+    let at = net.sample(&g, &w).expect("pose");
+    assert!(at.position[0] > 8.0 && at.position[0] < 28.0, "{at:?}");
+    assert!(at.position[2] >= 40.0 && at.position[2] <= 42.0, "{at:?}");
+    assert!(at.tangent[0] > 0.9, "heading across the street: {at:?}");
+
+    // Past the far end the walker is on road 1's curve, walking away
+    // from its finish.
+    net.advance(&mut w, 20.0, &mut rng);
+    assert!(w.crossing.is_none());
+    assert_eq!(w.lane, sw(1));
+    assert_eq!(w.dir, WalkDir::Backward);
+    let len = net.length(sw(1)).unwrap();
+    assert!(w.s < len && w.s > len - 20.0, "s = {}", w.s);
+
+    // And back over the same crosswalk the other way.
+    let mut w = walker(sw(1), 39.0, WalkDir::Forward);
+    net.advance(&mut w, 2.0, &mut rng);
+    let c = w.crossing.expect("on the crossing");
+    assert!(!c.forward);
+}
+
+#[test]
+fn a_long_walk_over_a_crossing_net_terminates_and_stays_on_the_net() {
+    let g = street_graph();
+    let net = crossing_net(&g, &[crosswalk()]);
+    let mut rng = NavRng::new(11);
+    let mut w = walker(sw(0), 5.0, WalkDir::Forward);
+    let mut crossed = 0;
+    for _ in 0..400 {
+        let step = net.advance(&mut w, 7.5, &mut rng);
+        crossed += step.crossings;
+        let at = net.sample(&g, &w).expect("always posed");
+        assert!(at.position.iter().all(|c| c.is_finite()));
+        assert!(at.position[0] >= 8.0 - 1e-3 && at.position[0] <= 28.0 + 1e-3);
+        assert!(at.position[2] >= -1e-3 && at.position[2] <= 42.0 + 1e-3);
+    }
+    assert!(
+        crossed > 10,
+        "walker kept crossing back and forth: {crossed}"
+    );
 }

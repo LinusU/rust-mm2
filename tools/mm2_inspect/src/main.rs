@@ -2586,6 +2586,7 @@ fn sidewalk_census(
                 WalkDir::Backward
             },
             from: None,
+            crossing: None,
         };
         for _ in 0..200 {
             let step = net.advance(&mut w, 10.0, &mut rng);
