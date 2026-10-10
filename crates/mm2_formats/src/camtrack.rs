@@ -55,8 +55,8 @@ pub struct TrackCamSpec {
     /// `MinMaxOn` — nonzero enables the original's ±5 m vertical
     /// ground/ceiling clamp of the eye. It does *not* gate the
     /// `MinDist`/`MaxDist` clamp (recovered runtime, UNK-36,
-    /// `docs/research/camtrack.md`); the app still reads it as that
-    /// gate until the recovered behaviour is bound.
+    /// `docs/research/camtrack.md`); the app does not bind the vertical
+    /// clamp yet.
     pub min_max_on: Option<f32>,
     /// `TrackBreak` — authored flag for the boom breaking loose on
     /// hard manoeuvres; exact behaviour unrecovered (surfaced, not
@@ -65,11 +65,11 @@ pub struct TrackCamSpec {
     /// `MinDist` — boom distance floor, metres. `0` on some records
     /// (e.g. the bus's near view).
     pub min_dist: Option<f32>,
-    /// `MaxDist` — boom distance cap, metres. The speed window drives
-    /// the boom toward it.
+    /// `MaxDist` — boom distance cap, metres; `MinDist`/`MaxDist` clamp
+    /// the eye–aim distance after the approach (UNK-36).
     pub max_dist: Option<f32>,
-    /// `MinSpeed`/`MaxSpeed` — vehicle-speed window (m/s) the boom
-    /// extension scales over.
+    /// `MinSpeed`/`MaxSpeed` — vehicle-speed window (m/s) the follow
+    /// rate `MaxAppXZPos`→`MinAppXZPos` lerps over (UNK-36).
     pub min_speed: Option<f32>,
     pub max_speed: Option<f32>,
     /// `TrackTo` — aim point in car space (metres; `+Y` up).
@@ -91,6 +91,31 @@ pub struct TrackCamSpec {
     pub camera_near: Option<f32>,
     /// `CameraFar`.
     pub camera_far: Option<f32>,
+    /// The approach cluster (`camAppCS`/`camTrackCS` follow dynamics,
+    /// recovered UNK-36, `docs/research/camtrack.md` §1–2): the live
+    /// follow-rate window and slew, the per-axis rates, and the
+    /// `AppPosMin` knee / `AppApp` low-pass of the eye approach.
+    pub approach_on: Option<f32>,
+    /// `AppAppOn`.
+    pub app_app_on: Option<f32>,
+    /// `AppYPos` — vertical follow rate (1/s).
+    pub app_y_pos: Option<f32>,
+    /// `AppXZPos` — the record's initial horizontal follow rate; the
+    /// runtime rewrites it every frame from the speed lerp.
+    pub app_xz_pos: Option<f32>,
+    /// `AppApp` — per-step low-pass factor on the approach rate state.
+    pub app_app: Option<f32>,
+    /// `AppPosMin` — soft-knee distance of the approach.
+    pub app_pos_min: Option<f32>,
+    /// `MinAppXZPos`/`MaxAppXZPos` — follow rate at/above `MaxSpeed`
+    /// and at/below `MinSpeed`.
+    pub min_app_xz_pos: Option<f32>,
+    /// `MaxAppXZPos`.
+    pub max_app_xz_pos: Option<f32>,
+    /// `AppInc`/`AppDec` — follow-rate slew up/down, per second.
+    pub app_inc: Option<f32>,
+    /// `AppDec`.
+    pub app_dec: Option<f32>,
     /// Field names outside the consumed schema (the approach/dynamics
     /// cluster), kept for diagnosis — values stay in the record.
     pub extra_fields: Vec<String>,
@@ -232,6 +257,16 @@ impl TrackCamSpec {
             "CameraFOV",
             "CameraNear",
             "CameraFar",
+            "ApproachOn",
+            "AppAppOn",
+            "AppYPos",
+            "AppXZPos",
+            "AppApp",
+            "AppPosMin",
+            "MinAppXZPos",
+            "MaxAppXZPos",
+            "AppInc",
+            "AppDec",
         ];
         Ok(TrackCamSpec {
             type_tag: file.type_tag.clone(),
@@ -252,6 +287,16 @@ impl TrackCamSpec {
             camera_fov: scalar(root, "CameraFOV"),
             camera_near: scalar(root, "CameraNear"),
             camera_far: scalar(root, "CameraFar"),
+            approach_on: scalar(root, "ApproachOn"),
+            app_app_on: scalar(root, "AppAppOn"),
+            app_y_pos: scalar(root, "AppYPos"),
+            app_xz_pos: scalar(root, "AppXZPos"),
+            app_app: scalar(root, "AppApp"),
+            app_pos_min: scalar(root, "AppPosMin"),
+            min_app_xz_pos: scalar(root, "MinAppXZPos"),
+            max_app_xz_pos: scalar(root, "MaxAppXZPos"),
+            app_inc: scalar(root, "AppInc"),
+            app_dec: scalar(root, "AppDec"),
             extra_fields: root
                 .entries
                 .iter()
@@ -334,6 +379,17 @@ impl TrackCamSpec {
         usable1(self.camera_far)
     }
 
+    /// `ApproachOn` as an authored flag (constructor default 1 when
+    /// absent or unusable — `0x51d750`, UNK-36).
+    pub fn approach_enabled(&self) -> bool {
+        usable1(self.approach_on).is_none_or(|v| v != 0.0)
+    }
+
+    /// `AppAppOn` as an authored flag (constructor default 1).
+    pub fn app_app_enabled(&self) -> bool {
+        usable1(self.app_app_on).is_none_or(|v| v != 0.0)
+    }
+
     /// `CollideType` as the authored gate: nonzero *and*
     /// [`usable_f32`]. A `nan` flag reads `!= 0.0` — true — so the
     /// unguarded read would silently enable the occlusion pull-in; an
@@ -377,6 +433,16 @@ impl TrackCamSpec {
             ("BlendGoal", self.blend_goal),
             ("CameraNear", self.camera_near),
             ("CameraFar", self.camera_far),
+            ("ApproachOn", self.approach_on),
+            ("AppAppOn", self.app_app_on),
+            ("AppYPos", self.app_y_pos),
+            ("AppXZPos", self.app_xz_pos),
+            ("AppApp", self.app_app),
+            ("AppPosMin", self.app_pos_min),
+            ("MinAppXZPos", self.min_app_xz_pos),
+            ("MaxAppXZPos", self.max_app_xz_pos),
+            ("AppInc", self.app_inc),
+            ("AppDec", self.app_dec),
         ] {
             if let Some(v) = v {
                 issues.extend(scalar_issue(name, v));
@@ -418,8 +484,16 @@ mod tests {
         assert_eq!(s.camera_fov.unwrap(), 70.0);
         assert_eq!(s.camera_near.unwrap(), 0.5);
         assert_eq!(s.camera_far.unwrap(), 600.0);
-        // Approach/dynamics tuning stays verbatim in extras.
-        assert!(s.extra_fields.iter().any(|f| f == "AppInc"));
+        assert_eq!(s.app_inc, Some(6.65));
+        assert_eq!(s.app_dec, Some(3.35));
+        assert_eq!(s.min_app_xz_pos, Some(1.5));
+        assert_eq!(s.max_app_xz_pos, Some(8.0));
+        assert_eq!(
+            (s.app_y_pos, s.app_app, s.app_pos_min),
+            (Some(4.0), Some(0.7), Some(0.25))
+        );
+        assert!(s.approach_enabled() && s.app_app_enabled());
+        // The rest of the dynamics cluster stays verbatim in extras.
         assert!(s.extra_fields.iter().any(|f| f == "ReverseOn"));
         assert!(s.extra_fields.iter().any(|f| f == "HillLerp"));
     }

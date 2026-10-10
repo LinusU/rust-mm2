@@ -7,8 +7,9 @@ use avian3d::prelude::{Collider, Gravity, LinearVelocity, PhysicsPlugins, RigidB
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
-    CameraMode, ChaseCamera, ChaseLens, FreeCamera, TrackReport, chase_follow, dev_cam_cycle_at,
-    load_track_cams, toggle_camera,
+    CameraMode, ChaseCamera, ChaseLens, FreeCamera, TrackReport, approach_axis, chase_follow,
+    desired_eye, dev_cam_cycle_at, follow_rate_target, load_track_cams, slew_follow_rate,
+    toggle_camera,
 };
 use mm2_app::dash::CockpitCamera;
 use mm2_app::input::vehicle_input;
@@ -366,31 +367,33 @@ fn the_field_of_view_setting_widens_the_active_chase_lens() {
     );
 }
 
-/// `MinSpeed`..`MaxSpeed` extends the boom toward `MaxDist`.
+/// Speed does not extend the boom (UNK-36): at full speed the eye
+/// still settles within `[MinDist, MaxDist]` of the aim point, trailing
+/// the desired position by the (loose) fast follow rate only.
 #[test]
-fn speed_window_extends_boom() {
+fn speed_window_does_not_extend_boom() {
     let mut app = base_app(CameraMode::Chase);
     app.add_systems(Update, chase_follow);
-    // At MaxSpeed (20 m/s, forward −Z) the boom reaches MaxDist 5.0.
+    // Constant 20 m/s (MaxSpeed) forward is −Z: the vehicle is kept in
+    // place so the eye must converge on the rest boom, not MaxDist.
     spawn_vehicle(&mut app, Vec3::ZERO, Vec3::new(0.0, 0.0, -20.0));
     let cam = spawn_chase(
         &mut app,
         ChaseCamera {
             near: near_lens(),
             far: None,
-            smoothness: 30.0,
             ..Default::default()
         },
         true,
     );
-    for _ in 0..240 {
+    for _ in 0..600 {
         app.update();
     }
     let xf = app.world().get::<Transform>(cam).unwrap();
     let boom = (xf.translation - near_lens().aim).length();
     assert!(
-        (boom - 5.0).abs() < 0.1,
-        "boom at MaxDist under full speed, got {boom}"
+        (boom - 17.0f32.sqrt()).abs() < 0.1,
+        "boom stays at |Offset| under full speed, got {boom}"
     );
 }
 
@@ -430,7 +433,6 @@ fn collide_type_pulls_boom_in() {
         ChaseCamera {
             near: near_lens(),
             far: None,
-            smoothness: 60.0,
             ..Default::default()
         },
         true,
@@ -469,7 +471,6 @@ fn collide_type_zero_ignores_occluder() {
         ChaseCamera {
             near: ChaseLens::authored(&spec),
             far: None,
-            smoothness: 60.0,
             ..Default::default()
         },
         true,
@@ -513,7 +514,6 @@ fn own_trailer_is_not_an_occluder() {
         ChaseCamera {
             near: near_lens(),
             far: None,
-            smoothness: 60.0,
             ..Default::default()
         },
         true,
@@ -548,7 +548,6 @@ fn other_trailer_still_occludes() {
         ChaseCamera {
             near: near_lens(),
             far: None,
-            smoothness: 60.0,
             ..Default::default()
         },
         true,
@@ -604,7 +603,7 @@ fn drive_views_steer_and_free_detaches() {
 }
 
 /// The designed size-derived lens is what a record-less vehicle gets:
-/// chassis-derived rest boom, 0–60 m/s window toward `rest + 3.6`,
+/// chassis-derived rest boom, constructor-default follow dynamics,
 /// no collision flag and `authored = false` so `trk=` reports `sized`.
 #[test]
 fn sized_lens_drives_the_fallback_boom() {
@@ -612,8 +611,9 @@ fn sized_lens_drives_the_fallback_boom() {
     let offset = Vec3::new(0.0, 2.0 * 0.10 + 1.4, 4.5 * 0.85 + 3.5);
     assert!((lens.offset - offset).length() < 1e-5);
     let rest = lens.offset.length();
-    assert!((lens.dist_max - (rest + 3.6)).abs() < 1e-5);
-    assert_eq!((lens.speed_min, lens.speed_max), (0.0, 60.0));
+    assert_eq!(lens.dist_max, 0.0, "no authored MaxDist, no clamp");
+    assert_eq!((lens.speed_min, lens.speed_max), (5.0, 35.0));
+    assert_eq!((lens.app_xz_min, lens.app_xz_max), (1.8, 12.0));
     assert!(!lens.collide && !lens.authored);
     // The eye lands where the retired constants put it.
     assert!((lens.anchor() - Vec3::new(0.0, 2.0 * 0.55 + 1.4, 4.5 * 0.85 + 3.5)).length() < 1e-5);
@@ -627,7 +627,6 @@ fn sized_lens_drives_the_fallback_boom() {
         ChaseCamera {
             near: lens,
             far: None,
-            smoothness: 30.0,
             ..Default::default()
         },
         true,
@@ -710,7 +709,6 @@ fn non_finite_authored_fields_fall_back_to_the_designed_boom() {
     spec.collide_type = Some(f32::NAN);
     spec.min_max_on = Some(f32::NAN);
     let lens = ChaseLens::authored(&spec);
-    let rest = Vec3::new(0.0, 1.8, 5.0).length();
     assert_eq!(
         lens.offset,
         Vec3::new(0.0, 1.8, 5.0),
@@ -718,9 +716,12 @@ fn non_finite_authored_fields_fall_back_to_the_designed_boom() {
     );
     assert_eq!(lens.aim, Vec3::new(0.0, 1.0, 0.0));
     assert_eq!(lens.dist_min, 0.0);
-    assert_eq!(lens.dist_max, rest);
-    assert_eq!(lens.speed_min, 0.0);
-    assert_eq!(lens.speed_max, 0.0);
+    assert_eq!(lens.dist_max, 0.0, "unusable MaxDist reads as no clamp");
+    assert_eq!(
+        (lens.speed_min, lens.speed_max),
+        (5.0, 35.0),
+        "unusable speed window takes the constructor defaults"
+    );
     assert!(!lens.collide);
     assert_eq!(lens.clip_near, 0.5);
     assert_eq!(lens.clip_far, 600.0);
@@ -780,7 +781,6 @@ fn overflowing_authored_fields_fall_back_to_the_designed_boom() {
     spec.collide_type = Some(1e9);
     spec.min_max_on = Some(1e9);
     let lens = ChaseLens::authored(&spec);
-    let rest = Vec3::new(0.0, 1.8, 5.0).length();
     assert_eq!(lens.offset, Vec3::new(0.0, 1.8, 5.0));
     assert_eq!(
         lens.aim,
@@ -788,9 +788,12 @@ fn overflowing_authored_fields_fall_back_to_the_designed_boom() {
         "a finite-but-overflowing TrackTo reads unauthored"
     );
     assert_eq!(lens.dist_min, 0.0);
-    assert_eq!(lens.dist_max, rest);
-    assert_eq!(lens.speed_min, 0.0);
-    assert_eq!(lens.speed_max, 0.0);
+    assert_eq!(lens.dist_max, 0.0, "unusable MaxDist reads as no clamp");
+    assert_eq!(
+        (lens.speed_min, lens.speed_max),
+        (5.0, 35.0),
+        "unusable speed window takes the constructor defaults"
+    );
     assert!(!lens.collide, "a beyond-bound flag reads off");
     assert_eq!(lens.clip_far, 600.0);
     for issue in spec.validate() {
@@ -964,7 +967,6 @@ fn lens_transition_stays_smooth() {
         ChaseCamera {
             near: near_lens(),
             far: Some(far_lens()),
-            smoothness: 6.0,
             ..Default::default()
         },
         true,
@@ -1200,4 +1202,130 @@ fn chase_lens_near_is_the_loaders_constant() {
         spec.camera_near = Some(authored);
         assert_eq!(ChaseLens::authored(&spec).clip_near, 0.5, "{authored}");
     }
+}
+
+fn dynamics_lens() -> ChaseLens {
+    ChaseLens::authored(
+        &TrackCamSpec::parse(
+            "type: a\ncamTrackCS {\n  Offset 0.5 1.0 4.0\n  MinAppXZPos 2.0\n  MaxAppXZPos 10.0\n  MinSpeed 5.0\n  MaxSpeed 25.0\n  AppInc 4.0\n  AppDec 2.0\n  TrackTo 0.0 1.5 0.0\n}\n",
+        )
+        .unwrap(),
+    )
+}
+
+/// UNK-36 `0x51eb20`: speed lerps the follow rate from `MaxAppXZPos`
+/// (at/below `MinSpeed`) to `MinAppXZPos` (at/above `MaxSpeed`), in m/s.
+#[test]
+fn follow_rate_lerps_with_speed() {
+    let lens = dynamics_lens();
+    assert_eq!(follow_rate_target(&lens, 0.0), 10.0);
+    assert_eq!(follow_rate_target(&lens, 5.0), 10.0);
+    assert!((follow_rate_target(&lens, 15.0) - 6.0).abs() < 1e-5);
+    assert_eq!(follow_rate_target(&lens, 25.0), 2.0);
+    assert_eq!(follow_rate_target(&lens, 80.0), 2.0);
+}
+
+/// The live rate slews at `AppInc` rising and `AppDec` falling per
+/// second and never passes the target.
+#[test]
+fn follow_rate_slews_at_inc_and_dec() {
+    let lens = dynamics_lens();
+    let dt = 1.0 / 60.0;
+    assert!(
+        (slew_follow_rate(2.0, 10.0, lens.app_inc, lens.app_dec, dt) - (2.0 + 4.0 * dt)).abs()
+            < 1e-6
+    );
+    assert!(
+        (slew_follow_rate(10.0, 2.0, lens.app_inc, lens.app_dec, dt) - (10.0 - 2.0 * dt)).abs()
+            < 1e-6
+    );
+    assert_eq!(slew_follow_rate(9.99, 10.0, 4.0, 2.0, dt), 10.0);
+    assert_eq!(slew_follow_rate(2.01, 2.0, 4.0, 2.0, dt), 2.0);
+    // Driven through the system: stopped car from a seeded fast rate
+    // eases up to MaxAppXZPos at AppInc, not instantly.
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: dynamics_lens(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    app.update();
+    app.update();
+    let rate = |app: &App| {
+        app.world()
+            .get::<ChaseCamera>(cam)
+            .unwrap()
+            .follow
+            .app_xz
+            .unwrap()
+    };
+    assert_eq!(rate(&app), 10.0, "a stopped car follows at MaxAppXZPos");
+}
+
+/// UNK-36 `0x51e3e0`: `Offset` is a yaw-only, gravity-aligned frame
+/// around the car-local `TrackTo` point. Pitching or rolling the car
+/// moves the aim point (through the full matrix) but never tilts the
+/// boom; yawing the car swings it behind the heading.
+#[test]
+fn offset_frame_is_yaw_only() {
+    let lens = dynamics_lens();
+    let (t0, eye0) = desired_eye(Vec3::new(3.0, 0.0, -2.0), Quat::IDENTITY, &lens);
+    assert!((t0 - Vec3::new(3.0, 1.5, -2.0)).length() < 1e-5);
+    // +X right, +Y up, +Z behind a car heading −Z.
+    assert!((eye0 - t0 - Vec3::new(0.5, 1.0, 4.0)).length() < 1e-5);
+
+    // Pitch and roll: the boom vector from the aim point is unchanged.
+    for rot in [
+        Quat::from_rotation_x(0.5),
+        Quat::from_rotation_z(-0.7),
+        Quat::from_euler(EulerRot::YXZ, 0.0, 0.4, 0.3),
+    ] {
+        let (t, eye) = desired_eye(Vec3::new(3.0, 0.0, -2.0), rot, &lens);
+        assert!(
+            (eye - t - Vec3::new(0.5, 1.0, 4.0)).length() < 1e-4,
+            "boom tilted by pitch/roll: {:?}",
+            eye - t
+        );
+        assert!((t - Vec3::new(3.0, 0.0, -2.0) - rot * lens.aim).length() < 1e-5);
+    }
+
+    // Yaw 90° (car now heads −X): rearward is +X, right is −Z.
+    let (t, eye) = desired_eye(
+        Vec3::ZERO,
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        &lens,
+    );
+    assert!(
+        (eye - t - Vec3::new(4.0, 1.0, -0.5)).length() < 1e-4,
+        "{:?}",
+        eye - t
+    );
+}
+
+/// The per-axis approach: soft knee below `AppPosMin`, `AppApp`
+/// low-pass, and a step that never overshoots.
+#[test]
+fn approach_axis_knee_lowpass_and_clamp() {
+    let lens = dynamics_lens(); // AppPosMin 0.25, AppApp 0.7 (ctor defaults)
+    let dt = 1.0 / 60.0;
+    // Far target: state low-passes toward d, step = state·rate·dt.
+    let mut st = 0.0;
+    let out = approach_axis(0.0, 10.0, &mut st, 6.0, &lens, dt);
+    assert!((st - 7.0).abs() < 1e-4, "s ← 0 + (10 − 0)·0.7");
+    assert!((out - 7.0 * 6.0 * dt).abs() < 1e-4);
+    // Inside the knee d becomes d²/AppPosMin.
+    let mut st = 0.0;
+    approach_axis(0.0, 0.1, &mut st, 6.0, &lens, dt);
+    assert!((st - 0.7 * (0.1 * 0.1 / 0.25)).abs() < 1e-5);
+    // Never overshoots, either direction.
+    let mut st = 100.0;
+    assert_eq!(approach_axis(0.0, 0.01, &mut st, 50.0, &lens, dt), 0.01);
+    let mut st = 100.0;
+    assert_eq!(approach_axis(0.0, -0.01, &mut st, 50.0, &lens, dt), -0.01);
 }

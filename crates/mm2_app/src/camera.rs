@@ -8,7 +8,10 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use mm2_assets::Vfs;
-use mm2_formats::{camtrack::TrackCamSpec, dash::PovCamSpec};
+use mm2_formats::{
+    camtrack::{TrackCamSpec, usable1},
+    dash::PovCamSpec,
+};
 use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase};
 
 use crate::input::control_just_pressed;
@@ -46,39 +49,56 @@ impl CameraMode {
 }
 
 /// One `camTrackCS` chase view distilled for the controller — the
-/// authored near or far rig, or a designed size-derived fallback when
-/// the vehicle ships no record. `offset`/`aim` are car-space: `+Z` is
+/// authored near or far rig, or a size-derived fallback when the
+/// vehicle ships no record. `offset`/`aim` are car-space: `+Z` is
 /// rearward (vehicle forward is `−Z`), `+Y` up.
 ///
-/// The boom hangs off the aim point: the rest eye is `aim + offset`
-/// ([`Self::anchor`]), not `offset` from the car origin. Designed
-/// reading (UNK-36), chosen because it is the one the retail records
-/// agree on — measured from the aim point, all 49 stock `camtrackcs`
-/// look *down* at the car, nearly all at 13–19°; measured from the
-/// car origin, near lenses sit below their own aim and look up at the
-/// car by up to 20° (`vpbug_near`: eye 1.0 m, under its 1.53 m roof).
+/// The follow model is the recovered retail one (UNK-36,
+/// `docs/research/camtrack.md`): the aim point `T` is `TrackTo` through
+/// the full car matrix, and the desired eye is `T` plus `Offset` in a
+/// **yaw-only, gravity-aligned** frame ([`desired_eye`]) — car pitch
+/// and roll never tilt the boom. The eye then approaches that point at
+/// a live follow rate that the car's speed interpolates between
+/// `MaxAppXZPos` (stopped) and `MinAppXZPos` (fast) ([`follow_rate_target`]).
 #[derive(Debug, Clone)]
 pub struct ChaseLens {
-    /// `Offset` — boom from the aim point to the eye; its length is the
-    /// rest distance.
+    /// `Offset` — yaw-frame offset from the aim point to the desired eye
+    /// (`+X` right, `+Y` up, `+Z` behind).
     pub offset: Vec3,
-    /// `TrackTo` — the point the camera aims at, and the boom's root.
+    /// `TrackTo` — car-local aim point.
     pub aim: Vec3,
-    /// `MinDist`/`MaxDist` — boom-length bounds in metres. `MaxDist` is
-    /// also the extension target the speed window drives toward; the
-    /// authored `MinMaxOn` gate is folded in: unbounded records simply
-    /// produce no clamp.
+    /// `MinDist`/`MaxDist` — hard clamp of the eye–aim distance after the
+    /// approach. Not gated by `MinMaxOn` (recovered, UNK-36); `dist_max
+    /// == 0` (or `<= dist_min`) means no clamp, as in the original.
     pub dist_min: f32,
     pub dist_max: f32,
-    /// `MinSpeed`/`MaxSpeed` — vehicle planar-speed window (m/s) across
-    /// which the boom extends from its rest length to `dist_max`
-    /// (designed reading; the record's approach-rate fields stay
-    /// verbatim in the spec).
-    /// The window is m/s in the original too, but there it interpolates
-    /// the follow rate (`MaxAppXZPos`→`MinAppXZPos`), not the boom
-    /// length (recovered, UNK-36).
+    /// `MinSpeed`/`MaxSpeed` — car forward speed window (m/s) across
+    /// which the follow rate lerps `MaxAppXZPos`→`MinAppXZPos`
+    /// (recovered, UNK-36; the window does not touch the boom length).
     pub speed_min: f32,
     pub speed_max: f32,
+    /// `MaxAppXZPos` / `MinAppXZPos` — follow rate (1/s) when stopped /
+    /// at `speed_max`.
+    pub app_xz_max: f32,
+    pub app_xz_min: f32,
+    /// `AppInc`/`AppDec` — follow-rate slew up/down, per second.
+    pub app_inc: f32,
+    pub app_dec: f32,
+    /// `AppYPos` — vertical follow rate (1/s).
+    pub app_y: f32,
+    /// `AppPosMin` — soft-knee distance of the approach.
+    pub app_pos_min: f32,
+    /// `AppApp` low-pass factor, `None` when `AppAppOn` is 0.
+    pub app_app: Option<f32>,
+    /// `ApproachOn`: when false the eye is set straight to the desired
+    /// position every frame.
+    pub approach: bool,
+    /// `AppXZPos` as authored — the follow rate before the first frame
+    /// rewrites it; absent records start at the speed-lerp target.
+    pub app_xz_init: Option<f32>,
+    /// `VertOffset` — scales the look target's lift
+    /// `LookAbove = (Offset.y − 0.8)·VertOffset` (recovered, UNK-36).
+    pub vert_offset: f32,
     /// `CollideType` nonzero: the boom pulls in front of world
     /// geometry that would occlude the car.
     pub collide: bool,
@@ -93,39 +113,64 @@ pub struct ChaseLens {
     pub authored: bool,
 }
 
+/// `camTrackCS` constructor defaults (`0x51d750`, UNK-36) for the
+/// follow-dynamics fields a record may omit.
+mod ctor {
+    pub const MIN_APP_XZ: f32 = 1.8;
+    pub const MAX_APP_XZ: f32 = 12.0;
+    pub const MIN_SPEED: f32 = 5.0;
+    pub const MAX_SPEED: f32 = 35.0;
+    pub const APP_INC: f32 = 15.0;
+    pub const APP_DEC: f32 = 10.0;
+    pub const APP_Y: f32 = 5.0;
+    pub const APP_APP: f32 = 0.7;
+    pub const APP_POS_MIN: f32 = 0.25;
+    pub const VERT_OFFSET: f32 = 0.6;
+}
+
 impl ChaseLens {
-    /// Distill an authored `camTrackCS` record. Missing fields take
-    /// designed defaults — a sparse record still binds. Every field
-    /// reads through the spec's usable-checked accessors — a `nan`/
-    /// `inf` or beyond-[`USABLE_BOUND`](mm2_formats::camtrack::USABLE_BOUND)
+    /// Distill an authored `camTrackCS` record. A field the record omits
+    /// keeps the constructor default for the follow dynamics, and a
+    /// designed value for `Offset`/`TrackTo`. Every field reads through
+    /// the spec's usable-checked accessors — a `nan`/`inf` or
+    /// beyond-[`USABLE_BOUND`](mm2_formats::camtrack::USABLE_BOUND)
     /// authored value reads unauthored and `validate` names it: a
-    /// non-finite `Offset` would poison the rest length into a NaN
-    /// boom, a `3e38` `TrackTo` would overflow `veh_rot * aim` into a
-    /// non-finite look target, and a `nan` `CameraFar` through a
-    /// `.max(1.0)` sink would silently clamp the far plane to a metre.
+    /// non-finite `Offset` would poison the eye into NaN, a `3e38`
+    /// `TrackTo` would overflow `veh_rot * aim` into a non-finite look
+    /// target, and a `nan` `CameraFar` through a `.max(1.0)` sink would
+    /// silently clamp the far plane to a metre.
     pub fn authored(spec: &TrackCamSpec) -> Self {
         let offset = spec
             .offset_vec()
             .map(Vec3::from)
             .unwrap_or(Vec3::new(0.0, 1.8, 5.0));
-        let rest = offset.length();
-        let min_max_on = spec.min_max_gated();
+        let rate =
+            |v: Option<f32>, default: f32| usable1(v).filter(|r| *r >= 0.0).unwrap_or(default);
+        let app_app = spec.app_app_enabled().then(|| {
+            usable1(spec.app_app)
+                .unwrap_or(ctor::APP_APP)
+                .clamp(0.0, 1.0)
+        });
         Self {
             offset,
             aim: spec
                 .track_to_vec()
                 .map(Vec3::from)
                 .unwrap_or(Vec3::new(0.0, 1.0, 0.0)),
-            dist_min: if min_max_on {
-                spec.min_dist_m().unwrap_or(0.0).max(0.0)
-            } else {
-                0.0
-            },
-            // The cap never shrinks the rest boom — `MaxDist` is the
-            // extension target, not a shrink-to bound.
-            dist_max: spec.max_dist_m().unwrap_or(rest).max(rest),
-            speed_min: spec.min_speed_mps().unwrap_or(0.0).max(0.0),
-            speed_max: spec.max_speed_mps().unwrap_or(0.0).max(0.0),
+            dist_min: spec.min_dist_m().unwrap_or(0.0).max(0.0),
+            dist_max: spec.max_dist_m().unwrap_or(0.0).max(0.0),
+            speed_min: spec.min_speed_mps().unwrap_or(ctor::MIN_SPEED),
+            speed_max: spec.max_speed_mps().unwrap_or(ctor::MAX_SPEED),
+            app_xz_max: rate(spec.max_app_xz_pos, ctor::MAX_APP_XZ),
+            app_xz_min: rate(spec.min_app_xz_pos, ctor::MIN_APP_XZ),
+            app_inc: rate(spec.app_inc, ctor::APP_INC),
+            app_dec: rate(spec.app_dec, ctor::APP_DEC),
+            app_y: rate(spec.app_y_pos, ctor::APP_Y),
+            app_pos_min: rate(spec.app_pos_min, ctor::APP_POS_MIN),
+            app_app,
+            approach: spec.approach_enabled(),
+            app_xz_init: usable1(spec.app_xz_pos).filter(|r| *r >= 0.0),
+            vert_offset: usable1(spec.vert_offset).unwrap_or(ctor::VERT_OFFSET),
             collide: spec.collides(),
             // `camera_fov_deg` reads an undrawable `CameraFOV`
             // (non-finite or outside `(0, 180)`) as unauthored — the
@@ -137,20 +182,27 @@ impl ChaseLens {
         }
     }
 
-    /// Designed boom sized from the chassis (`h`/`d` metres) — the
-    /// pre-authored fallback for a vehicle without records. Mirrors the
-    /// retired constants: rest eye `d*0.85 + 3.5` back and `h*0.55 + 1.4`
-    /// up, aim `h*0.45`, and the 0.06 m-of-boom-per-m/s stretch now
-    /// expressed as a 0–60 m/s window toward `rest + 3.6`.
-    pub fn sized(h: f32, d: f32) -> Self {
-        let offset = Vec3::new(0.0, h * 0.10 + 1.4, d * 0.85 + 3.5);
+    /// A lens with the constructor-default follow dynamics around a
+    /// given boom — the shape shared by the size-derived fallback and
+    /// [`ChaseCamera::default`].
+    fn with_ctor_dynamics(offset: Vec3, aim: Vec3) -> Self {
         Self {
             offset,
-            aim: Vec3::new(0.0, h * 0.45, 0.0),
+            aim,
             dist_min: 0.0,
-            dist_max: offset.length() + 3.6,
-            speed_min: 0.0,
-            speed_max: 60.0,
+            dist_max: 0.0,
+            speed_min: ctor::MIN_SPEED,
+            speed_max: ctor::MAX_SPEED,
+            app_xz_max: ctor::MAX_APP_XZ,
+            app_xz_min: ctor::MIN_APP_XZ,
+            app_inc: ctor::APP_INC,
+            app_dec: ctor::APP_DEC,
+            app_y: ctor::APP_Y,
+            app_pos_min: ctor::APP_POS_MIN,
+            app_app: Some(ctor::APP_APP),
+            approach: true,
+            app_xz_init: None,
+            vert_offset: ctor::VERT_OFFSET,
             collide: false,
             fov_deg: PerspectiveProjection::default().fov.to_degrees(),
             clip_near: PerspectiveProjection::default().near,
@@ -159,8 +211,19 @@ impl ChaseLens {
         }
     }
 
-    /// The rest eye position in car space: the boom's `offset` hung
-    /// off the `aim` point.
+    /// Designed boom sized from the chassis (`h`/`d` metres) — the
+    /// pre-authored fallback for a vehicle without records: rest eye
+    /// `d*0.85 + 3.5` back and `h*0.10 + 1.4` above the aim point `h*0.45`,
+    /// following with the constructor-default dynamics.
+    pub fn sized(h: f32, d: f32) -> Self {
+        Self::with_ctor_dynamics(
+            Vec3::new(0.0, h * 0.10 + 1.4, d * 0.85 + 3.5),
+            Vec3::new(0.0, h * 0.45, 0.0),
+        )
+    }
+
+    /// The rest eye position in car space for an upright car: `Offset`
+    /// hung off the `aim` point.
     pub fn anchor(&self) -> Vec3 {
         self.aim + self.offset
     }
@@ -174,6 +237,88 @@ impl ChaseLens {
             ..default()
         }
     }
+}
+
+/// Live follow state of the chase eye — what the original keeps in
+/// `AppXZPos` and the per-axis approach rate states (UNK-36).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FollowState {
+    /// The live horizontal follow rate (1/s); `None` until the first
+    /// tracked frame seeds it.
+    pub app_xz: Option<f32>,
+    /// Per-axis low-passed approach distance (`AppApp`).
+    pub axis: Vec3,
+}
+
+/// The follow rate the car's speed asks for (`0x51eb20`, UNK-36):
+/// `MaxAppXZPos` at/below `MinSpeed`, `MinAppXZPos` at/above `MaxSpeed`,
+/// linear between (`MaxAppXZPos` when the window is empty or
+/// `MinAppXZPos` is 0). `speed` is the car's |forward velocity| in m/s.
+pub fn follow_rate_target(lens: &ChaseLens, speed: f32) -> f32 {
+    if lens.app_xz_min == 0.0 {
+        return lens.app_xz_max;
+    }
+    let t = if lens.speed_max > lens.speed_min {
+        ((speed - lens.speed_min) / (lens.speed_max - lens.speed_min)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    lens.app_xz_max + (lens.app_xz_min - lens.app_xz_max) * t
+}
+
+/// Slew the live follow rate toward `target` at `inc` (rising) or `dec`
+/// (falling) per second, never passing it (`0x51eb20`, UNK-36).
+pub fn slew_follow_rate(cur: f32, target: f32, inc: f32, dec: f32, dt: f32) -> f32 {
+    if cur < target {
+        (cur + inc * dt).min(target)
+    } else {
+        (cur - dec * dt).max(target)
+    }
+}
+
+/// The aim point and desired eye (`0x51e3e0`, UNK-36). `T = TrackTo ·
+/// carMatrix`; with `b` the car's rearward axis flattened onto the
+/// ground and `r = up × b`, `eye = T + r·Offset.x + b·max(Offset.z,
+/// 0.01) + (0, Offset.y, 0)` — a yaw-only frame, so car pitch and roll
+/// never tilt the boom. A car standing on its nose or tail (no ground
+/// heading) falls back to the world +Z axis.
+pub fn desired_eye(veh_pos: Vec3, veh_rot: Quat, lens: &ChaseLens) -> (Vec3, Vec3) {
+    let t = veh_pos + veh_rot * lens.aim;
+    let back = veh_rot * Vec3::Z;
+    let b = Vec3::new(back.x, 0.0, back.z)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let r = Vec3::Y.cross(b);
+    let eye =
+        t + r * lens.offset.x + b * lens.offset.z.max(0.01) + Vec3::new(0.0, lens.offset.y, 0.0);
+    (t, eye)
+}
+
+/// One axis of the eye approach (`0x522860`, UNK-36): distance `d` to the
+/// target, squared over `AppPosMin` inside the knee, low-passed into
+/// `state` at `AppApp`, then a step of `state · rate · dt` toward the
+/// target that never overshoots. The original steps at its fixed 1/60 s;
+/// the low-pass is applied as `1 − (1 − AppApp)^(60·dt)` so the result is
+/// frame-rate independent and identical at 60 Hz.
+pub fn approach_axis(
+    eye: f32,
+    target: f32,
+    state: &mut f32,
+    rate: f32,
+    lens: &ChaseLens,
+    dt: f32,
+) -> f32 {
+    let gap = target - eye;
+    let mut d = gap.abs();
+    if d < lens.app_pos_min {
+        d = d * d / lens.app_pos_min;
+    }
+    *state = match lens.app_app {
+        Some(a) => *state + (d - *state) * (1.0 - (1.0 - a).powf(60.0 * dt)),
+        None => d,
+    };
+    let step = (*state * rate * dt).min(gap.abs());
+    eye + step * gap.signum()
 }
 
 /// The authored chase-lens pair for one vehicle — `_near` and `_far`
@@ -238,9 +383,8 @@ pub struct ChaseCamera {
     /// Chase-far lens (`CameraMode::ChaseFar`) — `Some` only when the
     /// vehicle's `_far.camtrackcs` bound.
     pub far: Option<ChaseLens>,
-    /// Position smoothing (1/s) — designed tracking lag; the authored
-    /// approach/dynamics fields stay unparsed for a later leg.
-    pub smoothness: f32,
+    /// The live follow rate and per-axis approach state (UNK-36).
+    pub follow: FollowState,
     /// Last vehicle position the boom tracked. A jump the frame's
     /// delta cannot explain — a `ResetVehicle` teleport (`R`, a
     /// water/stuck/disabled recovery, a scripted re-anchor) or a
@@ -266,23 +410,9 @@ impl ChaseCamera {
 impl Default for ChaseCamera {
     fn default() -> Self {
         Self {
-            near: ChaseLens {
-                offset: Vec3::new(0.0, 3.0, 7.5),
-                aim: Vec3::new(0.0, 1.0, 0.0),
-                dist_min: 0.0,
-                // 7.5²+3² rest ≈ 8.08; +3.6 keeps the old 0.06/m/s
-                // stretch inside the 0–60 m/s window.
-                dist_max: 11.68,
-                speed_min: 0.0,
-                speed_max: 60.0,
-                collide: false,
-                fov_deg: PerspectiveProjection::default().fov.to_degrees(),
-                clip_near: PerspectiveProjection::default().near,
-                clip_far: PerspectiveProjection::default().far,
-                authored: false,
-            },
+            near: ChaseLens::with_ctor_dynamics(Vec3::new(0.0, 3.0, 7.5), Vec3::new(0.0, 1.0, 0.0)),
             far: None,
-            smoothness: 6.0,
+            follow: FollowState::default(),
             last_pos: None,
         }
     }
@@ -581,10 +711,17 @@ const OCCLUSION_FLOOR: f32 = 0.05;
 /// reset/transition camera behavior is unrecovered (UNK-36).
 const BOOM_SNAP_SPEED: f32 = 120.0;
 
-/// Smooth follow on the active chase lens: the boom eases toward its
-/// authored anchor extended across the speed window, the projection
-/// follows the lens's `CameraFOV`/`CameraNear`/`CameraFar`, and
-/// `CollideType` pulls the camera in front of occluding geometry.
+/// Chase follow on the active chase lens (recovered `camTrackCS`
+/// runtime, UNK-36): the desired eye is `Offset` in the car's yaw-only
+/// frame around the `TrackTo` aim point, the live follow rate lerps with
+/// forward speed and slews at `AppInc`/`AppDec`, the eye approaches per
+/// axis (`AppXZPos` for X/Z, `AppYPos` for Y) through the `AppPosMin`
+/// knee and `AppApp` low-pass, and `[MinDist, MaxDist]` clamps the
+/// eye–aim distance afterwards. The camera looks at `T + (0, LookAbove,
+/// 0)`; the original's eased orientation approach (`AppRot`/`AppXRot`) is
+/// inferred, not recovered, so the look is applied directly. The
+/// projection follows the lens's `CameraFOV`/`CameraNear`/`CameraFar`,
+/// and `CollideType` pulls the camera in front of occluding geometry.
 pub fn chase_follow(
     time: Res<Time>,
     mode: Res<CameraMode>,
@@ -602,18 +739,20 @@ pub fn chase_follow(
     };
     let veh_pos = veh_xf.translation();
     let veh_rot = veh_xf.rotation();
-    let planar_speed = vel.x.hypot(vel.z);
+    // `|forward velocity|` (`carsim+0x248`): the car's −Z axis.
+    let speed = vel.dot(veh_rot * Vec3::NEG_Z).abs();
+    let dt = time.delta_secs();
     for (mut cam, mut xf, mut proj) in &mut cams {
         // A jump the frame delta cannot explain — a reset teleport or
         // a stale tracker after another camera mode ran — snaps to the
-        // target: lerping would sweep the view across the world
+        // target: easing would sweep the view across the world
         // through walls. A lens swap is *not* a jump (the vehicle
         // didn't move), so near↔far stays a smooth boom transition.
         let jumped = cam
             .last_pos
-            .is_none_or(|p| veh_pos.distance(p) > BOOM_SNAP_SPEED * time.delta_secs());
+            .is_none_or(|p| veh_pos.distance(p) > BOOM_SNAP_SPEED * dt);
         cam.last_pos = Some(veh_pos);
-        let lens = cam.lens(*mode);
+        let lens = cam.lens(*mode).clone();
         // The lens owns the projection — write-on-diff so toggling
         // near↔far swaps the authored FOV/clips without churning change
         // detection every frame.
@@ -631,27 +770,41 @@ pub fn chase_follow(
             *proj = Projection::Perspective(want);
         }
 
-        let look = veh_pos + veh_rot * lens.aim + vel.0 * 0.05;
-        let rest = lens.offset.length();
-        let frac = if lens.speed_max > lens.speed_min {
-            ((planar_speed - lens.speed_min) / (lens.speed_max - lens.speed_min)).clamp(0.0, 1.0)
-        } else {
-            0.0
+        let (aim, desired) = desired_eye(veh_pos, veh_rot, &lens);
+        let rate_target = follow_rate_target(&lens, speed);
+        let rate = match cam.follow.app_xz {
+            Some(cur) if !jumped => {
+                slew_follow_rate(cur, rate_target, lens.app_inc, lens.app_dec, dt)
+            }
+            None if !jumped => lens.app_xz_init.unwrap_or(rate_target),
+            _ => rate_target,
         };
-        let dist = (rest + frac * (lens.dist_max - rest))
-            .clamp(lens.dist_min.min(rest), lens.dist_max.max(lens.dist_min));
-        let dir = if rest > 1e-3 {
-            lens.offset / rest
+        cam.follow.app_xz = Some(rate);
+        let mut next = if jumped || !lens.approach {
+            cam.follow.axis = Vec3::ZERO;
+            desired
         } else {
-            Vec3::Z
+            let eye = xf.translation;
+            let mut st = cam.follow.axis;
+            let out = Vec3::new(
+                approach_axis(eye.x, desired.x, &mut st.x, rate, &lens, dt),
+                approach_axis(eye.y, desired.y, &mut st.y, lens.app_y, &lens, dt),
+                approach_axis(eye.z, desired.z, &mut st.z, rate, &lens, dt),
+            );
+            cam.follow.axis = st;
+            out
         };
-        let target = veh_pos + veh_rot * (lens.aim + dir * dist);
-        let t = 1.0 - (-cam.smoothness * time.delta_secs()).exp();
-        let mut next = if jumped {
-            target
-        } else {
-            xf.translation.lerp(target, t)
-        };
+        // `[MinDist, MaxDist]` hard-clamps the eye–aim distance after
+        // the approach, ungated by `MinMaxOn` (UNK-36).
+        if lens.dist_max > 0.0 && lens.dist_max > lens.dist_min {
+            let from = next - aim;
+            let len = from.length();
+            if len > 1e-6 {
+                next = aim + from * (len.clamp(lens.dist_min, lens.dist_max) / len);
+            }
+        }
+        let look = aim;
+        let look_target = aim + Vec3::new(0.0, (lens.offset.y - 0.8) * lens.vert_offset, 0.0);
 
         // CollideType: clamp the smoothed position in front of whatever
         // would occlude the car. Clamping the *smoothed* candidate —
@@ -687,7 +840,7 @@ pub fn chase_follow(
         }
 
         xf.translation = next;
-        xf.look_at(look, Vec3::Y);
+        xf.look_at(look_target, Vec3::Y);
     }
 }
 
