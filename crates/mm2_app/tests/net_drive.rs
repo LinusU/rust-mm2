@@ -2237,7 +2237,7 @@ fn run_breakdown(retail: &std::path::Path, impair: Option<Impair>) -> BreakdownR
 /// went dead exactly once and came back, and the authority paid the
 /// remote seat's breakdown through the production arm — the wreck
 /// landed at the flag's tick and the repair came `BREAKDOWN_SECONDS`
-/// (5 s × 120 Hz) later, in place; an instant reset would have logged
+/// at the shared `RACE_TICK_HZ`, in place; an instant reset would have logged
 /// no such episode.
 fn assert_breakdown(run: &BreakdownRun) {
     let (rec, host_rec) = (&run.client, &run.host);
@@ -2263,8 +2263,12 @@ fn assert_breakdown(run: &BreakdownRun) {
         "the wreck fired before its tick: {}",
         run.destroyed
     );
+    let expected_ticks =
+        (mm2_game::BREAKDOWN_SECONDS * mm2_game::RACE_TICK_HZ as f32).round() as u64;
+    // The wreck's own update can consume the first timer step. Permit one
+    // tick of boundary rounding while retaining the five-second contract.
     assert!(
-        (595..=610).contains(&(up - down)),
+        (up - down).abs_diff(expected_ticks) <= 1,
         "the dead interval was {} ticks, not five seconds: {} / {}",
         up - down,
         run.destroyed,
