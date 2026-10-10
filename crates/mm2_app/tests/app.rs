@@ -49,6 +49,7 @@ mod opponents;
 mod opponents_retail;
 mod package;
 mod pedestrian;
+mod pedestrian_retail;
 mod police;
 mod precip;
 mod profile;

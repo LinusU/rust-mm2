@@ -28,7 +28,9 @@ use mm2_game::{
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, city, contracts, damage, net, opponents, race, scripted, session};
+use crate::{
+    camera, city, contracts, crowd, damage, net, opponents, pedestrian, race, scripted, session,
+};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -880,6 +882,21 @@ fn run_headless(
                 crate::police::police_pursuit,
                 crate::police::count_cop_impacts,
             ),
+        )
+        // F19-B.2/B.3: the sidewalk crowd — recycle/refill, react, walk
+        // then animate, the same chain the windowed app runs, so a
+        // headless soak fields the production crowd on the real city
+        // networks and the record's `peds=` field reads it. No-ops
+        // without a city session's `PedDensity`/`Mm2Vfs` pair.
+        .add_systems(
+            Update,
+            (
+                crowd::maintain_pedestrians,
+                crowd::react_pedestrians,
+                crowd::walk_pedestrians,
+                pedestrian::animate_pedestrians,
+            )
+                .chain(),
         )
         // F25-B: towed trailers reseat off the `ResetVehicle` stream —
         // after every writer, before the apply; own slot, the main
@@ -2023,6 +2040,21 @@ fn run_headless(
             s
         })
         .unwrap_or_default();
+    // F19-B.2 sidewalk-crowd evidence: live/target population plus the
+    // placement, walk and reaction counters. Absent unless the session
+    // fielded a crowd, so dev-world and event records stay
+    // bit-identical.
+    let peds_detail = world_ecs
+        .get_resource::<crate::crowd::PedCrowd>()
+        .filter(|c| c.is_active())
+        .map(|c| {
+            let live = world_ecs
+                .iter_entities()
+                .filter(|e| e.get::<crate::crowd::PedWalk>().is_some())
+                .count();
+            c.smoke_detail(live)
+        })
+        .unwrap_or_default();
     // Banger evidence: how many bound placements exist and how the
     // dormant → active → settled/broken machine left them at the
     // frame cap.
@@ -2436,7 +2468,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),
