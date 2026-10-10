@@ -2588,12 +2588,16 @@ fn run_shove_trio(
     bob.wait_success("bob", &bob_rec);
     assert_eq!(field(&alice_rec, "stop"), "peer-left", "{alice_rec}");
     if host_rams {
+        // The shove produced a replicated impact row, pinned on the
+        // *authority* (pre-wire, so loss can never erase it) — see the
+        // host record read after the quit below.
+        //
         // On a clean link the v10 impact row always crosses, so both
         // clients are pinned to have applied it. Over the impaired
         // recipe the impact is an *event* riding a single lossy snap,
         // not retransmitted state — 5 % loss may drop that one snap
-        // (measured: ~1 run in 8 applied none) — so the impaired leg
-        // pins the shove by its pose convergence instead
+        // (measured: ~1 run in 8 applied none) — so the impaired leg's
+        // *delivery* is judged by pose convergence instead
         // (`assert_shove_converged`: the seats moved off their slots
         // and agree across processes). Poses ride every snap, so that
         // convergence is exactly what the leg's contract promises the
@@ -2614,7 +2618,24 @@ fn run_shove_trio(
     for _ in 0..2 {
         host.until_within("event=left", STEP);
     }
-    quit_and_assert_host_drove(host);
+    let host_net = quit_and_assert_host_drove(host);
+    if host_rams {
+        // The authority simulated the contact and put its impact rows on
+        // the wire, on both links. This is the loss-robust half of the
+        // impaired leg's impact pin: the rows are counted as they leave
+        // the host, before the proxy's loss, so the only thing the lossy
+        // leg cannot pin is *delivery* (see the clean-link-only
+        // `impacts_applied` assertions above).
+        assert!(
+            host_net.impacts_sent > 0,
+            "the authority published no impact for the shove: {host_net:?}"
+        );
+    } else {
+        // The control's all-parked grid collides with nothing, so the
+        // authority publishes no impact — every impact asserted above is
+        // the ram's, never a spawn-landing jostle.
+        assert_eq!(host_net.impacts_sent, 0, "{host_net:?}");
+    }
     (alice_rec, bob_rec, link)
 }
 
