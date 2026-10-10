@@ -24,9 +24,9 @@ use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehic
 use mm2_assets::Vfs;
 use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerFragment, BangerPhase, BangerPool,
-    BangerSite, BangerStateChanged, CityEntity, ImpactEvent, MAX_BANGER_ANGULAR_SPEED,
-    MAX_BANGER_LINEAR_SPEED, Mm2Vfs, ObjectId, ObjectIdentity, Session, SessionAuthority,
-    SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
+    BangerSite, BangerStateChanged, CityEntity, DEFAULT_ACTIVE_POOL, ImpactEvent,
+    MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED, Mm2Vfs, ObjectId, ObjectIdentity, Session,
+    SessionAuthority, SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
 use mm2_vehicle::{StrikeBound, VehicleConfig, VehiclePlugin, vehicle_bundle};
@@ -522,6 +522,49 @@ fn the_pool_reclaims_oldest_first_at_capacity() {
         app.world().get::<Banger>(b2).unwrap().phase,
         BangerPhase::Active
     );
+}
+
+/// The natural (recovered ×32) pool, not a dev bound: 33 props struck
+/// in the same instant exceed it by exactly one, so exactly one
+/// `Reclaimed` settle happens and 32 stay active. No surveyed retail
+/// site produces this density (docs/research/banger.md), so the
+/// fixture is synthetic.
+#[test]
+fn the_natural_pool_reclaims_exactly_the_overflow_of_a_simultaneous_burst() {
+    const STRUCK: usize = DEFAULT_ACTIVE_POOL + 1;
+    let mut app = test_app_with(SessionAuthority::Local, DEFAULT_ACTIVE_POOL);
+    let mut objects = Vec::new();
+    for i in 0..STRUCK {
+        let z = i as f32 * 6.0;
+        let (_, object) = spawn_banger(
+            &mut app,
+            Vec3::new(0.0, 0.5, z),
+            banger_def(&format!("p{i}"), 0.0),
+        );
+        objects.push(object);
+        spawn_striker(&mut app, Vec3::new(-6.0, 0.5, z), Vec3::new(20.0, 0.0, 0.0));
+    }
+    let events = run(&mut app, FRAMES_PER_SECOND / 2);
+
+    let activated: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Active)
+        .collect();
+    assert_eq!(activated.len(), STRUCK, "every struck prop activates once");
+    let reclaimed: Vec<_> = events
+        .iter()
+        .filter(|e| e.cause == BangerCause::Reclaimed)
+        .collect();
+    assert_eq!(reclaimed.len(), 1, "only the overflow is reclaimed");
+    assert_eq!(reclaimed[0].phase, BangerPhase::Settled);
+    assert!(objects.contains(&reclaimed[0].object));
+    let active = app
+        .world_mut()
+        .query::<&Banger>()
+        .iter(app.world())
+        .filter(|b| b.phase == BangerPhase::Active)
+        .count();
+    assert_eq!(active, DEFAULT_ACTIVE_POOL, "the pool holds at its cap");
 }
 
 // ---------------------------------------------------------------------------

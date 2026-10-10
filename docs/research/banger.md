@@ -529,9 +529,15 @@ corrected-geometry re-take follows at the end of the section.*
   bng_pool=2 bng_rec=1` — the third hit reclaimed the oldest active
   (cause `Reclaimed`), the other two slept naturally. At
   `--banger-pool 1` → `bng_rec=2`. Re-ran bit-identical. Natural-pool
-  (>32 simultaneous) reclaim remains unobserved — staging 33 live
-  actives needs dense simultaneous breaks that no surveyed retail
+  (>32 simultaneous) reclaim is unobserved on retail data — staging 33
+  live actives needs dense simultaneous breaks that no surveyed retail
   site produces; the dev bound exercises the same claim/reclaim path.
+  It is staged synthetically instead:
+  `the_natural_pool_reclaims_exactly_the_overflow_of_a_simultaneous_burst`
+  (`mm2_app/tests/banger.rs`) strikes 33 props in one instant with the
+  default ×32 pool and asserts 33 activations, exactly one `Reclaimed`
+  settle and 32 left active. Evidence level: synthetic integration, not
+  original content; the reclaim *order* stays unverified (see below).
 - **Hull-clearance corollary — resolved (F04-C.3):** the `vpddbus`
   (~4 915 kg) used to pass clean over `sp_cone_f` clusters — zero
   contacts where `vpbug` activates. With the authored-bound strike
@@ -594,8 +600,8 @@ channel (sf 5 927 total, london 6 271).
   that speed. (A ~1 200 kg car at 100 km/h estimates ~33 000, still
   under the authored limit — whether sub-limit hits should tip is
   UNK-22.)
-- Natural-pool (>32 simultaneous) reclaim remains unobserved —
-  unchanged; the dev bound exercises the same claim/reclaim path.
+- Natural-pool (>32 simultaneous) reclaim remains unobserved on retail
+  data; see the synthetic fixture named above.
 
 ## Intact movable collision volumes
 
