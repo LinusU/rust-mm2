@@ -1852,9 +1852,10 @@ wire actually moved rather than an in-process mailbox's contents.
 - **Reset on an impaired link (F25-C.5).** The ask is one frame, and a
   lossy link may eat it — which the first leg could not survive. The
   scheduled ask now behaves like a driver whose `R` seemed to do
-  nothing: `netdrive::DevResetAsk` repeats it every `DEV_RESET_RETRY`
-  (3 s wall clock, above the host's 1 s grant cooldown, so a repeat can
-  never be dropped for arriving inside the round trip) until an
+  nothing: `netdrive::ResetAsk` repeats it every `RESET_RETRY`
+  (1.25 s wall clock, above the host's 1 s grant cooldown, so a repeat
+  can never be dropped for arriving inside the round trip; at most
+  `MAX_RESET_ASKS` = 12 asks) until an
   own-seat epoch reset has been applied (`NetDriveReport::own_resets`,
   a subset of `resets`). Wall clock, not ticks: a headless client runs
   ticks far faster than the wire answers. The downlink needs no retry —
@@ -1879,9 +1880,19 @@ wire actually moved rather than an in-process mailbox's contents.
   consecutive isolated runs (~13 s each), and 3/3 runs of the whole
   `net_drive` module (19 process tests contending, ~86 s), including
   the clean leg's exact one-ask assertion — so that timing assumption
-  (the reset returns well inside `DEV_RESET_RETRY`) held under CPU
+  (the reset returns well inside `RESET_RETRY`) held under CPU
   contention too. Not covered: other recipes, a trailer rig reset,
   reset-while-moving divergence; loopback, dev world.
+- **Reset ask lost five times running (NET-RESET-LOSSY).** Main CI
+  failed the impaired leg once: the client sent 5 asks (`req5s`), the
+  host saw none (`req0s/0g/0d`). Root cause: each ask is one
+  unacknowledged frame on a 30 % loss relay, and a local 25-run loop
+  measured only ~58 % of first asks answered, so 5 straight misses
+  (~1.3 %) fit inside the 6000-update cap at the then 3 s retry. The
+  retry was also only the dev flag's; the `R` key sent once. Both now
+  share `ResetAsk` (1.25 s, 12 asks max, epoch snap = the ack); the
+  retry rule is unit-tested against a link that eats the first five
+  asks. Evidence level: code checks + local multi-process loop.
 - **A remote driver's breakdown across processes (report 6 follow-up
   1, new-run iteration 11).** The policy and its in-process legs
   landed earlier (remote humans pay the Blitz/Checkpoint breakdown;

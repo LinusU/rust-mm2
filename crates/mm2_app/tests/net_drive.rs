@@ -492,7 +492,7 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
 /// host through a recipe with 30 % loss, duplication, reordering and
 /// latency armed on both directions for the driving window. The ask is
 /// one frame that the link may lose, so alice repeats it until her own
-/// seat's reset comes back (`DEV_RESET_RETRY`) — the count of asks is
+/// seat's reset comes back (`RESET_RETRY`) — the count of asks is
 /// therefore a floor, not exact — and a duplicated or repeated ask the
 /// host sees inside its cooldown is dropped counted, never granted
 /// twice in a row. What must hold is the clean leg's outcome: she

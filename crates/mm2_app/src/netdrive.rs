@@ -242,38 +242,51 @@ impl SettleWatch {
 /// immediate answer to a wedge.
 pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
 
-/// How long `--reset-at`'s ask waits for its own seat's reset to come
-/// back before asking again (F25-C; a dev-evidence knob, designed). A
-/// driver whose `R` seemed to do nothing presses it again; the scheduled
-/// form does the same, so one frame lost on an impaired link cannot
-/// strand the run. Wall clock, not session ticks: a headless client runs
-/// ticks far faster than the wire answers, and an ask repeated inside
-/// the round trip would only be dropped by [`RESET_REQUEST_COOLDOWN`]
-/// (which this must stay above).
-pub const DEV_RESET_RETRY: Duration = Duration::from_secs(3);
+/// How long a reset ask waits for its own seat's reset to come back
+/// before asking again (F25-C; designed). The ask is one frame on a link
+/// that may lose it — a 30 % lossy relay measured ~40 % of asks never
+/// answered (NET-RESET-LOSSY) — so, like a driver whose `R` seemed to do
+/// nothing pressing it again, both the key and `--reset-at` repeat it.
+/// Wall clock, not session ticks: a headless client runs ticks far
+/// faster than the wire answers, and an ask repeated inside the round
+/// trip would only be dropped by [`RESET_REQUEST_COOLDOWN`] (which this
+/// must stay above).
+pub const RESET_RETRY: Duration = Duration::from_millis(1250);
 
-/// The scheduled reset ask's state: when it last went out and how many
-/// own-seat resets the client had applied then. Pure, so the retry rule
-/// is testable without a clock.
+/// Asks one press (or one scheduled reset) may send in total. The epoch
+/// declaration is the acknowledgement, so the bound only matters for a
+/// host that never answers (a refused ask, a dead link): it keeps that
+/// from becoming a request every [`RESET_RETRY`] forever.
+pub const MAX_RESET_ASKS: u32 = 12;
+
+/// A reset ask's retransmission state: when it last went out, how many
+/// own-seat resets the client had applied then, and how many went out.
+/// Pure, so the retry rule is testable without a clock.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DevResetAsk {
+pub struct ResetAsk {
     asked: Option<(Instant, u64)>,
+    sent: u32,
 }
 
-impl DevResetAsk {
+impl ResetAsk {
     /// Whether to send now: never before the first ask is due, once at
-    /// the tick, then again after [`DEV_RESET_RETRY`] if no own-seat
-    /// reset has been applied since the last ask.
+    /// the tick, then again after [`RESET_RETRY`] if no own-seat reset
+    /// has been applied since the last ask, up to [`MAX_RESET_ASKS`].
     pub fn due(&self, now: Instant, own_resets: u64, tick_reached: bool) -> bool {
         match self.asked {
             None => tick_reached,
-            Some((at, seen)) => own_resets == seen && now.duration_since(at) >= DEV_RESET_RETRY,
+            Some((at, seen)) => {
+                own_resets == seen
+                    && self.sent < MAX_RESET_ASKS
+                    && now.duration_since(at) >= RESET_RETRY
+            }
         }
     }
 
     /// Record a sent ask.
     pub fn sent(&mut self, now: Instant, own_resets: u64) {
         self.asked = Some((now, own_resets));
+        self.sent += 1;
     }
 }
 
@@ -2103,9 +2116,13 @@ pub fn apply_remote_inputs(
 /// `ResetRequest` for the running generation. The granted answer is the
 /// seat's epoch-declared `Snap`: [`apply_snapshots`]' own-seat reconcile
 /// already applies it like any authority reset. Fire-and-forget — a
-/// dropped request is a key press nothing answered, the same
-/// dead-feeling the inert gate had (a lobby notice is future UX work);
-/// no reply message exists by design.
+/// dropped request would be a key press nothing answered, so the ask
+/// repeats every [`RESET_RETRY`] (at most [`MAX_RESET_ASKS`] times)
+/// until the own seat's reset comes back; no reply message exists by
+/// design, the epoch declaration is the acknowledgement.
+// A Bevy system: the key/pad/window reads, link, session, controls, report and
+// the retry ledger are each a distinct system parameter.
+#[allow(clippy::too_many_arguments)]
 pub fn send_reset_request(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -2114,23 +2131,36 @@ pub fn send_reset_request(
     session: Res<Session>,
     controls: Option<Res<crate::controls::ControlSettings>>,
     mut report: ResMut<NetDriveReport>,
+    mut ask: Local<Option<ResetAsk>>,
 ) {
     if session.authority_role().is_authority()
         || !session.is_playing()
         || link.closed
         || link.leaving()
-        || !control_just_pressed(
-            &keys,
-            &pads,
-            &windows,
-            controls.as_deref(),
-            crate::controls::DriveAction::Reset,
-        )
     {
+        *ask = None;
         return;
     }
-    if link.ctl().request_reset(session.wire_generation()).is_ok() {
+    // A press starts a fresh ask; it repeats until the own seat's reset
+    // comes back (the epoch snap is the acknowledgement).
+    if control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        controls.as_deref(),
+        crate::controls::DriveAction::Reset,
+    ) {
+        *ask = Some(ResetAsk::default());
+    }
+    let Some(pending) = ask.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if pending.due(now, report.own_resets, true)
+        && link.ctl().request_reset(session.wire_generation()).is_ok()
+    {
         report.requests_sent += 1;
+        pending.sent(now, report.own_resets);
     }
 }
 
@@ -2140,7 +2170,7 @@ pub fn send_reset_request(
 /// teleport would be the unannounced self-teleport the key's gate
 /// forbids, so the flag does what the key does — asks the authority
 /// when the session clock reaches the tick, and asks again after
-/// [`DEV_RESET_RETRY`] if the own seat's reset has not come back (the
+/// [`RESET_RETRY`] if the own seat's reset has not come back (the
 /// ask is one frame on a link that may lose it, and a driver would
 /// press `R` again). This is what lets a headless process leg exercise
 /// the wire reset (request up, epoch snap down) without a keyboard; the
@@ -2149,7 +2179,7 @@ pub fn send_dev_reset_request(
     link: Res<LobbyLink>,
     session: Res<Session>,
     mut report: ResMut<NetDriveReport>,
-    mut ask: Local<DevResetAsk>,
+    mut ask: Local<ResetAsk>,
 ) {
     if session.authority_role().is_authority() || link.closed || link.leaving() {
         return;
@@ -3645,25 +3675,69 @@ mod tests {
     #[test]
     fn the_scheduled_reset_ask_repeats_until_the_own_seat_resets() {
         let t0 = Instant::now();
-        let mut ask = DevResetAsk::default();
+        let mut ask = ResetAsk::default();
         assert!(!ask.due(t0, 0, false), "nothing before the tick");
         assert!(ask.due(t0, 0, true), "the tick fires it");
         ask.sent(t0, 0);
-        let early = t0 + DEV_RESET_RETRY / 2;
+        let early = t0 + RESET_RETRY / 2;
         assert!(!ask.due(early, 0, true), "the answer may be in flight");
         assert!(
-            DEV_RESET_RETRY > RESET_REQUEST_COOLDOWN,
+            RESET_RETRY > RESET_REQUEST_COOLDOWN,
             "a retry must outlast the host's grant cooldown"
         );
-        let late = t0 + DEV_RESET_RETRY;
+        let late = t0 + RESET_RETRY;
         assert!(ask.due(late, 0, true), "no reset came back: ask again");
         ask.sent(late, 0);
         assert!(!ask.due(late, 0, true), "the retry restarts the wait");
-        let much_later = late + DEV_RESET_RETRY * 10;
+        let much_later = late + RESET_RETRY * 10;
         assert!(
             !ask.due(much_later, 1, true),
             "an own-seat reset applied since the last ask ends it"
         );
+    }
+
+    /// NET-RESET-LOSSY: an ask the link keeps losing is repeated on the
+    /// retry clock until one gets through, and a seeded loss that eats
+    /// the first asks cannot strand the reset inside the ask budget.
+    #[test]
+    fn a_reset_ask_survives_a_link_that_loses_the_first_asks() {
+        // The link loses the first five asks outright (the failing CI
+        // run's pattern), then delivers; the host's answer applies one
+        // reset to the own seat.
+        let t0 = Instant::now();
+        let mut ask = ResetAsk::default();
+        let mut own_resets = 0;
+        let mut delivered_at = None;
+        for step in 0..2000u32 {
+            let now = t0 + Duration::from_millis(u64::from(step) * 16);
+            if ask.due(now, own_resets, true) {
+                ask.sent(now, own_resets);
+                if ask.sent > 5 {
+                    delivered_at = Some(now);
+                    own_resets += 1;
+                }
+            }
+        }
+        let delivered = delivered_at.expect("the sixth ask got through");
+        assert!(
+            delivered.duration_since(t0) <= RESET_RETRY * 5 + Duration::from_millis(100),
+            "five lost asks cost five retry periods, not more"
+        );
+        assert_eq!(ask.sent, 6, "no ask after the answer applied");
+    }
+
+    /// A host that never answers is asked a bounded number of times.
+    #[test]
+    fn a_reset_ask_to_a_silent_host_gives_up() {
+        let t0 = Instant::now();
+        let mut ask = ResetAsk::default();
+        for step in 0..MAX_RESET_ASKS * 4 {
+            let now = t0 + RESET_RETRY * step;
+            if ask.due(now, 0, true) {
+                ask.sent(now, 0);
+            }
+        }
+        assert_eq!(ask.sent, MAX_RESET_ASKS);
     }
 
     /// A residual inside the bound — the measured prediction error —
