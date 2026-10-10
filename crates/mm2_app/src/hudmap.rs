@@ -1147,6 +1147,109 @@ mod tests {
         }
     }
 
+    /// The retail-shaped spec the layout legs frame against (both
+    /// stock cities author this `Pos`/`Size` shape).
+    fn retail_shaped_spec() -> HudMapSpec {
+        HudMapSpec::parse(
+            "mmHudMap {
+Size 0.21 0.25
+Pos 0.78 0.75
+ZoomIn 0
+Approach Rate 1.2
+ZoomInDist 577
+ZoomOutDist 1195
+IconScaleMin 34
+IconScaleMax 52
+ZoomInDistFS 786
+ZoomOutDistFS 1581
+IconScaleMinFS 15
+IconScaleMaxFS 18
+Ocean Color 0.084 0.7 0.94
+}",
+        )
+        .unwrap()
+    }
+
+    /// F22-AC06 (scaling half): no clipped, unreadable corner map at
+    /// any supported text size (the `UiScale` the 100/125/150 % rows
+    /// apply), any window scale factor, any window size — small
+    /// window, laptop, 16:9, 21:9 ultrawide and 4K — in both inset
+    /// views. The composition `drive_hud_map` performs is reproduced
+    /// verbatim (viewport from the authored fractions plus the
+    /// breathing-room offset, bezel through `frame_rect`), and the
+    /// matrix asserts the two invariants a driver can see: the
+    /// viewport is a real sub-rectangle of the window, and the bezel
+    /// multiplied back to physical pixels covers that viewport exactly
+    /// while staying on screen. Fullscreen needs no bezel — the pause
+    /// map owns the whole window — so the matrix is the inset contract.
+    #[test]
+    fn the_bezel_matrix_fits_every_text_size_and_window() {
+        let spec = retail_shaped_spec();
+        let windows = [
+            (800.0_f32, 600.0_f32), // small window
+            (1280.0, 960.0),        // 4:3
+            (1920.0, 1080.0),       // 16:9
+            (2560.0, 1080.0),       // 21:9 ultrawide
+            (3440.0, 1440.0),       // 32:9 super-ultrawide
+            (3840.0, 2160.0),       // 4K
+        ];
+        let text_sizes = [1.0_f32, 1.25, 1.5];
+        let scale_factors = [1.0_f32, 2.0];
+        for (win_x, win_y) in windows {
+            let window = Vec2::new(win_x, win_y);
+            for view in [MapView::Inset, MapView::Large] {
+                let (raw_pos, vp_size) = inset_rect(view, &spec, window);
+                assert!(
+                    vp_size.x >= 1.0 && vp_size.y >= 1.0,
+                    "{view:?} {window:?}: the viewport never degenerates"
+                );
+                for sf in scale_factors {
+                    // The production composition: the breathing-room
+                    // offset `drive_hud_map` applies after `inset_rect`.
+                    let vp_pos = Vec2::new(
+                        (raw_pos.x + 12.0 * sf).min(win_x - vp_size.x),
+                        (raw_pos.y - 18.0 * sf).max(0.0),
+                    );
+                    assert!(
+                        vp_pos.x >= 0.0
+                            && vp_pos.y >= 0.0
+                            && vp_pos.x + vp_size.x <= win_x + 1e-3
+                            && vp_pos.y + vp_size.y <= win_y + 1e-3,
+                        "{view:?} {window:?} sf{sf}: viewport {vp_pos:?} {vp_size:?} \
+                         is a sub-rectangle of the window"
+                    );
+                    for ui in text_sizes {
+                        let r = frame_rect(vp_pos, vp_size, sf * ui, ui);
+                        // Back to physical pixels, exactly as layout
+                        // multiplies the node.
+                        let (l, t) = (r.x * sf * ui, r.y * sf * ui);
+                        let (w, h) = (r.z * sf * ui, r.w * sf * ui);
+                        assert!(
+                            l <= vp_pos.x + 1e-3
+                                && t <= vp_pos.y + 1e-3
+                                && l + w >= vp_pos.x + vp_size.x - 1e-3
+                                && t + h >= vp_pos.y + vp_size.y - 1e-3,
+                            "{view:?} {window:?} sf{sf} ui{ui}: the bezel must wrap \
+                             the viewport (bezel {l},{t} {w}×{h} vs viewport {vp_pos:?} {vp_size:?})"
+                        );
+                        assert!(
+                            l >= -1e-3 && t >= -1e-3,
+                            "{view:?} {window:?} sf{sf} ui{ui}: bezel spills off the \
+                             top/left ({l}, {t})"
+                        );
+                        assert!(
+                            l + w <= win_x + 1e-3 && t + h <= win_y + 1e-3,
+                            "{view:?} {window:?} sf{sf} ui{ui}: bezel spills off the \
+                             bottom/right ({}, {})",
+                            l + w,
+                            t + h
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn inset_fullscreen_inset_preserves_camera_artwork_policy() {
         let spec = HudMapSpec::parse(
