@@ -3148,6 +3148,11 @@ const RAIN_STEMS: &[&str] = &["rainexterior", "raininterior", "thunder"];
 fn weather_app(dir: &Path, weather: u8, seed: u64) -> App {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
+    weather_app_over(vfs, weather, seed)
+}
+
+/// [`weather_app`] over an already-mounted [`Vfs`] (the retail sweep).
+fn weather_app_over(vfs: Vfs, weather: u8, seed: u64) -> App {
     let bank = WaveBank::index(&vfs);
 
     let mut session = Session::new();
@@ -3299,6 +3304,117 @@ fn the_shelter_probe_crossfades_to_the_interior_bed() {
         "exterior bed restored: {mixes:?}"
     );
     assert!(!app.world().resource::<AudioReport>().interior);
+}
+
+/// Original-content validation of F18-AC05's audio leg (opt-in:
+/// `MM2_RETAIL`). The production `weather_voices` system runs over the
+/// retail `rainexterior`/`raininterior`/`thunder` stems; the beds'
+/// computed mixer state (open air, then under a roof) and one thunder
+/// clap are rendered through `mix_offline` and measured, then saved
+/// as WAVs under `$CARGO_TARGET_DIR/captures/` (never committed). It
+/// evidences the computed mix, not rodio or a listen on a device.
+#[test]
+fn the_retail_rain_ambience_mixes_offline() {
+    use mm2_assets::{InstallMount, mount_install};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail rain ambience capture NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut app = weather_app_over(vfs, 3, 7);
+    for _ in 0..30 {
+        app.update();
+    }
+    let report = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (report.weather, report.failed),
+        (2, 0),
+        "retail stems resolve"
+    );
+
+    // The beds' handles, keyed by role.
+    let handles = |app: &mut App| -> Vec<(WeatherRole, f32, Handle<PcmAudio>)> {
+        app.world_mut()
+            .query::<(&WeatherVoice, &AudioPlayer<PcmAudio>)>()
+            .iter(app.world())
+            .map(|(b, p)| (b.role, b.mix.volume, p.0.clone()))
+            .collect()
+    };
+    let render = |app: &mut App, bed: &[(WeatherRole, f32, Handle<PcmAudio>)]| -> Vec<f32> {
+        let waves = app.world().resource::<Assets<PcmAudio>>();
+        let voices: Vec<_> = bed
+            .iter()
+            .map(|(_, volume, h)| audio::OfflineVoice {
+                clip: waves.get(h).expect("bed decoded"),
+                volume: *volume,
+                speed: 1.0,
+            })
+            .collect();
+        audio::mix_offline(&voices, 22050, 4.0)
+    };
+    let open_bed = handles(&mut app);
+    let open = render(&mut app, &open_bed);
+
+    app.world_mut().spawn((
+        Collider::cuboid(60.0, 0.5, 60.0),
+        Transform::from_xyz(0.0, 9.0, 0.0),
+    ));
+    for _ in 0..90 {
+        app.update();
+    }
+    let sheltered_bed = handles(&mut app);
+    let sheltered = render(&mut app, &sheltered_bed);
+
+    // One thunder clap through the same mixer (a one-shot, rendered
+    // as the clip once at the authored THUNDER level 1.0).
+    let thunder = {
+        let mut vfs = Vfs::new();
+        mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+        let mut bank = WaveBank::index(&vfs);
+        let mut waves = Assets::<PcmAudio>::default();
+        let h = bank
+            .load(&vfs, &mut waves, "thunder")
+            .expect("thunder stem");
+        let clip = waves.get(&h).unwrap();
+        let secs = clip.duration();
+        assert!(secs > 0.5 && secs < 120.0, "thunder clip {secs}s");
+        audio::mix_offline(
+            &[audio::OfflineVoice {
+                clip,
+                volume: 1.0,
+                speed: 1.0,
+            }],
+            22050,
+            secs,
+        )
+    };
+
+    let (ro, rs, rt) = (rms(&open), rms(&sheltered), rms(&thunder));
+    eprintln!("retail rain mix rms: open {ro:.4} sheltered {rs:.4} thunder {rt:.4}");
+    assert!(ro > 0.005, "open-air bed audible: rms {ro}");
+    assert!(rs > 0.005, "sheltered bed audible: rms {rs}");
+    assert!(rt > 0.005, "thunder audible: rms {rt}");
+    assert!(open.iter().all(|s| s.is_finite()));
+    assert!(
+        (ro - rs).abs() > 1e-3,
+        "the shelter crossfade changes the mix: {ro} vs {rs}"
+    );
+    assert_eq!(open_bed.iter().filter(|b| b.1 > 0.0).count(), 1);
+    assert_eq!(sheltered_bed.iter().filter(|b| b.1 > 0.0).count(), 1);
+
+    if let Ok(target) = std::env::var("CARGO_TARGET_DIR") {
+        let dir = Path::new(&target).join("captures");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, pcm) in [
+            ("f18-rain-open.wav", &open),
+            ("f18-rain-sheltered.wav", &sheltered),
+            ("f18-thunder.wav", &thunder),
+        ] {
+            std::fs::write(dir.join(name), audio::encode_wav_mono16(pcm, 22050)).unwrap();
+        }
+    }
 }
 
 /// A stem the install does not ship counts one `failed` and never

@@ -607,3 +607,31 @@ artefact (the owner's judgement task #1154); none is committed. Still
 open for F18: AC04 (network replication/late-join) and AC05's *audio*
 captures (an offline mix harness is the cross-cutting gap in
 `docs/coverage-audit.md` §4.1).
+
+## F18-AC05 audio capture (2026-10-11)
+
+The audio half of F18-AC05, on the retail fingerprinted install, at
+the *synthetic-mix* evidence level (no output device, no listen). The
+opt-in test `crates/mm2_app/tests/audio.rs::the_retail_rain_ambience_mixes_offline`
+runs the production `weather_voices` system (rainy, selector 3) over
+the retail `rainexterior`/`raininterior`/`thunder` stems, reads the
+computed bed mixer state, and renders it through `audio::mix_offline`:
+four seconds in the open (exterior bed at 0.85), four seconds after a
+roof is spawned over the camera and the crossfade settles (interior
+bed at 0.65), and one `thunder` clap at 1.0. Command:
+
+```text
+MM2_RETAIL=<install> cargo test -p mm2_app --test app \
+    the_retail_rain_ambience_mixes_offline -- --nocapture
+```
+
+Measured RMS of the mono mix (22.05 kHz): open 0.113, sheltered
+0.138, thunder 0.118 — all audible, finite, and the shelter crossfade
+changes the mix (one bed live in each state). WAVs are written to
+`$CARGO_TARGET_DIR/captures/f18-rain-open.wav`,
+`f18-rain-sheltered.wav` and `f18-thunder.wav` (not committed). The
+sheltered RMS exceeds the open one despite its lower gain, so the two
+clips differ in source level (not investigated further). This
+renders the computed mix, not rodio's resampler; the original's mix
+and trigger remain unrecovered (DSN-61/UNK-25). Open: a human listen
+to the three WAVs (`OWNER:` follow-up) and AC04.
