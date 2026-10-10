@@ -26,6 +26,7 @@ mod game_keys;
 mod hud;
 mod hudjourney;
 mod hudmap;
+mod hudmap_retail;
 mod huge_texture;
 mod import_pipeline;
 mod input;

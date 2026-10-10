@@ -9,9 +9,11 @@
 
 use std::path::Path;
 
+use bevy::prelude::*;
 use mm2_app::session::SelectedCar;
 use mm2_app::smoke::{self, SmokeStatus};
 use mm2_assets::Vfs;
+use mm2_formats::hudmap::HudMapSpec;
 use mm2_game::{DevOverrides, SessionConfig, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
@@ -330,4 +332,210 @@ fn dev_world_has_no_map_field() {
         "the dev world carries no map field: {}",
         rec.line()
     );
+}
+
+// ---------------------------------------------------------------------------
+// F22-C: the world → map coordinate contract (AC02's transform half)
+// ---------------------------------------------------------------------------
+
+/// Project a world point through the map camera exactly as the frame
+/// would: Bevy's own orthographic matrix on the `ScalingMode::Fixed`
+/// projection `drive_hud_map` wrote, through the camera's live
+/// `GlobalTransform` and viewport. NDC is −1..1 across the inset.
+fn map_ndc(app: &App, camera: Entity, world_pos: Vec3) -> Vec3 {
+    let world = app.world();
+    let cam = world.get::<Camera>(camera).expect("map camera");
+    let gt = world
+        .get::<GlobalTransform>(camera)
+        .expect("map camera transform");
+    let mut proj = world
+        .get::<Projection>(camera)
+        .expect("map projection")
+        .clone();
+    let vp = cam.viewport.clone().expect("the inset viewport");
+    // `ScalingMode::Fixed` ignores the area, but go through the real
+    // trait path with the live viewport size so the matrix is the one
+    // the frame would compute.
+    bevy::camera::CameraProjection::update(
+        &mut *proj,
+        vp.physical_size.x as f32,
+        vp.physical_size.y as f32,
+    );
+    let clip = proj.get_clip_from_view();
+    let view = gt.affine().inverse().transform_point3(world_pos);
+    clip.project_point3(view)
+}
+
+/// F22-AC02 (transform half): the map is a world-space instrument, so
+/// a known world position lands at its true map coordinate — the
+/// player marker exactly at the viewport centre, a point `d` metres
+/// north/east at `d / view_half_extent` NDC (the authored zoom's
+/// metres-per-half-extent, aspect-corrected on the horizontal) — and
+/// the `F` orientation toggle rotates that frame about the driver, it
+/// does not re-map the world. North-up: world −Z is screen-up, +X is
+/// screen-right. Rotating: the car's heading is screen-up, so the
+/// same world points project with the driver's yaw applied.
+#[test]
+fn known_world_positions_project_to_their_map_coordinates() {
+    use bevy::camera::ScalingMode;
+    use mm2_app::hud::HudVisible;
+    use mm2_app::hudmap::{self, HudMapCamera, HudMapMarker, HudMapReport, MarkerRole};
+    use mm2_game::{HudMap, Player, PlayerControl, Session};
+
+    let spec = HudMapSpec::parse(TUNE).unwrap();
+    let mut app = App::new();
+    app.add_plugins(TransformPlugin)
+        .insert_resource(Time::<()>::default())
+        .insert_resource(Session::new())
+        .insert_resource(HudVisible(true))
+        .insert_resource(HudMap::new(spec, 0))
+        .insert_resource(HudMapReport {
+            spec_path: "tune/test.mmhudmap".into(),
+            pkg_path: "geometry/hudmap_test.pkg".into(),
+            tiles: 1,
+            markers: 1,
+            absent: None,
+            dot_materials: Vec::new(),
+            marker_y: 5.0,
+        })
+        .add_systems(Update, hudmap::drive_hud_map);
+    app.world_mut().spawn((
+        bevy::window::PrimaryWindow,
+        Window {
+            resolution: bevy::window::WindowResolution::new(1280, 960),
+            ..default()
+        },
+    ));
+    let player = app
+        .world_mut()
+        .spawn((
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+        ))
+        .id();
+    let camera = app
+        .world_mut()
+        .spawn((
+            HudMapCamera,
+            Camera3d::default(),
+            Camera {
+                order: 1,
+                ..default()
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+            Projection::Orthographic(OrthographicProjection::default_3d()),
+        ))
+        .id();
+    let marker = app
+        .world_mut()
+        .spawn((
+            HudMapMarker {
+                role: MarkerRole::Player,
+                extent: 1.0,
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+            Visibility::default(),
+            MeshMaterial3d::<StandardMaterial>::default(),
+        ))
+        .id();
+    // Two frames: `drive_hud_map` writes the transforms in `Update`,
+    // propagation settles them at the frame's end, and the second
+    // frame's driver reads the settled poses like the real app.
+    app.update();
+    app.update();
+
+    // The player marker is drawn at the viewport centre — the map is
+    // player-centred by construction (the camera parks over the car).
+    let marker_pos = app.world().get::<Transform>(marker).unwrap().translation;
+    let ndc = map_ndc(&app, camera, marker_pos);
+    assert!(
+        ndc.truncate().length() < 1e-4,
+        "the player marker sits at the map centre, got {ndc:?}"
+    );
+
+    // Metres → NDC at the authored zoom (E starts zoomed out in the
+    // TUNE fixture: ZoomOutDist 700 × INSET_VIEW_SCALE). Read the
+    // production projection rect rather than re-deriving it: the
+    // vertical extent must be the authored zoom, the horizontal must
+    // follow the inset viewport's aspect, and every metre maps through
+    // exactly those numbers.
+    let half = app.world().resource::<HudMap>().view_half_extent();
+    assert!(
+        half > 100.0,
+        "the 100 m probe stays inside the view: {half}"
+    );
+    let vp = app
+        .world()
+        .get::<Camera>(camera)
+        .unwrap()
+        .viewport
+        .clone()
+        .unwrap();
+    let (fixed_w, fixed_h) = {
+        let world = app.world();
+        let Projection::Orthographic(o) = world.get::<Projection>(camera).unwrap() else {
+            panic!("the map camera is orthographic");
+        };
+        let ScalingMode::Fixed { width, height } = o.scaling_mode else {
+            panic!("drive_hud_map frames the map with ScalingMode::Fixed");
+        };
+        (width, height)
+    };
+    assert!(
+        (fixed_h - 2.0 * half).abs() < 1e-3,
+        "the vertical extent is the authored zoom: {fixed_h} vs {}",
+        2.0 * half
+    );
+    let vp_aspect = vp.physical_size.x as f32 / vp.physical_size.y as f32;
+    assert!(
+        (fixed_w - fixed_h * vp_aspect).abs() / fixed_w < 1e-2,
+        "the horizontal extent follows the inset viewport's aspect: {fixed_w} vs {fixed_h}·{vp_aspect} \
+         (the sub-percent gap is the physical viewport's whole-pixel rounding)"
+    );
+
+    // North-up leg: world −Z is screen-up, +X is screen-right, and a
+    // point `d` metres out maps to `2d/extent` NDC on its axis.
+    let north = map_ndc(&app, camera, Vec3::new(0.0, 0.0, -100.0));
+    assert!((north.y - 200.0 / fixed_h).abs() < 1e-4, "north: {north:?}");
+    assert!(north.x.abs() < 1e-4, "due north is centred: {north:?}");
+    let east = map_ndc(&app, camera, Vec3::new(100.0, 0.0, 0.0));
+    assert!((east.x - 200.0 / fixed_w).abs() < 1e-4, "east: {east:?}");
+    assert!(east.y.abs() < 1e-4, "due east is level: {east:?}");
+    let south = map_ndc(&app, camera, Vec3::new(0.0, 0.0, 100.0));
+    assert!((south.y + 200.0 / fixed_h).abs() < 1e-4, "south: {south:?}");
+
+    // Rotating leg (F): the frame rotates about the driver — heading
+    // east (`Quat::from_rotation_y(-π/2)` faces +X), so the point off
+    // the car's nose reads screen-up and north (the driver's left)
+    // reads screen-left. Same world points, rotated frame.
+    app.world_mut()
+        .resource_mut::<HudMap>()
+        .toggle_orientation();
+    app.world_mut()
+        .get_mut::<Transform>(player)
+        .unwrap()
+        .rotation = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    app.update();
+    app.update();
+    let along_heading = map_ndc(&app, camera, Vec3::new(100.0, 0.0, 0.0));
+    assert!(
+        (along_heading.y - 200.0 / fixed_h).abs() < 1e-4,
+        "heading is screen-up while rotating: {along_heading:?}"
+    );
+    assert!(along_heading.x.abs() < 1e-4, "{along_heading:?}");
+    let left_of_driver = map_ndc(&app, camera, Vec3::new(0.0, 0.0, -100.0));
+    assert!(
+        (left_of_driver.x + 200.0 / fixed_w).abs() < 1e-4,
+        "north is the eastward driver's left: {left_of_driver:?}"
+    );
+    // The player marker is still centred — rotation never moves the
+    // driver's own dot.
+    let marker_pos = app.world().get::<Transform>(marker).unwrap().translation;
+    assert!(map_ndc(&app, camera, marker_pos).truncate().length() < 1e-4);
 }
