@@ -104,10 +104,14 @@ fn journey_app(def: &RaceDefinition) -> (App, Entity, PlayerId) {
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
+            // The binary's own FixedLast order: the publisher snapshots
+            // before the teleport re-anchor and the race driver (and
+            // `reanchor` still precedes `advance_race`, so a reset
+            // never sweeps a checkpoint).
             (
+                contracts::publish_vehicle_telemetry,
                 reanchor_teleported_participants,
                 advance_race,
-                contracts::publish_vehicle_telemetry,
             )
                 .chain(),
         )

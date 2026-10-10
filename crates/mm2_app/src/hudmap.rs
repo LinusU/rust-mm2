@@ -1173,8 +1173,8 @@ Ocean Color 0.084 0.7 0.94
     /// F22-AC06 (scaling half): no clipped, unreadable corner map at
     /// any supported text size (the `UiScale` the 100/125/150 % rows
     /// apply), any window scale factor, any window size — small
-    /// window, laptop, 16:9, 21:9 ultrawide and 4K — in both inset
-    /// views. The composition `drive_hud_map` performs is reproduced
+    /// window, 4:3, 16:9, 21:9 ultrawide, 32:9 super-ultrawide and
+    /// 4K — in both inset views. The composition `drive_hud_map` performs is reproduced
     /// verbatim (viewport from the authored fractions plus the
     /// breathing-room offset, bezel through `frame_rect`), and the
     /// matrix asserts the two invariants a driver can see: the
@@ -1190,7 +1190,8 @@ Ocean Color 0.084 0.7 0.94
             (1280.0, 960.0),        // 4:3
             (1920.0, 1080.0),       // 16:9
             (2560.0, 1080.0),       // 21:9 ultrawide
-            (3440.0, 1440.0),       // 32:9 super-ultrawide
+            (3440.0, 1440.0),       // 21.5:9 ultrawide panel
+            (5120.0, 1440.0),       // 32:9 super-ultrawide
             (3840.0, 2160.0),       // 4K
         ];
         let text_sizes = [1.0_f32, 1.25, 1.5];
