@@ -570,7 +570,8 @@ cargo run -p mm2_app --bin mm2 -- --mm2-path "$MM2_RETAIL" --city sf \
 
 for every `w,t ∈ {0,1,2,3}` — 16 captures, all `status=pass`. How
 each preset differs at this pose (sky, fog, light colour), and the
-measured sky/horizon mean RGB that backs the reading:
+measured sky-band mean that backs the reading — mean RGB where the
+sky is coloured, otherwise that band's luminance (`lum`):
 
 | slot | preset | visual reading |
 | --- | --- | --- |
@@ -592,12 +593,16 @@ measured sky/horizon mean RGB that backs the reading:
 | w3-t3 | rainy-night | near-black storm dome, skyline lost in the 50–120 m fog, pink-purple cast on lit surfaces; sky lum 14 |
 
 Objective distinctness (scene region 6–70 % of frame, downscaled to
-32×18, mean-abs-per-pixel RGB distance over all 120 slot pairs):
-minimum 40.24 (foggy-morning vs foggy-noon), i.e. no two captures are
+32×18, mean per-pixel L1 RGB distance — `|ΔR|+|ΔG|+|ΔB|` summed per
+pixel, averaged over the grid — over all 120 slot pairs): minimum
+40.24 (foggy-morning vs foggy-noon), i.e. no two captures are
 near-identical; the closest within-weather and within-time neighbours
-also clear 40+. Every audited combination visibly distinguishes the
-intended environment on the Metal/Apple-M1 path — F18-AC01's visual
-leg and F18-AC05's screenshot half. Captures are a human-read
+also clear 40+. Independently re-measured in review (2026-10-10,
+separate resampling path at 32×18/320×180/720×1280): the same pair
+is the closest at every scale and the minimum stays above 40 in all
+three (41.97 at 320×180). Every audited combination visibly
+distinguishes the intended environment on the Metal/Apple-M1 path —
+F18-AC01's visual leg and F18-AC05's screenshot half. Captures are a human-read
 artefact (the owner's judgement task #1154); none is committed. Still
 open for F18: AC04 (network replication/late-join) and AC05's *audio*
 captures (an offline mix harness is the cross-cutting gap in
