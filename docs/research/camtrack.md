@@ -249,6 +249,44 @@ excluded.
 | `VertOffset` | −0.89…1 |
 | `MinDist` / `MaxDist` | 0–9.43 / 4.25–21.9 |
 
+## `CameraNear` is overwritten after every load (verified_original, UNK-37)
+
+The `CameraNear` token is registered by the shared camera base class
+(registrar `0x521e80`: `BlendTime` `+0x80`, `BlendGoal` `+0x84`,
+`CameraFOV` `+0x88`, `CameraNear` `+0x8c`, `CameraFar` `+0x90`). The
+loader, vtable slot 10 (`0x4a1110`, shared by `camPovCS` and
+`camTrackCS`), runs the registrar's parse (slot 6) and, **only when the
+parse succeeds**, calls vtable slot 7 (`call [eax+0x1c]` at `0x4a119a`)
+before returning. Each camera class's slot 7 is a one-store method:
+
+| Class | Vtable | Slot 7 | Effect |
+| --- | --- | --- | --- |
+| `camPovCS` | `0x5b3e80` | `0x51d6f0` | `mov [ecx+0x8c], 0x3dcccccd` — `CameraNear = 0.1` |
+| `camTrackCS` | `0x5b3ec4` | `0x51dad0` | `mov [ecx+0x8c], 0x3f000000` — `CameraNear = 0.5` |
+
+So the authored `CameraNear` of a loaded record is never used: `camPovCS`
+always renders with a 0.1 m near plane, `camTrackCS` with 0.5 m. The
+constructor default (`0x51d3f0`, `[+0x8c] = 3.0`) is also overridden by the
+same virtual once a file loads. The near plane reaches the renderer
+through `0x4b1630` (FOV, near, far); the per-frame readers are
+`0x51fed8`, `0x520031` and `0x5217d9` (the blend, which interpolates
+`+0x88`/`+0x8c` between two cameras).
+
+Retail sweep (`mm2_app` test `retail_authored_camera_near_values_are_what_the_loader_overwrites`):
+44 `camPovCS` records parse — `CameraNear` 0.1 ×29, 0.391–1.726 ×11 (non-`_dash`
+records: `vppanoz`, `vpcoop`, `vpcoop2k`, `vpcab`, `vpcop`, `vpmustang99`,
+`vpauditt`, `vpcaddie`, `vpsemi`, `vppanozgt`, `vpddbus`), and **3.0 on four
+`_dash` records** (`vpcentury`, `vpcoop2k`, `vpsemi`, `vpvw_dune`) — all
+run at 0.1, which is why those dashes were never clipped in the retail
+game. Three `*_pov.campovcs` files hold a `PovCamCS` block (a different
+class, not covered here). 49 `camtrackcs`: 0.5 ×44, 1.0 ×5 (`vpbug_ind`,
+`vpbus_ind`, `vpdune`, `vpeagle_far`, `vpsemi_far`) — those run at 0.5.
+
+What stays *designed*: the rear-view mirror strip's near plane (the
+original's mirror presentation is unrecovered, DSN-50/UNK-29), which keeps
+the authored `camPovCS` value because a high clip usefully hides the
+vehicle's own bodywork.
+
 ## Still unknown
 
 - The airborne/broken-state machine at `0x190/0x194/0x198`: the speed²
