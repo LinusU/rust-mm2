@@ -60,8 +60,8 @@ fn retail_coverage_enumerates_every_lesson_unfiltered() {
 
 /// Retail: passing the lessons in authored order opens each midterm
 /// and the final exactly when CC-2/CC-3 say; every `crash,N` reward
-/// grants on the first pass of its row only; a timeout, a repeat pass
-/// and an out-of-order pass grant nothing new.
+/// grants on the first pass of its row only; a timeout and a repeat pass
+/// grant nothing new (out-of-order and quit cases are not covered here).
 #[test]
 fn retail_progression_unlocks_and_rewards_once() {
     let Some(vfs) = retail_vfs() else { return };
