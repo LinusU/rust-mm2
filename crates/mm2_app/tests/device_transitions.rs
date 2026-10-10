@@ -315,3 +315,156 @@ fn menu_navigation_keys_do_not_drive_while_paused_or_at_results() {
     app.update();
     assert_neutral(player_input(&mut app), "results own the keys");
 }
+
+/// Typing into a menu text field (the profile-name entry) happens with no
+/// session, so a held letter that is also a driving key (`W`, `A`, `S`,
+/// `D`) reads as neutral at the menu and while the world loads, and a
+/// session that begins with the letter still down does not inherit it as
+/// throttle until the phase is `Playing`.
+#[test]
+fn typing_in_menu_text_fields_never_drives_the_car() {
+    let (mut app, window) = drive_app();
+    app.world_mut().insert_resource(Session::new());
+    for code in [KeyCode::KeyW, KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyD] {
+        key(&mut app, window, code, ButtonState::Pressed);
+    }
+    app.update();
+    assert_neutral(player_input(&mut app), "no session: letters are text");
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    app.world_mut().insert_resource(session);
+    app.update();
+    assert_neutral(player_input(&mut app), "loading: letters are still text");
+
+    for phase in [
+        SessionPhase::Ready,
+        SessionPhase::Countdown,
+        SessionPhase::Playing,
+    ] {
+        app.world_mut()
+            .resource_mut::<Session>()
+            .transition(phase.clone())
+            .unwrap();
+        app.update();
+        let vi = player_input(&mut app);
+        if phase == SessionPhase::Playing {
+            assert_eq!(vi.throttle, 1.0, "playing: the held key drives");
+        } else {
+            assert_neutral(vi, "control is not released before Playing");
+        }
+    }
+}
+
+/// A minimized client reports a window with no pixels and (on every
+/// platform winit supports) loses focus: held keys and a held pad stay
+/// silent for as long as it is minimized, and restoring the window does
+/// not resurrect the keys; the pad, still held, answers again.
+#[test]
+fn a_minimized_client_is_neutral_until_restored() {
+    let (mut app, window) = drive_app();
+    let pad = connect_pad(&mut app);
+    key(&mut app, window, KeyCode::KeyW, ButtonState::Pressed);
+    pad_axis(&mut app, pad, GamepadAxis::LeftStickX, 1.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!((vi.throttle, vi.steering), (1.0, 1.0));
+
+    {
+        let mut entity = app.world_mut().entity_mut(window);
+        let mut w = entity.get_mut::<Window>().unwrap();
+        w.resolution.set_physical_resolution(0, 0);
+        assert!(input::window_minimized(&w));
+    }
+    set_focus(&mut app, window, false);
+    for _ in 0..3 {
+        app.update();
+        assert_neutral(player_input(&mut app), "minimized client is neutral");
+    }
+
+    {
+        let mut entity = app.world_mut().entity_mut(window);
+        let mut w = entity.get_mut::<Window>().unwrap();
+        w.resolution.set_physical_resolution(1280, 720);
+        assert!(!input::window_minimized(&w));
+    }
+    set_focus(&mut app, window, true);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (0.0, 1.0),
+        "restore: the released key stays released, the held stick answers"
+    );
+}
+
+/// Mixed devices: the keyboard fills every channel and a pad past its
+/// deadzone owns only the channels it touches, so W + stick steers from the
+/// stick with the key's throttle, a half-pulled trigger replaces the key's
+/// full throttle, and releasing the pad hands steering back to the keys.
+#[test]
+fn keyboard_and_pad_activity_mix_per_channel() {
+    let (mut app, window) = drive_app();
+    let pad = connect_pad(&mut app);
+    key(&mut app, window, KeyCode::KeyW, ButtonState::Pressed);
+    key(&mut app, window, KeyCode::KeyA, ButtonState::Pressed);
+    pad_axis(&mut app, pad, GamepadAxis::LeftStickX, 0.5);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (1.0, 0.5),
+        "key throttle, pad steering"
+    );
+
+    pad_trigger(&mut app, pad, GamepadButton::RightTrigger2, 0.5);
+    app.update();
+    assert_eq!(
+        player_input(&mut app).throttle,
+        0.5,
+        "the trigger is analog"
+    );
+
+    pad_axis(&mut app, pad, GamepadAxis::LeftStickX, 0.0);
+    pad_trigger(&mut app, pad, GamepadButton::RightTrigger2, 0.0);
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.steering),
+        (1.0, -1.0),
+        "a released pad hands every channel back to the keys"
+    );
+}
+
+/// Trigger range conventions: a trigger rests at 0 and reads 0..=1, one
+/// under its deadzone is released, and a backend that rests a trigger at
+/// the bottom of a -1..1 axis (or overshoots) never produces a negative or
+/// above-unit throttle/brake.
+#[test]
+fn trigger_values_stay_in_unit_range() {
+    let (mut app, _window) = drive_app();
+    let pad = connect_pad(&mut app);
+    for (value, why) in [
+        (0.0, "at rest"),
+        (0.02, "under the deadzone"),
+        (-1.0, "a -1..1 axis resting at its minimum"),
+    ] {
+        pad_trigger(&mut app, pad, GamepadButton::RightTrigger2, value);
+        pad_trigger(&mut app, pad, GamepadButton::LeftTrigger2, value);
+        app.update();
+        assert_neutral(player_input(&mut app), why);
+    }
+    for value in [0.5, 1.0, 1.5] {
+        pad_trigger(&mut app, pad, GamepadButton::RightTrigger2, value);
+        pad_trigger(&mut app, pad, GamepadButton::LeftTrigger2, value);
+        app.update();
+        let vi = player_input(&mut app);
+        assert!(
+            (0.0..=1.0).contains(&vi.throttle) && (0.0..=1.0).contains(&vi.brake),
+            "trigger {value} gave throttle {} brake {}",
+            vi.throttle,
+            vi.brake
+        );
+        assert!(vi.throttle > 0.0 && vi.brake > 0.0, "trigger {value} reads");
+    }
+}
