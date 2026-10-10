@@ -2704,13 +2704,6 @@ mod tests {
         assert!(mallory.recv().is_err());
     }
 
-    /// F26-AC04 as a table: the client→host set is exactly `SetReady`,
-    /// `SetVehicle`, `Leave`, `Input` and `ResetRequest`. Every other
-    /// verb, sent by a rostered client, drops it `Malformed` — a client
-    /// can neither answer for the host (handshake or lifecycle verbs)
-    /// nor re-handshake mid-lobby. A new wire verb that is not on the
-    /// reader's allowlist is refused by default; this pins the ones
-    /// that exist.
     #[test]
     fn an_idle_lobby_keeps_speaking_and_a_client_swallows_it() {
         let host = sessioned_host();
@@ -2741,6 +2734,13 @@ mod tests {
         sender.join().unwrap();
     }
 
+    /// F26-AC04 as a table: the client→host set is exactly `SetReady`,
+    /// `SetVehicle`, `Leave`, `Input` and `ResetRequest`. Every other
+    /// verb, sent by a rostered client, drops it `Malformed` — a client
+    /// can neither answer for the host (handshake or lifecycle verbs)
+    /// nor re-handshake mid-lobby. A new wire verb that is not on the
+    /// reader's allowlist is refused by default; this pins the ones
+    /// that exist.
     #[test]
     fn every_host_side_verb_sent_by_a_client_drops_it() {
         let hello_again = hello("b".to_string(), "mallory".to_string(), FP);
