@@ -547,5 +547,58 @@ shows a lit skyline under a grey-blue cloud dome; rainy-night
 (`--weather 3 --time-of-day 3`) is near-black with the skyline lost
 in the 50-120 m fog and a pink-purple cast on lit surfaces; rain
 streaks are not discernible at this pose. Still open: AC04 (network
-replication/late join), AC05 audio captures and a human-read
-capture set across all presets.
+replication/late join) and AC05 audio captures.
+
+## F18-AC01/AC05 capture matrix (2026-10-10)
+
+Rendered evidence for F18-AC01 (every audited preset visibly
+distinguishes its environment) and the *visual* half of F18-AC05
+(screenshots cover contrasting time/weather on the supported path).
+The headless 32-slot matrix above already proves each slot *binds*
+its own preset, fog band and sky dome; this matrix proves each slot
+*looks* different from the others. Command (retail sf, one fixed
+`--cam` pose chosen to show a wide sky band, the distant skyline
+where fog bites, and lit foreground surfaces; 90 frames each; PNGs
+saved under `$CARGO_TARGET_DIR/captures/f18-matrix/`, never
+committed):
+
+```text
+cargo run -p mm2_app --bin mm2 -- --mm2-path "$MM2_RETAIL" --city sf \
+    --cam=-747.5,42.4,275.0,179,-4 --weather <w> --time-of-day <t> \
+    --frames 90 --screenshot $CARGO_TARGET_DIR/captures/f18-matrix/sf-w<w>-t<t>.png
+```
+
+for every `w,t ∈ {0,1,2,3}` — 16 captures, all `status=pass`. How
+each preset differs at this pose (sky, fog, light colour), and the
+measured sky/horizon mean RGB that backs the reading:
+
+| slot | preset | visual reading |
+| --- | --- | --- |
+| w0-t0 | clear-morning | warm dawn sky, low pink-orange band on the horizon, skyline cool-lit; sky lum 154 |
+| w1-t0 | cloudy-morning | grey-blue overcast dome, skyline flat-lit; sky lum 106 |
+| w2-t0 | foggy-morning | uniform pale-grey fog wall, skyline dissolved to silhouette; sky lum 174 |
+| w3-t0 | rainy-morning | dark green-grey overcast, dimmed mid-distance; sky lum 106 |
+| w0-t1 | clear-noon | bright blue sky, crisp fully-resolved skyline, neutral daylight; sky (94,120,173) |
+| w1-t1 | cloudy-noon | big cumulus cloud dome over blue, soft daylight; sky (148,154,172) |
+| w2-t1 | foggy-noon | flat grey fog wall, skyline fully dissolved (authored 10–120 m band); sky lum 170 |
+| w3-t1 | rainy-noon | dark storm overcast, skyline lost, cool-dim light; sky lum 69 |
+| w0-t2 | clear-evening | warm dusk gradient, pink-lit skyline; sky (174,150,146) |
+| w1-t2 | cloudy-evening | fiery orange sunset burning through the cloud deck; sky (183,89,53) |
+| w2-t2 | foggy-evening | dark olive-grey fog, skyline gone; sky lum 73 |
+| w3-t2 | rainy-evening | dark magenta-brown overcast, dim; sky lum 65 |
+| w0-t3 | clear-night | deep navy sky, cool blue-lit buildings, clear skyline; sky (19,25,51) |
+| w1-t3 | cloudy-night | near-black cloud deck, faint skyline; sky lum 16 |
+| w2-t3 | foggy-night | near-black fog, skyline erased; sky lum 12 |
+| w3-t3 | rainy-night | near-black storm dome, skyline lost in the 50–120 m fog, pink-purple cast on lit surfaces; sky lum 14 |
+
+Objective distinctness (scene region 6–70 % of frame, downscaled to
+32×18, mean-abs-per-pixel RGB distance over all 120 slot pairs):
+minimum 40.24 (foggy-morning vs foggy-noon), i.e. no two captures are
+near-identical; the closest within-weather and within-time neighbours
+also clear 40+. Every audited combination visibly distinguishes the
+intended environment on the Metal/Apple-M1 path — F18-AC01's visual
+leg and F18-AC05's screenshot half. Captures are a human-read
+artefact (the owner's judgement task #1154); none is committed. Still
+open for F18: AC04 (network replication/late-join) and AC05's *audio*
+captures (an offline mix harness is the cross-cutting gap in
+`docs/coverage-audit.md` §4.1).
