@@ -408,8 +408,37 @@ crowd counter of the second fresh process matches the first verbatim
 prej=1`, SF `peds=24/24 psp=134 prec=110 phop=25 pwary=0 pdive=0`) —
 a session restart restores the density/seed behaviour on retail data.
 
-Still open for F19, deliberately: crosswalk crossings (UNK-42 — no
-verified original rule; joins crossing vehicle lanes stay refused),
+## Crosswalk crossings (F19-B.6, measured geometry, designed use)
+
+`cargo run -p mm2_app --example crosswalk_probe -- <install> london|sf`
+reduces each PSDL `Crosswalk` rectangle (attribute `0x04`, four corner
+refs in strip order) to the midpoints of its two short ends and measures
+the distance to the nearest BAI sidewalk curve end:
+
+| city | crosswalks | length (m) min / median / max | end → nearest curve end (m) min / median / max | both ends within 4 m / 6 m |
+| --- | --- | --- | --- | --- |
+| London | 697 | 7.0 / 16.0 / 30.0 | 1.6 / 2.5 / 4.3 | 693 / 697 |
+| SF | 648 | 7.9 / 20.0 / 35.2 | 1.1 / 2.9 / 4.3 | 634 / 648 |
+
+Every crosswalk is authored against curve ends at both of its ends, and
+the nearest vertex is always an end vertex (the sidewalk curves stop at
+the junction mouth). That evidences the *sites*. It does not evidence
+the original's walker behaviour: the attribute holds only corner refs,
+`Midtown2.exe` strings name only `lvlAiMap::GetSidewalkVertexMulti`, and
+neither the `.rays` rows nor mm2hook's pedestrian classes were
+available to read. Ruled out as evidence: the crosswalk texture slot
+(a texture, no pedestrian data) and the join-radius census above (gaps
+spread 1–12 m).
+
+The runtime therefore lets a walker take a crosswalk only where both
+ends verify against curve ends (DSN-106, designed); on retail every
+rectangle verifies and the 60 s soak shows `pcross=4` (London) and
+`pcross=15` (SF) crossings taken, reproduced verbatim by a second fresh
+process.
+
+Still open for F19, deliberately: the original's crossing behaviour
+(UNK-42 — sites measured, rule unrecovered; ordinary joins crossing
+vehicle lanes stay refused),
 the original car-sensing rule (UNK-43 — the runtime's constant-velocity
 time-to-contact test is designed, DSN-89), pedestrian audio, and any
 human play-test judgement of the figures' feel (owner evidence).
