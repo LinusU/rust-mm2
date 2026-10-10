@@ -773,7 +773,7 @@ fn env_cells(line: &str) -> String {
 /// host's preset, not how it looks.
 #[test]
 fn a_late_joiner_lights_the_scene_like_the_host_on_a_retail_city() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1343,7 +1343,7 @@ fn props_field(line: &str) -> (u64, String, u64, u64) {
 /// ordinals agree across platforms.
 #[test]
 fn two_retail_processes_stamp_the_same_prop_world() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1399,7 +1399,7 @@ fn parked_cars(line: &str) -> u64 {
 /// seed rolls is unobserved.
 #[test]
 fn two_retail_processes_roll_the_same_parked_cars_in_a_race() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1462,7 +1462,7 @@ fn scenery_field(line: &str) -> (u64, std::collections::BTreeMap<u64, String>) {
 /// a Cruise (the host's clock frames align the client) or a race (the
 /// race row does).
 fn two_retail_processes_stand_the_same_scenery(extra: &[&str]) {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1583,7 +1583,7 @@ fn world_field(line: &str) -> (u64, u64, u64, u64) {
 /// (headless) or hold up under impairment.
 #[test]
 fn two_retail_processes_replicate_the_hosts_traffic() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1659,7 +1659,7 @@ fn cnr_cell(line: &str, prefix: &str) -> Option<u64> {
 /// drives to the gold), the HUD, or behaviour under impairment.
 #[test]
 fn two_retail_processes_play_a_started_cops_and_robbers_match() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1725,7 +1725,7 @@ fn two_retail_processes_play_a_started_cops_and_robbers_match() {
 #[test]
 fn two_retail_processes_decide_a_cops_and_robbers_match() {
     const SEED: u64 = 1291;
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1814,7 +1814,7 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
 /// pickup, or a rendered match.
 #[test]
 fn a_decided_cops_and_robbers_match_reaches_a_client_on_an_impaired_link() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1903,7 +1903,7 @@ fn a_decided_cops_and_robbers_match_reaches_a_client_on_an_impaired_link() {
 /// rendered match.
 #[test]
 fn a_client_that_joins_a_cops_and_robbers_match_mid_carry_reads_the_verdict() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -1979,7 +1979,7 @@ fn a_client_that_joins_a_cops_and_robbers_match_mid_carry_reads_the_verdict() {
 /// drives, a contested pickup, or a rendered match.
 #[test]
 fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -2073,7 +2073,7 @@ fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
 /// steal, packet loss, or a rendered match.
 #[test]
 fn a_joined_clients_bot_picks_up_the_gold() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -2278,7 +2278,7 @@ fn assert_breakdown(run: &BreakdownRun) {
 /// a rendered smoke plume, or a second client.
 #[test]
 fn a_remote_drivers_breakdown_crosses_two_processes() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
@@ -2299,7 +2299,7 @@ fn a_remote_drivers_breakdown_crosses_two_processes() {
 /// knob's and nothing is rendered.
 #[test]
 fn a_remote_drivers_breakdown_survives_an_impaired_link() {
-    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+    let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };

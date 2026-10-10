@@ -7,8 +7,9 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,43 @@ use mm2_game::{EventRef, EventTableKind};
 /// How long a leg waits for one record before failing rather than
 /// hanging on a dead child.
 pub const WAIT: Duration = Duration::from_secs(15);
+
+/// How many retail two-process legs run at once. Each child mounts the
+/// whole retail install (4 archives, ~13k files), so with every leg on
+/// its own test thread the children starve each other and miss the
+/// per-line [`WAIT`]; measured, 4 concurrent test threads passed
+/// everything and 8 did not. Two legs is two to four children.
+const RETAIL_LEGS: usize = 2;
+
+/// A held place among the concurrently running retail legs; released
+/// on drop.
+pub struct RetailSlot;
+
+static RETAIL_RUNNING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+impl Drop for RetailSlot {
+    fn drop(&mut self) {
+        let (running, freed) = &RETAIL_RUNNING;
+        *running.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
+/// The operator's retail install (`MM2_RETAIL`), if set, with a
+/// [`RetailSlot`] the leg holds for its whole body: blocks until fewer
+/// than [`RETAIL_LEGS`] retail legs are running. A leg takes exactly
+/// one slot, at its start, so the wait cannot deadlock. `None` (leg
+/// skipped) takes no slot.
+pub fn retail_slot() -> Option<(PathBuf, RetailSlot)> {
+    let retail = std::env::var_os("MM2_RETAIL").map(PathBuf::from)?;
+    let (running, freed) = &RETAIL_RUNNING;
+    let mut running = running.lock().unwrap_or_else(|e| e.into_inner());
+    while *running >= RETAIL_LEGS {
+        running = freed.wait(running).unwrap_or_else(|e| e.into_inner());
+    }
+    *running += 1;
+    Some((retail, RetailSlot))
+}
 
 pub const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
 pub const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";
