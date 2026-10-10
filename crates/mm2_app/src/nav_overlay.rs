@@ -102,8 +102,14 @@ pub enum OverlayClass {
     LaneForward,
     /// Vehicle lane travelling against it.
     LaneBackward,
-    /// Sidewalk curve, or a non-routable vehicle curve.
+    /// Sidewalk curve.
     Sidewalk,
+    /// Vehicle curve with no ambient arc — the road side is authored
+    /// `ambientTypes` pedestrians-only or disabled (e.g. The Mall at
+    /// London's spawn). The curve exists and is routable for racers
+    /// ([`NavGraph::build_for_routing`]); ambient traffic just never
+    /// uses it, so it has no travel direction to show.
+    AmbientOff,
     /// Tram/train rail curve.
     Rail,
     /// Direction chevron along a vehicle lane's travel tangent.
@@ -157,7 +163,7 @@ pub fn overlay_lines(nav: &CityNav) -> Vec<OverlaySegment> {
                 LaneKind::Vehicle => match lane.arc.map(|a| g.arc(a).dir) {
                     Some(TravelDir::Forward) => OverlayClass::LaneForward,
                     Some(TravelDir::Backward) => OverlayClass::LaneBackward,
-                    None => OverlayClass::Sidewalk,
+                    None => OverlayClass::AmbientOff,
                 },
                 LaneKind::Sidewalk => OverlayClass::Sidewalk,
                 LaneKind::Tram | LaneKind::Train => OverlayClass::Rail,
@@ -245,6 +251,7 @@ fn class_color(class: OverlayClass) -> Color {
         OverlayClass::LaneForward => Color::srgb(0.2, 0.9, 0.3),
         OverlayClass::LaneBackward => Color::srgb(0.2, 0.6, 0.95),
         OverlayClass::Sidewalk => Color::srgb(0.5, 0.5, 0.5),
+        OverlayClass::AmbientOff => Color::srgb(0.95, 0.5, 0.1),
         OverlayClass::Rail => Color::srgb(0.7, 0.4, 0.9),
         OverlayClass::Direction => Color::srgb(1.0, 1.0, 1.0),
         OverlayClass::Closed => Color::srgb(0.95, 0.15, 0.15),

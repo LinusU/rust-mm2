@@ -48,6 +48,12 @@ fn push_f32s(d: &mut Vec<u8>, v: &[f32]) {
 /// (x ±8.5). The right-side lane travels with section order (+z), the
 /// left-side lane against it.
 fn bai_bytes() -> Vec<u8> {
+    bai_bytes_with_ambient([0, 0])
+}
+
+/// [`bai_bytes`] with each road's raw `ambientTypes` code chosen
+/// (3 = `Disabled`: the ambient graph gives the road no arc).
+fn bai_bytes_with_ambient(ambient: [u16; 2]) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"CAI1");
     d.extend_from_slice(&1u16.to_le_bytes()); // n_intersections
@@ -55,6 +61,7 @@ fn bai_bytes() -> Vec<u8> {
 
     let write_road =
         |d: &mut Vec<u8>, id: u16, z0: f32, z1: f32, end: (u32, u32), start: (u32, u32)| {
+            let ambient_code = ambient[id as usize];
             d.extend_from_slice(&id.to_le_bytes());
             d.extend_from_slice(&2u16.to_le_bytes()); // nSections
             d.extend_from_slice(&0u16.to_le_bytes()); // flags
@@ -63,7 +70,7 @@ fn bai_bytes() -> Vec<u8> {
             d.extend_from_slice(&7.5f32.to_le_bytes()); // half_width
             d.extend_from_slice(&15.0f32.to_le_bytes()); // base_speed
             for side in [1f32, -1f32] {
-                for n in [1u16, 0, 0, 1, 0] {
+                for n in [1u16, 0, 0, 1, ambient_code] {
                     // lanes, trams, trains, sidewalks, ambientTypes
                     d.extend_from_slice(&n.to_le_bytes());
                 }
@@ -133,6 +140,11 @@ fn bai_bytes() -> Vec<u8> {
 
     d.extend_from_slice(&0u32.to_le_bytes()); // culling rooms
     d
+}
+
+/// The graph of a fixture whose road 1 is ambient-disabled.
+fn graph_with_disabled_road_1() -> NavGraph {
+    NavGraph::build(&Bai::parse(&bai_bytes_with_ambient([0, 3])).expect("fixture parses")).graph
 }
 
 /// The parsed fixture's graph.
@@ -210,6 +222,35 @@ fn city_config(route: Option<(u16, u16)>) -> SessionConfig {
 // ---------------------------------------------------------------------------
 // overlay_lines — segment classification (no renderer needed)
 // ---------------------------------------------------------------------------
+
+/// F09-AC04 (London spawn road): a road authored `ambientTypes = 3`
+/// (Disabled) has vehicle curves but no ambient arc. The overlay must
+/// show them as their own class — not as sidewalk grey with no
+/// chevrons, which read as "no lanes here".
+#[test]
+fn ambient_disabled_vehicle_lanes_have_their_own_class() {
+    let nav = nav(graph_with_disabled_road_1());
+    let segs = overlay_lines(&nav);
+    let of = |c| segs.iter().filter(move |s| s.class == c).count();
+
+    // Road 1's two vehicle curves (one per side), one segment each.
+    assert_eq!(of(OverlayClass::AmbientOff), 2);
+    assert!(
+        segs.iter()
+            .filter(|s| s.class == OverlayClass::AmbientOff)
+            .all(|s| s.a.z > 0.0 && s.b.z > 0.0)
+    );
+    // Road 0 stays routable; sidewalks stay sidewalks (2 roads × 2).
+    assert_eq!(of(OverlayClass::LaneForward), 1);
+    assert_eq!(of(OverlayClass::LaneBackward), 1);
+    assert_eq!(of(OverlayClass::Sidewalk), 4);
+    // No chevrons on road 1: no travel direction is authored for it.
+    assert!(
+        segs.iter()
+            .filter(|s| s.class == OverlayClass::Direction)
+            .all(|s| s.a.z < 0.0)
+    );
+}
 
 #[test]
 fn lanes_are_classified_by_kind_and_direction_and_lifted() {
