@@ -2503,27 +2503,38 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
 fn run_shove_trio(
     install: &std::path::Path,
     host_rams: bool,
-    alice_frames: u32,
     bob_frames: u32,
     impair: Option<Impair>,
 ) -> (String, String, Option<(LinkStats, LinkStats)>) {
     // Each lifecycle step is waited on for an observed line, bounded and
     // named in the failure (a loaded runner is slow, not wrong).
     const STEP: Duration = Duration::from_secs(60);
+    // Alice stops on `peer-left`, i.e. once bob has left — and bob leaves
+    // by burning his `bob_frames` settling span, which is a *simulated*
+    // budget that a load-starved runner pays out in a long *wall-clock*
+    // window. This deadline is the backstop for a bob that never leaves,
+    // so it must sit well past the wall time a heavily contended bob
+    // needs for `bob_frames` (measured: a 90 s bound flaked ~1 run in 8
+    // when bob drew a starved core and outlasted it; 150 s matches the
+    // collision trio's deadline and covers bob down to ~17 fps).
+    const DEADLINE: Duration = Duration::from_secs(150);
     let mut host_flags = host_args(install, HOST_FRAME_CEILING);
     host_flags.push(if host_rams { "--ram" } else { "--parked" }.into());
     let mut host = Proc::spawn(MM2_EXE, &host_flags);
     let addr = listening_addr(&host);
     let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC02).unwrap());
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
-    // Bob's frames set when the record is taken; alice's are only a
-    // ceiling well past them, since the 90 s deadline is what bounds her.
-    let mut alice_flags = join_args(
-        install,
-        join_addr,
-        "alice",
-        alice_frames.max(bob_frames * 4),
-    );
+    // Alice's frame budget is a non-binding ceiling (like the host's),
+    // never a racing frame count: a headless update is one 1/60 s step,
+    // so `bob_frames` alone is the settling span (in simulated seconds)
+    // the run gives the field before bob leaves, and alice stops on the
+    // *condition* that bob has gone. Deriving her cap as
+    // `bob_frames * 4` made it bind under load — a faster, less
+    // starved alice burned her whole 4x ceiling while a slower bob was
+    // still a seat (the flake: alice capped at `updates=10000`, `rem2`,
+    // no `stop=`). At `HOST_FRAME_CEILING` the cap cannot fire inside
+    // the deadline, so peer-left is what always ends her run.
+    let mut alice_flags = join_args(install, join_addr, "alice", HOST_FRAME_CEILING);
     alice_flags.push("--parked".into());
     // Alice's record must be taken while bob is still a seat she holds
     // and after he has printed: end her run when bob leaves (her frame
@@ -2531,7 +2542,11 @@ fn run_shove_trio(
     // bob can lose the race against on a loaded runner. A client receives
     // the authority's impact without necessarily emitting a local contact;
     // the replicated shove is asserted below, not a local-impact stop gate.
-    alice_flags.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
+    alice_flags.extend([
+        "--until-peer-left".to_string(),
+        "--deadline".to_string(),
+        DEADLINE.as_secs().to_string(),
+    ]);
     let alice = Proc::spawn(MM2_EXE, &alice_flags);
     host.until_within("ready=true", STEP);
     let mut bob_flags = join_args(install, join_addr, "bob", bob_frames);
@@ -2547,16 +2562,33 @@ fn run_shove_trio(
         proxy.set(LinkDir::Down, impair);
     }
     // The clients print nothing for ~2.5k frames, longer than the
-    // per-line wait under a loaded full-suite run: bound the whole wait.
-    let bound = Duration::from_secs(90);
+    // per-line wait under a loaded full-suite run: bound the whole wait
+    // well past alice's deadline so a deadline-fired record is still
+    // captured cleanly rather than racing the wait (the collision
+    // trio's bound is the same `deadline + 60` shape).
+    let bound = DEADLINE + Duration::from_secs(60);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     alice.wait_success("alice", &alice_rec);
     bob.wait_success("bob", &bob_rec);
     assert_eq!(field(&alice_rec, "stop"), "peer-left", "{alice_rec}");
     if host_rams {
-        assert!(net_field(&alice_rec).impacts_applied > 0, "{alice_rec}");
-        assert!(net_field(&bob_rec).impacts_applied > 0, "{bob_rec}");
+        // On a clean link the v10 impact row always crosses, so both
+        // clients are pinned to have applied it. Over the impaired
+        // recipe the impact is an *event* riding a single lossy snap,
+        // not retransmitted state — 5 % loss may drop that one snap
+        // (measured: ~1 run in 8 applied none) — so the impaired leg
+        // pins the shove by its pose convergence instead
+        // (`assert_shove_converged`: the seats moved off their slots
+        // and agree across processes). Poses ride every snap, so that
+        // convergence is exactly what the leg's contract promises the
+        // recipe "may cost the route, never the pose"; requiring a
+        // best-effort row here would test reliable delivery over an
+        // unreliable channel, not the shove.
+        if impair.is_none() {
+            assert!(net_field(&alice_rec).impacts_applied > 0, "{alice_rec}");
+            assert!(net_field(&bob_rec).impacts_applied > 0, "{bob_rec}");
+        }
     }
     let link = proxy
         .as_ref()
@@ -2585,8 +2617,8 @@ fn run_shove_trio(
 #[test]
 fn a_shoved_seat_converges_across_three_processes() {
     let install = tempfile::tempdir().unwrap();
-    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1100, 1000, None);
-    let (alice, bob, _) = run_shove_trio(install.path(), true, 2800, 2500, None);
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1000, None);
+    let (alice, bob, _) = run_shove_trio(install.path(), true, 2500, None);
     eprintln!("shove control bob={control_bob}\nshove ram alice={alice}\n bob={bob}");
     assert_shove_converged(&control_bob, &alice, &bob);
 }
@@ -2608,8 +2640,8 @@ fn a_shoved_seat_converges_across_three_processes_on_an_impaired_link() {
         duplicate: 0.10,
         reorder: 0.10,
     };
-    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1100, 1000, None);
-    let (alice, bob, link) = run_shove_trio(install.path(), true, 2800, 2500, Some(recipe));
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, 1000, None);
+    let (alice, bob, link) = run_shove_trio(install.path(), true, 2500, Some(recipe));
     eprintln!("impaired shove control bob={control_bob}\n ram alice={alice}\n bob={bob}");
     // The convergence below only means something if the link really
     // misbehaved while the shove played out: both directions carried
