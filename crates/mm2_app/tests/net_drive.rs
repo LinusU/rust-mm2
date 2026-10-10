@@ -1617,13 +1617,16 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
         "the host published no world clock: {host_rec}"
     );
     // F28-B.5: sf's four cable cars run on the host and ride the same
-    // frames; the client holds a copy of each and never ran one.
+    // frames; the client holds a copy of the ones near its car and never
+    // ran one. F26-A.1: a client is sent only what is within the
+    // relevancy radius of its vehicle, so which of the four it holds
+    // depends on where it drove — at least one, at most all.
     let (cable_sent, _) = cable_field(&host_rec)
         .unwrap_or_else(|| panic!("the host published no cable car: {host_rec}"));
     assert!(cable_sent >= 4, "{host_rec}");
     let (_, cable_live) =
         cable_field(&rec).unwrap_or_else(|| panic!("the client holds no cable car copy: {rec}"));
-    assert_eq!(cable_live, 4, "{rec}");
+    assert!((1..=4).contains(&cable_live), "{rec}");
     // The operator's evidence: both records, as the run printed them.
     eprintln!("host   {host_rec}\nclient {rec}");
 }

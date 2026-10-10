@@ -14,9 +14,11 @@ use std::collections::BTreeSet;
 use bevy::prelude::*;
 
 /// An item enters a client's interest set inside this distance, metres.
-pub const ENTER_RADIUS: f32 = 300.0;
+/// Sized to the retail city fog (it ends at 1000 m, `fog=650-1000` in a
+/// smoke record): nothing farther is drawn, so nothing farther is owed.
+pub const ENTER_RADIUS: f32 = 900.0;
 /// ... and leaves it only beyond this one. Wider than the enter radius.
-pub const EXIT_RADIUS: f32 = 360.0;
+pub const EXIT_RADIUS: f32 = 1000.0;
 
 /// What one client's update produced.
 #[derive(Debug, Default, PartialEq)]
