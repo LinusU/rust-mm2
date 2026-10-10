@@ -576,6 +576,11 @@ pub struct EngineConstants {
 
 /// `(√5 + 1)/2` and `(√5 − 1)/2`: they make the curve below `OptRPM` a
 /// parabola through `T_opt` at both zero and `OptRPM`.
+// Clippy's `approx_constant` (1.99+) recognises this as the golden ratio.
+// It is: the constant is the algebraic value above, written out so the
+// crate does not depend on `f32::consts::GOLDEN_RATIO` being stable on
+// every toolchain it builds with.
+#[allow(clippy::approx_constant)]
 const CURVE_A: f32 = 1.618_034;
 const CURVE_B: f32 = 0.618_034;
 
