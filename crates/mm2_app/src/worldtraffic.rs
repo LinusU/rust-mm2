@@ -48,7 +48,7 @@
 //! smoothing is the velocity carry and the car's transform
 //! interpolation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use avian3d::prelude::*;
@@ -66,8 +66,9 @@ use crate::cablecar::CableCar;
 use crate::car_visual::spawn_vehicle_model;
 use crate::city::{MovableModel, MovableModels};
 use crate::movers::spawn_body;
-use crate::net::HostLink;
-use crate::netdrive::{NetDriveReport, RemoteSnaps, wire_quat};
+use crate::net::{HostLink, LobbyState};
+use crate::netdrive::{NetDriveReport, NetPlayer, RemotePick, RemoteSnaps, wire_quat};
+use crate::relevancy::InterestSet;
 use crate::traffic::fields_ambient_traffic;
 use crate::traffic::{AmbientCar, AmbientClass, AmbientDrive, AmbientTraffic, class_assets};
 use crate::worldprops::fnv;
@@ -333,6 +334,8 @@ pub struct TrafficLedger {
     ids: HashMap<Entity, u32>,
     next: u32,
     frames: u32,
+    /// Per remote player: the cars near its vehicle (F26-A.1).
+    interest: BTreeMap<u16, InterestSet<u32>>,
 }
 
 impl TrafficLedger {
@@ -345,6 +348,20 @@ impl TrafficLedger {
         generation: u64,
         cars: impl Iterator<Item = (Entity, usize, u8, Vec3, Quat, Vec3)>,
     ) -> (Vec<SnapCar>, usize) {
+        let mut live = self.collect_all(generation, cars);
+        let omitted = live.len().saturating_sub(MAX_SNAP_CARS as usize);
+        live.truncate(MAX_SNAP_CARS as usize);
+        (live, omitted)
+    }
+
+    /// [`collect`](Self::collect) without the frame bound: every live
+    /// car's row, in id order. The per-client relevancy pass applies the
+    /// bound after it has narrowed the population to what is near.
+    pub fn collect_all(
+        &mut self,
+        generation: u64,
+        cars: impl Iterator<Item = (Entity, usize, u8, Vec3, Quat, Vec3)>,
+    ) -> Vec<SnapCar> {
         if self.generation != generation {
             *self = Self {
                 generation,
@@ -381,21 +398,56 @@ impl TrafficLedger {
         }
         self.ids.retain(|entity, _| alive.contains(entity));
         live.sort_by_key(|row| row.id);
-        let omitted = live.len().saturating_sub(MAX_SNAP_CARS as usize);
-        live.truncate(MAX_SNAP_CARS as usize);
-        (live, omitted)
+        live
     }
+}
+
+/// The rows one client is owed this frame: the cars near `centre` (its
+/// own vehicle), at most [`MAX_SNAP_CARS`], in id order. A client whose
+/// vehicle the host has not spawned yet has no centre; it is sent the
+/// lowest ids unfiltered rather than nothing, so a joiner is never
+/// starved of the population while its seat loads. Rows are whole state
+/// every frame, so a car entering relevance needs nothing extra.
+/// Returns the rows and how many near cars the bound held back.
+pub fn rows_for_client(
+    interest: &mut InterestSet<u32>,
+    centre: Option<Vec3>,
+    all: &[SnapCar],
+) -> (Vec<SnapCar>, usize) {
+    let cap = MAX_SNAP_CARS as usize;
+    let Some(centre) = centre else {
+        interest.clear();
+        let rows: Vec<SnapCar> = all.iter().take(cap).copied().collect();
+        return (rows, all.len().saturating_sub(cap));
+    };
+    let by_id: HashMap<u32, &SnapCar> = all.iter().map(|row| (row.id, row)).collect();
+    let near = interest.update(
+        centre,
+        all.iter().map(|row| (row.id, Vec3::from_array(row.pos))),
+        usize::MAX,
+    );
+    let omitted = near.relevant.len().saturating_sub(cap);
+    // `relevant` is nearest-first; the bound keeps the nearest.
+    let mut keep: Vec<u32> = near.relevant.into_iter().take(cap).collect();
+    keep.sort_unstable();
+    let rows = keep
+        .into_iter()
+        .filter_map(|id| by_id.get(&id).map(|row| **row))
+        .collect();
+    (rows, omitted)
 }
 
 /// Host: broadcast the ambient population as [`Message::Traffic`].
 ///
 /// Sends only while a traffic resource exists (a session that fields no
 /// traffic sends nothing), gated like `worldprops::publish_props`.
-#[allow(clippy::type_complexity)] // Bevy system — the query is the contract.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // Bevy system — the queries are the contract.
 pub fn publish_traffic(
     host: Res<HostLink>,
     session: Res<Session>,
+    lobby: Res<LobbyState>,
     traffic: Option<Res<AmbientTraffic>>,
+    remotes: Query<(&NetPlayer, &Position), With<RemotePick>>,
     mut ledger: Local<TrafficLedger>,
     cars: Query<(
         Entity,
@@ -440,7 +492,7 @@ pub fn publish_traffic(
         return;
     }
 
-    let (rows, omitted) = ledger.collect(
+    let all = ledger.collect_all(
         session.generation(),
         // The cable cars first: they are few, so they take the lowest
         // ids and the frame's bound can never be what drops one.
@@ -465,23 +517,38 @@ pub fn publish_traffic(
                     }),
             ),
     );
-    if rows.is_empty() {
+    if all.is_empty() {
         return;
     }
-    let sent = rows.len() as u64;
-    let cable = rows.iter().filter(|r| r.state == CAR_CABLE).count() as u64;
-    let frame = Message::Traffic {
-        generation: session.wire_generation(),
-        tick: session.tick(),
-        roster: roster_digest(traffic.roster()),
-        rows,
-    };
-    if host.ctl().broadcast(&frame).is_ok()
-        && let Some(mut report) = report
-    {
-        report.cars_sent += sent;
-        report.cars_omitted += omitted as u64;
-        report.cable_sent += cable;
+    let roster = roster_digest(traffic.roster());
+    // Each remote player gets the cars near its own vehicle (F26-A.1).
+    let players: BTreeSet<u16> = lobby.roster.iter().map(|e| e.player_id).collect();
+    ledger.interest.retain(|id, _| players.contains(id));
+    let mut report = report;
+    for id in players {
+        let centre = remotes
+            .iter()
+            .find(|(wire, _)| wire.0 == id)
+            .map(|(_, pos)| pos.0);
+        let (rows, omitted) = rows_for_client(ledger.interest.entry(id).or_default(), centre, &all);
+        if rows.is_empty() {
+            continue;
+        }
+        let sent = rows.len() as u64;
+        let cable = rows.iter().filter(|r| r.state == CAR_CABLE).count() as u64;
+        let frame = Message::Traffic {
+            generation: session.wire_generation(),
+            tick: session.tick(),
+            roster,
+            rows,
+        };
+        if host.ctl().send_to(id, &frame).is_ok()
+            && let Some(report) = report.as_mut()
+        {
+            report.cars_sent += sent;
+            report.cars_omitted += omitted as u64;
+            report.cable_sent += cable;
+        }
     }
 }
 
@@ -789,6 +856,52 @@ fn spawn_cable_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn car_at(id: u32, x: f32) -> SnapCar {
+        SnapCar {
+            pos: [x, 0.0, 0.0],
+            ..row(id)
+        }
+    }
+
+    #[test]
+    fn a_far_client_is_sent_no_car_a_near_client_is_and_entry_delivers_the_current_pose() {
+        let mut near = InterestSet::default();
+        let mut far = InterestSet::default();
+        let cars = [car_at(1, 0.0), car_at(2, 40.0)];
+        let (near_rows, _) = rows_for_client(&mut near, Some(Vec3::ZERO), &cars);
+        let far_centre = Vec3::new(5000.0, 0.0, 0.0);
+        let (far_rows, _) = rows_for_client(&mut far, Some(far_centre), &cars);
+        assert_eq!(near_rows.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
+        assert!(far_rows.is_empty(), "nothing near the far client");
+        // The far client drives to the cars; the car has moved meanwhile.
+        let moved = [car_at(1, 12.0), car_at(2, 40.0)];
+        let (entered, _) = rows_for_client(&mut far, Some(Vec3::new(20.0, 0.0, 0.0)), &moved);
+        assert_eq!(entered.len(), 2);
+        assert_eq!(
+            entered[0].pos,
+            [12.0, 0.0, 0.0],
+            "the pose is the current one"
+        );
+    }
+
+    #[test]
+    fn the_per_client_bound_keeps_the_nearest_cars_in_id_order() {
+        let mut set = InterestSet::default();
+        let cars: Vec<SnapCar> = (0..80).map(|i| car_at(i, i as f32)).collect();
+        let (rows, omitted) = rows_for_client(&mut set, Some(Vec3::ZERO), &cars);
+        assert_eq!(rows.len(), MAX_SNAP_CARS as usize);
+        assert_eq!(omitted, 80 - MAX_SNAP_CARS as usize);
+        assert!(rows.windows(2).all(|w| w[0].id < w[1].id));
+        assert_eq!(rows.last().unwrap().id, MAX_SNAP_CARS as u32 - 1);
+    }
+
+    #[test]
+    fn a_client_with_no_vehicle_yet_gets_the_population_unfiltered() {
+        let mut set = InterestSet::default();
+        let cars = [car_at(1, 9000.0)];
+        assert_eq!(rows_for_client(&mut set, None, &cars).0.len(), 1);
+    }
 
     fn row(id: u32) -> SnapCar {
         SnapCar {

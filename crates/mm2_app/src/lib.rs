@@ -63,6 +63,7 @@ pub mod racestat;
 pub mod racetime;
 pub mod racing_line;
 pub mod recovery;
+pub mod relevancy;
 pub mod results;
 pub mod scripted;
 pub mod sequence;

@@ -55,8 +55,9 @@ use mm2_game::{
 use mm2_net::{MAX_SNAP_PROPS, Message, SNAP_NO_FRAGMENT, SiteTable, SnapProp};
 
 use crate::banger::{BangerPieces, FragmentSpawn, shatter_placement, spawn_fragment};
-use crate::net::HostLink;
-use crate::netdrive::{NetDriveReport, RemoteSnaps, wire_quat};
+use crate::net::{HostLink, LobbyState};
+use crate::netdrive::{NetDriveReport, NetPlayer, RemotePick, RemoteSnaps, wire_quat};
+use crate::relevancy::InterestSet;
 
 /// [`SnapProp::phase`]: a struck, live body.
 pub const PROP_ACTIVE: u8 = 1;
@@ -394,8 +395,9 @@ pub struct PropLedger {
     live: BTreeMap<PropKey, Entity>,
     /// Changed since the last frame that carried them.
     fresh: BTreeSet<PropKey>,
-    cursor: usize,
     frames: u32,
+    /// Per remote player: what it is near and what it is owed.
+    clients: BTreeMap<u16, PropClient>,
     /// The placements this host stamped — the world its rows' ordinals
     /// are relative to.
     sites: SiteRegistry,
@@ -411,6 +413,8 @@ pub struct PropLedger {
 pub fn publish_props(
     host: Res<HostLink>,
     session: Res<Session>,
+    lobby: Res<LobbyState>,
+    remotes: Query<(&NetPlayer, &Position), With<RemotePick>>,
     mut ledger: Local<PropLedger>,
     stamped: Query<(&BangerSite, &Banger, &Transform, &SessionEntity), Added<BangerSite>>,
     placements: Query<(Entity, &BangerSite, &Banger), (Changed<Banger>, Without<BangerFragment>)>,
@@ -469,7 +473,7 @@ pub fn publish_props(
     }
 
     // `Err` — the entity is gone; `Ok(None)` — nothing sendable.
-    let row_for = |key: PropKey, entity: Entity| -> Result<Option<SnapProp>, ()> {
+    let row_for = |key: PropKey, entity: Entity| -> Result<Option<(SnapProp, Vec3)>, ()> {
         let (banger, pos, rot) = poses.get(entity).map_err(|_| ())?;
         let Some(phase) = encode_phase(banger.phase) else {
             return Ok(None);
@@ -477,81 +481,142 @@ pub fn publish_props(
         if !pos.0.is_finite() || !rot.0.is_finite() {
             return Ok(None);
         }
-        Ok(Some(SnapProp {
-            site: key.0,
-            fragment: key.1,
-            phase,
-            pos: pos.0.to_array(),
-            rot: rot.0.to_array(),
-        }))
+        Ok(Some((
+            SnapProp {
+                site: key.0,
+                fragment: key.1,
+                phase,
+                pos: pos.0.to_array(),
+                rot: rot.0.to_array(),
+            },
+            pos.0,
+        )))
     };
-    let cap = MAX_SNAP_PROPS as usize;
+    // Every live prop's row once, with its position: the per-client
+    // passes below only choose among these.
     let mut gone: Vec<PropKey> = Vec::new();
-    let mut rows: Vec<SnapProp> = Vec::new();
-    let mut included: BTreeSet<PropKey> = BTreeSet::new();
-    // Active bodies and the freshly changed first: they are what moves.
+    let mut table: BTreeMap<PropKey, (SnapProp, Vec3, bool)> = BTreeMap::new();
     for (&key, &entity) in &ledger.live {
-        if rows.len() >= cap {
-            break;
-        }
-        let active = poses
-            .get(entity)
-            .is_ok_and(|(b, ..)| b.phase == BangerPhase::Active);
-        if !(active || ledger.fresh.contains(&key)) {
-            continue;
-        }
         match row_for(key, entity) {
-            Ok(Some(row)) => {
-                included.insert(key);
-                rows.push(row);
+            Ok(Some((row, pos))) => {
+                let active = poses
+                    .get(entity)
+                    .is_ok_and(|(b, ..)| b.phase == BangerPhase::Active);
+                table.insert(key, (row, pos, active));
             }
             Ok(None) => {}
             Err(()) => gone.push(key),
         }
     }
-    // Then the rolling resend window over everything not yet carried.
-    let keys: Vec<(PropKey, Entity)> = ledger.live.iter().map(|(k, e)| (*k, *e)).collect();
-    if !keys.is_empty() {
-        let start = ledger.cursor % keys.len();
-        let mut taken = 0;
-        for step in 0..keys.len() {
-            if taken >= RESEND_WINDOW || rows.len() >= cap {
-                break;
-            }
-            let (key, entity) = keys[(start + step) % keys.len()];
-            if included.contains(&key) {
-                continue;
-            }
-            match row_for(key, entity) {
-                Ok(Some(row)) => {
-                    included.insert(key);
-                    rows.push(row);
-                }
-                Ok(None) => {}
-                Err(()) => gone.push(key),
-            }
-            taken += 1;
+    // The changes since the last send are owed to every client; the
+    // ones that are not near it are delivered when they come near
+    // (entering the interest set owes the current state).
+    let fresh = std::mem::take(&mut ledger.fresh);
+    let players: BTreeSet<u16> = lobby.roster.iter().map(|e| e.player_id).collect();
+    ledger.clients.retain(|id, _| players.contains(id));
+    for id in players {
+        let centre = remotes
+            .iter()
+            .find(|(wire, _)| wire.0 == id)
+            .map(|(_, pos)| pos.0);
+        let client = ledger.clients.entry(id).or_default();
+        client.owed.extend(fresh.iter().copied());
+        let rows = rows_for_client(client, centre, &table);
+        if rows.is_empty() {
+            continue;
         }
-        ledger.cursor = (start + RESEND_WINDOW) % keys.len();
+        let frame = Message::Props {
+            generation: session.wire_generation(),
+            tick: session.tick(),
+            table: ledger.sites.table(),
+            rows: rows.iter().map(|(_, row)| *row).collect(),
+        };
+        // Only a frame that left clears the owed mark — a failed send
+        // leaves the change queued for the next.
+        if host.ctl().send_to(id, &frame).is_ok() {
+            let client = ledger.clients.entry(id).or_default();
+            for (key, _) in &rows {
+                client.owed.remove(key);
+            }
+        }
     }
     for key in gone {
         ledger.live.remove(&key);
-        ledger.fresh.remove(&key);
+        for client in ledger.clients.values_mut() {
+            client.owed.remove(&key);
+        }
     }
-    if rows.is_empty() {
-        return;
-    }
-    let frame = Message::Props {
-        generation: session.wire_generation(),
-        tick: session.tick(),
-        table: ledger.sites.table(),
-        rows,
+}
+
+/// One remote player's prop bookkeeping on the host (F26-A.1).
+#[derive(Default)]
+pub struct PropClient {
+    interest: InterestSet<PropKey>,
+    /// Changed props this client has not been sent since.
+    owed: BTreeSet<PropKey>,
+    /// Rolling resend position over this client's near props.
+    cursor: usize,
+}
+
+/// The rows one client is owed this frame, [`MAX_SNAP_PROPS`] at most:
+/// near props that moved, changed or just came near, then the rolling
+/// resend window over the rest of the near ones. A client whose vehicle
+/// has no position yet (its seat is still loading) is treated as near
+/// everything, so the first frames deliver the world rather than none.
+fn rows_for_client(
+    client: &mut PropClient,
+    centre: Option<Vec3>,
+    table: &BTreeMap<PropKey, (SnapProp, Vec3, bool)>,
+) -> Vec<(PropKey, SnapProp)> {
+    let cap = MAX_SNAP_PROPS as usize;
+    let (near, entered): (Vec<PropKey>, BTreeSet<PropKey>) = match centre {
+        Some(centre) => {
+            let got = client.interest.update(
+                centre,
+                table.iter().map(|(key, (_, pos, _))| (*key, *pos)),
+                usize::MAX,
+            );
+            let mut near = got.relevant;
+            near.sort_unstable();
+            (near, got.entered.into_iter().collect())
+        }
+        None => {
+            client.interest.clear();
+            (table.keys().copied().collect(), BTreeSet::new())
+        }
     };
-    if host.ctl().broadcast(&frame).is_ok() {
-        // Only a frame that left clears the fresh mark — a failed send
-        // leaves the change queued for the next.
-        ledger.fresh.retain(|key| !included.contains(key));
+    let mut rows: Vec<(PropKey, SnapProp)> = Vec::new();
+    let mut included: BTreeSet<PropKey> = BTreeSet::new();
+    // Active bodies and the freshly changed first: they are what moves.
+    for key in &near {
+        if rows.len() >= cap {
+            break;
+        }
+        let (row, _, active) = &table[key];
+        if *active || client.owed.contains(key) || entered.contains(key) {
+            included.insert(*key);
+            rows.push((*key, *row));
+        }
     }
+    // Then the rolling resend window over everything not yet carried.
+    if !near.is_empty() {
+        let start = client.cursor % near.len();
+        let mut taken = 0;
+        for step in 0..near.len() {
+            if taken >= RESEND_WINDOW || rows.len() >= cap {
+                break;
+            }
+            let key = near[(start + step) % near.len()];
+            if included.contains(&key) {
+                continue;
+            }
+            included.insert(key);
+            rows.push((key, table[&key].0));
+            taken += 1;
+        }
+        client.cursor = (start + RESEND_WINDOW) % near.len();
+    }
+    rows
 }
 
 /// The client index from placement ordinal / fragment key to entity.
@@ -812,6 +877,52 @@ fn apply_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table_of(props: &[(u32, f32, bool)]) -> BTreeMap<PropKey, (SnapProp, Vec3, bool)> {
+        props
+            .iter()
+            .map(|&(site, x, active)| {
+                let pos = Vec3::new(x, 0.0, 0.0);
+                let mut r = row(site, SNAP_NO_FRAGMENT, 2);
+                r.pos = pos.to_array();
+                ((site, SNAP_NO_FRAGMENT), (r, pos, active))
+            })
+            .collect()
+    }
+
+    fn sites(rows: &[(PropKey, SnapProp)]) -> Vec<u32> {
+        rows.iter().map(|(key, _)| key.0).collect()
+    }
+
+    #[test]
+    fn a_far_client_is_sent_no_prop_and_entry_delivers_a_change_it_missed() {
+        let mut near = PropClient::default();
+        let mut far = PropClient::default();
+        let table = table_of(&[(1, 5.0, true), (2, 30.0, false)]);
+        for client in [&mut near, &mut far] {
+            client.owed.extend(table.keys().copied());
+        }
+        let got = rows_for_client(&mut near, Some(Vec3::ZERO), &table);
+        assert_eq!(sites(&got), [1, 2]);
+        let far_centre = Some(Vec3::new(5000.0, 0.0, 0.0));
+        assert!(rows_for_client(&mut far, far_centre, &table).is_empty());
+        // The far client never saw the change; it still owes it, and
+        // coming near delivers the settled state of both.
+        let entered = rows_for_client(&mut far, Some(Vec3::ZERO), &table);
+        assert_eq!(sites(&entered), [1, 2]);
+        // Once delivered and settled, only the resend window repeats it.
+        far.owed.clear();
+        let quiet = table_of(&[(2, 30.0, false)]);
+        let again = rows_for_client(&mut far, Some(Vec3::ZERO), &quiet);
+        assert_eq!(sites(&again), [2], "the resend window still heals drops");
+    }
+
+    #[test]
+    fn a_client_with_no_vehicle_yet_is_treated_as_near_everything() {
+        let mut client = PropClient::default();
+        let table = table_of(&[(1, 9000.0, true)]);
+        assert_eq!(sites(&rows_for_client(&mut client, None, &table)), [1]);
+    }
 
     fn row(site: u32, fragment: u8, phase: u8) -> SnapProp {
         SnapProp {

@@ -605,6 +605,16 @@ impl HostCtl {
         msg.encode()?;
         self.send(LoopMsg::Broadcast(msg.clone()))
     }
+
+    /// Send `msg` to the one rostered player `player_id` — the
+    /// per-client data-plane send (F26-A.1 relevancy). Same removal
+    /// discipline as [`broadcast`](Self::broadcast): a failed write
+    /// reaps the peer `Lost`. A `player_id` that is not on the roster
+    /// (it left since the caller looked) is skipped, not an error.
+    pub fn send_to(&self, player_id: u16, msg: &Message) -> Result<(), NetError> {
+        msg.encode()?;
+        self.send(LoopMsg::SendTo(player_id, msg.clone()))
+    }
 }
 
 /// The joining side of a lobby. `join` completes the handshake and the
@@ -809,6 +819,8 @@ enum LoopMsg {
     /// `HostCtl::broadcast` — a host→client data-plane send
     /// (F25-A snapshots).
     Broadcast(Message),
+    /// `HostCtl::send_to` — a data-plane send to one player.
+    SendTo(u16, Message),
     /// `Host::shutdown`.
     Shutdown,
 }
@@ -1157,6 +1169,15 @@ fn run(
                 // the write is reaped `Lost` and survivors get the
                 // corrected roster.
                 if !broadcast(&mut players, &msg, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
+                }
+            }
+            LoopMsg::SendTo(id, msg) => {
+                let failed = players
+                    .get_mut(&id)
+                    .is_some_and(|slot| slot.writer.send(&msg).is_err());
+                if failed {
+                    remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs);
                     broadcast_roster(&mut players, &events, &inputs);
                 }
             }
