@@ -2,9 +2,20 @@
 """Compare measured original-game JSON with handling_trace CSV in the initial car frame."""
 import argparse
 import csv
+import gzip
 import json
 import math
 from pathlib import Path
+
+
+def open_text(path):
+    """Read lossless evidence archives or ordinary UTF-8 files."""
+    return gzip.open(path, "rt", encoding="utf-8", newline="") if path.suffix == ".gz" else path.open(encoding="utf-8", newline="")
+
+
+def read_json(path):
+    with open_text(path) as source:
+        return json.load(source)
 
 
 def summarize(values):
@@ -128,11 +139,16 @@ def main():
     parser.add_argument("--last-frame", type=int, help="Exclude contaminated frames after this original frame")
     parser.add_argument("--native-offset", type=int, default=-1,
                         help="Native row index minus original row index; native row0 is post-step")
+    parser.add_argument("--world-coordinate", action="store_true",
+                        help="Compare city traces in world axes using absolute native com_x/com_y/com_z, world velocity, yaw and basis")
     args = parser.parse_args()
-    original = json.loads(args.original.read_text())
+    original = read_json(args.original)
     old = original["rows"]
-    with args.native.open() as source:
+    with open_text(args.native) as source:
         new = list(csv.DictReader(source))
+    if args.world_coordinate and (not new or any(
+            new[0].get(column) in (None, "") for column in ("com_x", "com_y", "com_z"))):
+        raise SystemExit("--world-coordinate requires absolute native com_x/com_y/com_z columns")
     back = old[0]["forward"]  # Original instrument records AGE row2 (+Z/back).
     length = math.hypot(back[0], back[2])
     back = [back[0] / length, 0.0, back[2] / length]
@@ -167,14 +183,17 @@ def main():
         delta = [p - o for p, o in zip(row["pos"], origin)]
         x = sum(a * b for a, b in zip(delta, right))
         z = sum(a * b for a, b in zip(delta, back))
-        yaw = math.atan2(row["forward"][0], row["forward"][2]) - initial_yaw
+        yaw = math.atan2(row["forward"][0], row["forward"][2])
+        if not args.world_coordinate:
+            yaw -= initial_yaw
         yaw_error = (float(native["yaw"]) - yaw + math.pi) % (2 * math.pi) - math.pi
         orientation_columns = [f"{axis}_{component}" for axis in ("up", "right")
                                for component in ("x", "y", "z")]
         if ("up" in row and "right" in row
                 and all(native.get(column) not in (None, "") for column in orientation_columns)):
             in_initial_frame = lambda vector: [dot(vector, right), vector[1], dot(vector, back)]
-            old_basis = basis(in_initial_frame(row["right"]), in_initial_frame(row["up"]))
+            old_basis = (basis(row["right"], row["up"]) if args.world_coordinate
+                         else basis(in_initial_frame(row["right"]), in_initial_frame(row["up"])))
             new_basis = basis([float(native[f"right_{axis}"]) for axis in ("x", "y", "z")],
                               [float(native[f"up_{axis}"]) for axis in ("x", "y", "z")])
             if old_basis is not None and new_basis is not None:
@@ -217,8 +236,14 @@ def main():
                 ("native", native_forward, native_lateral, native_slip, float(native["yaw_rate"]))):
             slide_samples[source].append((frame, longitudinal, lateral, slip, yaw_rate))
         errors["speed_mps"].append(float(native["speed"]) - signed_speed)
-        errors["position_metres"].append(math.hypot(float(native["x"]) - x, float(native["z"]) - z))
-        errors["height_metres"].append(float(native["y"]) - delta[1])
+        if args.world_coordinate:
+            errors["position_metres"].append(math.hypot(
+                float(native["com_x"]) - row["pos"][0],
+                float(native["com_z"]) - row["pos"][2]))
+            errors["height_metres"].append(float(native["com_y"]) - row["pos"][1])
+        else:
+            errors["position_metres"].append(math.hypot(float(native["x"]) - x, float(native["z"]) - z))
+            errors["height_metres"].append(float(native["y"]) - delta[1])
         errors["yaw_radians"].append(yaw_error)
         errors["yaw_rate_radians_per_second"].append(float(native["yaw_rate"]) - row["omega"][1])
         errors["rpm"].append(float(native["rpm"]) - row["rpm"])
@@ -248,6 +273,8 @@ def main():
         "car": original["car"], "scenario": original["scenario"],
         "hz": original["hz"], "frames": len(frames),
         "frame_range": [frames[0], frames[-1]], "native_offset": args.native_offset,
+        "coordinate_convention": ("world axes; absolute center of mass position" if args.world_coordinate
+                                  else "initial yaw frame; displacement from settled center of mass"),
         "input_byte_mismatches": input_mismatches,
         "errors": {key: {"samples": len(values),
                           "rms": math.sqrt(sum(x*x for x in values) / len(values)),

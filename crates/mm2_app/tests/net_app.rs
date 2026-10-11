@@ -4177,7 +4177,7 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
     );
 
     // A grass slide: every wheel grounded on the class-1 collider and
-    // 0.6 of the way past its longitudinal limit, wheel speed and
+    // native wheel visual slip is 0.6, wheel speed and
     // forward speed both 12.4 m/s so the rolling gate stays open.
     let grass = app.world_mut().spawn(SurfaceMaterial::Authored(1)).id();
     let config = &app
@@ -4185,6 +4185,10 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
         .get::<mm2_vehicle::vehicle::Vehicle>(remote)
         .unwrap()
         .config;
+    assert!(
+        config.original.is_some(),
+        "the authored fixture uses native handling"
+    );
     let ratios: Vec<f32> = config
         .wheels
         .iter()
@@ -4197,6 +4201,7 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
             w.grounded = true;
             w.contact_entity = Some(grass);
             w.traction_demand = 1.0 + 0.6 * ratio;
+            w.slip_visual = 0.6;
             w.vel_long = 12.4;
         }
     }
@@ -4267,6 +4272,7 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
             w.grounded = false;
             w.contact_entity = None;
             w.traction_demand = 0.0;
+            w.slip_visual = 0.0;
             w.vel_long = 0.0;
         }
     }

@@ -1,0 +1,1356 @@
+{
+  "bristle_error_m": {
+    "max_absolute": 2.9802322387695312e-08,
+    "rms": 7.672256535295976e-10
+  },
+  "car": "vpbullet",
+  "city": "sf",
+  "coupled_integration_projected_basis": {
+    "angular_velocity_error_rad_s": {
+      "per_axis": [
+        {
+          "max_absolute": 1.434236764907837e-07,
+          "rms": 2.2181962053615436e-08
+        },
+        {
+          "max_absolute": 8.940696716308594e-08,
+          "rms": 8.41942030554849e-09
+        },
+        {
+          "max_absolute": 1.5832483768463135e-07,
+          "rms": 2.122721287605615e-08
+        }
+      ]
+    },
+    "body_basis": "source AGE rows projected to normalized Quat for inertia only; Jacobians remain source raw geometry",
+    "components": 5400,
+    "exact_angular_components": 1019,
+    "exact_velocity_components": 3607,
+    "max_angular_velocity_ULPs": 126976,
+    "max_velocity_ULPs": 82726,
+    "near_first_native_divergence": [
+      {
+        "angular_velocity_ULPs": [
+          0,
+          6,
+          20
+        ],
+        "angular_velocity_error_rad_s": [
+          0.0,
+          8.731149137020111e-11,
+          7.275957614183426e-11
+        ],
+        "n": 74,
+        "predicted_angular_velocity": [
+          -0.01879194937646389,
+          0.0002374069590587169,
+          -3.9983176975511014e-05
+        ],
+        "predicted_velocity": [
+          -0.0014328458346426487,
+          0.002108829328790307,
+          10.144205093383789
+        ],
+        "velocity_ULPs": [
+          0,
+          7,
+          0
+        ],
+        "velocity_error_m_s": [
+          0.0,
+          -1.6298145055770874e-09,
+          0.0
+        ]
+      },
+      {
+        "angular_velocity_ULPs": [
+          1,
+          1,
+          96
+        ],
+        "angular_velocity_error_rad_s": [
+          -1.862645149230957e-09,
+          2.9103830456733704e-11,
+          2.1827872842550278e-11
+        ],
+        "n": 75,
+        "predicted_angular_velocity": [
+          -0.017297478392720222,
+          0.00024635877343825996,
+          3.729452146217227e-06
+        ],
+        "predicted_velocity": [
+          -0.0013973752502352,
+          0.0023195696994662285,
+          10.274908065795898
+        ],
+        "velocity_ULPs": [
+          0,
+          37,
+          0
+        ],
+        "velocity_error_m_s": [
+          0.0,
+          -8.614733815193176e-09,
+          0.0
+        ]
+      }
+    ],
+    "scope": "Rust f32 Mat3 Jacobian/inverse/cofactor expressions matching original_step, evaluated at captured SOURCE poses, forces and velocities. Source normals/arms/D reconstruct matrices; raw cached A/B/C not recorded. No impulses, no airborne branch. Prescribed-state kernel audit, not closed-loop native equivalence; ULP distances near zero can be large despite tiny absolute residuals.",
+    "transitions": 1800,
+    "velocity_error_m_s": {
+      "per_axis": [
+        {
+          "max_absolute": 5.820766091346741e-11,
+          "rms": 2.6150718590673503e-12
+        },
+        {
+          "max_absolute": 1.234002411365509e-08,
+          "rms": 6.6848587045602835e-09
+        },
+        {
+          "max_absolute": 0.0,
+          "rms": 0.0
+        }
+      ]
+    }
+  },
+  "coupled_integration_raw_source_basis": {
+    "angular_velocity_error_rad_s": {
+      "per_axis": [
+        {
+          "max_absolute": 7.450580596923828e-09,
+          "rms": 1.0151386192453992e-09
+        },
+        {
+          "max_absolute": 2.9802322387695312e-08,
+          "rms": 1.9310297222426708e-09
+        },
+        {
+          "max_absolute": 7.450580596923828e-09,
+          "rms": 8.469466372884018e-10
+        }
+      ]
+    },
+    "body_basis": "raw source AGE rows; source forward field means BACK",
+    "components": 5400,
+    "exact_angular_components": 3147,
+    "exact_velocity_components": 3605,
+    "max_angular_velocity_ULPs": 8192,
+    "max_velocity_ULPs": 82726,
+    "near_first_native_divergence": [
+      {
+        "angular_velocity_ULPs": [
+          0,
+          1,
+          4
+        ],
+        "angular_velocity_error_rad_s": [
+          0.0,
+          1.4551915228366852e-11,
+          1.4551915228366852e-11
+        ],
+        "n": 74,
+        "predicted_angular_velocity": [
+          -0.01879194937646389,
+          0.00023740688629914075,
+          -3.998323518317193e-05
+        ],
+        "predicted_velocity": [
+          -0.0014328458346426487,
+          0.002108829328790307,
+          10.144205093383789
+        ],
+        "velocity_ULPs": [
+          0,
+          7,
+          0
+        ],
+        "velocity_error_m_s": [
+          0.0,
+          -1.6298145055770874e-09,
+          0.0
+        ]
+      },
+      {
+        "angular_velocity_ULPs": [
+          0,
+          0,
+          16
+        ],
+        "angular_velocity_error_rad_s": [
+          0.0,
+          0.0,
+          3.637978807091713e-12
+        ],
+        "n": 75,
+        "predicted_angular_velocity": [
+          -0.017297476530075073,
+          0.0002463587443344295,
+          3.7294339563231915e-06
+        ],
+        "predicted_velocity": [
+          -0.0013973752502352,
+          0.0023195696994662285,
+          10.274908065795898
+        ],
+        "velocity_ULPs": [
+          0,
+          37,
+          0
+        ],
+        "velocity_error_m_s": [
+          0.0,
+          -8.614733815193176e-09,
+          0.0
+        ]
+      }
+    ],
+    "scope": "Rust f32 Mat3 Jacobian/inverse/cofactor expressions matching original_step, evaluated at captured SOURCE poses, forces and velocities. Source normals/arms/D reconstruct matrices; raw cached A/B/C not recorded. No impulses, no airborne branch. Prescribed-state kernel audit, not closed-loop native equivalence; ULP distances near zero can be large despite tiny absolute residuals.",
+    "transitions": 1800,
+    "velocity_error_m_s": {
+      "per_axis": [
+        {
+          "max_absolute": 5.820766091346741e-11,
+          "rms": 2.6150718590673503e-12
+        },
+        {
+          "max_absolute": 1.1757947504520416e-08,
+          "rms": 6.6746972686374674e-09
+        },
+        {
+          "max_absolute": 0.0,
+          "rms": 0.0
+        }
+      ]
+    }
+  },
+  "force_error_N": {
+    "max_absolute": 0.0029296875,
+    "rms": 0.0001328258872199616
+  },
+  "near_first_native_divergence": [
+    {
+      "bristle_error_m": [
+        -3.637978807091713e-12,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.0
+      ],
+      "input": {
+        "load": 6766.2841796875,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          4.339379302109592e-05,
+          0.014081337489187717
+        ],
+        "rolling_speed_reconstructed": 9.983760833740234,
+        "v_fwd": 10.146099090576172,
+        "v_lat": 0.00020727375522255898,
+        "v_slip": 0.1623382568359375
+      },
+      "n": 74,
+      "rust": {
+        "bristles": [
+          3.333752101752907e-05,
+          0.016786975786089897
+        ],
+        "forces": [
+          -3.7319602966308594,
+          -2392.31884765625
+        ],
+        "slip_visual": 5.107227843836881e-05
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          3.333752465550788e-05,
+          0.016786975786089897
+        ],
+        "forces": [
+          -3.7319602966308594,
+          -2392.31884765625
+        ],
+        "slip_visual": 5.107227843836881e-05
+      },
+      "wheel": 0
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -2.384185791015625e-07,
+        -0.000244140625
+      ],
+      "input": {
+        "load": 6750.80859375,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          4.333071774453856e-05,
+          0.014135188423097134
+        ],
+        "rolling_speed_reconstructed": 9.983763694763184,
+        "v_fwd": 10.14651107788086,
+        "v_lat": 0.00020727328956127167,
+        "v_slip": 0.16274738311767578
+      },
+      "n": 74,
+      "rust": {
+        "bristles": [
+          3.3259846532018855e-05,
+          0.0168476440012455
+        ],
+        "forces": [
+          -3.7232649326324463,
+          -2400.403564453125
+        ],
+        "slip_visual": 5.107008837512694e-05
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          3.3259846532018855e-05,
+          0.0168476440012455
+        ],
+        "forces": [
+          -3.723264694213867,
+          -2400.4033203125
+        ],
+        "slip_visual": 5.107008837512694e-05
+      },
+      "wheel": 1
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.0
+      ],
+      "input": {
+        "load": 5998.71240234375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -6.287600263021886e-05,
+          -0.07461083680391312
+        ],
+        "rolling_speed_reconstructed": 10.306634902954102,
+        "v_fwd": 10.146106719970703,
+        "v_lat": 0.0009269511210732162,
+        "v_slip": -0.16052818298339844
+      },
+      "n": 74,
+      "rust": {
+        "bristles": [
+          -4.742681630887091e-05,
+          -0.07728630304336548
+        ],
+        "forces": [
+          1.9507310390472412,
+          7509.2275390625
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -4.742681630887091e-05,
+          -0.07728630304336548
+        ],
+        "forces": [
+          1.9507310390472412,
+          7509.2275390625
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.0
+      ],
+      "input": {
+        "load": 5986.27099609375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -6.287202995736152e-05,
+          -0.07461011409759521
+        ],
+        "rolling_speed_reconstructed": 10.306925773620605,
+        "v_fwd": 10.146502494812012,
+        "v_lat": 0.0009269521688111126,
+        "v_slip": -0.16042327880859375
+      },
+      "n": 74,
+      "rust": {
+        "bristles": [
+          -4.742282544611953e-05,
+          -0.0772838369011879
+        ],
+        "forces": [
+          1.950361967086792,
+          7508.7294921875
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -4.742282544611953e-05,
+          -0.0772838369011879
+        ],
+        "forces": [
+          1.950361967086792,
+          7508.7294921875
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 3
+    },
+    {
+      "bristle_error_m": [
+        -1.8189894035458565e-12,
+        0.0
+      ],
+      "force_error_N": [
+        -2.384185791015625e-07,
+        0.0
+      ],
+      "input": {
+        "load": 6749.408203125,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          3.333752465550788e-05,
+          0.016786975786089897
+        ],
+        "rolling_speed_reconstructed": 10.09726333618164,
+        "v_fwd": 10.276627540588379,
+        "v_lat": 0.00018451502546668053,
+        "v_slip": 0.17936420440673828
+      },
+      "n": 75,
+      "rust": {
+        "bristles": [
+          2.9227208869997412e-05,
+          0.01977637968957424
+        ],
+        "forces": [
+          -3.2718324661254883,
+          -2780.78125
+        ],
+        "slip_visual": 4.4887055992148817e-05
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          2.9227210688986816e-05,
+          0.01977637968957424
+        ],
+        "forces": [
+          -3.271832227706909,
+          -2780.78125
+        ],
+        "slip_visual": 4.4887055992148817e-05
+      },
+      "wheel": 0
+    },
+    {
+      "bristle_error_m": [
+        -1.8189894035458565e-12,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.0
+      ],
+      "input": {
+        "load": 6734.00732421875,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          3.3259846532018855e-05,
+          0.0168476440012455
+        ],
+        "rolling_speed_reconstructed": 10.097674369812012,
+        "v_fwd": 10.277055740356445,
+        "v_lat": 0.0001845162478275597,
+        "v_slip": 0.1793813705444336
+      },
+      "n": 75,
+      "rust": {
+        "bristles": [
+          2.9159495170461014e-05,
+          0.019837332889437675
+        ],
+        "forces": [
+          -3.264252185821533,
+          -2787.658935546875
+        ],
+        "slip_visual": 4.4885480747325346e-05
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          2.9159496989450417e-05,
+          0.019837332889437675
+        ],
+        "forces": [
+          -3.264252185821533,
+          -2787.658935546875
+        ],
+        "slip_visual": 4.4885480747325346e-05
+      },
+      "wheel": 1
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -2.384185791015625e-07,
+        0.0
+      ],
+      "input": {
+        "load": 6011.6943359375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -4.742681630887091e-05,
+          -0.07728630304336548
+        ],
+        "rolling_speed_reconstructed": 10.428826332092285,
+        "v_fwd": 10.276636123657227,
+        "v_lat": 0.0009313679183833301,
+        "v_slip": -0.1521902084350586
+      },
+      "n": 75,
+      "rust": {
+        "bristles": [
+          -3.1904019124340266e-05,
+          -0.07982280850410461
+        ],
+        "forces": [
+          0.5146219730377197,
+          7720.41845703125
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -3.1904019124340266e-05,
+          -0.07982280850410461
+        ],
+        "forces": [
+          0.5146222114562988,
+          7720.41845703125
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.0
+      ],
+      "input": {
+        "load": 5999.314453125,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -4.742282544611953e-05,
+          -0.0772838369011879
+        ],
+        "rolling_speed_reconstructed": 10.429121971130371,
+        "v_fwd": 10.277047157287598,
+        "v_lat": 0.0009313629707321525,
+        "v_slip": -0.15207481384277344
+      },
+      "n": 75,
+      "rust": {
+        "bristles": [
+          -3.190010829712264e-05,
+          -0.07974155992269516
+        ],
+        "forces": [
+          0.5142760276794434,
+          7318.5849609375
+        ],
+        "slip_visual": 0.12980280816555023
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -3.190010829712264e-05,
+          -0.07974155992269516
+        ],
+        "forces": [
+          0.5142760276794434,
+          7318.5849609375
+        ],
+        "slip_visual": 0.12980280816555023
+      },
+      "wheel": 3
+    }
+  ],
+  "primary_train": {
+    "constants_mode": "native authored ratio and actual EngineConstants torque methods",
+    "differential_bias_error_reconstructed": {
+      "max_absolute": 2.384185791015625e-07,
+      "rms": 6.97213935995309e-08
+    },
+    "eligible_updates": 1746,
+    "near_first_native_divergence": [
+      {
+        "differential_bias_error_reconstructed": 0.0,
+        "gear": 2,
+        "input": {
+          "bias_reconstructed": 0.9999858736991882,
+          "engine_omega_reconstructed": 487.18145751953125,
+          "omega": 27.90494155883789,
+          "ratio": 17.458608627319336,
+          "reactions_reconstructed": [
+            2670.46630859375,
+            2670.486083984375
+          ],
+          "throttle": 1.0,
+          "torque": 756.2673950195312
+        },
+        "n": 74,
+        "rust": {
+          "bias": 0.9999858736991882,
+          "shaft_omega": 28.248353958129883
+        },
+        "shaft_omega_error_rad_s": 0.0,
+        "source": {
+          "bias_reconstructed": 0.9999858736991882,
+          "phase_rpm_reconstructed": 4652.23974609375,
+          "rpm": 4652.23974609375,
+          "shaft_omega": 28.248353958129883
+        }
+      },
+      {
+        "differential_bias_error_reconstructed": -5.960464477539063e-08,
+        "gear": 2,
+        "input": {
+          "bias_reconstructed": 0.9999858736991882,
+          "engine_omega_reconstructed": 493.17694091796875,
+          "omega": 28.248353958129883,
+          "ratio": 17.458608627319336,
+          "reactions_reconstructed": [
+            2739.839599609375,
+            2739.65771484375
+          ],
+          "throttle": 1.0,
+          "torque": 753.1151733398438
+        },
+        "n": 75,
+        "rust": {
+          "bias": 0.9999857544898987,
+          "shaft_omega": 28.5832576751709
+        },
+        "shaft_omega_error_rad_s": 0.0,
+        "source": {
+          "bias_reconstructed": 0.9999858140945435,
+          "phase_rpm_reconstructed": 4709.49267578125,
+          "rpm": 4709.49267578125,
+          "shaft_omega": 28.5832576751709
+        }
+      }
+    ],
+    "scope": "Actual Rust step_train and engine torque curve at prescribed SOURCE states. Forward unchanged-gear samples with two consecutive unblended-RPM phase checks, engine above twice idle, below limiter, no brake/HB; power_scale assumed1. Previous engine omega=-source spin*authored ratio. Differential bias and reactions reconstructed from rounded source wheel fields, not raw train caches; this uncertainty precludes bit-exact conclusions.",
+    "shaft_omega_error_rad_s": {
+      "max_absolute": 3.814697265625e-06,
+      "rms": 6.519631455048868e-07
+    },
+    "skipped_by_reason": {
+      "braking/handbrake or invalid throttle outside this audit": 6,
+      "clutch attachment or limiter uncertain": 13,
+      "displayed RPM does not verify unblended attached phase": 30,
+      "neutral/reverse/gear transition": 4
+    }
+  },
+  "primary_train_source_derived": {
+    "constants_mode": "captured source ratios and full-throttle curve; native engine inertia/idle/coast curve and train inertia",
+    "differential_bias_error_reconstructed": {
+      "max_absolute": 2.384185791015625e-07,
+      "rms": 6.97213935995309e-08
+    },
+    "eligible_updates": 1746,
+    "near_first_native_divergence": [
+      {
+        "differential_bias_error_reconstructed": 0.0,
+        "gear": 2,
+        "input": {
+          "bias_reconstructed": 0.9999858736991882,
+          "engine_omega_reconstructed": 487.181396484375,
+          "omega": 27.90494155883789,
+          "ratio": 17.458606719970703,
+          "reactions_reconstructed": [
+            2670.46630859375,
+            2670.486083984375
+          ],
+          "throttle": 1.0,
+          "torque": 756.2675170898438
+        },
+        "n": 74,
+        "rust": {
+          "bias": 0.9999858736991882,
+          "shaft_omega": 28.248353958129883
+        },
+        "shaft_omega_error_rad_s": 0.0,
+        "source": {
+          "bias_reconstructed": 0.9999858736991882,
+          "phase_rpm_reconstructed": 4652.2392578125,
+          "rpm": 4652.23974609375,
+          "shaft_omega": 28.248353958129883
+        }
+      },
+      {
+        "differential_bias_error_reconstructed": -5.960464477539063e-08,
+        "gear": 2,
+        "input": {
+          "bias_reconstructed": 0.9999858736991882,
+          "engine_omega_reconstructed": 493.1769104003906,
+          "omega": 28.248353958129883,
+          "ratio": 17.458606719970703,
+          "reactions_reconstructed": [
+            2739.839599609375,
+            2739.65771484375
+          ],
+          "throttle": 1.0,
+          "torque": 753.115234375
+        },
+        "n": 75,
+        "rust": {
+          "bias": 0.9999857544898987,
+          "shaft_omega": 28.5832576751709
+        },
+        "shaft_omega_error_rad_s": 0.0,
+        "source": {
+          "bias_reconstructed": 0.9999858140945435,
+          "phase_rpm_reconstructed": 4709.49267578125,
+          "rpm": 4709.49267578125,
+          "shaft_omega": 28.5832576751709
+        }
+      }
+    ],
+    "scope": "Actual Rust step_train and engine torque curve at prescribed SOURCE states. Forward unchanged-gear samples with two consecutive unblended-RPM phase checks, engine above twice idle, below limiter, no brake/HB; power_scale assumed1. Previous engine omega=-source spin*authored ratio. Differential bias and reactions reconstructed from rounded source wheel fields, not raw train caches; this uncertainty precludes bit-exact conclusions.",
+    "shaft_omega_error_rad_s": {
+      "max_absolute": 3.814697265625e-06,
+      "rms": 3.027849613583253e-07
+    },
+    "skipped_by_reason": {
+      "braking/handbrake or invalid throttle outside this audit": 6,
+      "clutch attachment or limiter uncertain": 13,
+      "displayed RPM does not verify unblended attached phase": 30,
+      "neutral/reverse/gear transition": 4
+    }
+  },
+  "scope": "Actual Rust original::tyre f32 law at captured ORIGINAL states, using each previous source bristle independently. Not closed-loop native trajectory equivalence or bit-exact x87 replay. Rolling speed is reconstructed by f32(vFwd-vSlip), not directly recorded; source drag is not replayed.",
+  "slip_visual_error": {
+    "max_absolute": 5.960464477539063e-08,
+    "rms": 7.024474751815672e-10
+  },
+  "wheel_updates": 7200,
+  "worst_force_rows": [
+    {
+      "bristle_error_m": [
+        0.0,
+        2.9802322387695312e-08
+      ],
+      "force_error_N": [
+        0.0,
+        -0.0029296875
+      ],
+      "input": {
+        "load": 6115.8515625,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -0.0002372549643041566,
+          -0.1677323281764984
+        ],
+        "rolling_speed_reconstructed": 18.4042911529541,
+        "v_fwd": 17.56447982788086,
+        "v_lat": -0.0008316386956721544,
+        "v_slip": -0.8398113250732422
+      },
+      "n": 158,
+      "rust": {
+        "bristles": [
+          -0.00025111561990343034,
+          -0.17524567246437073
+        ],
+        "forces": [
+          25.2021484375,
+          16083.837890625
+        ],
+        "slip_visual": 0.4194127023220062
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.00025111561990343034,
+          -0.17524570226669312
+        ],
+        "forces": [
+          25.2021484375,
+          16083.8408203125
+        ],
+        "slip_visual": 0.4194127023220062
+      },
+      "wheel": 3
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        0.001953125
+      ],
+      "input": {
+        "load": 6071.8798828125,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -0.00022960414935369045,
+          -0.14508704841136932
+        ],
+        "rolling_speed_reconstructed": 4.918476581573486,
+        "v_fwd": 3.3439524173736572,
+        "v_lat": -0.0006984205101616681,
+        "v_slip": -1.574524164199829
+      },
+      "n": 28,
+      "rust": {
+        "bristles": [
+          -0.0002412444882793352,
+          -0.17132911086082458
+        ],
+        "forces": [
+          19.82648468017578,
+          16394.0625
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.0002412444882793352,
+          -0.17132911086082458
+        ],
+        "forces": [
+          19.82648468017578,
+          16394.060546875
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -9.5367431640625e-07,
+        -0.001953125
+      ],
+      "input": {
+        "load": 5982.81494140625,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -9.514394332654774e-05,
+          -0.09960639476776123
+        ],
+        "rolling_speed_reconstructed": 20.622779846191406,
+        "v_fwd": 16.597877502441406,
+        "v_lat": -0.0017469119047746062,
+        "v_slip": -4.02490234375
+      },
+      "n": 153,
+      "rust": {
+        "bristles": [
+          -0.0001242591388290748,
+          -0.16668811440467834
+        ],
+        "forces": [
+          10.00244426727295,
+          16153.595703125
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.0001242591388290748,
+          -0.16668811440467834
+        ],
+        "forces": [
+          10.002445220947266,
+          16153.59765625
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -1.9073486328125e-06,
+        -0.001953125
+      ],
+      "input": {
+        "load": 6108.7138671875,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -0.00021476014808285981,
+          -0.1408248245716095
+        ],
+        "rolling_speed_reconstructed": 19.013059616088867,
+        "v_fwd": 17.396217346191406,
+        "v_lat": -0.0013498773332685232,
+        "v_slip": -1.616842269897461
+      },
+      "n": 157,
+      "rust": {
+        "bristles": [
+          -0.00023725810751784593,
+          -0.16777220368385315
+        ],
+        "forces": [
+          21.280920028686523,
+          16493.509765625
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.00023725810751784593,
+          -0.16777220368385315
+        ],
+        "forces": [
+          21.280921936035156,
+          16493.51171875
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -4.76837158203125e-07,
+        -0.001953125
+      ],
+      "input": {
+        "load": 6613.68017578125,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          8.204096047847997e-06,
+          0.058664917945861816
+        ],
+        "rolling_speed_reconstructed": 16.431331634521484,
+        "v_fwd": 17.565210342407227,
+        "v_lat": 0.000465987715870142,
+        "v_slip": 1.1338787078857422
+      },
+      "n": 158,
+      "rust": {
+        "bristles": [
+          1.5970559616107494e-05,
+          0.07756289839744568
+        ],
+        "forces": [
+          -3.2606759071350098,
+          -12266.62890625
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          1.5970559616107494e-05,
+          0.07756289839744568
+        ],
+        "forces": [
+          -3.2606754302978516,
+          -12266.626953125
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 0
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        -1.4901161193847656e-08
+      ],
+      "force_error_N": [
+        0.0,
+        0.001953125
+      ],
+      "input": {
+        "load": 5412.908203125,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          0.0005162102752365172,
+          0.1540217101573944
+        ],
+        "rolling_speed_reconstructed": 10.87254524230957,
+        "v_fwd": 11.288347244262695,
+        "v_lat": -0.006753802299499512,
+        "v_slip": 0.415802001953125
+      },
+      "n": 629,
+      "rust": {
+        "bristles": [
+          0.000403646903578192,
+          0.1393095850944519
+        ],
+        "forces": [
+          -19.54483413696289,
+          -12785.6669921875
+        ],
+        "slip_visual": 0.3231107294559479
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          0.000403646903578192,
+          0.1393095999956131
+        ],
+        "forces": [
+          -19.54483413696289,
+          -12785.6689453125
+        ],
+        "slip_visual": 0.3231107294559479
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        0.0,
+        -0.0009765625
+      ],
+      "input": {
+        "load": 5814.6865234375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -2.9429489245558216e-07,
+          -0.049447495490312576
+        ],
+        "rolling_speed_reconstructed": 3.032827615737915,
+        "v_fwd": 0.315010130405426,
+        "v_lat": 4.921419531456195e-06,
+        "v_slip": -2.717817544937134
+      },
+      "n": 9,
+      "rust": {
+        "bristles": [
+          -2.1227123170319828e-07,
+          -0.09474445879459381
+        ],
+        "forces": [
+          0.006712396163493395,
+          15699.65234375
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -2.1227123170319828e-07,
+          -0.09474445879459381
+        ],
+        "forces": [
+          0.006712396163493395,
+          15699.6533203125
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 2
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -2.384185791015625e-07,
+        -0.0009765625
+      ],
+      "input": {
+        "load": 6859.4560546875,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          2.965704652524437e-06,
+          0.015343811362981796
+        ],
+        "rolling_speed_reconstructed": 0.24874335527420044,
+        "v_fwd": 0.9917767643928528,
+        "v_lat": 0.0003951148537453264,
+        "v_slip": 0.7430334091186523
+      },
+      "n": 11,
+      "rust": {
+        "bristles": [
+          9.550952199788298e-06,
+          0.027727700769901276
+        ],
+        "forces": [
+          -2.3180253505706787,
+          -5452.4892578125
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          9.550952199788298e-06,
+          0.027727700769901276
+        ],
+        "forces": [
+          -2.3180251121520996,
+          -5452.48828125
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 0
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -1.1920928955078125e-07,
+        -0.0009765625
+      ],
+      "input": {
+        "load": 5899.11865234375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -4.304470621718792e-06,
+          -0.13442574441432953
+        ],
+        "rolling_speed_reconstructed": 3.0837297439575195,
+        "v_fwd": 0.9912739396095276,
+        "v_lat": -0.000500720925629139,
+        "v_slip": -2.0924558639526367
+      },
+      "n": 11,
+      "rust": {
+        "bristles": [
+          -1.2649819836951792e-05,
+          -0.16930001974105835
+        ],
+        "forces": [
+          1.8682080507278442,
+          15927.619140625
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -1.2649819836951792e-05,
+          -0.16930001974105835
+        ],
+        "forces": [
+          1.8682081699371338,
+          15927.6201171875
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 3
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -2.384185791015625e-07,
+        -0.0009765625
+      ],
+      "input": {
+        "load": 6797.546875,
+        "mu_sliding": 2.430000066757202,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          9.550762115395628e-06,
+          0.027716003358364105
+        ],
+        "rolling_speed_reconstructed": 0.5165292620658875,
+        "v_fwd": 1.2608155012130737,
+        "v_lat": 0.0005609150975942612,
+        "v_slip": 0.7442862391471863
+      },
+      "n": 12,
+      "rust": {
+        "bristles": [
+          1.889934719656594e-05,
+          0.040120773017406464
+        ],
+        "forces": [
+          -3.8885767459869385,
+          -6843.7880859375
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          1.889934719656594e-05,
+          0.040120773017406464
+        ],
+        "forces": [
+          -3.8885765075683594,
+          -6843.787109375
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 1
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -1.9073486328125e-06,
+        0.0009765625
+      ],
+      "input": {
+        "load": 6060.86474609375,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -0.000229604440391995,
+          -0.14514699578285217
+        ],
+        "rolling_speed_reconstructed": 4.921310901641846,
+        "v_fwd": 3.343548536300659,
+        "v_lat": -0.0006984194042161107,
+        "v_slip": -1.5777623653411865
+      },
+      "n": 28,
+      "rust": {
+        "bristles": [
+          -0.00024124476476572454,
+          -0.17144303023815155
+        ],
+        "forces": [
+          19.77172088623047,
+          16364.3232421875
+        ],
+        "slip_visual": 0.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.00024124476476572454,
+          -0.17144303023815155
+        ],
+        "forces": [
+          19.7717227935791,
+          16364.322265625
+        ],
+        "slip_visual": 0.0
+      },
+      "wheel": 3
+    },
+    {
+      "bristle_error_m": [
+        0.0,
+        0.0
+      ],
+      "force_error_N": [
+        -2.9802322387695312e-08,
+        0.0009765625
+      ],
+      "input": {
+        "load": 6071.67626953125,
+        "mu_sliding": 1.2599999904632568,
+        "mu_static": 2.6999998092651367,
+        "previous_bristles": [
+          -0.00024124476476572454,
+          -0.17144303023815155
+        ],
+        "rolling_speed_reconstructed": 4.949522972106934,
+        "v_fwd": 3.712416410446167,
+        "v_lat": 7.414806168526411e-05,
+        "v_slip": -1.2371065616607666
+      },
+      "n": 29,
+      "rust": {
+        "bristles": [
+          -0.0002400089579168707,
+          -0.16319382190704346
+        ],
+        "forces": [
+          -0.4585343301296234,
+          7650.3125
+        ],
+        "slip_visual": 1.0
+      },
+      "slip_visual_error": 0.0,
+      "source": {
+        "bristles": [
+          -0.0002400089579168707,
+          -0.16319382190704346
+        ],
+        "forces": [
+          -0.458534300327301,
+          7650.3115234375
+        ],
+        "slip_visual": 1.0
+      },
+      "wheel": 3
+    }
+  ]
+}

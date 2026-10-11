@@ -17,7 +17,8 @@
 //!
 //! Authored: the field values, the index→name table, the rule files
 //! and the atlas. Designed (DSN-62): the gate quantity (the wheel's
-//! `tire_slippage` utilization — the same measure skid audio reads),
+//! retail wheel `slip_visual` for native cars, arcade `tire_slippage`
+//! utilization otherwise — the same per-wheel measures skid audio reads),
 //! the strict-`>` comparison, the `InitialBlast`-on-edge / `SpewRate`-
 //! while-held reading, the per-vehicle pool bound and the billboard
 //! presentation. The original trigger quantity and emission cadence
@@ -34,7 +35,7 @@ use mm2_content::SurfaceTables;
 use mm2_formats::banger::BirthRule;
 use mm2_game::{
     ObjectIdentity, PTX_ATLAS_TILES, PTX_RULE_NAMES, ParticleSpec, Player, PlayerControl, Session,
-    SessionEntity, SurfaceMaterial, WheelDraw, WheelPtx, WheelPtxPolicy, WheelPuff, tire_slippage,
+    SessionEntity, SurfaceMaterial, WheelDraw, WheelPtx, WheelPtxPolicy, WheelPuff,
 };
 use mm2_vehicle::{Vehicle, VehicleState};
 
@@ -213,8 +214,8 @@ fn wheel_fx_assets(
 /// Emit surface puffs from every rigged participant's grounded wheels
 /// (F18-B.4). Per wheel the contact's [`SurfaceMaterial`] resolves
 /// through [`SurfaceTables::ptx_channels`] to the authored channel
-/// pair; the designed gate quantity is the wheel's `tire_slippage`
-/// utilization — the same measure the skid voices read — so the
+/// pair; the gate quantity is retail `slip_visual` for native cars and
+/// designed `tire_slippage` utilization for arcade cars. Thus the
 /// authored `ptxthreshold` applies on the same 0..1 domain a slip
 /// trigger plausibly reads (the original quantity is unrecovered,
 /// UNK-23). Remote participants are skipped like every effect system —
@@ -301,12 +302,7 @@ pub fn emit_wheel_fx(
                 .get(i)
                 .and_then(|c| c.tires.as_ref())
                 .unwrap_or(&vehicle.config.tires);
-            let q = tire_slippage(
-                w.traction_demand,
-                w.slip_angle,
-                tires.peak_slip_angle,
-                tires.peak_slip_ratio,
-            );
+            let q = crate::audio::wheel_slippage(vehicle.config.original.is_some(), w, tires);
             let emission = rig.draw(
                 i,
                 WheelDraw {

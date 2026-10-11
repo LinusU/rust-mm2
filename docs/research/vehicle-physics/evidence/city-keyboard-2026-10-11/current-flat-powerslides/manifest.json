@@ -1,0 +1,59 @@
+{
+  "scope": "Current post-MPH handling regression against previously recorded flat-course powerslides; not city/audio evidence",
+  "binary_sha256": "ad9e04ea657c29c35dabb2a2434614115ff8292872273b9af21d449664c2424c",
+  "files": [
+    {
+      "file": "vpbug.csv.gz",
+      "raw_sha256": "ae7d784559bf8d89538ba1cdf0d0a7ef8db06cb7c0c5eb33b54981c5748d5ef9",
+      "archive_sha256": "4b6c943797239b2bc096ae8a8097614dd3ff8c33e066fa0958bfc99e6f7817e2"
+    },
+    {
+      "file": "vppanoz.csv.gz",
+      "raw_sha256": "f3c16b9b4b26d5207f16b06f34db1352aaca3c367f9e749cd35a7765e2e7baee",
+      "archive_sha256": "8423787b64de92ec503028f8d608d8c01031b06213bb5278b8d9487e0d4777c9"
+    },
+    {
+      "file": "vpbullet.csv.gz",
+      "raw_sha256": "c845dcf0b806229210adf3cf47a7026839fe6fc1b51b13e58ac79a806647ac1b",
+      "archive_sha256": "2d5ba29352268e187d57240c5aa8ed331aff3c4911a144e83326e352d8496f5a"
+    }
+  ],
+  "cases": [
+    {
+      "car": "vpbug",
+      "hz": 60,
+      "frames": 900,
+      "settle_frames": 600,
+      "source_file": "../../../../../../tools/handling/evidence/original-vpbug-flat-powerslide.json",
+      "source_sha256": "fb0b092e097fbdd9c2c1d51398d7381a3ae237fac3c647925efa8151ce4f2eec",
+      "native": "vpbug.csv.gz",
+      "max_heading_degrees": 0.06175611097427867,
+      "speed_rms_mps": 0.0032800440207446336,
+      "slip_rms_degrees": 0.01342118733590227
+    },
+    {
+      "car": "vppanoz",
+      "hz": 60,
+      "frames": 900,
+      "settle_frames": 180,
+      "source_file": "../../../../../../tools/handling/evidence/original-vppanoz-flat-powerslide.json",
+      "source_sha256": "aa10d763033d275048d786e320586b3113a3baa670b9d26f0463ac37f7c8edb4",
+      "native": "vppanoz.csv.gz",
+      "max_heading_degrees": 0.7277788570511677,
+      "speed_rms_mps": 0.12459326206850467,
+      "slip_rms_degrees": 0.032612425970606804
+    },
+    {
+      "car": "vpbullet",
+      "hz": 60,
+      "frames": 900,
+      "settle_frames": 600,
+      "source_file": "../../../../../../tools/handling/evidence/original-vpbullet-flat-powerslide.json",
+      "source_sha256": "9acbf3de152a3bfd18e77ea836442671bc8323c2b11e00601275322270ac2fc1",
+      "native": "vpbullet.csv.gz",
+      "max_heading_degrees": 0.015518002107472662,
+      "speed_rms_mps": 0.0363345865295753,
+      "slip_rms_degrees": 0.0020258031208415135
+    }
+  ]
+}

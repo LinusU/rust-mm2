@@ -51,6 +51,16 @@ const ALLOWED: &[(&str, Reason)] = &[
     ("crates/mm2_app/src/write_guard.rs", Reason::DevOutput),
     ("crates/mm2_app/examples/analyze_city.rs", Reason::DevOutput),
     ("crates/mm2_app/examples/drive_probe.rs", Reason::DevOutput),
+    // Calibration reads explicitly named recordings/routes and writes trace evidence;
+    // retail resources themselves still resolve through Vfs.
+    (
+        "crates/mm2_app/examples/city_handling_trace.rs",
+        Reason::DevInput,
+    ),
+    (
+        "crates/mm2_app/examples/source_tyre_audit.rs",
+        Reason::DevInput,
+    ),
     ("crates/mm2_app/src/scripted.rs", Reason::DevInput),
     ("crates/mm2_vehicle/src/config.rs", Reason::DevInput),
     (

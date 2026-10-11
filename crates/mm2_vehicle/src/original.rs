@@ -61,7 +61,10 @@ pub const BRAKE_STAND_PEDAL: f32 = 0.95;
 /// m/s → mph, the original's `2.236025`.
 pub const MPS_TO_MPH: f32 = 2.236025;
 /// mph → metres per minute (`1609.344 / 60`).
-const MPH_TO_M_PER_MIN: f32 = 26.8224;
+// Retail initializes 0x6aeec0 at 0x4cf500 from these two f32 values.
+// Rounding the decimal result to 26.8224 loses one ULP and changes the
+// first/reverse gear ratios measured in the original Fastback.
+const MPH_TO_M_PER_MIN: f32 = 1609.344 * (1.0 / 60.0);
 
 /// `sign` with `sign(0) == 0`, as the original's x87 code computes it.
 pub fn sgn(x: f32) -> f32 {

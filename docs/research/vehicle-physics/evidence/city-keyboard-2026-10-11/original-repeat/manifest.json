@@ -1,0 +1,12 @@
+{
+  "scope": "fresh original-to-original physical-state repeat; not native-fidelity acceptance",
+  "car": "vpbullet",
+  "city": "sf",
+  "reference": "../sf-vpbullet/original.json.gz",
+  "repeat": "sf-vpbullet.json.gz",
+  "raw_sha256": "0489173ecddfef20eefd6e12db56bf9a4768e119929929d8fc25fe257d2862c5",
+  "gzip_sha256": "da3cdb67498930bc4faa97680c303ffcd4725e2509cb3ccc3e210dd46aa3d7a2",
+  "comparison": "comparison.json",
+  "comparison_sha256": "77625c34febe5256b30221c6871e7e0472325f5d425817487c8e9732ce3f4710",
+  "meaning": "Physical positions, velocity, angular velocity, orientation, steering, gears and wheel diagnostics repeat exactly across1801 rows. Recorder addresses/frame counters differ. Native trajectory drift cannot be assigned to measured original repeat variability."
+}

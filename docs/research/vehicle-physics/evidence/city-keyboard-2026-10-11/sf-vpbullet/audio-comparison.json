@@ -1,0 +1,627 @@
+{
+  "original": "original.json.gz",
+  "native": "native.audio.json.gz",
+  "alignment": "source n\u22121 = native frame; stops are exclusive; band indices are table row ordinals",
+  "source_backend_lag_ticks": 1,
+  "native_request_delay_ticks": 1,
+  "native_evidence": "requested production mix only; no native backend playback measured",
+  "surface_scope": "retail sampler observes current class bands; native internal-law check excludes different classes",
+  "retail_internal_previous_q_vs_backend": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 38,
+    "same_band_amplitude_mae": 0.0,
+    "same_band_amplitude_max_error": 0.0
+  },
+  "native_internal_own_q_vs_requested": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 37,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "handling_source_q_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 1,
+    "any_skid_mismatch_ticks": 1,
+    "same_band_gain_samples": 37,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "raw_backend_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 1,
+    "any_skid_mismatch_ticks": 1,
+    "same_band_gain_samples": 37,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "lag_adjusted_backend_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 1,
+    "any_skid_mismatch_ticks": 1,
+    "same_band_gain_samples": 37,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "source_backend_windows": [
+    {
+      "band": 2,
+      "start": 12,
+      "stop_exclusive": 18
+    },
+    {
+      "band": 2,
+      "start": 19,
+      "stop_exclusive": 23
+    },
+    {
+      "band": 2,
+      "start": 24,
+      "stop_exclusive": 28
+    },
+    {
+      "band": 2,
+      "start": 29,
+      "stop_exclusive": 31
+    },
+    {
+      "band": 2,
+      "start": 32,
+      "stop_exclusive": 34
+    },
+    {
+      "band": 2,
+      "start": 35,
+      "stop_exclusive": 37
+    },
+    {
+      "band": 2,
+      "start": 38,
+      "stop_exclusive": 39
+    },
+    {
+      "band": 2,
+      "start": 146,
+      "stop_exclusive": 150
+    },
+    {
+      "band": 2,
+      "start": 151,
+      "stop_exclusive": 153
+    },
+    {
+      "band": 2,
+      "start": 154,
+      "stop_exclusive": 156
+    },
+    {
+      "band": 2,
+      "start": 616,
+      "stop_exclusive": 617
+    },
+    {
+      "band": 2,
+      "start": 618,
+      "stop_exclusive": 621
+    },
+    {
+      "band": 2,
+      "start": 622,
+      "stop_exclusive": 624
+    },
+    {
+      "band": 2,
+      "start": 625,
+      "stop_exclusive": 628
+    }
+  ],
+  "native_request_windows": [
+    {
+      "band": 2,
+      "start": 12,
+      "stop_exclusive": 18
+    },
+    {
+      "band": 2,
+      "start": 19,
+      "stop_exclusive": 23
+    },
+    {
+      "band": 2,
+      "start": 24,
+      "stop_exclusive": 28
+    },
+    {
+      "band": 2,
+      "start": 29,
+      "stop_exclusive": 31
+    },
+    {
+      "band": 2,
+      "start": 32,
+      "stop_exclusive": 34
+    },
+    {
+      "band": 2,
+      "start": 35,
+      "stop_exclusive": 37
+    },
+    {
+      "band": 2,
+      "start": 38,
+      "stop_exclusive": 39
+    },
+    {
+      "band": 2,
+      "start": 146,
+      "stop_exclusive": 150
+    },
+    {
+      "band": 2,
+      "start": 151,
+      "stop_exclusive": 153
+    },
+    {
+      "band": 2,
+      "start": 154,
+      "stop_exclusive": 156
+    },
+    {
+      "band": 2,
+      "start": 616,
+      "stop_exclusive": 617
+    },
+    {
+      "band": 2,
+      "start": 618,
+      "stop_exclusive": 621
+    },
+    {
+      "band": 2,
+      "start": 622,
+      "stop_exclusive": 624
+    },
+    {
+      "band": 2,
+      "start": 625,
+      "stop_exclusive": 627
+    }
+  ],
+  "raw_timing": {
+    "matching": "greedy nearest onset within 60 ticks, same band only; merged bursts may remain unmatched",
+    "matched": [
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 12,
+          "stop_exclusive": 18
+        },
+        "native": {
+          "band": 2,
+          "start": 12,
+          "stop_exclusive": 18
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 19,
+          "stop_exclusive": 23
+        },
+        "native": {
+          "band": 2,
+          "start": 19,
+          "stop_exclusive": 23
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 24,
+          "stop_exclusive": 28
+        },
+        "native": {
+          "band": 2,
+          "start": 24,
+          "stop_exclusive": 28
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 29,
+          "stop_exclusive": 31
+        },
+        "native": {
+          "band": 2,
+          "start": 29,
+          "stop_exclusive": 31
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 32,
+          "stop_exclusive": 34
+        },
+        "native": {
+          "band": 2,
+          "start": 32,
+          "stop_exclusive": 34
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 35,
+          "stop_exclusive": 37
+        },
+        "native": {
+          "band": 2,
+          "start": 35,
+          "stop_exclusive": 37
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 38,
+          "stop_exclusive": 39
+        },
+        "native": {
+          "band": 2,
+          "start": 38,
+          "stop_exclusive": 39
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 146,
+          "stop_exclusive": 150
+        },
+        "native": {
+          "band": 2,
+          "start": 146,
+          "stop_exclusive": 150
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 151,
+          "stop_exclusive": 153
+        },
+        "native": {
+          "band": 2,
+          "start": 151,
+          "stop_exclusive": 153
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 154,
+          "stop_exclusive": 156
+        },
+        "native": {
+          "band": 2,
+          "start": 154,
+          "stop_exclusive": 156
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 616,
+          "stop_exclusive": 617
+        },
+        "native": {
+          "band": 2,
+          "start": 616,
+          "stop_exclusive": 617
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 618,
+          "stop_exclusive": 621
+        },
+        "native": {
+          "band": 2,
+          "start": 618,
+          "stop_exclusive": 621
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 622,
+          "stop_exclusive": 624
+        },
+        "native": {
+          "band": 2,
+          "start": 622,
+          "stop_exclusive": 624
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 625,
+          "stop_exclusive": 628
+        },
+        "native": {
+          "band": 2,
+          "start": 625,
+          "stop_exclusive": 627
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": -1
+      }
+    ],
+    "unmatched_source": [],
+    "unmatched_native": []
+  },
+  "lag_adjusted_timing": {
+    "matching": "greedy nearest onset within 60 ticks, same band only; merged bursts may remain unmatched",
+    "matched": [
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 11,
+          "stop_exclusive": 17
+        },
+        "native": {
+          "band": 2,
+          "start": 11,
+          "stop_exclusive": 17
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 18,
+          "stop_exclusive": 22
+        },
+        "native": {
+          "band": 2,
+          "start": 18,
+          "stop_exclusive": 22
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 23,
+          "stop_exclusive": 27
+        },
+        "native": {
+          "band": 2,
+          "start": 23,
+          "stop_exclusive": 27
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 28,
+          "stop_exclusive": 30
+        },
+        "native": {
+          "band": 2,
+          "start": 28,
+          "stop_exclusive": 30
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 31,
+          "stop_exclusive": 33
+        },
+        "native": {
+          "band": 2,
+          "start": 31,
+          "stop_exclusive": 33
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 34,
+          "stop_exclusive": 36
+        },
+        "native": {
+          "band": 2,
+          "start": 34,
+          "stop_exclusive": 36
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 37,
+          "stop_exclusive": 38
+        },
+        "native": {
+          "band": 2,
+          "start": 37,
+          "stop_exclusive": 38
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 145,
+          "stop_exclusive": 149
+        },
+        "native": {
+          "band": 2,
+          "start": 145,
+          "stop_exclusive": 149
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 150,
+          "stop_exclusive": 152
+        },
+        "native": {
+          "band": 2,
+          "start": 150,
+          "stop_exclusive": 152
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 153,
+          "stop_exclusive": 155
+        },
+        "native": {
+          "band": 2,
+          "start": 153,
+          "stop_exclusive": 155
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 615,
+          "stop_exclusive": 616
+        },
+        "native": {
+          "band": 2,
+          "start": 615,
+          "stop_exclusive": 616
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 617,
+          "stop_exclusive": 620
+        },
+        "native": {
+          "band": 2,
+          "start": 617,
+          "stop_exclusive": 620
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 621,
+          "stop_exclusive": 623
+        },
+        "native": {
+          "band": 2,
+          "start": 621,
+          "stop_exclusive": 623
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 624,
+          "stop_exclusive": 627
+        },
+        "native": {
+          "band": 2,
+          "start": 624,
+          "stop_exclusive": 626
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": -1
+      }
+    ],
+    "unmatched_source": [],
+    "unmatched_native": []
+  }
+}

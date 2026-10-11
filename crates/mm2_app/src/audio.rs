@@ -77,8 +77,9 @@
 //! The loudest covering
 //! `skid wave` band and the loudest `surface wave` rolling loop each
 //! earn lazily-spawned `PlaybackMode::Loop` voices, mixed from
-//! [`tire_slippage`] (designed quantity — longitudinal over-demand or
-//! lateral utilization, UNK-25) and `|forward_speed|` respectively.
+//! retail `slip_visual` (largest four-wheel slide intensity) for native
+//! cars, [`tire_slippage`] utilization for arcade cars, and
+//! `|forward_speed|` for rolling loops.
 //! A held brake at rest and airborne wheels resolve nothing
 //! (F07-AC03).
 //!
@@ -162,11 +163,13 @@ use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EmergencyLights, EngineLoopSpec, EngineMix,
     ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
     RACE_TICK_HZ, SIREN_FLAG, Session, SessionConditions, SessionEntity, SessionPhase,
-    SirenPlayback, SirenSpec, SirenTransition, SkidUnit, SurfaceMaterial, SurfaceSpec,
-    SurfaceVariant, VehicleAudio, Weather, cue_wave_stem, draw_cue_suffix, draw_speaker,
-    impact_category, pick_impact, prerace_tod_stem, prerace_weather_stem, tire_slippage,
+    SirenPlayback, SirenSpec, SirenTransition, SkidPick, SkidSpec, SkidUnit, SurfaceMaterial,
+    SurfaceSpec, SurfaceVariant, VehicleAudio, Weather, cue_wave_stem, draw_cue_suffix,
+    draw_speaker, impact_category, pick_impact, prerace_tod_stem, prerace_weather_stem,
+    tire_slippage,
 };
-use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState};
+use mm2_vehicle::config::TireConfig;
+use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState, WheelState};
 
 use crate::settings::{AudioBus, GraphicsSettings};
 
@@ -315,7 +318,7 @@ impl Iterator for PcmDecoder {
 
 impl Source for PcmDecoder {
     fn current_span_len(&self) -> Option<usize> {
-        Some((self.audio.samples.len() - self.pos) / usize::from(self.audio.channels.get()))
+        Some(self.audio.samples.len() - self.pos)
     }
 
     fn channels(&self) -> ChannelCount {
@@ -330,6 +333,14 @@ impl Source for PcmDecoder {
         Some(Duration::from_secs_f64(
             self.audio.frames() as f64 / f64::from(self.audio.sample_rate.get()),
         ))
+    }
+
+    fn try_seek(&mut self, position: Duration) -> Result<(), bevy::audio::SeekError> {
+        let frame = (position.as_secs_f64() * f64::from(self.audio.sample_rate.get()))
+            .floor()
+            .min(self.audio.frames() as f64) as usize;
+        self.pos = frame * usize::from(self.audio.channels.get());
+        Ok(())
     }
 }
 
@@ -1258,16 +1269,93 @@ pub struct EngineVoice {
     pub mix: EngineMix,
 }
 
+/// Retail skid audio is evaluated before the next wheel update. City traces
+/// show each DirectSound playing window one physics tick after wheel+0x220.
+/// Capture on the physics clock so render catch-up cannot change that delay.
+pub struct NativeSkidTimingPlugin;
+
+impl Plugin for NativeSkidTimingPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            avian3d::prelude::PhysicsSchedule,
+            capture_native_skid.before(avian3d::prelude::PhysicsStepSystems::First),
+        );
+    }
+}
+
+/// Previous-step retail skid inputs; rolling still reads current wheel state.
+#[derive(Component, Default)]
+pub struct NativeSkidFrame {
+    slippage: f32,
+    fronts: [u16; 2],
+    surface: u16,
+}
+
+fn capture_native_skid(
+    mut commands: Commands,
+    tables: Option<Res<SurfaceTables>>,
+    audio: Option<Res<SurfaceAudio>>,
+    collider_surfaces: Query<&SurfaceMaterial>,
+    mut cars: Query<
+        (
+            Entity,
+            &Vehicle,
+            &VehicleState,
+            Option<&mut NativeSkidFrame>,
+        ),
+        Without<RemoteReplica>,
+    >,
+) {
+    for (entity, vehicle, state, existing) in &mut cars {
+        if vehicle.config.original.is_none() {
+            continue;
+        }
+        let mut fronts = existing.as_deref().map_or([0; 2], |frame| frame.fronts);
+        if let Some(tables) = tables.as_deref() {
+            let resolved = [0, 1].map(|i| {
+                state.wheels.get(i).and_then(|w| w.contact_entity).map(|e| {
+                    let material = collider_surfaces.get(e).copied().unwrap_or_default();
+                    tables.sound_index(material).unwrap_or(0)
+                })
+            });
+            retain_front_classes(&mut fronts, resolved);
+        }
+        let current = existing.as_deref().map_or(0, |frame| frame.surface);
+        let surface = audio.as_deref().map_or(current, |audio| {
+            native_surface_class(current, fronts, audio.table.surfaces.len())
+        });
+        let snapshot = NativeSkidFrame {
+            slippage: state
+                .wheels
+                .iter()
+                .map(|w| wheel_slippage(true, w, &vehicle.config.tires))
+                .fold(0.0_f32, f32::max),
+            fronts,
+            surface,
+        };
+        if let Some(mut existing) = existing {
+            *existing = snapshot;
+        } else {
+            commands.entity(entity).insert(snapshot);
+        }
+    }
+}
+
 /// Per-car surface voice state (F07-B.4): which `sound`-index entries
 /// the skid and rolling halves are committed to, plus the voice slots
 /// of the committed entry. Band loops are spawned lazily — a `skid
 /// wave` row's voice exists only once that band has covered — and an
-/// entry rebuild waits for the new entry to hold [`SURFACE_DWELL`]
-/// frames, so a car straddling a surface boundary can't churn sink
+/// arcade entry rebuild waits for the new entry to hold [`SURFACE_DWELL`]
+/// frames. Native skid entries follow the source's front-wheel class
+/// retention instead. A car straddling a surface boundary avoids sink
 /// attach/detach every frame. Voices are children of the car like the
 /// engine rig's, so they despawn with it and ride its transform.
 #[derive(Component, Default)]
 pub struct SurfaceRig {
+    /// Retail shared class: retained while either front wheel still reports it.
+    native_surface: u16,
+    /// `vehWheel+0x268` survives a missed ray; retain each front's last class.
+    native_fronts: [u16; 2],
     /// The committed skid entry (`sound` index into the table) —
     /// `None` until a band first covers.
     skid_entry: Option<u16>,
@@ -1331,7 +1419,8 @@ pub struct SkidContact {
     /// `SurfaceTables::sound_index`'s row for the winning wheel's
     /// material — the class space `SnapEntry::surf_skid` carries.
     pub surface: u16,
-    /// `tire_slippage`'s clamped 0..1 utilization on that wheel.
+    /// Retail maximum four-wheel slide intensity for native cars; the
+    /// winning wheel's clamped utilization proxy for arcade cars.
     pub slippage: f32,
     /// The wheel's `vel_long`, m/s — `Speed`-unit picks read
     /// `|vel_long|`.
@@ -1348,6 +1437,21 @@ pub struct SurfaceVoice {
     pub role: SurfaceRole,
     /// The mixer state [`surface_voices`] last computed.
     pub mix: EngineMix,
+}
+
+/// Native skid bands stop and restart their sample at zero (DS callback
+/// 0x5a4210: Stop then SetCurrentPosition(0)). Global pause retains position.
+#[derive(Component)]
+pub struct NativeSkidPlayback {
+    was_active: bool,
+}
+
+impl NativeSkidPlayback {
+    fn transition(&mut self, active: bool, phase_paused: bool) -> (bool, bool) {
+        let restart_at_zero = self.was_active && !active;
+        self.was_active = active;
+        (phase_paused || !active, restart_at_zero)
+    }
 }
 
 /// Which half of a committed surface entry a [`SurfaceVoice`] plays.
@@ -3206,6 +3310,93 @@ fn push_mix(
 struct SurfaceWins {
     skid: Option<(u16, usize, f32)>,
     roll: Option<(u16, f32)>,
+    /// Retail mixers visit every inclusive band, including shared boundaries.
+    native_bands: Vec<(usize, f32)>,
+}
+
+/// The retail audio mixer reads `vehWheel+0x220`, not tire-force demand.
+/// `vehSurfaceAudio` (0x4de2b0/0x4de3e0) takes the largest four-wheel value.
+/// The arcade model retains its designed utilization proxy.
+pub(crate) fn wheel_slippage(native: bool, wheel: &WheelState, tires: &TireConfig) -> f32 {
+    if native {
+        if wheel.slip_visual.is_finite() {
+            wheel.slip_visual.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    } else {
+        tire_slippage(
+            wheel.traction_demand,
+            wheel.slip_angle,
+            tires.peak_slip_angle,
+            tires.peak_slip_ratio,
+        )
+    }
+}
+
+/// The source loader stores MaxSkidVolume-MinSkidVolume at data+0x28
+/// (0x4e0378..0x4e0384); both mixers apply min+q*delta
+/// (0x4dfe06..0x4dfe17 / 0x4e0006..0x4e0017). Bands choose samples;
+/// they do not restart the volume ramp at each band's lower boundary.
+fn skid_pick(
+    native: bool,
+    spec: SkidSpec,
+    bands: &[cardata::SkidSample],
+    q: f32,
+) -> Option<SkidPick<'_>> {
+    if native && q <= 0.0 {
+        return None;
+    }
+    let mut pick = spec.pick(bands, q)?;
+    if native {
+        pick.volume =
+            native_skid_amplitude(spec.min_volume + q * (spec.max_volume - spec.min_volume));
+    }
+    Some(pick)
+}
+
+/// DirectSound callback 0x5a4260 converts the source's normalized volume
+/// to hundredths of a decibel: trunc((v-1)*10000), then SetVolume.
+/// Bevy expects amplitude, so 0.88 means -12 dB (0.25119), not 0.88.
+/// The source node's 0x5a27e0 setter clamps v before this conversion.
+fn native_skid_amplitude(volume: f32) -> f32 {
+    let db_hundredths = ((f64::from(volume.clamp(0.0, 1.0)) - 1.0) * 10_000.0).trunc();
+    10.0_f64.powf(db_hundredths / 2_000.0) as f32
+}
+
+/// The source mixers (0x4dfe00 / 0x4e0000) visit all covering rows.
+fn native_skid_bands(spec: SkidSpec, bands: &[cardata::SkidSample], q: f32) -> Vec<(usize, f32)> {
+    bands
+        .iter()
+        .enumerate()
+        .filter_map(|(band, sample)| {
+            skid_pick(true, spec, std::slice::from_ref(sample), q).map(|pick| (band, pick.volume))
+        })
+        .collect()
+}
+
+fn retain_front_classes(cached: &mut [u16; 2], resolved: [Option<u16>; 2]) {
+    for (class, new) in cached.iter_mut().zip(resolved) {
+        if let Some(new) = new {
+            *class = new;
+        }
+    }
+}
+
+/// `vehSurfaceAudio::SurfaceChanged` (0x4de520) ignores the rear wheels.
+/// Once both fronts leave the old class, the skid update selects wheel 0
+/// (0x4de354..0x4de378), falling back to class zero for a dead table index.
+fn native_surface_class(current: u16, fronts: [u16; 2], count: usize) -> u16 {
+    let selected = if fronts.contains(&current) {
+        current
+    } else {
+        fronts[0]
+    };
+    if usize::from(selected) < count {
+        selected
+    } else {
+        0
+    }
 }
 
 /// [`surface_voices`]' per-car wheel loop distilled to a value: the
@@ -3219,13 +3410,52 @@ fn contact_pick(
     tables: &SurfaceTables,
     audio: &SurfaceAudio,
     collider_surfaces: &Query<&SurfaceMaterial>,
+    native_surface: Option<u16>,
+    native_frame: Option<&NativeSkidFrame>,
 ) -> (SurfaceWins, SurfaceContact) {
     // The loudest covering skid band and rolling loop across the
     // grounded wheels — `(sound index, band, gain)` / `(index, _)`.
     let mut skid_win: Option<(u16, usize, f32)> = None;
     let mut skid_contact: Option<SkidContact> = None;
     let mut roll_win: Option<(u16, f32)> = None;
+    let mut native_bands = Vec::new();
     let moving = state.forward_speed.abs() > ROLL_MIN_SPEED;
+    let native = vehicle.config.original.is_some();
+    let native_slippage = native_frame.map_or_else(
+        || {
+            state
+                .wheels
+                .iter()
+                .map(|w| wheel_slippage(true, w, &vehicle.config.tires))
+                .fold(0.0_f32, f32::max)
+        },
+        |frame| frame.slippage,
+    );
+    if let Some(idx) = native_surface
+        && let (Some(spec), Some(entry)) = (
+            audio.specs.get(idx as usize),
+            audio.table.surfaces.get(idx as usize),
+        )
+        && let Some(skid) = spec.skid
+        && let Some(pick) = skid_pick(
+            true,
+            skid,
+            &entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)],
+            native_slippage,
+        )
+    {
+        native_bands = native_skid_bands(
+            skid,
+            &entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)],
+            native_slippage,
+        );
+        skid_win = Some((idx, pick.band, pick.volume));
+        skid_contact = Some(SkidContact {
+            surface: idx,
+            slippage: native_slippage,
+            wheel_speed: state.forward_speed,
+        });
+    }
     for (i, w) in state.wheels.iter().enumerate() {
         if !w.grounded {
             continue;
@@ -3244,25 +3474,24 @@ fn contact_pick(
         ) else {
             continue;
         };
-        if let Some(skid) = spec.skid {
+        if !native && let Some(skid) = spec.skid {
             let tires = vehicle
                 .config
                 .wheels
                 .get(i)
                 .and_then(|c| c.tires.as_ref())
                 .unwrap_or(&vehicle.config.tires);
-            let slippage = tire_slippage(
-                w.traction_demand,
-                w.slip_angle,
-                tires.peak_slip_angle,
-                tires.peak_slip_ratio,
-            );
+            let slippage = wheel_slippage(false, w, tires);
             let q = match skid.unit {
                 SkidUnit::Slippage => slippage,
                 SkidUnit::Speed => w.vel_long.abs(),
             };
-            if let Some(pick) = skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
-                && skid_win.is_none_or(|(.., g)| pick.volume > g)
+            if let Some(pick) = skid_pick(
+                native,
+                skid,
+                &entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)],
+                q,
+            ) && skid_win.is_none_or(|(.., g)| pick.volume > g)
             {
                 skid_win = Some((idx, pick.band, pick.volume));
                 skid_contact = Some(SkidContact {
@@ -3283,6 +3512,7 @@ fn contact_pick(
         SurfaceWins {
             skid: skid_win,
             roll: roll_win,
+            native_bands,
         },
         SurfaceContact {
             skid: skid_contact,
@@ -3299,7 +3529,13 @@ fn contact_pick(
 /// than trusting the authority's band or gain. A class the local table
 /// cannot answer — out of range or spec-less — resolves to silence
 /// like an unmapped material.
-fn contact_wins(audio: &SurfaceAudio, contact: &SurfaceContact, forward_speed: f32) -> SurfaceWins {
+fn contact_wins(
+    audio: &SurfaceAudio,
+    contact: &SurfaceContact,
+    forward_speed: f32,
+    native: bool,
+) -> SurfaceWins {
+    let mut native_bands = Vec::new();
     let skid_win = contact.skid.and_then(|sk| {
         let (Some(spec), Some(entry)) = (
             audio.specs.get(sk.surface as usize),
@@ -3308,12 +3544,30 @@ fn contact_wins(audio: &SurfaceAudio, contact: &SurfaceContact, forward_speed: f
             return None;
         };
         let skid = spec.skid?;
-        let q = match skid.unit {
-            SkidUnit::Slippage => sk.slippage,
-            SkidUnit::Speed => sk.wheel_speed.abs(),
+        let q = if native {
+            // Retail always feeds maximum wheel+0x220, even when the
+            // table header calls its band columns "min/max speed".
+            sk.slippage
+        } else {
+            match skid.unit {
+                SkidUnit::Slippage => sk.slippage,
+                SkidUnit::Speed => sk.wheel_speed.abs(),
+            }
         };
-        skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
-            .map(|pick| (sk.surface, pick.band, pick.volume))
+        if native {
+            native_bands = native_skid_bands(
+                skid,
+                &entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)],
+                q,
+            );
+        }
+        skid_pick(
+            native,
+            skid,
+            &entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)],
+            q,
+        )
+        .map(|pick| (sk.surface, pick.band, pick.volume))
     });
     let roll_win = if forward_speed.abs() > ROLL_MIN_SPEED {
         contact.roll.and_then(|idx| {
@@ -3327,6 +3581,7 @@ fn contact_wins(audio: &SurfaceAudio, contact: &SurfaceContact, forward_speed: f
     SurfaceWins {
         skid: skid_win,
         roll: roll_win,
+        native_bands,
     }
 }
 
@@ -3336,9 +3591,12 @@ fn contact_wins(audio: &SurfaceAudio, contact: &SurfaceContact, forward_speed: f
 /// `sound` class → the [`SurfaceAudio`] row — and voices the loudest
 /// result per role:
 ///
-/// - **Skid**: per grounded wheel the designed [`tire_slippage`]
-///   quantity (UNK-25 — tire-limit utilization saturating at one)
-///   picks a `skid wave` band of that wheel's entry; `min speed`
+/// - **Skid**: native cars use maximum four-wheel `slip_visual`, as read
+///   by `vehSurfaceAudio` (0x4de2b0/0x4de3e0); arcade cars use designed
+///   [`tire_slippage`] utilization. Native class selection retains the
+///   current class while either front wheel reports it, then switches
+///   immediately to wheel 0's class; arcade contacts pick their loudest
+///   surface band. `min speed`
 ///   units read `|vel_long|` instead. The loudest covering band wins.
 ///   A held brake at rest demands nothing (its force is
 ///   `vel_long`-scaled) and an airborne wheel has no contact — the
@@ -3381,6 +3639,7 @@ pub fn surface_voices(
         Has<PlayerVehicle>,
         Has<RemoteReplica>,
         Option<&mut SurfaceContact>,
+        Option<&NativeSkidFrame>,
     )>,
     collider_surfaces: Query<&SurfaceMaterial>,
     mut voices: Query<(
@@ -3402,7 +3661,36 @@ pub fn surface_voices(
     let generation = session.generation();
     let bus_gain = voice_gain(settings.as_deref(), VoiceKind::Skid);
     let mut live_rigs = rigs.iter().count();
-    for (car, vehicle, state, rig_slot, player, remote, mut contact) in &mut cars {
+    for (car, vehicle, state, mut rig_slot, player, remote, mut contact, native_frame) in &mut cars
+    {
+        let native = vehicle.config.original.is_some();
+        let mut native_fronts = rig_slot.as_deref().map_or([0; 2], |r| r.native_fronts);
+        let native_class = if native && !remote {
+            // Production snapshots also advance shared class every physics
+            // step, so several catch-up steps retain intermediate transitions.
+            let selected = if let Some(frame) = native_frame {
+                native_fronts = frame.fronts;
+                frame.surface
+            } else {
+                // Standalone mixer fixtures without a physics schedule.
+                let resolved = [0, 1].map(|i| {
+                    state.wheels.get(i).and_then(|w| w.contact_entity).map(|e| {
+                        let material = collider_surfaces.get(e).copied().unwrap_or_default();
+                        tables.sound_index(material).unwrap_or(0)
+                    })
+                });
+                retain_front_classes(&mut native_fronts, resolved);
+                let current = rig_slot.as_deref().map_or(0, |r| r.native_surface);
+                native_surface_class(current, native_fronts, audio.table.surfaces.len())
+            };
+            if let Some(rig) = rig_slot.as_deref_mut() {
+                rig.native_surface = selected;
+                rig.native_fronts = native_fronts;
+            }
+            Some(selected)
+        } else {
+            None
+        };
         // The loudest covering skid band and rolling loop —
         // `(sound index, band, gain)` / `(index, _)`. A simulated car
         // resolves its wheels ([`contact_pick`]) and publishes the
@@ -3413,10 +3701,18 @@ pub fn surface_voices(
                 &audio,
                 &contact.as_deref().copied().unwrap_or_default(),
                 state.forward_speed,
+                vehicle.config.original.is_some(),
             )
         } else {
-            let (wins, resolved) =
-                contact_pick(vehicle, state, &tables, &audio, &collider_surfaces);
+            let (wins, resolved) = contact_pick(
+                vehicle,
+                state,
+                &tables,
+                &audio,
+                &collider_surfaces,
+                native_class,
+                native_frame,
+            );
             match contact.as_deref_mut() {
                 Some(slot) => *slot = resolved,
                 None => {
@@ -3426,25 +3722,34 @@ pub fn surface_voices(
             wins
         };
         let (skid_win, roll_win) = (wins.skid, wins.roll);
-        if skid_win.is_none() && roll_win.is_none() && rig_slot.is_none() {
+        if skid_win.is_none() && roll_win.is_none() && rig_slot.is_none() && !native {
             // Never resolved a surface — no rig to silence either.
             continue;
         }
-        let Some(mut rig) = rig_slot else {
-            // First resolution — bound the session's rig count. A
-            // muted marker keeps the refusal counted once.
+        let mut fresh_rig = SurfaceRig {
+            native_surface: native_class.unwrap_or(0),
+            native_fronts,
+            ..default()
+        };
+        let insert_rig = rig_slot.is_none();
+        let rig = if let Some(rig) = rig_slot.as_deref_mut() {
+            rig
+        } else {
             if live_rigs >= MAX_SURFACE_RIGS {
                 report.dropped += 1;
                 warn!("audio: surface rig bound reached, {car:?} stays silent");
                 commands.entity(car).insert(SurfaceRig {
                     muted: true,
-                    ..Default::default()
+                    ..default()
                 });
-            } else {
-                live_rigs += 1;
-                commands.entity(car).insert(SurfaceRig::default());
+                continue;
             }
-            continue;
+            live_rigs += 1;
+            if !native {
+                commands.entity(car).insert(fresh_rig);
+                continue;
+            }
+            &mut fresh_rig
         };
         if rig.muted {
             continue;
@@ -3465,7 +3770,7 @@ pub fn surface_voices(
                     Some((p, n)) if *p == idx => *n += 1,
                     _ => rig.skid_pending = Some((idx, 1)),
                 }
-                if rig.skid_pending.is_some_and(|(_, n)| n >= SURFACE_DWELL) {
+                if native || rig.skid_pending.is_some_and(|(_, n)| n >= SURFACE_DWELL) {
                     for slot in &mut rig.skid_slots {
                         if let Some(v) = slot.voice.take() {
                             commands.entity(v).despawn();
@@ -3479,10 +3784,21 @@ pub fn surface_voices(
         }
         let winning = skid_win.filter(|(idx, ..)| Some(*idx) == rig.skid_entry);
         if let Some(idx) = rig.skid_entry {
-            if let Some((_, band, ..)) = winning
-                && let Some(slot) = rig.skid_slots.get_mut(band)
-                && !slot.tried
-            {
+            let targets = if native && winning.is_some() {
+                wins.native_bands.clone()
+            } else {
+                winning
+                    .map(|(_, band, gain)| vec![(band, gain)])
+                    .unwrap_or_default()
+            };
+            for &(band, gain) in &targets {
+                let Some(slot) = rig.skid_slots.get_mut(band) else {
+                    continue;
+                };
+                if slot.tried {
+                    continue;
+                }
+                let initial_gain = if native { gain } else { 0.0 };
                 slot.tried = true;
                 let name = audio.table.surfaces[idx as usize].skids[band].name.clone();
                 match bank.load(&vfs.0, &mut waves, &name) {
@@ -3495,7 +3811,7 @@ pub fn surface_voices(
                                 SurfaceVoice {
                                     role: SurfaceRole::Skid(band),
                                     mix: EngineMix {
-                                        volume: 0.0,
+                                        volume: initial_gain,
                                         speed: 1.0,
                                     },
                                 },
@@ -3505,7 +3821,8 @@ pub fn surface_voices(
                                 AudioPlayer(handle),
                                 PlaybackSettings {
                                     mode: PlaybackMode::Loop,
-                                    volume: Volume::Linear(0.0),
+                                    // level_new_voices applies the bus once in PostUpdate.
+                                    volume: Volume::Linear(initial_gain),
                                     spatial: !player,
                                     spatial_scale: (!player)
                                         .then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
@@ -3513,9 +3830,17 @@ pub fn surface_voices(
                                 },
                             ))
                             .id();
+                        if native {
+                            commands.entity(v).insert(NativeSkidPlayback {
+                                was_active: initial_gain > 0.0,
+                            });
+                        }
                         slot.voice = Some(v);
                         report.voices += 1;
                         report.skid_voices += 1;
+                        if initial_gain > 0.0 {
+                            report.skids += 1;
+                        }
                     }
                     Err(e) => {
                         report.failed += 1;
@@ -3524,10 +3849,10 @@ pub fn surface_voices(
                 }
             }
             for (b, slot) in rig.skid_slots.iter().enumerate() {
-                let target = winning
-                    .filter(|(_, band, _)| *band == b)
-                    .map(|(.., g)| g)
-                    .unwrap_or(0.0);
+                let target = targets
+                    .iter()
+                    .find(|(band, _)| *band == b)
+                    .map_or(0.0, |(_, gain)| *gain);
                 if let Some(v) = slot.voice
                     && let Ok((mut voice, sink, spatial)) = voices.get_mut(v)
                 {
@@ -3633,6 +3958,9 @@ pub fn surface_voices(
                 push_mix(voice.mix, bus_gain, sink, spatial);
             }
         }
+        if insert_rig {
+            commands.entity(car).insert(fresh_rig);
+        }
     }
 }
 /// 5): `toggle_camera` flips `Camera::is_active` between the session's
@@ -3675,16 +4003,50 @@ pub fn count_sinks(
     report.sunk += (plain.iter().count() + spatial.iter().count()) as u64;
 }
 
-/// Pause/resume live voices with the session — voice entities whose
-/// sink exists yet follow the phase each update, so a pause between
-/// spawn and sink attach still lands paused (F07's pause half; unload
-/// is covered by [`SessionEntity`] teardown).
+/// Pause queued and attached voices with the session. Run in PostUpdate
+/// after Update voice spawning and level_new_voices, before transform
+/// propagation (Bevy queues audio afterwards). PlaybackSettings covers
+/// the interval before a sink attaches; existing sinks follow immediately.
+/// Unload is covered by SessionEntity teardown.
+#[allow(clippy::type_complexity)] // Lifecycle needs queued settings and both sink shapes.
 pub fn sync_audio_pause(
+    mut commands: Commands,
     session: Res<Session>,
-    voices: Query<(Option<&AudioSink>, Option<&SpatialAudioSink>), With<AudioVoice>>,
+    mut voices: Query<
+        (
+            Entity,
+            Option<&mut PlaybackSettings>,
+            Option<&AudioSink>,
+            Option<&SpatialAudioSink>,
+            Option<&SurfaceVoice>,
+            Option<&mut NativeSkidPlayback>,
+        ),
+        With<AudioVoice>,
+    >,
 ) {
-    let paused = matches!(session.phase(), SessionPhase::Paused);
-    for (sink, spatial) in &voices {
+    let phase_paused = matches!(session.phase(), SessionPhase::Paused);
+    for (entity, settings, sink, spatial, surface, native) in &mut voices {
+        let (paused, restart_at_zero) = native.map_or((phase_paused, false), |mut native| {
+            let active = surface.is_some_and(|voice| voice.mix.volume > 0.0);
+            native.transition(active, phase_paused)
+        });
+        if let Some(mut settings) = settings {
+            settings.paused = paused;
+        }
+        if restart_at_zero {
+            // Rodio Repeat wraps Buffered, whose try_seek is NotSupported.
+            // Requeue the same AudioPlayer with a fresh decoder, paused at
+            // zero. Bevy's audio queue runs after this deferred removal.
+            if let Some(sink) = sink {
+                sink.stop();
+                commands.entity(entity).remove::<AudioSink>();
+            }
+            if let Some(sink) = spatial {
+                sink.stop();
+                commands.entity(entity).remove::<SpatialAudioSink>();
+            }
+            continue;
+        }
         for s in [
             sink.map(|s| -> &dyn AudioSinkPlayback { s }),
             spatial.map(|s| -> &dyn AudioSinkPlayback { s }),
@@ -3765,4 +4127,269 @@ pub fn encode_wav_mono16(samples: &[f32], rate: u32) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod retail_slip_tests {
+    use super::*;
+
+    #[test]
+    fn native_surface_retains_either_front_then_switches_immediately_to_left() {
+        assert_eq!(native_surface_class(0, [1, 0], 3), 0);
+        assert_eq!(native_surface_class(0, [0, 1], 3), 0);
+        assert_eq!(native_surface_class(0, [1, 2], 3), 1);
+        assert_eq!(native_surface_class(1, [2, 1], 3), 1);
+        assert_eq!(native_surface_class(1, [2, 2], 3), 2);
+        assert_eq!(native_surface_class(2, [99, 99], 3), 0);
+        assert_eq!(
+            native_surface_class(2, [0, 0], 3),
+            0,
+            "null front material pointers return source class zero"
+        );
+    }
+
+    #[test]
+    fn pcm_seek_aligns_stereo_frames_and_fresh_loop_restarts_at_zero() {
+        let clip = PcmAudio {
+            samples: Arc::from([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
+            channels: ChannelCount::new(2).unwrap(),
+            sample_rate: SampleRate::new(4).unwrap(),
+        };
+        let mut decoder = clip.decoder();
+        decoder.try_seek(Duration::from_millis(250)).unwrap();
+        assert_eq!(decoder.next(), Some(0.3));
+        decoder.try_seek(Duration::from_secs(10)).unwrap();
+        assert_eq!(decoder.next(), None);
+        decoder.try_seek(Duration::ZERO).unwrap();
+        assert_eq!(decoder.next(), Some(0.1));
+        assert_eq!(
+            clip.decoder()
+                .repeat_infinite()
+                .take(10)
+                .collect::<Vec<_>>(),
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2],
+            "source spans count interleaved samples, preserving the full stereo loop"
+        );
+        let mut old_loop = clip.decoder().repeat_infinite();
+        assert_eq!(old_loop.nth(4), Some(0.5));
+        assert!(
+            old_loop.try_seek(Duration::ZERO).is_err(),
+            "Rodio buffered repeat cannot rewind in place"
+        );
+        let mut restarted_loop = clip.decoder().repeat_infinite();
+        assert_eq!(
+            restarted_loop.next(),
+            Some(0.1),
+            "fresh decoder resets stopped band's cursor"
+        );
+    }
+
+    #[test]
+    fn native_band_stop_rewinds_during_phase_pause_but_pause_alone_retains_cursor() {
+        let mut band = NativeSkidPlayback { was_active: true };
+        assert_eq!(
+            band.transition(true, true),
+            (true, false),
+            "global pause keeps active band's cursor"
+        );
+        assert_eq!(
+            band.transition(false, true),
+            (true, true),
+            "band stop must reset even while globally paused"
+        );
+        assert_eq!(
+            band.transition(false, false),
+            (true, false),
+            "inactive band stays paused on global resume"
+        );
+        assert_eq!(
+            band.transition(true, false),
+            (false, false),
+            "next activation resumes fresh zero cursor"
+        );
+        assert_eq!(
+            band.transition(true, false),
+            (false, false),
+            "continuous activation does not restart"
+        );
+    }
+
+    #[test]
+    fn queued_positive_gain_voice_is_paused_before_sink_attachment_then_resumes() {
+        let mut session = Session::new();
+        session.begin(mm2_game::SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        session.transition(SessionPhase::Paused).unwrap();
+        let mut app = App::new();
+        app.insert_resource(session)
+            .add_systems(
+                Update,
+                |mut commands: Commands, mut spawned: Local<bool>| {
+                    if !*spawned {
+                        commands.spawn((
+                            AudioVoice {
+                                kind: VoiceKind::Skid,
+                            },
+                            PlaybackSettings {
+                                volume: Volume::Linear(0.25),
+                                ..default()
+                            },
+                        ));
+                        *spawned = true;
+                    }
+                },
+            )
+            .add_systems(PostUpdate, sync_audio_pause);
+        app.update();
+        let world = app.world_mut();
+        let settings = world.query::<&PlaybackSettings>().single(world).unwrap();
+        assert!(
+            settings.paused,
+            "Update-spawned voice must be paused before Bevy queues its sink"
+        );
+        assert_eq!(settings.volume, Volume::Linear(0.25));
+        world
+            .resource_mut::<Session>()
+            .transition(SessionPhase::Playing)
+            .unwrap();
+        app.update();
+        let world = app.world_mut();
+        assert!(
+            !world
+                .query::<&PlaybackSettings>()
+                .single(world)
+                .unwrap()
+                .paused
+        );
+    }
+
+    #[test]
+    fn native_skid_gain_matches_directsound_attenuation() {
+        assert!((native_skid_amplitude(0.88) - 0.251_188_64).abs() < 1e-7);
+        // The stored f32 is slightly above 0.781: truncation yields -2189.
+        assert!((native_skid_amplitude(0.781) - 0.080_445_18).abs() < 1e-7);
+        assert_eq!(native_skid_amplitude(1.0), 1.0);
+        assert_eq!(native_skid_amplitude(2.0), 1.0);
+        assert!((native_skid_amplitude(0.0) - 0.000_01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn native_class_retains_an_intermediate_transition_during_render_catch_up() {
+        let first_step = native_surface_class(0, [1, 1], 3);
+        let second_step = native_surface_class(first_step, [2, 1], 3);
+        assert_eq!(
+            second_step, 1,
+            "right front retains class selected by earlier physics step"
+        );
+        assert_eq!(
+            native_surface_class(0, [2, 1], 3),
+            2,
+            "render-only sampling would miss that commitment"
+        );
+    }
+
+    #[test]
+    fn native_airborne_fronts_retain_their_last_material_class() {
+        let mut fronts = [1, 2];
+        retain_front_classes(&mut fronts, [None, None]);
+        assert_eq!(fronts, [1, 2]);
+        assert_eq!(native_surface_class(1, fronts, 3), 1);
+        retain_front_classes(&mut fronts, [Some(2), None]);
+        assert_eq!(fronts, [2, 2]);
+        assert_eq!(native_surface_class(1, fronts, 3), 2);
+        retain_front_classes(&mut fronts, [Some(0), None]);
+        assert_eq!(
+            fronts,
+            [0, 2],
+            "a resolved sound-zero contact replaces the cache"
+        );
+    }
+
+    #[test]
+    fn native_skid_volume_uses_global_slip_across_sample_boundaries() {
+        let spec = SkidSpec {
+            min_volume: 0.5,
+            max_volume: 1.0,
+            unit: SkidUnit::Slippage,
+        };
+        let bands = [
+            cardata::SkidSample {
+                name: "low".into(),
+                line: 1,
+                min: 0.5,
+                max: 0.75,
+            },
+            cardata::SkidSample {
+                name: "high".into(),
+                line: 2,
+                min: 0.75,
+                max: 1.0,
+            },
+        ];
+        assert!(
+            (skid_pick(true, spec, &bands, 0.74).unwrap().volume - native_skid_amplitude(0.87))
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (skid_pick(true, spec, &bands, 0.76).unwrap().volume - native_skid_amplitude(0.88))
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(
+            native_skid_bands(spec, &bands, 0.75),
+            vec![
+                (0, native_skid_amplitude(0.875)),
+                (1, native_skid_amplitude(0.875))
+            ]
+        );
+        assert_eq!(skid_pick(false, spec, &bands, 0.75).unwrap().band, 0);
+        let speed_header = SkidSpec {
+            unit: SkidUnit::Speed,
+            ..spec
+        };
+        assert!(
+            (skid_pick(true, speed_header, &bands, 0.74).unwrap().volume
+                - native_skid_amplitude(0.87))
+            .abs()
+                < 1e-6
+        );
+        let high = native_skid_bands(spec, &bands, 0.76);
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].0, 1);
+        assert!((high[0].1 - native_skid_amplitude(0.88)).abs() < 1e-6);
+        let zero_band = [cardata::SkidSample {
+            name: "zero".into(),
+            line: 1,
+            min: 0.0,
+            max: 1.0,
+        }];
+        assert!(skid_pick(true, spec, &zero_band, 0.0).is_none());
+        assert_eq!(skid_pick(false, spec, &zero_band, 0.0).unwrap().volume, 0.5);
+    }
+
+    #[test]
+    fn native_skid_quantity_follows_bristle_slide_not_force_utilization() {
+        let tires = mm2_vehicle::VehicleConfig::default().tires;
+        let mut wheel = WheelState {
+            traction_demand: 1.5,
+            slip_angle: tires.peak_slip_angle * 2.0,
+            ..default()
+        };
+        assert_eq!(
+            wheel_slippage(true, &wheel, &tires),
+            0.0,
+            "a sticking retail tyre stays silent despite high force/angle"
+        );
+        assert_eq!(
+            wheel_slippage(false, &wheel, &tires),
+            1.0,
+            "the arcade model keeps its existing utilization proxy"
+        );
+        wheel.slip_visual = 0.6;
+        assert_eq!(wheel_slippage(true, &wheel, &tires), 0.6);
+        wheel.slip_visual = f32::NAN;
+        assert_eq!(wheel_slippage(true, &wheel, &tires), 0.0);
+    }
 }

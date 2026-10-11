@@ -180,8 +180,20 @@ per wheel rev, final drive included) that puts the engine at `OptRPM`
 at `mph`, using the radius of the primary drivetrain's first wheel:
 
 ```
-ratio(mph) = OptRPM / ((26.8224 · mph) / (2π · r))        # 26.8224 = 1609.344/60
+metresPerMinutePerMPH = f32(f32(1609.344) · f32(1/60))
+ratio(mph) = OptRPM / ((metresPerMinutePerMPH · mph) / (2π · r))
 ```
+
+**verified_original**, retail initializer `0x4cf500..0x4cf50c` loads
+single-precision constants at `0x5b1d28` (1609.343994140625) and
+`0x5b1d64` (0.01666666753590107), multiplies them, then stores the
+single-precision result at `0x6aeec0`. `GearRatioFromMPH` loads that
+global at `0x4cf526`. Its value is **26.82240104675293**; spelling the
+rounded decimal `26.8224` as an f32 produces 26.822399139404297 instead.
+The native conversion uses the initializer expression, preserving this
+store boundary. A paused SF Fastback capture verified the first and
+reverse ratio magnitude as 17.458606719970703; the rounded-decimal
+conversion produced 17.458608627319336.
 
 For each box (`n` = `AutoNumGears` / `ManualNumGears`):
 
@@ -194,6 +206,28 @@ for i in 1..N−1:  ratio[2+i] = ratio[2] · q^(i + GearBias·i·(N − i)/N)
 
 `GearBias 0` is a geometric progression; positive values push the
 middle gears taller.
+
+Numerical limit of the port: the source calls its CRT power helper
+`0x581f10`, which spills its arguments as doubles and evaluates
+`FYL2X`, then `FRNDINT`, `FSUBR`, `F2XM1`, addition of one and `FSCALE`
+(the exponential sequence is at `0x586d10`). Native `f32::powf` has the
+same mathematical meaning but does not reproduce every intermediate
+rounding of that sequence. After correcting the MPH initializer,
+Fastback's native middle ratios are 9.799914360046387 and
+6.3552374839782715; the measured BottleShip original has
+9.799915313720703 and 6.355238437652588, respectively (one and two ULPs).
+The reverse, first and top ratios match the measured values.
+
+**Execution-environment caveat:** BottleShip's `FYL2X` implementation
+evaluates separate multiply-by-`ln` and divide-by-`ln(2)` operations.
+With 24-bit precision control, these introduce extra rounded operations
+that are not separate instructions in the retail binary. Reproducing
+that emulator implementation also reproduces the captured Fastback
+middle ratios and active shift thresholds, but would encode an emulator
+behavior into production vehicle rules. The port therefore retains
+ordinary `powf`; no emulator-specific logarithm approximation is used.
+This is a measured quantization limit, not evidence for changing the
+authored gearing or shift coefficients.
 
 **Automatic shift points** (auto box only), for each forward gear `g`
 below the top: with `v = ratio[g+1]/ratio[g]`, bisect (to 1 rpm) the

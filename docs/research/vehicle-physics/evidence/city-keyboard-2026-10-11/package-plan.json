@@ -1,0 +1,643 @@
+{
+  "provenance": {
+    "base_commit": "c59f1acf292a5a733b244210ae43eb0589f666e5",
+    "native_code": "codex/original-handling; retail input reciprocal decoding, skid timing/class/gain/stop fixes, source f32 MPH conversion; diagnostic modes excluded",
+    "native_example_binary_sha256": "b96ca84ac103becbcbd547f067827beebfd4cc212863fecc33186ef2b4d10316",
+    "bottleship_revision": "b58752783b74813273af132b087e228aad01cf67",
+    "bottleship_branch": "midtown-madness-2",
+    "bottleship_working_tree": "clean",
+    "capture_owner_manifest": {
+      "capture_owner": "original_measurements",
+      "fresh_scene_per_run": true,
+      "runs": [
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpbullet-clear.json",
+          "sha256": "036f47556e6f392b3787de5b39e3f6b51ddef18dd65c4894aa5282706e2a25df",
+          "car": "vpbullet",
+          "city": "sf",
+          "route_sha256": "a8a2705aca8820b36c41df73ef99c821f5e70beff6e89ccf97e6e139ad1d0548",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 403.6322326660156,
+            "engineOmega": 10.530660629272461,
+            "gear": 2,
+            "pos": [
+              -86,
+              1.100000023841858,
+              -329.8500061035156
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              11.47323226928711,
+              -513.5072631835938
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpbug-clear.json",
+          "sha256": "471a3beff14d81d4e5e762372cd188a17d55ad3f2e320223517d7f62bb5364cb",
+          "car": "vpbug",
+          "city": "sf",
+          "route_sha256": "6cf4736dd16d6499154f8a737835de9e454803e8893bcd9351d8816269630b1c",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.994140625,
+            "engineOmega": 78.5392074584961,
+            "gear": 2,
+            "pos": [
+              -86,
+              1.100000023841858,
+              -330
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              9.977788925170898,
+              -513.6557006835938
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              -0.0050062923692166805,
+              0.9999464154243469,
+              -0.009092060849070549
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vppanoz-clear.json",
+          "sha256": "ee6154c71dfe34236d459e96c8f2dbb8d764ba0ed367d814c46313201c919f75",
+          "car": "vppanoz",
+          "city": "sf",
+          "route_sha256": "9786e1545157352ae5a67b4096d1a87db5a86e026ae89da96dc387aa0062c4c2",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 413.60467529296875,
+            "engineOmega": 7.204653739929199,
+            "gear": 2,
+            "pos": [
+              -86,
+              1,
+              -330
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              11.573232650756836,
+              -513.6572875976562
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpcoop-safe-stop.json",
+          "sha256": "65f2e2b4daa813a8bd8c1142fea50de61acdd19116947b4b7f498fe230886d7d",
+          "car": "vpcoop",
+          "city": "sf",
+          "route_sha256": "891e9c3e6a93b29f6fbb179e6c7a8c43cda0d59a8dffe8e702b6a08206a0d0e7",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.9971313476562,
+            "engineOmega": 78.53952026367188,
+            "gear": 2,
+            "pos": [
+              -86,
+              1,
+              -329.79998779296875
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              9.865705490112305,
+              -513.4561157226562
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0.000774056592490524,
+              0.999999463558197,
+              -0.0010057706385850906
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpbullet-hb-fresh.json",
+          "sha256": "48f1a0b245989a28f199e9c8d0b378c2eb7a6af1a3ca6108bcee0ac974590f24",
+          "car": "vpbullet",
+          "city": "london",
+          "route_sha256": "27d9372fb91169c9f3980c9c73f063e0c6d35c1c2ae391ebc255f42f9ecb6e4b",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 329.32861328125,
+            "engineOmega": 12.460904121398926,
+            "gear": 2,
+            "pos": [
+              -231,
+              1.100000023841858,
+              650.1500244140625
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              1.3606483936309814,
+              -148.38421630859375
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpbug-hb-fresh.json",
+          "sha256": "d7410075e9972cc6c753918c5078856fe8872fa072ede4b0736ae40ceff1d26e",
+          "car": "vpbug",
+          "city": "london",
+          "route_sha256": "d75386e162d1d138dfb424c5955bebf7883802020c57e543c5d2b13520b5f2cf",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 723.405029296875,
+            "engineOmega": 75.75479888916016,
+            "gear": 2,
+            "pos": [
+              -231,
+              1.100000023841858,
+              650
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": null,
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vppanoz-hb-fresh.json",
+          "sha256": "fd67a06fd38e91ca2d320a7f6fb6f7552bb2f8c23850ff904f40a89870327e06",
+          "car": "vppanoz",
+          "city": "london",
+          "route_sha256": "62f78cee7580e99898bc1b7998dfce7d4c40c86168f61ac5190840183d272f8f",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.9716796875,
+            "engineOmega": 78.53684997558594,
+            "gear": 2,
+            "pos": [
+              -231,
+              1,
+              650
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              -0.1140628382563591,
+              -148.5343780517578
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              -4.744313991977833e-05,
+              1.0000001192092896,
+              0.0001829182292567566
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpcoop-hb-fresh.json",
+          "sha256": "ba43848768a0783b2eab2a8442443a6c0765aae9974247fa3fbd65d59ed9b3c9",
+          "car": "vpcoop",
+          "city": "london",
+          "route_sha256": "4f1487e7b16245642c73ff345e5c4219b8be1cb7c408dd55e2f9f00436155dd8",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 291.99749755859375,
+            "engineOmega": 6.596945762634277,
+            "gear": 2,
+            "pos": [
+              -231,
+              1,
+              650.2000122070312
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              1.4606484174728394,
+              -148.33421325683594
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        }
+      ],
+      "cleanup_report": "/tmp/mm2-polish-cleanup-safe-stop-final.json",
+      "cleanup_report_sha256": "2a3363900ea3495ad7ecf9dd47651f62332ae5fa442bee7d9c623ab8ece9b34f",
+      "safe_stop_route_purpose": "SF Mini preserves all inputs before frame1400, then stops and holds before late dormant palm proximity"
+    },
+    "startup_history": "600 handbrake settlement in each game; source loaded-engine history not fullycold or matched to native independent cold state; recorded total_cold_settle_frames null is retained",
+    "claim_limits": "Measured differences, not bit-exact handling or recorded device waveform equivalence; trajectory drift and Fastback brief chirp/band differences remain reported"
+  },
+  "cases": [
+    {
+      "id": "sf-vpbug",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-sf-vpbug-clear.json",
+      "native": "/tmp/sf-vpbug-source-ratio-native.csv",
+      "route": "/tmp/sf-vpbug-frozen-route.json",
+      "backend_native": "/tmp/sf-vpbug-source-ratio-live.csv",
+      "backend_audio": "/tmp/sf-vpbug-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/sf-vpbug-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "sf-vppanoz",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-sf-vppanoz-clear.json",
+      "native": "/tmp/sf-vppanoz-source-ratio-native.csv",
+      "route": "/tmp/sf-vppanoz-frozen-route.json",
+      "backend_native": "/tmp/sf-vppanoz-source-ratio-live.csv",
+      "backend_audio": "/tmp/sf-vppanoz-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/sf-vppanoz-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "sf-vpbullet",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-sf-vpbullet-clear.json",
+      "native": "/tmp/sf-vpbullet-source-ratio-native.csv",
+      "route": "/tmp/sf-vpbullet-frozen-route.json",
+      "backend_native": "/tmp/sf-vpbullet-source-ratio-live.csv",
+      "backend_audio": "/tmp/sf-vpbullet-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/sf-vpbullet-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "sf-vpcoop",
+      "status": "reviewed_clean",
+      "review_note": "Fresh SF Mini source capture with safe-stop final section; original identity/density/ground/body-impulse guards reviewed by capture owner. Native all-contact sidecar has zero prop or solved body constraints. Ordinary frozen keyboard replay; all diagnostic modes off. Live replay byte-identical physics, attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-sf-vpcoop-safe-stop.json",
+      "native": "/tmp/sf-vpcoop-safe-stop-native.csv",
+      "route": "/tmp/sf-vpcoop-safe-stop-route.json",
+      "backend_native": "/tmp/sf-vpcoop-safe-stop-live.csv",
+      "backend_audio": "/tmp/sf-vpcoop-safe-stop-live.csv.audio.json",
+      "backend_provenance": "/tmp/sf-vpcoop-safe-stop-live.csv.provenance.json"
+    },
+    {
+      "id": "london-vpbug-hb",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Older London Beetle source capture predates pre-pose density metadata; zero body impulse/push reviewed, fresh London scene verified by capture owner. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-london-vpbug-hb-fresh.json",
+      "native": "/tmp/london-vpbug-source-ratio-native.csv",
+      "route": "/tmp/london-vpbug-hb-frozen-route.json",
+      "backend_native": "/tmp/london-vpbug-source-ratio-live.csv",
+      "backend_audio": "/tmp/london-vpbug-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/london-vpbug-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "london-vppanoz-hb",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-london-vppanoz-hb-fresh.json",
+      "native": "/tmp/london-vppanoz-source-ratio-native.csv",
+      "route": "/tmp/london-vppanoz-hb-frozen-route.json",
+      "backend_native": "/tmp/london-vppanoz-source-ratio-live.csv",
+      "backend_audio": "/tmp/london-vppanoz-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/london-vppanoz-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "london-vpbullet-hb",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-london-vpbullet-hb-fresh.json",
+      "native": "/tmp/london-vpbullet-source-ratio-native.csv",
+      "route": "/tmp/london-vpbullet-hb-frozen-route.json",
+      "backend_native": "/tmp/london-vpbullet-source-ratio-live.csv",
+      "backend_audio": "/tmp/london-vpbullet-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/london-vpbullet-source-ratio-live.csv.provenance.json"
+    },
+    {
+      "id": "london-vpcoop-hb",
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "original": "/tmp/mm2-polish-captures/original-london-vpcoop-hb-fresh.json",
+      "native": "/tmp/london-vpcoop-source-ratio-native.csv",
+      "route": "/tmp/london-vpcoop-hb-frozen-route.json",
+      "backend_native": "/tmp/london-vpcoop-source-ratio-live.csv",
+      "backend_audio": "/tmp/london-vpcoop-source-ratio-live.csv.audio.json",
+      "backend_provenance": "/tmp/london-vpcoop-source-ratio-live.csv.provenance.json"
+    }
+  ]
+}

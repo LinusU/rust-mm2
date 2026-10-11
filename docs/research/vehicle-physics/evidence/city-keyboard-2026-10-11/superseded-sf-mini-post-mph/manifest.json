@@ -1,0 +1,42 @@
+{
+  "status": "rejected_for_clean_calibration",
+  "reason": "14 dormant palm proximity contacts, frames1592\u20131605; negative penetration and zero normal impulses; excludes comparable prop response because dormant activation absent in harness",
+  "files": [
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv.gz",
+      "raw_sha256": "0492052bf711c4861077a840c2f5d76f4c3431f8517079d9036655eb0e330cd8",
+      "archive_sha256": "ee95c48009e18ed08eaef7e54188bae1736b5dbe6caf05d9f51dd0deeebc6b58"
+    },
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv.audio.json.gz",
+      "raw_sha256": "b4872ab0c4ab6f061ec1a64511ff812a77cf2719a8c75a79c8d71693b9e12a42",
+      "archive_sha256": "baff06d0979faa38f598904f19535da273f7e43e4068fe104e2a88f1697c2a74"
+    },
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv.contacts.json.gz",
+      "raw_sha256": "2aeacc2a5aa590368283d2b81982da2fda582d9ebbaddc764639e8ffc525e289",
+      "archive_sha256": "58e220c831f1ea5833496c46976e7e752125110d78dd59ff35f89cbbfd41647a"
+    },
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv.provenance.json.gz",
+      "raw_sha256": "b138217bca58d6e2c34e1f328cb8f80b2802acd28424250f00bac1d2e14bc966",
+      "archive_sha256": "b7ed2b470de08011272159d3a20c1e89116b9d417d20cc60e80a1878908aef42"
+    },
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv-comparison.json.gz",
+      "raw_sha256": "1a36f394f8213c3138e389a05bf4f41def77b015f8ec8b20f658a7d1c99bde9a",
+      "archive_sha256": "72b61a003cbb2d7b2d6c811b24546744591af11c9a1d9885cdff8578517ad47a"
+    },
+    {
+      "file": "sf-vpcoop-source-ratio-native.csv-audio-comparison.json.gz",
+      "raw_sha256": "585a81274d5e04c63130b465c97536f9cd5b53b7e8dd459995f97f0f4c379cd0",
+      "archive_sha256": "47558b4a28b06a3dc6845b94e8e69e17182d24bd307d84ac7696bc8e6695d71c"
+    }
+  ],
+  "route_sha256": "26a35127611849a4315143c9c5eac37bbd8005e2b4d3ad84214a5e397cabddeb",
+  "superseded_original": {
+    "file": "original.json.gz",
+    "archive_sha256": "9a3e8ac1a82a5fdebbcb1d9383852a3dabfabc5a4c6c917c99476abe7bf7a337",
+    "raw_sha256": "aeac0065629abda94ecad8960eb5506fa9969ef2c229640c55b4bb89a1a283cc"
+  }
+}

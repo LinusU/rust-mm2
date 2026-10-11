@@ -1,0 +1,41 @@
+{
+  "verified_at_utc": "2026-10-11T07:19:18.684752+00:00",
+  "gates": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "env": {
+        "RUSTC_WRAPPER": ""
+      },
+      "log_sha256": "ff6c4aaf8a24859765d4896ee2be18d7d7de7fedf871a71f42a98abc1d5af856"
+    },
+    {
+      "command": "cargo test --workspace",
+      "exit_code": 0,
+      "env": {
+        "RUSTC_WRAPPER": "",
+        "RUST_TEST_THREADS": "4",
+        "MM2_RETAIL": "/Users/linus/coding/rust-mm2/retail"
+      },
+      "socket_access": "unsandboxed localhost networking required",
+      "passed_tests": 3110,
+      "log_sha256": "fb1e145ad646cbe160e4a1a81800dcdb3d980ebab4951a677c5cff5a4744a230"
+    }
+  ],
+  "resolved_final_check_failures": [
+    "Filesystem audit classification for the new developer recording/audit examples",
+    "Native skid replication fixture now stages source visual slip instead of the former traction proxy",
+    "Initial networking child-line timeout did not recur with reduced test concurrency"
+  ],
+  "playable_render_smoke": {
+    "city": "sf",
+    "car": "vpbug",
+    "frames": 90,
+    "exit_code": 0
+  },
+  "fidelity_limit": "Numerical city drift and brief Fastback skid differences remain; device output was not recorded"
+}

@@ -1633,6 +1633,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .insert_resource(ScreenshotDir(screenshot_dir))
     .add_plugins(VehiclePlugin)
+    .add_plugins(audio::NativeSkidTimingPlugin)
     .insert_resource(graphics)
     .insert_resource(control_settings.clone())
     .insert_resource(controls::ControlsSave(controls_path.clone()))
@@ -2164,7 +2165,6 @@ fn main() {
                 .after(camera::toggle_camera)
                 .after(session::drive_session),
             audio::count_sinks,
-            audio::sync_audio_pause.after(session::drive_session),
             audio::reset_audio_report.run_if(session::unloading),
             // F18-B.2: the precipitation evidence counters clear on
             // teardown like the audio report's.
@@ -2178,7 +2178,9 @@ fn main() {
     // propagation) create its sink; mixers apply the same gain per frame.
     .add_systems(
         PostUpdate,
-        audio::level_new_voices.before(bevy::transform::TransformSystems::Propagate),
+        (audio::level_new_voices, audio::sync_audio_pause)
+            .chain()
+            .before(bevy::transform::TransformSystems::Propagate),
     )
     // F16-B: drain authoritative results into the bound profile —
     // records finishes, grants rewards, saves on change. Inert without

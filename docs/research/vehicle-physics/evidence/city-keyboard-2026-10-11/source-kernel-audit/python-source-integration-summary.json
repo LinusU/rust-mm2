@@ -1,0 +1,59 @@
+{
+  "scope": "Python double arithmetic over captured original source-to-source states; reconstructed grounded suspension Jacobians, authored mass/inertia/gravity, and original force/torque inputs. Not a bit-exact x87/native comparison, orientation audit, closed-loop replay or native trajectory equivalence.",
+  "car": "vpbullet",
+  "city": "sf",
+  "transitions": 1800,
+  "dt_seconds": 0.01666666753590107,
+  "inputs": {
+    "original_capture": "/tmp/mm2-polish-captures/original-sf-vpbullet-clear.json",
+    "native_provenance": "/tmp/sf-vpbullet-final-city-native.csv.provenance.json"
+  },
+  "authored_constants": {
+    "mass": 1300.0,
+    "inertia": [
+      3141.666748046875,
+      3385.416748046875,
+      1110.4166259765625
+    ],
+    "gravity": 19.600000381469727
+  },
+  "guards": "complete 60 Hz, matching car/city, four grounded wheels, constant dt, no original body impulses/pushes/bump-stop state",
+  "errors": {
+    "velocity_error_m_s": {
+      "rms_per_axis": [
+        1.267765497949974e-07,
+        5.92962484617119e-09,
+        2.815970428383346e-07
+      ],
+      "max_abs_per_axis": [
+        4.749216859778471e-07,
+        6.4025081295687736e-09,
+        9.308084472081646e-07
+      ]
+    },
+    "angular_velocity_error_rad_s": {
+      "rms_per_axis": [
+        8.093459225025991e-10,
+        1.6125405584502896e-09,
+        7.649908148195843e-10
+      ],
+      "max_abs_per_axis": [
+        4.1458673161187676e-09,
+        1.1792575110858294e-08,
+        5.272649102050497e-09
+      ]
+    },
+    "position_update_error_m": {
+      "rms_per_axis": [
+        1.6785457799518597e-06,
+        2.1640324469381645e-09,
+        4.430707067796507e-06
+      ],
+      "max_abs_per_axis": [
+        3.811152566868259e-06,
+        3.72157883676838e-09,
+        1.525466245766438e-05
+      ]
+    }
+  }
+}

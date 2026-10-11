@@ -107,11 +107,14 @@ fn sign(x: f32) -> f32 {
 
 /// Human recording and network format both truncate toward zero.
 pub fn quantize_steering(value: f32) -> f32 {
-    (value.clamp(-1.0, 1.0) * 127.0).trunc() / 127.0
+    // Retail 0x4ccc4f multiplies the byte by the f32 reciprocal at
+    // 0x5af484. Division differs by one ULP for some steering bytes.
+    (value.clamp(-1.0, 1.0) * 127.0).trunc() * (1.0 / 127.0)
 }
 
 pub fn quantize_pedal(value: f32) -> f32 {
-    (value.clamp(0.0, 1.0) * 255.0).trunc() / 255.0
+    // The pedal helper 0x4ccbf1 likewise loads f32 1/255 at 0x5af480.
+    (value.clamp(0.0, 1.0) * 255.0).trunc() * (1.0 / 255.0)
 }
 
 #[cfg(test)]
@@ -158,7 +161,19 @@ mod tests {
     #[test]
     fn recording_quantization_truncates_negative_steering_toward_zero() {
         assert_eq!(quantize_steering(-0.5), -63.0 / 127.0);
-        assert_eq!(quantize_pedal(0.5), 127.0 / 255.0);
+        assert_eq!(quantize_pedal(0.5), 127.0 * (1.0 / 255.0));
         assert_eq!(quantize_steering(1.0), 1.0);
+    }
+
+    #[test]
+    fn recording_decode_uses_retail_f32_reciprocals() {
+        let steering = quantize_steering(9.5 / 127.0);
+        assert_eq!(steering.to_bits(), 0x3d91_2244);
+        assert_ne!(steering, 9.0_f32 / 127.0);
+        assert_eq!(quantize_steering(-9.5 / 127.0), -steering);
+
+        let pedal = quantize_pedal(3.5 / 255.0);
+        assert_eq!(pedal.to_bits(), 0x3c40_c0c2);
+        assert_ne!(pedal, 3.0_f32 / 255.0);
     }
 }

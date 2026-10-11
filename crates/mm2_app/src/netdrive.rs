@@ -1147,11 +1147,13 @@ pub fn encode_input(input: &VehicleInput, generation: u64, seq: u64) -> DriveInp
 /// `-1.008` — and the host's sim reads steering unclamped; the result is
 /// clamped here, at the one place wire controls become sim controls.
 pub fn decode_input(input: &DriveInput) -> VehicleInput {
+    // Match retail's loaded f32 reciprocals, as local keyboard decoding does.
+    // Division rounds some byte values differently before the physics step.
     VehicleInput {
-        throttle: input.throttle as f32 / 255.0,
-        brake: input.brake as f32 / 255.0,
-        steering: (input.steer as f32 / 127.0).clamp(-1.0, 1.0),
-        handbrake: input.handbrake as f32 / 255.0,
+        throttle: input.throttle as f32 * (1.0 / 255.0),
+        brake: input.brake as f32 * (1.0 / 255.0),
+        steering: (input.steer as f32 * (1.0 / 127.0)).clamp(-1.0, 1.0),
+        handbrake: input.handbrake as f32 * (1.0 / 255.0),
         forced_gear: input.forced_gear.map(|gear| gear as usize),
     }
 }
@@ -3820,6 +3822,24 @@ mod tests {
         assert_eq!(back.steering, -1.0);
         assert_eq!(back.handbrake, 0.0);
         assert_eq!(back.forced_gear, input.forced_gear);
+    }
+
+    #[test]
+    fn wire_decode_matches_retail_reciprocal_rounding() {
+        let input = decode_input(&DriveInput {
+            generation: 1,
+            seq: 1,
+            throttle: 3,
+            brake: 3,
+            steer: 9,
+            handbrake: 3,
+            auto_reverse: true,
+            forced_gear: None,
+        });
+        assert_eq!(input.steering.to_bits(), 0x3d91_2244);
+        assert_eq!(input.throttle.to_bits(), 0x3c40_c0c2);
+        assert_eq!(input.brake, input.throttle);
+        assert_eq!(input.handbrake, input.throttle);
     }
 
     #[test]

@@ -20,7 +20,7 @@ recorder node 0x4069e0 (once per frame)
     throttle, brake, handbrake = GetThrottle/GetBrakes/GetHandBrake   0x52d930/0x52d9c0/0x52da50
     QUANTISE: steer → i8 trunc(s·127), others → u8 trunc(v·255)       (also the replay format)
 mmGame::ApplyPlayerInput 0x414a10
-    decode (/127, /255) → vehCarSim Brake/Handbrake/Steering, engine Throttle ; AUTO-REVERSE
+    decode (×f32 reciprocal127/255) → vehCarSim Brake/Handbrake/Steering, engine Throttle ; AUTO-REVERSE
 mmPlayer::Update 0x405760
     speed-dependent steering parameters for the next frame ; overrides (stopped handbrake, post-race, dead car)
 physics: vehCar::PreUpdate (drivable-mode overrides) → vehCar::Update → vehCarSim::Update (04)
@@ -64,6 +64,16 @@ handbrake: u8  = trunc(handbrake · 255)
 Quantisation is toward zero; a held key is exactly 1.0, the keyboard
 steering ramp moves in multiples of 1/127. Network cars use the same
 encoding.
+
+The getter multiplies by stored **f32 reciprocals**, rather than dividing:
+steering `FMULS` at `0x4ccc4f` reads `0x5af484` (bits `0x3c010204`),
+and pedal `FMULS` at `0x4ccbf1` reads `0x5af480` (bits `0x3b808081`).
+All 3,602 sampled retail steering values match reciprocal multiplication
+bit for bit; division differs by one ULP in 244 samples. Preserve the
+operation when decoding recording bytes. The port and regression bit checks
+are in `crates/mm2_vehicle/src/player_input.rs`. See
+[city calibration evidence](city-handling-calibration.md#verified-byte-decoding)
+for capture scope, provenance and remaining fidelity limitations.
 
 ## `mmInput` — devices and bindings
 

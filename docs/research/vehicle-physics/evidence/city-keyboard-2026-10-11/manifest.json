@@ -1,0 +1,1498 @@
+{
+  "format": 1,
+  "scope": "eight_city_cases",
+  "status_meaning": "reviewed_clean describes capture contamination only; metrics remain unthresholded",
+  "numeric_storage": "lossless UTF-8 source bytes; gzip level9 mtime0; raw and archived SHA256 recorded",
+  "alignment": "original row n aligns native frame n\u22121; original0 settled pre-input",
+  "audio_scope": "original DirectSound backend vs native requested production metadata; optional attached native sink evidence is separately reported, without recorded device output",
+  "provenance": {
+    "base_commit": "c59f1acf292a5a733b244210ae43eb0589f666e5",
+    "native_code": "codex/original-handling; retail input reciprocal decoding, skid timing/class/gain/stop fixes, source f32 MPH conversion; diagnostic modes excluded",
+    "native_example_binary_sha256": "b96ca84ac103becbcbd547f067827beebfd4cc212863fecc33186ef2b4d10316",
+    "bottleship_revision": "b58752783b74813273af132b087e228aad01cf67",
+    "bottleship_branch": "midtown-madness-2",
+    "bottleship_working_tree": "clean",
+    "capture_owner_manifest": {
+      "capture_owner": "original_measurements",
+      "fresh_scene_per_run": true,
+      "runs": [
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpbullet-clear.json",
+          "sha256": "036f47556e6f392b3787de5b39e3f6b51ddef18dd65c4894aa5282706e2a25df",
+          "car": "vpbullet",
+          "city": "sf",
+          "route_sha256": "a8a2705aca8820b36c41df73ef99c821f5e70beff6e89ccf97e6e139ad1d0548",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 403.6322326660156,
+            "engineOmega": 10.530660629272461,
+            "gear": 2,
+            "pos": [
+              -86,
+              1.100000023841858,
+              -329.8500061035156
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              11.47323226928711,
+              -513.5072631835938
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpbug-clear.json",
+          "sha256": "471a3beff14d81d4e5e762372cd188a17d55ad3f2e320223517d7f62bb5364cb",
+          "car": "vpbug",
+          "city": "sf",
+          "route_sha256": "6cf4736dd16d6499154f8a737835de9e454803e8893bcd9351d8816269630b1c",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.994140625,
+            "engineOmega": 78.5392074584961,
+            "gear": 2,
+            "pos": [
+              -86,
+              1.100000023841858,
+              -330
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              9.977788925170898,
+              -513.6557006835938
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              -0.0050062923692166805,
+              0.9999464154243469,
+              -0.009092060849070549
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vppanoz-clear.json",
+          "sha256": "ee6154c71dfe34236d459e96c8f2dbb8d764ba0ed367d814c46313201c919f75",
+          "car": "vppanoz",
+          "city": "sf",
+          "route_sha256": "9786e1545157352ae5a67b4096d1a87db5a86e026ae89da96dc387aa0062c4c2",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 413.60467529296875,
+            "engineOmega": 7.204653739929199,
+            "gear": 2,
+            "pos": [
+              -86,
+              1,
+              -330
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              11.573232650756836,
+              -513.6572875976562
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-sf-vpcoop-safe-stop.json",
+          "sha256": "65f2e2b4daa813a8bd8c1142fea50de61acdd19116947b4b7f498fe230886d7d",
+          "car": "vpcoop",
+          "city": "sf",
+          "route_sha256": "891e9c3e6a93b29f6fbb179e6c7a8c43cda0d59a8dffe8e702b6a08206a0d0e7",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.9971313476562,
+            "engineOmega": 78.53952026367188,
+            "gear": 2,
+            "pos": [
+              -86,
+              1,
+              -329.79998779296875
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "sf"
+            },
+            {
+              "address": 7014020,
+              "value": "sf"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1471.598876953125,
+              9.865705490112305,
+              -513.4561157226562
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0.000774056592490524,
+              0.999999463558197,
+              -0.0010057706385850906
+            ],
+            "instance_room": 1037,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpbullet-hb-fresh.json",
+          "sha256": "48f1a0b245989a28f199e9c8d0b378c2eb7a6af1a3ca6108bcee0ac974590f24",
+          "car": "vpbullet",
+          "city": "london",
+          "route_sha256": "27d9372fb91169c9f3980c9c73f063e0c6d35c1c2ae391ebc255f42f9ecb6e4b",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 329.32861328125,
+            "engineOmega": 12.460904121398926,
+            "gear": 2,
+            "pos": [
+              -231,
+              1.100000023841858,
+              650.1500244140625
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              1.3606483936309814,
+              -148.38421630859375
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpbug-hb-fresh.json",
+          "sha256": "d7410075e9972cc6c753918c5078856fe8872fa072ede4b0736ae40ceff1d26e",
+          "car": "vpbug",
+          "city": "london",
+          "route_sha256": "d75386e162d1d138dfb424c5955bebf7883802020c57e543c5d2b13520b5f2cf",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 723.405029296875,
+            "engineOmega": 75.75479888916016,
+            "gear": 2,
+            "pos": [
+              -231,
+              1.100000023841858,
+              650
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": null,
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vppanoz-hb-fresh.json",
+          "sha256": "fd67a06fd38e91ca2d320a7f6fb6f7552bb2f8c23850ff904f40a89870327e06",
+          "car": "vppanoz",
+          "city": "london",
+          "route_sha256": "62f78cee7580e99898bc1b7998dfce7d4c40c86168f61ac5190840183d272f8f",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 749.9716796875,
+            "engineOmega": 78.53684997558594,
+            "gear": 2,
+            "pos": [
+              -231,
+              1,
+              650
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              -0.1140628382563591,
+              -148.5343780517578
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              -4.744313991977833e-05,
+              1.0000001192092896,
+              0.0001829182292567566
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        },
+        {
+          "file": "/tmp/mm2-polish-captures/original-london-vpcoop-hb-fresh.json",
+          "sha256": "ba43848768a0783b2eab2a8442443a6c0765aae9974247fa3fbd65d59ed9b3c9",
+          "car": "vpcoop",
+          "city": "london",
+          "route_sha256": "4f1487e7b16245642c73ff345e5c4219b8be1cb7c408dd55e2f9f00436155dd8",
+          "archive_sha256": "d4768421c7435faba1e17773a39053227deb87ffbcbba2931cf47b061c21505e",
+          "executable_sha256": "93afb6c00be3d3b12a6e5d88d8e4f711a13f5a4100dbdfab77943c30083f98a2",
+          "identity_verified": true,
+          "frames": 1801,
+          "hz": 60,
+          "settle_frames": 600,
+          "total_cold_settle_frames": null,
+          "pre_warm_state": {
+            "rpm": 291.99749755859375,
+            "engineOmega": 6.596945762634277,
+            "gear": 2,
+            "pos": [
+              -231,
+              1,
+              650.2000122070312
+            ],
+            "vel": [
+              0,
+              0,
+              0
+            ]
+          },
+          "city_globals": [
+            {
+              "address": 7013980,
+              "value": "london"
+            },
+            {
+              "address": 7014020,
+              "value": "london"
+            }
+          ],
+          "pre_pose": {
+            "player": 74796432,
+            "car": 74805568,
+            "instance": 74812824,
+            "pos": [
+              -1045.2283935546875,
+              1.4606484174728394,
+              -148.33421325683594
+            ],
+            "pos_convention": "center_of_mass",
+            "up": [
+              0,
+              1,
+              0
+            ],
+            "instance_room": 1050,
+            "display": {
+              "width": 800,
+              "height": 600
+            },
+            "traffic": {
+              "address": 7013880,
+              "value": 0
+            },
+            "cops": {
+              "address": 7013888,
+              "value": 0
+            }
+          },
+          "impulse_frames": 0,
+          "angular_impulse_frames": 0
+        }
+      ],
+      "cleanup_report": "/tmp/mm2-polish-cleanup-safe-stop-final.json",
+      "cleanup_report_sha256": "2a3363900ea3495ad7ecf9dd47651f62332ae5fa442bee7d9c623ab8ece9b34f",
+      "safe_stop_route_purpose": "SF Mini preserves all inputs before frame1400, then stops and holds before late dormant palm proximity"
+    },
+    "startup_history": "600 handbrake settlement in each game; source loaded-engine history not fullycold or matched to native independent cold state; recorded total_cold_settle_frames null is retained",
+    "claim_limits": "Measured differences, not bit-exact handling or recorded device waveform equivalence; trajectory drift and Fastback brief chirp/band differences remain reported"
+  },
+  "plan_raw_sha256": "fde0f4662a27f4cc2ae99ea32951d4d1ea793a3e4e0a60e7abda3134bfc433ea",
+  "files": [
+    {
+      "path": "package-plan.json",
+      "source": "/tmp/city-keyboard-eight-safe-stop-plan.json",
+      "raw_bytes": 25304,
+      "raw_sha256": "fde0f4662a27f4cc2ae99ea32951d4d1ea793a3e4e0a60e7abda3134bfc433ea",
+      "stored_bytes": 25304,
+      "stored_sha256": "fde0f4662a27f4cc2ae99ea32951d4d1ea793a3e4e0a60e7abda3134bfc433ea",
+      "compression": "none"
+    },
+    {
+      "path": "tools/package_city_evidence.py",
+      "source": "/Users/linus/.codex/worktrees/67df/rust-mm2/tools/handling/package_city_evidence.py",
+      "raw_bytes": 15427,
+      "raw_sha256": "57d2cdb2219ca6bc80d23d3128ff1fa5036717f0377294090d2367431496fe40",
+      "stored_bytes": 15427,
+      "stored_sha256": "57d2cdb2219ca6bc80d23d3128ff1fa5036717f0377294090d2367431496fe40",
+      "compression": "none"
+    },
+    {
+      "path": "tools/compare_traces.py",
+      "source": "/Users/linus/.codex/worktrees/67df/rust-mm2/tools/handling/compare_traces.py",
+      "raw_bytes": 22724,
+      "raw_sha256": "285a608f69b4f9d8962d9222693ccde1a2604ef5bd948297a9c2a26f0d4f127c",
+      "stored_bytes": 22724,
+      "stored_sha256": "285a608f69b4f9d8962d9222693ccde1a2604ef5bd948297a9c2a26f0d4f127c",
+      "compression": "none"
+    },
+    {
+      "path": "tools/compare_city_audio.py",
+      "source": "/Users/linus/.codex/worktrees/67df/rust-mm2/tools/handling/compare_city_audio.py",
+      "raw_bytes": 8735,
+      "raw_sha256": "9b1fcc85b940c9844f414befc6674fa3dcb5a54562c613ac8c1ea59bbfb1e217",
+      "stored_bytes": 8735,
+      "stored_sha256": "9b1fcc85b940c9844f414befc6674fa3dcb5a54562c613ac8c1ea59bbfb1e217",
+      "compression": "none"
+    },
+    {
+      "path": "tools/audit_source_integration.py",
+      "source": "/Users/linus/.codex/worktrees/67df/rust-mm2/tools/handling/audit_source_integration.py",
+      "raw_bytes": 11639,
+      "raw_sha256": "04820b634262f1d24fdc3fcc8f9d1681bddf01df2cfff20aa8fde58fafad4320",
+      "stored_bytes": 11639,
+      "stored_sha256": "04820b634262f1d24fdc3fcc8f9d1681bddf01df2cfff20aa8fde58fafad4320",
+      "compression": "none"
+    },
+    {
+      "path": "tools/capture_original.ts",
+      "source": "/Users/linus/.codex/worktrees/67df/rust-mm2/tools/handling/capture_original.ts",
+      "raw_bytes": 27069,
+      "raw_sha256": "83055429aea9e1197197766c93e1eed9a324c4fa358dc91f6e38e1d87f2d8bdf",
+      "stored_bytes": 27069,
+      "stored_sha256": "83055429aea9e1197197766c93e1eed9a324c4fa358dc91f6e38e1d87f2d8bdf",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-sf-vpbug-clear.json",
+      "raw_bytes": 25779082,
+      "raw_sha256": "471a3beff14d81d4e5e762372cd188a17d55ad3f2e320223517d7f62bb5364cb",
+      "stored_bytes": 3180733,
+      "stored_sha256": "3d5decbc2d68097ef57da305e1269b65a4e788852602e8398efa088a932068a0",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbug/native.csv.gz",
+      "source": "/tmp/sf-vpbug-source-ratio-native.csv",
+      "raw_bytes": 2825794,
+      "raw_sha256": "560b645835b03977ac06595e294cb351dac35e397977298bc2f8b62468aa2c8a",
+      "stored_bytes": 766131,
+      "stored_sha256": "2b837fe5223cb406e8edd0f344fa6759a457b694a198e2617fc75a30279a5fe1",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbug/route.json",
+      "source": "/tmp/sf-vpbug-frozen-route.json",
+      "raw_bytes": 8022,
+      "raw_sha256": "6cf4736dd16d6499154f8a737835de9e454803e8893bcd9351d8816269630b1c",
+      "stored_bytes": 8022,
+      "stored_sha256": "6cf4736dd16d6499154f8a737835de9e454803e8893bcd9351d8816269630b1c",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/native.audio.json.gz",
+      "source": "/tmp/sf-vpbug-source-ratio-native.csv.audio.json",
+      "raw_bytes": 991469,
+      "raw_sha256": "032680f8f2488d1a3091cbc52bd1a4c23a9f9b7ec7179561200a20a6aab1073b",
+      "stored_bytes": 10032,
+      "stored_sha256": "4e8dc65f6370025e29e453082a2e4b57849ce26ac9e6eec7503a64e2637815b7",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbug/native.contacts.json.gz",
+      "source": "/tmp/sf-vpbug-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 330036,
+      "raw_sha256": "a47d8fd6e4b6e83875f0f5ac2a0c8c50ba01fa88dc1ee269ac4d636d57d0950e",
+      "stored_bytes": 43148,
+      "stored_sha256": "ae05d2f93cefd06abdb4234ca9252469eb811d104818488aa8a909c65b9b0acb",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbug/native.provenance.json",
+      "source": "/tmp/sf-vpbug-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 57216,
+      "raw_sha256": "d07d398bc846c28cbea3eed9ca8855678e91f3408f4222d7a434ff9a333df083",
+      "stored_bytes": 57216,
+      "stored_sha256": "d07d398bc846c28cbea3eed9ca8855678e91f3408f4222d7a434ff9a333df083",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/native.backend-audio.json.gz",
+      "source": "/tmp/sf-vpbug-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1249786,
+      "raw_sha256": "151dbe7c559874052395dd3ea4d5cd4c9ad42da8e63f067000d31c742d7dfc3d",
+      "stored_bytes": 10571,
+      "stored_sha256": "5e3a505e501ec4b2821c6f47c2060e6eea81e9d602fa89a521c3619b7bd2dd99",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbug/native.backend-provenance.json",
+      "source": "/tmp/sf-vpbug-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 57209,
+      "raw_sha256": "5c5c99b48fa47090132f56d410e4ea014b1d62e1461d30fbbe9ad4cedfca8801",
+      "stored_bytes": 57209,
+      "stored_sha256": "5c5c99b48fa47090132f56d410e4ea014b1d62e1461d30fbbe9ad4cedfca8801",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 5596,
+      "raw_sha256": "ef3226533f24e04ac95b5bdfb2a0a8273fc6abc3caa9cb9f318c98823350f35d",
+      "stored_bytes": 5596,
+      "stored_sha256": "ef3226533f24e04ac95b5bdfb2a0a8273fc6abc3caa9cb9f318c98823350f35d",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 64310,
+      "raw_sha256": "89fcbc14d12853f790580385e7e1f4a51ce63ea1b6f64fd7720fa3d081a8ff38",
+      "stored_bytes": 64310,
+      "stored_sha256": "89fcbc14d12853f790580385e7e1f4a51ce63ea1b6f64fd7720fa3d081a8ff38",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbug/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 3930,
+      "raw_sha256": "1f0bbcb6b1ff7f05a53b4e015417a29a8919d4f39f2b86964b6602e710f771bf",
+      "stored_bytes": 3930,
+      "stored_sha256": "1f0bbcb6b1ff7f05a53b4e015417a29a8919d4f39f2b86964b6602e710f771bf",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-sf-vppanoz-clear.json",
+      "raw_bytes": 25808885,
+      "raw_sha256": "ee6154c71dfe34236d459e96c8f2dbb8d764ba0ed367d814c46313201c919f75",
+      "stored_bytes": 3083480,
+      "stored_sha256": "5b732d9a7cbecff772233b0dad87c7a4b15797cf88963c1187255878a0e8a9ca",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vppanoz/native.csv.gz",
+      "source": "/tmp/sf-vppanoz-source-ratio-native.csv",
+      "raw_bytes": 2826123,
+      "raw_sha256": "33a0a12ccb803c6f4295f16cceadd9afca16fbfd87604b87761aa74441b34d3d",
+      "stored_bytes": 709564,
+      "stored_sha256": "4f69cc245ce922ed903973c7bbe6ceff20d7ab3293fe2c2fc30a4eca7f684ef4",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vppanoz/route.json",
+      "source": "/tmp/sf-vppanoz-frozen-route.json",
+      "raw_bytes": 8631,
+      "raw_sha256": "9786e1545157352ae5a67b4096d1a87db5a86e026ae89da96dc387aa0062c4c2",
+      "stored_bytes": 8631,
+      "stored_sha256": "9786e1545157352ae5a67b4096d1a87db5a86e026ae89da96dc387aa0062c4c2",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/native.audio.json.gz",
+      "source": "/tmp/sf-vppanoz-source-ratio-native.csv.audio.json",
+      "raw_bytes": 993809,
+      "raw_sha256": "bff0c45d33707f6fe80cab691c26c185de398f3e557d202b14387d7116388f62",
+      "stored_bytes": 9872,
+      "stored_sha256": "2ebd69dca8439a42aabb622a3dbe02788986da0e9395ccaff471b863b5683463",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vppanoz/native.contacts.json.gz",
+      "source": "/tmp/sf-vppanoz-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 2,
+      "raw_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stored_bytes": 22,
+      "stored_sha256": "64406e753d82e11c6bd63d1d04bb6aa083eefa0a46949bbfce994d556b989f0f",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vppanoz/native.provenance.json",
+      "source": "/tmp/sf-vppanoz-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 60197,
+      "raw_sha256": "e781efcfe81574609fb0bb01e4cdfcbff20487f0bf7081338e4610b275683ec6",
+      "stored_bytes": 60197,
+      "stored_sha256": "e781efcfe81574609fb0bb01e4cdfcbff20487f0bf7081338e4610b275683ec6",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/native.backend-audio.json.gz",
+      "source": "/tmp/sf-vppanoz-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1253029,
+      "raw_sha256": "619d61683d07a3ca8c3030cfc772cb88d691858511e51c6eb4439a7c50b7c723",
+      "stored_bytes": 10384,
+      "stored_sha256": "592dc1f5ffa90735e91a472650726625539f763ae68339ccc46ea602abe5b655",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vppanoz/native.backend-provenance.json",
+      "source": "/tmp/sf-vppanoz-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 60190,
+      "raw_sha256": "0e0852a436dc56310936c11e09c90c71ad13f644c95919171e897a491d7eede3",
+      "stored_bytes": 60190,
+      "stored_sha256": "0e0852a436dc56310936c11e09c90c71ad13f644c95919171e897a491d7eede3",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 5571,
+      "raw_sha256": "f9af4759157db285e1fd6cb0f2338ef0e8bbf140dba203bd8ea38b50e7f430e2",
+      "stored_bytes": 5571,
+      "stored_sha256": "f9af4759157db285e1fd6cb0f2338ef0e8bbf140dba203bd8ea38b50e7f430e2",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 79060,
+      "raw_sha256": "7dfe2e0779fdc666f86bfb8bc749ff3b4235391575182c01a3dade1f8cf18686",
+      "stored_bytes": 79060,
+      "stored_sha256": "7dfe2e0779fdc666f86bfb8bc749ff3b4235391575182c01a3dade1f8cf18686",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vppanoz/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 3913,
+      "raw_sha256": "fa4a213c37264128bd2d66b669b5be77853b0343f7df996f0aff6ed04547eb97",
+      "stored_bytes": 3913,
+      "stored_sha256": "fa4a213c37264128bd2d66b669b5be77853b0343f7df996f0aff6ed04547eb97",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-sf-vpbullet-clear.json",
+      "raw_bytes": 25769581,
+      "raw_sha256": "036f47556e6f392b3787de5b39e3f6b51ddef18dd65c4894aa5282706e2a25df",
+      "stored_bytes": 3261354,
+      "stored_sha256": "9aaccb37d984ca9e62a0102ecbd17cccbe130fb1cf27dc4cf0f00456fb50dcf9",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbullet/native.csv.gz",
+      "source": "/tmp/sf-vpbullet-source-ratio-native.csv",
+      "raw_bytes": 2831222,
+      "raw_sha256": "1648973a35cccadc6a1714b674cc363896cf5d72d03d23e873cee0c151dea6fd",
+      "stored_bytes": 794400,
+      "stored_sha256": "7f309edd59e470dd13626df99ed2403345235725939b3745aab895702239aa5b",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbullet/route.json",
+      "source": "/tmp/sf-vpbullet-frozen-route.json",
+      "raw_bytes": 6553,
+      "raw_sha256": "a8a2705aca8820b36c41df73ef99c821f5e70beff6e89ccf97e6e139ad1d0548",
+      "stored_bytes": 6553,
+      "stored_sha256": "a8a2705aca8820b36c41df73ef99c821f5e70beff6e89ccf97e6e139ad1d0548",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/native.audio.json.gz",
+      "source": "/tmp/sf-vpbullet-source-ratio-native.csv.audio.json",
+      "raw_bytes": 996496,
+      "raw_sha256": "5ef8bae38debdbe5b3b7324a34f8bd658fce5461867e7e5e1f1dea7cee0022ec",
+      "stored_bytes": 10484,
+      "stored_sha256": "8310b8da100172272498e05a373f493791f6256530d12e6785c2ee4c2b9626ba",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbullet/native.contacts.json.gz",
+      "source": "/tmp/sf-vpbullet-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 2,
+      "raw_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stored_bytes": 22,
+      "stored_sha256": "64406e753d82e11c6bd63d1d04bb6aa083eefa0a46949bbfce994d556b989f0f",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbullet/native.provenance.json",
+      "source": "/tmp/sf-vpbullet-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 50556,
+      "raw_sha256": "3255516e6591faae0f3899d164f7f282be9f18506d6d1c37ea728c40542f4dbf",
+      "stored_bytes": 50556,
+      "stored_sha256": "3255516e6591faae0f3899d164f7f282be9f18506d6d1c37ea728c40542f4dbf",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/native.backend-audio.json.gz",
+      "source": "/tmp/sf-vpbullet-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1258195,
+      "raw_sha256": "2e66a78b9eb34ab89ec2b419c600f22c77826f23fe496d91f856718e87f152f2",
+      "stored_bytes": 11209,
+      "stored_sha256": "efc73ecfad4adedc876821832448637e6705ff05fdee8705c24aaa22a6cdab42",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpbullet/native.backend-provenance.json",
+      "source": "/tmp/sf-vpbullet-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 50549,
+      "raw_sha256": "51d0d6447f60d48f4484b6550ac53262dc08c37d37ac50b6563c52e4ca7d1190",
+      "stored_bytes": 50549,
+      "stored_sha256": "51d0d6447f60d48f4484b6550ac53262dc08c37d37ac50b6563c52e4ca7d1190",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 19603,
+      "raw_sha256": "996843cc933e2016d86c310b58971440f98f32f8ef9707b9d3d82f6e194878ca",
+      "stored_bytes": 19603,
+      "stored_sha256": "996843cc933e2016d86c310b58971440f98f32f8ef9707b9d3d82f6e194878ca",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 63458,
+      "raw_sha256": "11555c63b1f4fa8c02fcdc7756eaec575d207f9730d6f5106938d8a680309507",
+      "stored_bytes": 63458,
+      "stored_sha256": "11555c63b1f4fa8c02fcdc7756eaec575d207f9730d6f5106938d8a680309507",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpbullet/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 13268,
+      "raw_sha256": "d8ee86c97d8268203daf04aac1e6211d03b7ec72cefe8665bb56fe44baf200b2",
+      "stored_bytes": 13268,
+      "stored_sha256": "d8ee86c97d8268203daf04aac1e6211d03b7ec72cefe8665bb56fe44baf200b2",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-sf-vpcoop-safe-stop.json",
+      "raw_bytes": 25790845,
+      "raw_sha256": "65f2e2b4daa813a8bd8c1142fea50de61acdd19116947b4b7f498fe230886d7d",
+      "stored_bytes": 2988080,
+      "stored_sha256": "1f403723eab84df1fda38653bef45001825592d3cd682179f840fbbec4fb7a74",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpcoop/native.csv.gz",
+      "source": "/tmp/sf-vpcoop-safe-stop-native.csv",
+      "raw_bytes": 2815584,
+      "raw_sha256": "be1b16f58279042211f232ab0b5b2f1e8e16b3422af174a685ee4284a60d8c97",
+      "stored_bytes": 672707,
+      "stored_sha256": "91118868ebcb19fac9b4296b00ccc4d7a850fe7077bbfe595735887e1b12ed0a",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpcoop/route.json",
+      "source": "/tmp/sf-vpcoop-safe-stop-route.json",
+      "raw_bytes": 5444,
+      "raw_sha256": "891e9c3e6a93b29f6fbb179e6c7a8c43cda0d59a8dffe8e702b6a08206a0d0e7",
+      "stored_bytes": 5444,
+      "stored_sha256": "891e9c3e6a93b29f6fbb179e6c7a8c43cda0d59a8dffe8e702b6a08206a0d0e7",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/native.audio.json.gz",
+      "source": "/tmp/sf-vpcoop-safe-stop-native.csv.audio.json",
+      "raw_bytes": 994413,
+      "raw_sha256": "cd02ed7c448ef70d976887cb3014b656654fedd7b33ec2b50fdd35f599f367a3",
+      "stored_bytes": 11012,
+      "stored_sha256": "768e7f60b7b2df6e9b25e6a7260d28e5099c304978643f9fec7578dd5a90d687",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpcoop/native.contacts.json.gz",
+      "source": "/tmp/sf-vpcoop-safe-stop-native.csv.contacts.json",
+      "raw_bytes": 583120,
+      "raw_sha256": "05a959bc892e362892983d420aa8d47487303bf313ee4beef01e1edad66ea0b3",
+      "stored_bytes": 87305,
+      "stored_sha256": "5a8bab2b597f5597ec6009acd11fb66e25546b53d2df4b39a2ecf2e8a252e606",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpcoop/native.provenance.json",
+      "source": "/tmp/sf-vpcoop-safe-stop-native.csv.provenance.json",
+      "raw_bytes": 44780,
+      "raw_sha256": "d6263476cc677f02c9cb3d383b9a9a020c66a26a906985909f7939c8d294b3f3",
+      "stored_bytes": 44780,
+      "stored_sha256": "d6263476cc677f02c9cb3d383b9a9a020c66a26a906985909f7939c8d294b3f3",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/native.backend-audio.json.gz",
+      "source": "/tmp/sf-vpcoop-safe-stop-live.csv.audio.json",
+      "raw_bytes": 1253158,
+      "raw_sha256": "5dc5dfdcb37b5a7099a99a3116f608dd8872ed8e256029592abd5a8c04b9a62f",
+      "stored_bytes": 11696,
+      "stored_sha256": "74661fe54fb60180ece8d9802b32b629cc74b157a5d3e12aeddf47c95721d242",
+      "compression": "gzip"
+    },
+    {
+      "path": "sf-vpcoop/native.backend-provenance.json",
+      "source": "/tmp/sf-vpcoop-safe-stop-live.csv.provenance.json",
+      "raw_bytes": 44773,
+      "raw_sha256": "10e0402ee1ad608f8d7d0f025ba3c2d11e4b68aa843a1a5f67b93771ef9def83",
+      "stored_bytes": 44773,
+      "stored_sha256": "10e0402ee1ad608f8d7d0f025ba3c2d11e4b68aa843a1a5f67b93771ef9def83",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 6808,
+      "raw_sha256": "d8ad52bae22529d71092509cdd268789e40e6ec6dd85db9e1c68ae141d341813",
+      "stored_bytes": 6808,
+      "stored_sha256": "d8ad52bae22529d71092509cdd268789e40e6ec6dd85db9e1c68ae141d341813",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 38215,
+      "raw_sha256": "58874c6182909dd0b3340ee6e2fdf7eb852f29684d53e1bea4bff8897ef0cb48",
+      "stored_bytes": 38215,
+      "stored_sha256": "58874c6182909dd0b3340ee6e2fdf7eb852f29684d53e1bea4bff8897ef0cb48",
+      "compression": "none"
+    },
+    {
+      "path": "sf-vpcoop/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 4738,
+      "raw_sha256": "88effc6bc3d01e06f669d015ddaf63f9c4fe0d61d436d770a44e13bd9ae859cc",
+      "stored_bytes": 4738,
+      "stored_sha256": "88effc6bc3d01e06f669d015ddaf63f9c4fe0d61d436d770a44e13bd9ae859cc",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-london-vpbug-hb-fresh.json",
+      "raw_bytes": 24913943,
+      "raw_sha256": "d7410075e9972cc6c753918c5078856fe8872fa072ede4b0736ae40ceff1d26e",
+      "stored_bytes": 3060968,
+      "stored_sha256": "ab2fb86a6a9fff9a4b41ae15ff21c486bdc2e09611622af050ef226c3a64b8b0",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbug-hb/native.csv.gz",
+      "source": "/tmp/london-vpbug-source-ratio-native.csv",
+      "raw_bytes": 2827638,
+      "raw_sha256": "68128adf65c32d94050693012d3a53dbd7f9c2abc79143367917d5c4cb40240f",
+      "stored_bytes": 761013,
+      "stored_sha256": "c1b4cb7f9879f2d0f63ebe070808786d6c604f540498456fcd724d6fdb099e24",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbug-hb/route.json",
+      "source": "/tmp/london-vpbug-hb-frozen-route.json",
+      "raw_bytes": 8623,
+      "raw_sha256": "d75386e162d1d138dfb424c5955bebf7883802020c57e543c5d2b13520b5f2cf",
+      "stored_bytes": 8623,
+      "stored_sha256": "d75386e162d1d138dfb424c5955bebf7883802020c57e543c5d2b13520b5f2cf",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/native.audio.json.gz",
+      "source": "/tmp/london-vpbug-source-ratio-native.csv.audio.json",
+      "raw_bytes": 1536909,
+      "raw_sha256": "9386ac532a8041f0d9c90ea6a7a68473316d89e58f0a85dbdec6fd1d88abf470",
+      "stored_bytes": 13413,
+      "stored_sha256": "01c18d37da0da222aa9953b2a2cbb5427f126769d91cfc43fbe1b29bfc33ae07",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbug-hb/native.contacts.json.gz",
+      "source": "/tmp/london-vpbug-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 308543,
+      "raw_sha256": "8619ee79045b0319f8de506a4576fd6874db69bdb2c1fc4ea83ae4c6323f3ced",
+      "stored_bytes": 38320,
+      "stored_sha256": "18da722e947749073aa741f2b6ef2ea5789c589f6931f4d728588d3d32cf3460",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbug-hb/native.provenance.json",
+      "source": "/tmp/london-vpbug-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 60106,
+      "raw_sha256": "2c5f3b38a07a7dcd176aec9dfdcc0741d369987ddf5f5fb312a34e532c04311c",
+      "stored_bytes": 60106,
+      "stored_sha256": "2c5f3b38a07a7dcd176aec9dfdcc0741d369987ddf5f5fb312a34e532c04311c",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/native.backend-audio.json.gz",
+      "source": "/tmp/london-vpbug-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1988346,
+      "raw_sha256": "6bf5b02e40f6de1088c9ccaa2b30650993ac0a49bdc2d5e16e93b4f6fe40e87b",
+      "stored_bytes": 16105,
+      "stored_sha256": "5bb9163050ba42f9b33cc08cf7323598617fd570458e2eab34ec0f5fe5f29ed3",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbug-hb/native.backend-provenance.json",
+      "source": "/tmp/london-vpbug-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 60099,
+      "raw_sha256": "62201a5ee2640629def61676081c42f87df0d398d895c32cf7fdecd4f07c9034",
+      "stored_bytes": 60099,
+      "stored_sha256": "62201a5ee2640629def61676081c42f87df0d398d895c32cf7fdecd4f07c9034",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 10304,
+      "raw_sha256": "e6b3d6da1bd764fac501e733c53fcfc2e9b5b0e68018d339f9ff1e5dfcfd45fb",
+      "stored_bytes": 10304,
+      "stored_sha256": "e6b3d6da1bd764fac501e733c53fcfc2e9b5b0e68018d339f9ff1e5dfcfd45fb",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 58132,
+      "raw_sha256": "5f0c928eb151658b843f3e7613344b96c94ef4396f740ab6278f425b36bc0ac8",
+      "stored_bytes": 58132,
+      "stored_sha256": "5f0c928eb151658b843f3e7613344b96c94ef4396f740ab6278f425b36bc0ac8",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbug-hb/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 7069,
+      "raw_sha256": "1f2967b143e9ac9e3c897e7a798181feca038aadb42acfec0959b63823fd323c",
+      "stored_bytes": 7069,
+      "stored_sha256": "1f2967b143e9ac9e3c897e7a798181feca038aadb42acfec0959b63823fd323c",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-london-vppanoz-hb-fresh.json",
+      "raw_bytes": 24920321,
+      "raw_sha256": "fd67a06fd38e91ca2d320a7f6fb6f7552bb2f8c23850ff904f40a89870327e06",
+      "stored_bytes": 2978301,
+      "stored_sha256": "529cc0d27b702d954b7fad95a0e77863cb0ccf9f80c00d5a77daa0691028db72",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vppanoz-hb/native.csv.gz",
+      "source": "/tmp/london-vppanoz-source-ratio-native.csv",
+      "raw_bytes": 2829187,
+      "raw_sha256": "b6bb6ddb451cb057463d0b9d599773eccf320d9bd384e5a499eb398f108b47c3",
+      "stored_bytes": 713664,
+      "stored_sha256": "15a50bdfcd9a31a4b024f304fa2a54f36bf823bac52a1d9274826a57cfdbd62d",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vppanoz-hb/route.json",
+      "source": "/tmp/london-vppanoz-hb-frozen-route.json",
+      "raw_bytes": 8026,
+      "raw_sha256": "62f78cee7580e99898bc1b7998dfce7d4c40c86168f61ac5190840183d272f8f",
+      "stored_bytes": 8026,
+      "stored_sha256": "62f78cee7580e99898bc1b7998dfce7d4c40c86168f61ac5190840183d272f8f",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/native.audio.json.gz",
+      "source": "/tmp/london-vppanoz-source-ratio-native.csv.audio.json",
+      "raw_bytes": 995876,
+      "raw_sha256": "7d46c36b389b218d4731c16020cb5b2b6a6b84f0e69982b3846bec2f08dd7a7f",
+      "stored_bytes": 10385,
+      "stored_sha256": "2cf3bac5b474cb3489eb122acf3af313d0915cea9b4dc27ae6cf148dc410e47b",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vppanoz-hb/native.contacts.json.gz",
+      "source": "/tmp/london-vppanoz-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 2,
+      "raw_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stored_bytes": 22,
+      "stored_sha256": "64406e753d82e11c6bd63d1d04bb6aa083eefa0a46949bbfce994d556b989f0f",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vppanoz-hb/native.provenance.json",
+      "source": "/tmp/london-vppanoz-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 57155,
+      "raw_sha256": "54753f2dd5b6102db99849fe3493f832f6d59ea60218ef1082fb3d414f08f430",
+      "stored_bytes": 57155,
+      "stored_sha256": "54753f2dd5b6102db99849fe3493f832f6d59ea60218ef1082fb3d414f08f430",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/native.backend-audio.json.gz",
+      "source": "/tmp/london-vppanoz-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1255560,
+      "raw_sha256": "496e85b3968515948bb8afc0a56bd9117227cd41f21334afe7240d48a4940962",
+      "stored_bytes": 10979,
+      "stored_sha256": "8aef4167ac9bcefef72593a6e50874571e8772f1786493e146ad1801d9112998",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vppanoz-hb/native.backend-provenance.json",
+      "source": "/tmp/london-vppanoz-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 57148,
+      "raw_sha256": "5b4b21fa48bc2670ea91636159a11206c6c997756b4a7e3d4ef2cafd3047e9c3",
+      "stored_bytes": 57148,
+      "stored_sha256": "5b4b21fa48bc2670ea91636159a11206c6c997756b4a7e3d4ef2cafd3047e9c3",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 6750,
+      "raw_sha256": "5b094118c45fb5a7b5de988aa384c59127bf8239728c62754e794e2dae213d71",
+      "stored_bytes": 6750,
+      "stored_sha256": "5b094118c45fb5a7b5de988aa384c59127bf8239728c62754e794e2dae213d71",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 52293,
+      "raw_sha256": "5ea7d26e0a09636fd8cfde84b336b00f1bcf88a3ba8780bc14c909c92625722b",
+      "stored_bytes": 52293,
+      "stored_sha256": "5ea7d26e0a09636fd8cfde84b336b00f1bcf88a3ba8780bc14c909c92625722b",
+      "compression": "none"
+    },
+    {
+      "path": "london-vppanoz-hb/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 4699,
+      "raw_sha256": "f4b183985111d3c20d9ae4409bc1d234d2449ea0a4ca16bc4ab260cc75925884",
+      "stored_bytes": 4699,
+      "stored_sha256": "f4b183985111d3c20d9ae4409bc1d234d2449ea0a4ca16bc4ab260cc75925884",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-london-vpbullet-hb-fresh.json",
+      "raw_bytes": 24918519,
+      "raw_sha256": "48f1a0b245989a28f199e9c8d0b378c2eb7a6af1a3ca6108bcee0ac974590f24",
+      "stored_bytes": 3142301,
+      "stored_sha256": "36c25a624210cb825832215e75c79903b05eaebe1308b150aecd1d71daff50a8",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbullet-hb/native.csv.gz",
+      "source": "/tmp/london-vpbullet-source-ratio-native.csv",
+      "raw_bytes": 2832522,
+      "raw_sha256": "7887a116deb0122df625ed753ed7e6fc26c800b59b4de773e545b2ba68d24447",
+      "stored_bytes": 786310,
+      "stored_sha256": "a901d6ebd4ee0d31e19c299a0e224cedd1775381820c90c0466a6a50de1296c1",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbullet-hb/route.json",
+      "source": "/tmp/london-vpbullet-hb-frozen-route.json",
+      "raw_bytes": 6882,
+      "raw_sha256": "27d9372fb91169c9f3980c9c73f063e0c6d35c1c2ae391ebc255f42f9ecb6e4b",
+      "stored_bytes": 6882,
+      "stored_sha256": "27d9372fb91169c9f3980c9c73f063e0c6d35c1c2ae391ebc255f42f9ecb6e4b",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/native.audio.json.gz",
+      "source": "/tmp/london-vpbullet-source-ratio-native.csv.audio.json",
+      "raw_bytes": 2038709,
+      "raw_sha256": "344fe3e6ecbea6a183b908cc5c0fb451ff452f317283be97c314b11e19422a0e",
+      "stored_bytes": 17899,
+      "stored_sha256": "66354a579f75667a79919e8b3ff38083ab40a7e0ecf69186070c9b9d0f556fc6",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbullet-hb/native.contacts.json.gz",
+      "source": "/tmp/london-vpbullet-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 2,
+      "raw_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stored_bytes": 22,
+      "stored_sha256": "64406e753d82e11c6bd63d1d04bb6aa083eefa0a46949bbfce994d556b989f0f",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbullet-hb/native.provenance.json",
+      "source": "/tmp/london-vpbullet-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 52087,
+      "raw_sha256": "9acc84631fcf96544035325e3da8b95aa3c4c43e14e5a91ee6ccd41fe3f91c41",
+      "stored_bytes": 52087,
+      "stored_sha256": "9acc84631fcf96544035325e3da8b95aa3c4c43e14e5a91ee6ccd41fe3f91c41",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/native.backend-audio.json.gz",
+      "source": "/tmp/london-vpbullet-source-ratio-live.csv.audio.json",
+      "raw_bytes": 2670393,
+      "raw_sha256": "0e9d7ef9c7693fb2f7e7cdc318ff1ef80a08978bcf6c2e6db281edec463825cb",
+      "stored_bytes": 21183,
+      "stored_sha256": "62307a28644a52eb68ef17a032c699e82b520d501c17715b67abc4f852f5878d",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpbullet-hb/native.backend-provenance.json",
+      "source": "/tmp/london-vpbullet-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 52080,
+      "raw_sha256": "419b057a3a82d32f883979096442fa5480e259386c8bca48addae1f33ce01720",
+      "stored_bytes": 52080,
+      "stored_sha256": "419b057a3a82d32f883979096442fa5480e259386c8bca48addae1f33ce01720",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 32925,
+      "raw_sha256": "977b6c767ad77a19168f1d0512c43ddac437010b870697c1c18f2c3e3ccb0a48",
+      "stored_bytes": 32925,
+      "stored_sha256": "977b6c767ad77a19168f1d0512c43ddac437010b870697c1c18f2c3e3ccb0a48",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 58132,
+      "raw_sha256": "2378c3f98ea67fa2298a4114f201de8349f5e6ec9dc2d633acbdbb4d99ade464",
+      "stored_bytes": 58132,
+      "stored_sha256": "2378c3f98ea67fa2298a4114f201de8349f5e6ec9dc2d633acbdbb4d99ade464",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpbullet-hb/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 22149,
+      "raw_sha256": "4a02c0a517a46cc3d13a0f953064ed9e3ded581d861e7a188090f7a3be5da94c",
+      "stored_bytes": 22149,
+      "stored_sha256": "4a02c0a517a46cc3d13a0f953064ed9e3ded581d861e7a188090f7a3be5da94c",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/original.json.gz",
+      "source": "/tmp/mm2-polish-captures/original-london-vpcoop-hb-fresh.json",
+      "raw_bytes": 24975220,
+      "raw_sha256": "ba43848768a0783b2eab2a8442443a6c0765aae9974247fa3fbd65d59ed9b3c9",
+      "stored_bytes": 2989948,
+      "stored_sha256": "7eb6c3da775a09ce5e345d90fff28e98e5166aa7ba168f2c1ffb70afd78bc79c",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpcoop-hb/native.csv.gz",
+      "source": "/tmp/london-vpcoop-source-ratio-native.csv",
+      "raw_bytes": 2819512,
+      "raw_sha256": "ab535f21da88c52dfcfbb7d20ac6b8437a005bba9d6ac200a6d01e6667dbb275",
+      "stored_bytes": 705670,
+      "stored_sha256": "feedebc402b7a2b84e85ae79028cc0c3b8f902ea1a27d9e8db27123705df36be",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpcoop-hb/route.json",
+      "source": "/tmp/london-vpcoop-hb-frozen-route.json",
+      "raw_bytes": 8217,
+      "raw_sha256": "4f1487e7b16245642c73ff345e5c4219b8be1cb7c408dd55e2f9f00436155dd8",
+      "stored_bytes": 8217,
+      "stored_sha256": "4f1487e7b16245642c73ff345e5c4219b8be1cb7c408dd55e2f9f00436155dd8",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/native.audio.json.gz",
+      "source": "/tmp/london-vpcoop-source-ratio-native.csv.audio.json",
+      "raw_bytes": 989173,
+      "raw_sha256": "4e0a08e2d686e3856e8f93eb2ce7151e6b5da85e2f37c2846e3e9690827e1e7e",
+      "stored_bytes": 9824,
+      "stored_sha256": "d32356de19e52b742bb5d4c0fd69abbf601561fe47bfe0416630737f3dce869d",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpcoop-hb/native.contacts.json.gz",
+      "source": "/tmp/london-vpcoop-source-ratio-native.csv.contacts.json",
+      "raw_bytes": 724353,
+      "raw_sha256": "8cce0a98cd22ebed32b0209a704b2cc4e90c2ab8b02df7972a41851f41aabf51",
+      "stored_bytes": 104146,
+      "stored_sha256": "a7d71724be187a8ca77e8e0b1ae7510b62b3aabb89033ee5653f2bfccfb7e513",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpcoop-hb/native.provenance.json",
+      "source": "/tmp/london-vpcoop-source-ratio-native.csv.provenance.json",
+      "raw_bytes": 58186,
+      "raw_sha256": "4d2753f61d7ec36359eb78d54ef24af5c9b23f8b7a165f723cafeebfd06eaf65",
+      "stored_bytes": 58186,
+      "stored_sha256": "4d2753f61d7ec36359eb78d54ef24af5c9b23f8b7a165f723cafeebfd06eaf65",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/native.backend-audio.json.gz",
+      "source": "/tmp/london-vpcoop-source-ratio-live.csv.audio.json",
+      "raw_bytes": 1246750,
+      "raw_sha256": "ba51b654f346b11f2c3e6d396a98a903aa8e1806f361b1b587b820e3b374857f",
+      "stored_bytes": 10321,
+      "stored_sha256": "b115213fdc0ffb2c45ea8882bec4617d8d9570b07402ef85a8620efc19d7a171",
+      "compression": "gzip"
+    },
+    {
+      "path": "london-vpcoop-hb/native.backend-provenance.json",
+      "source": "/tmp/london-vpcoop-source-ratio-live.csv.provenance.json",
+      "raw_bytes": 58179,
+      "raw_sha256": "36c7abad5c7392248bafc3c72b948f1e53fb48cd9678ad4ac2546832b17cce50",
+      "stored_bytes": 58179,
+      "stored_sha256": "36c7abad5c7392248bafc3c72b948f1e53fb48cd9678ad4ac2546832b17cce50",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/backend-audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 4413,
+      "raw_sha256": "d66137db2756d051cb5c706fb185577014033394b7d1128d9bd4b88b2913eae8",
+      "stored_bytes": 4413,
+      "stored_sha256": "d66137db2756d051cb5c706fb185577014033394b7d1128d9bd4b88b2913eae8",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/handling-comparison.json",
+      "source": "generated",
+      "raw_bytes": 62768,
+      "raw_sha256": "cf7783bf59dae4d6c8b2ef47c27d332109b1b4395b825b95f8352b79518ddcfc",
+      "stored_bytes": 62768,
+      "stored_sha256": "cf7783bf59dae4d6c8b2ef47c27d332109b1b4395b825b95f8352b79518ddcfc",
+      "compression": "none"
+    },
+    {
+      "path": "london-vpcoop-hb/audio-comparison.json",
+      "source": "generated",
+      "raw_bytes": 3141,
+      "raw_sha256": "e7e5ed227e5abadfa25795f54ae6bbbb7e6685aa7a1b9e5a5a2cb28f642185c9",
+      "stored_bytes": 3141,
+      "stored_sha256": "e7e5ed227e5abadfa25795f54ae6bbbb7e6685aa7a1b9e5a5a2cb28f642185c9",
+      "compression": "none"
+    }
+  ],
+  "cases": [
+    {
+      "id": "sf-vpbug",
+      "city": "sf",
+      "car": "vpbug",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "sf-vpbug/backend-audio-comparison.json",
+      "handling": "sf-vpbug/handling-comparison.json",
+      "audio": "sf-vpbug/audio-comparison.json"
+    },
+    {
+      "id": "sf-vppanoz",
+      "city": "sf",
+      "car": "vppanoz",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "sf-vppanoz/backend-audio-comparison.json",
+      "handling": "sf-vppanoz/handling-comparison.json",
+      "audio": "sf-vppanoz/audio-comparison.json"
+    },
+    {
+      "id": "sf-vpbullet",
+      "city": "sf",
+      "car": "vpbullet",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "sf-vpbullet/backend-audio-comparison.json",
+      "handling": "sf-vpbullet/handling-comparison.json",
+      "audio": "sf-vpbullet/audio-comparison.json"
+    },
+    {
+      "id": "sf-vpcoop",
+      "city": "sf",
+      "car": "vpcoop",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Fresh SF Mini source capture with safe-stop final section; original identity/density/ground/body-impulse guards reviewed by capture owner. Native all-contact sidecar has zero prop or solved body constraints. Ordinary frozen keyboard replay; all diagnostic modes off. Live replay byte-identical physics, attached sinks observed, device samples unrecorded.",
+      "backend_audio": "sf-vpcoop/backend-audio-comparison.json",
+      "handling": "sf-vpcoop/handling-comparison.json",
+      "audio": "sf-vpcoop/audio-comparison.json"
+    },
+    {
+      "id": "london-vpbug-hb",
+      "city": "london",
+      "car": "vpbug",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Older London Beetle source capture predates pre-pose density metadata; zero body impulse/push reviewed, fresh London scene verified by capture owner. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "london-vpbug-hb/backend-audio-comparison.json",
+      "handling": "london-vpbug-hb/handling-comparison.json",
+      "audio": "london-vpbug-hb/audio-comparison.json"
+    },
+    {
+      "id": "london-vppanoz-hb",
+      "city": "london",
+      "car": "vppanoz",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "london-vppanoz-hb/backend-audio-comparison.json",
+      "handling": "london-vppanoz-hb/handling-comparison.json",
+      "audio": "london-vppanoz-hb/audio-comparison.json"
+    },
+    {
+      "id": "london-vpbullet-hb",
+      "city": "london",
+      "car": "vpbullet",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "london-vpbullet-hb/backend-audio-comparison.json",
+      "handling": "london-vpbullet-hb/handling-comparison.json",
+      "audio": "london-vpbullet-hb/audio-comparison.json"
+    },
+    {
+      "id": "london-vpcoop-hb",
+      "city": "london",
+      "car": "vpcoop",
+      "frames": 1800,
+      "status": "reviewed_clean",
+      "review_note": "Full1801 original rows and1800 native frames; allfour wheels grounded; six recorded original ICS impulse/push/turn arrays zero throughout. Native all-contact sidecar reviewed clear of hull/prop constraints. Live car tuning verified, fresh city load visually confirmed. Pre-pose live traffic/cops zero guarded. Ordinary frozen keyboard replay, all diagnostic modes explicitly off. Backend evidence uses byte-identical physics CSV; attached sinks observed, device samples unrecorded.",
+      "backend_audio": "london-vpcoop-hb/backend-audio-comparison.json",
+      "handling": "london-vpcoop-hb/handling-comparison.json",
+      "audio": "london-vpcoop-hb/audio-comparison.json"
+    }
+  ]
+}

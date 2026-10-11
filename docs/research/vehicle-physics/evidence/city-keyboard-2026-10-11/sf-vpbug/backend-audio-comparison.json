@@ -1,0 +1,212 @@
+{
+  "original": "original.json.gz",
+  "native": "native.backend-audio.json.gz",
+  "alignment": "source n\u22121 = native frame; stops are exclusive; band indices are table row ordinals",
+  "source_backend_lag_ticks": 1,
+  "native_request_delay_ticks": 1,
+  "native_evidence": "requested mix plus attached sink gain/pause/empty state; positive-gain windows compared; device output not recorded",
+  "surface_scope": "retail sampler observes current class bands; native internal-law check excludes different classes",
+  "retail_internal_previous_q_vs_backend": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 0.0,
+    "same_band_amplitude_max_error": 0.0
+  },
+  "native_internal_own_q_vs_requested": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "handling_source_q_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "raw_backend_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "lag_adjusted_backend_vs_native_requests": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "source_backend_windows": [
+    {
+      "band": 2,
+      "start": 20,
+      "stop_exclusive": 22
+    },
+    {
+      "band": 2,
+      "start": 187,
+      "stop_exclusive": 198
+    }
+  ],
+  "native_request_windows": [
+    {
+      "band": 2,
+      "start": 20,
+      "stop_exclusive": 22
+    },
+    {
+      "band": 2,
+      "start": 187,
+      "stop_exclusive": 198
+    }
+  ],
+  "raw_timing": {
+    "matching": "greedy nearest onset within 60 ticks, same band only; merged bursts may remain unmatched",
+    "matched": [
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 20,
+          "stop_exclusive": 22
+        },
+        "native": {
+          "band": 2,
+          "start": 20,
+          "stop_exclusive": 22
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 187,
+          "stop_exclusive": 198
+        },
+        "native": {
+          "band": 2,
+          "start": 187,
+          "stop_exclusive": 198
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      }
+    ],
+    "unmatched_source": [],
+    "unmatched_native": []
+  },
+  "lag_adjusted_timing": {
+    "matching": "greedy nearest onset within 60 ticks, same band only; merged bursts may remain unmatched",
+    "matched": [
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 19,
+          "stop_exclusive": 21
+        },
+        "native": {
+          "band": 2,
+          "start": 19,
+          "stop_exclusive": 21
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 186,
+          "stop_exclusive": 197
+        },
+        "native": {
+          "band": 2,
+          "start": 186,
+          "stop_exclusive": 197
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      }
+    ],
+    "unmatched_source": [],
+    "unmatched_native": []
+  },
+  "native_requests_vs_attached_sink": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 0.0,
+    "same_band_amplitude_max_error": 0.0
+  },
+  "source_backend_vs_native_positive_gain_sink": {
+    "samples": 1800,
+    "active_band_set_mismatch_ticks": 0,
+    "any_skid_mismatch_ticks": 0,
+    "same_band_gain_samples": 13,
+    "same_band_amplitude_mae": 7.324847173251214e-09,
+    "same_band_amplitude_max_error": 7.324847173251214e-09
+  },
+  "native_positive_gain_sink_windows": [
+    {
+      "band": 2,
+      "start": 20,
+      "stop_exclusive": 22
+    },
+    {
+      "band": 2,
+      "start": 187,
+      "stop_exclusive": 198
+    }
+  ],
+  "source_backend_vs_native_sink_timing": {
+    "matching": "greedy nearest onset within 60 ticks, same band only; merged bursts may remain unmatched",
+    "matched": [
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 20,
+          "stop_exclusive": 22
+        },
+        "native": {
+          "band": 2,
+          "start": 20,
+          "stop_exclusive": 22
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      },
+      {
+        "band": 2,
+        "source": {
+          "band": 2,
+          "start": 187,
+          "stop_exclusive": 198
+        },
+        "native": {
+          "band": 2,
+          "start": 187,
+          "stop_exclusive": 198
+        },
+        "onset_error_ticks": 0,
+        "stop_error_ticks": 0
+      }
+    ],
+    "unmatched_source": [],
+    "unmatched_native": []
+  }
+}
