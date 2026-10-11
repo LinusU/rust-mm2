@@ -1362,6 +1362,89 @@ fn a_mods_cinfo_renames_the_races_and_is_cosmetic() {
     assert_eq!(observe(&[]).0, "Quick Race: Deck The Hall");
 }
 
+/// F29-AC04 (localization consumer): a mod's `tune/<city>.cinfo` that is
+/// not valid text must not be papered over by the install's own names.
+/// The menu reads the bytes the VFS serves the override from — here they
+/// hold no `Key=Value` line at all, so the rows fall back to their stems —
+/// never the shadowed stock list, and the bad bytes do not panic.
+#[test]
+fn a_malformed_cinfo_override_is_not_papered_over_by_the_stocks_names() {
+    let tmp = install();
+    write(
+        tmp.path(),
+        "tune/testcity.cinfo",
+        "LocalizedName=Test City\r\nCheckpointNames=Racing 101|Deck The Hall\r\n",
+    );
+    let mod_dir = tempfile::tempdir().unwrap();
+    write(mod_dir.path(), "mod.toml", "[mod]\nid = \"broken-cinfo\"\n");
+    // Not valid UTF-8, and no `=` anywhere: nothing the parser can read.
+    write(
+        mod_dir.path(),
+        "tune/testcity.cinfo",
+        [
+            0xffu8, 0xfe, 0x00, 0xff, b'g', b'a', b'r', b'b', b'a', b'g', b'e',
+        ],
+    );
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let mut loaded = store.load(&alice.id).unwrap().profile;
+    loaded.selections.last_event = Some(EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        stem: "race1".into(),
+    });
+    store.save(&mut loaded).unwrap();
+
+    let observe = |mods: &[&Path]| {
+        let mut vfs = vfs_of(tmp.path());
+        for (i, m) in mods.iter().enumerate() {
+            vfs.mount_mod(m, 300 + i as i32).unwrap();
+        }
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        let mut app = menu_app_vfs(vfs, MenuData::new(Some(store), false, None));
+        app.update();
+        activate_row(&mut app, "Driver:");
+        activate_row(&mut app, "Alice");
+        press(&mut app, KeyCode::Escape);
+        let quick = quick_race(&app).0;
+        activate_row(&mut app, "Events");
+        activate_row(&mut app, "testcity");
+        activate_row(&mut app, "Checkpoint");
+        let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+        (quick, rows)
+    };
+
+    let (quick, rows) = observe(&[]);
+    assert_eq!(quick, "Quick Race: Deck The Hall");
+    assert_eq!(rows[..2], ["Racing 101", "Deck The Hall"]);
+
+    // The broken override carries no names of its own, so the rows take
+    // their stem labels — and the install's names, shadowed by the
+    // override, never reappear.
+    let (quick, rows) = observe(&[mod_dir.path()]);
+    assert_eq!(
+        rows,
+        [
+            "Checkpoint #0 (race0)",
+            "Checkpoint #1 (race1)",
+            "Checkpoint #2 (race2)",
+            "Checkpoint #3 (race3)"
+        ],
+        "the override's own (name-less) content stands"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.contains("Racing 101") || r.contains("Deck The Hall")),
+        "the shadowed stock names must not stand in: {rows:?}"
+    );
+    assert_eq!(quick, "Quick Race: Checkpoint #1 (race1)");
+}
+
 /// Won races carry a badge in the event list: a beaten record marks
 /// its row with the difficulties it was beaten at, while a finish that
 /// missed the place criterion (or no record at all) leaves it bare.

@@ -972,6 +972,74 @@ fn a_malformed_selected_override_is_reported_not_papered_over() {
         bank.load(&vfs, &mut waves, "roadskid1").is_err(),
         "an unsupported encoding is an error, not the base cue"
     );
+
+    // Model, unsupported encoding: a file that is not a `PKG2`/`PKG3`
+    // container. The car's geometry is required, so a bad container is an
+    // error — the install's own model must not stand in.
+    let m = broken_mod(root, "badmodel", "geometry/vpt.pkg", b"PKG9 not a model");
+    let vfs = mounted(&f.base, &m);
+    assert!(
+        load_vehicle(&vfs, "vpt", 0).is_err(),
+        "a model with a container the parser does not know is an error"
+    );
+    assert!(
+        load_vehicle(&vfs, "vpu", 0).is_ok(),
+        "the bystander still loads its own model"
+    );
+
+    // Texture, unsupported encoding: a well-formed TEX whose pixel type
+    // has no decoder (`TEX.md` type 99; `decode_rgba` returns `None`).
+    // The mod's `.tex` outranks the install's `.png` for the same stem —
+    // source priority first — so the undecodable file is what the
+    // consumer must report, never the shadowed PNG.
+    for (id, bytes) in [
+        ("badtex", unknown_tex(2, 2)),
+        // Malformed encoding: a TEX header that stops before its pixel
+        // fields — a structural parse error, reported the same way.
+        ("trunctex", unknown_tex(2, 2)[..6].to_vec()),
+    ] {
+        let m = broken_mod(root, id, "texture/vpt_skin.tex", &bytes);
+        let vfs = mounted(&f.base, &m);
+        let mut images: Assets<Image> = Assets::default();
+        let mut materials: Assets<StandardMaterial> = Assets::default();
+        let mut cache = MaterialCache::new(&vfs, &mut images, &mut materials);
+        let broken = cache.get("vpt_skin");
+        // The broken override is scoped to its stem: the sibling car's
+        // untouched `vpu_skin.png` still decodes.
+        let bystander = cache.get("vpu_skin");
+        assert!(
+            cache.missing_textures().contains("vpt_skin"),
+            "{id}: the undecodable .tex is reported"
+        );
+        assert!(
+            materials
+                .get(&broken)
+                .and_then(|m| m.base_color_texture.clone())
+                .is_none(),
+            "{id}: the install's PNG must not stand in for the undecodable .tex"
+        );
+        assert!(
+            materials
+                .get(&bystander)
+                .and_then(|m| m.base_color_texture.clone())
+                .is_some(),
+            "{id}: the bystander texture still resolves"
+        );
+    }
+}
+
+/// A TEX with a pixel type no decoder recognises: the header parses, the
+/// pixels are kept raw, and `decode_rgba` yields nothing.
+fn unknown_tex(width: u16, height: u16) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&width.to_le_bytes());
+    d.extend_from_slice(&height.to_le_bytes());
+    d.extend_from_slice(&99u16.to_le_bytes()); // pixel type 99: Unknown
+    d.extend_from_slice(&1u16.to_le_bytes()); // mips
+    d.extend_from_slice(&0u16.to_le_bytes()); // unknown
+    d.extend_from_slice(&0u32.to_le_bytes()); // bits
+    d.extend_from_slice(&[0u8; 16]); // pixels, kept raw for the unknown type
+    d
 }
 
 /// F29-AC03: the same ranked provenance line for one mod-against-mod
