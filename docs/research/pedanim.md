@@ -363,6 +363,34 @@ names are resolved at `0x54b200..` (`WALK_STAND`, `STAND_ANTIC`,
   player-only filtering and the steering-based side choice (each needs
   a field or table identity the disassembly did not settle).
 
+## Car contact (F19-B.8, read from `Midtown2.exe`)
+
+Question: does a retail car physically hit a walker? Answer from the
+walker side: nothing in the code reads a contact.
+
+- The walker update `0x54b9a0` dispatches on a reaction word at +0x10
+  that only takes 0 (walking), 1 (wary), 2 (diving); the car enters only
+  through the sensing tests of "Car sensing" above. A standing walker
+  (`0x54bb12..0x54bb87`) wakes into `WALK` when a car comes within twice
+  a car-component radius (vtable +0x18) — a proximity wake-up, not a hit.
+- No string names a hit, splat, roadkill, damage or score for a walker.
+  `Ped %d biffed.` (`0x5d6f20`, pushed at `0x544193`) is the exception
+  handler arm of the per-ped loop at `0x544130`; the sibling arms print
+  `Vehicle/Opp/Cop/Hookman %d biffed.` for their own loops, so it is a
+  fault report.
+- `pedRagdollMgr` (`0x5db18c`, checked in the singleton constructor
+  `0x57b630`, global `0x6b3720`, vtable `0x5b535c`) is the walker
+  animation state-graph player: `0x57b070` advances a time word by the
+  frame delta and, past a per-state threshold, enters the next state
+  (`0x57b2d0`). It drives the csv chain, not rigid-body ragdolls.
+- The walker instance (constructor `0x551b50`, vtable `0x5b490c`,
+  size 0x3c) is a level-instance object. Not traced: whether the
+  vehicle collision broad phase ever visits it. That half, and any play
+  observation, stay open (original-rules PED-2 / UNK-15).
+
+Conclusion: no physical car-walker interaction is evidenced; the
+no-collider policy stands (DSN-89).
+
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
 The windowed app and the headless evidence path (`--headless`, the
