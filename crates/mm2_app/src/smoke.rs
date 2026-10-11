@@ -186,6 +186,14 @@ pub struct StopWhen {
     /// itself emitted this many impacts (`impacts=`) — a predicted
     /// contact can trail the wire's news of the same collision.
     pub peer_left_after_impacts: u64,
+    /// Stop once this process has applied an authority snapshot at or
+    /// past this session tick (`RemoteSnaps::applied`). The authority's
+    /// own clock, unlike `--frames`: a client's local step count is its
+    /// throughput, so a loaded or lossy link can leave a frame budget
+    /// short of a state the *authority* has not reached yet. Waiting on
+    /// the applied wire tick puts every process's record at the same
+    /// point of the authority's sim, whatever its local step rate.
+    pub snap_tick: Option<u64>,
     /// Stop once this much wall-clock time has passed since the first
     /// update — the bound on a condition that never comes.
     pub deadline: Option<Duration>,
@@ -198,6 +206,7 @@ impl StopWhen {
             || self.resets_observed.is_some()
             || self.repaired.is_some()
             || self.peer_left
+            || self.snap_tick.is_some()
             || self.deadline.is_some()
     }
 }
@@ -228,6 +237,7 @@ enum StopReason {
     Resets,
     Repaired,
     PeerLeft,
+    SnapTick,
     Deadline,
 }
 
@@ -238,6 +248,7 @@ impl StopReason {
             Self::Resets => "resets",
             Self::Repaired => "repaired",
             Self::PeerLeft => "peer-left",
+            Self::SnapTick => "snap-tick",
             Self::Deadline => "deadline",
         }
     }
@@ -292,6 +303,14 @@ impl StopWatch {
             {
                 return Some(StopReason::PeerLeft);
             }
+        }
+        if let Some(want) = self.stop.snap_tick
+            && world
+                .get_resource::<crate::netdrive::RemoteSnaps>()
+                .and_then(crate::netdrive::RemoteSnaps::applied)
+                .is_some_and(|(_, tick)| tick >= want)
+        {
+            return Some(StopReason::SnapTick);
         }
         match self.stop.deadline {
             Some(limit) if self.started.elapsed() >= limit => Some(StopReason::Deadline),
@@ -2876,6 +2895,29 @@ mod tests {
         assert_eq!(watch.fired(&held(2)), None);
         assert_eq!(watch.fired(&held(2)), None);
         assert_eq!(watch.fired(&held(1)), Some(StopReason::PeerLeft));
+    }
+
+    #[test]
+    fn a_stop_on_a_snapshot_tick_waits_for_the_authority() {
+        let stop = StopWhen {
+            snap_tick: Some(10),
+            ..default()
+        };
+        assert!(stop.is_armed());
+        let mut watch = StopWatch::new(stop);
+        // No stream yet: the authority's clock is unknown, not zero.
+        let mut world = World::new();
+        assert_eq!(watch.fired(&world), None);
+        let mut snaps = crate::netdrive::RemoteSnaps::default();
+        snaps.set_applied(1, 9);
+        world.insert_resource(snaps);
+        assert_eq!(watch.fired(&world), None);
+        // The applied tick is the authority's, not this process's local
+        // step count: only reaching 10 ends the run.
+        world
+            .resource_mut::<crate::netdrive::RemoteSnaps>()
+            .set_applied(1, 10);
+        assert_eq!(watch.fired(&world), Some(StopReason::SnapTick));
     }
 
     #[test]

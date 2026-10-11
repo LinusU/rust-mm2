@@ -880,6 +880,13 @@ impl RemoteSnaps {
         self.applied
     }
 
+    /// Test hook: stage an applied `(generation, tick)` watermark without
+    /// a live stream, so a stop condition on it can be unit-tested.
+    #[cfg(test)]
+    pub(crate) fn set_applied(&mut self, generation: u64, tick: u64) {
+        self.applied = Some((generation, tick));
+    }
+
     /// End the stream's authority boundary: the staged frame, both
     /// watermarks, the per-seat repair ledger and the dedup window all
     /// describe the *ended* session's `(generation, tick)` sequence.

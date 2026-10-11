@@ -420,6 +420,15 @@ struct Cli {
     )]
     with_impacts: u64,
 
+    /// End a `--headless` run once this process has applied an authority
+    /// snapshot at or past this session tick — the authority's own
+    /// clock, not this process's local step count. A multi-process leg
+    /// that must agree on an authority-side state names the tick it
+    /// waits for, so a loaded or lossy link cannot end the run before
+    /// the authority reached it. The record prints `stop=snap-tick`.
+    #[arg(long, value_name = "tick", requires = "headless")]
+    until_snap_tick: Option<u64>,
+
     /// Wall-clock bound, in seconds, on a `--headless` run's
     /// `--until-*` condition: the run ends when it passes, whether or
     /// not the condition came. The record prints `stop=deadline`.
@@ -1401,6 +1410,7 @@ fn main() {
                 repaired: cli.until_repaired,
                 peer_left: cli.until_peer_left,
                 peer_left_after_impacts: cli.with_impacts,
+                snap_tick: cli.until_snap_tick,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
         };
@@ -1420,7 +1430,7 @@ fn main() {
                     "{}",
                     record(
                         smoke::SmokeStatus::Fail,
-                        "--until-impacts/--until-resets/--until-repaired/--until-peer-left/--deadline need --join or --host: \
+                        "--until-impacts/--until-resets/--until-repaired/--until-peer-left/--until-snap-tick/--deadline need --join or --host: \
                          a single-process run only counts --frames"
                             .into(),
                     )

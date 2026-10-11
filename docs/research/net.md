@@ -1872,6 +1872,23 @@ wire actually moved rather than an in-process mailbox's contents.
   isolation. Loopback, dev world, one recipe; the other seven cells
   are not run against a collision.
 
+- **Shove trio after the tick-rate change (NET-SHOVE-AFTER-HANDLING,
+  #1283).** `b991eb8` moved `FIXED_HZ` 120 → 60, and the leg's
+  `bob_frames = 2500` settling "span" became a *local step* budget while
+  the shove's settle is an *authority* quantity: a client that outran
+  the authority's sim ended its record before the strike landed, and
+  alice waited on bob's one-shot `Leave`, which the impaired relay can
+  swallow (both failed on a contended runner; a lost `Leave` left the
+  host's only `event=left` alice's own). The clients now end on
+  `--until-snap-tick <tick>` — the authority's own applied session tick
+  (`RemoteSnaps::applied`, `stop=snap-tick`) — so every record is taken
+  at the same point of the authority's sim whatever a process's local
+  throughput or the link's delay. The span is `43 s × RACE_TICK_HZ`
+  (the field is at rest by ~41 s, tick ≈2470, measured). The 5 % `combined`
+  recipe, the impaired-link counters and every pose assertion are
+  unchanged; bob now also holds alice's seat at his record, so the
+  convergence compares all three.
+
 - **Reset across processes (F25-C.4).** `--reset-at` was inert under a
   `Remote` session (a local teleport is the unannounced self-teleport
   the `R` gate forbids). `netdrive::send_dev_reset_request` now makes
