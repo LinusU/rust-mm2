@@ -1360,7 +1360,7 @@ fn run_headless(
         .unwrap_or_default();
     // F25-A data-plane evidence: `net=` reports the wire traffic the
     // run actually moved — inputs sent (client), inputs applied vs
-    // staled (host), snapshots sent (host) vs applied (client) vs
+    // staled vs rate-limited (host, `l`), snapshots sent (host) vs applied (client) vs
     // staled at the push watermark (client; a duplicated/reordered
     // frame at or behind the newest staged/applied tick), live
     // remote participants, `rspn`, the wheel-spin radians the v7
@@ -1397,10 +1397,11 @@ fn run_headless(
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{},surf{}s/{}a,fix{}",
+                " net=in{}s/{}a/{}x/{}l,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{},surf{}s/{}a,fix{}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
+                r.inputs_limited,
                 r.snaps_sent,
                 r.snaps_applied,
                 r.snaps_staled,

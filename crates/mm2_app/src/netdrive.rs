@@ -934,6 +934,10 @@ pub struct NetDriveReport {
     pub inputs_applied: u64,
     /// Mailbox reads zeroed for staleness or a wrong generation.
     pub inputs_staled: u64,
+    /// `Input` frames the host's mailbox dropped over a seat's rate
+    /// bound ([`mm2_net::INPUT_RATE_HZ`] / [`mm2_net::INPUT_BURST`]) —
+    /// mirrored from the mailbox's lifetime counter.
+    pub inputs_limited: u64,
     /// `Snap` frames the host broadcast.
     pub snaps_sent: u64,
     /// Snapshot frames the client applied to its remote copies.
@@ -2105,6 +2109,7 @@ pub fn apply_remote_inputs(
         return;
     }
     let inputs: RemoteInputs = host.remote_inputs();
+    report.inputs_limited = inputs.rate_limited();
     for (wire, mut input, mut human) in &mut remotes {
         let fresh = inputs.latest(wire.0).filter(|s| {
             s.input.generation == session.wire_generation() && s.received.elapsed() <= INPUT_STALE

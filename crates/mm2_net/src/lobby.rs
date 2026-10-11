@@ -283,6 +283,53 @@ pub struct StampedInput {
 struct PeerMail {
     inputs: BTreeMap<u16, StampedInput>,
     resets: BTreeMap<u16, u64>,
+    buckets: BTreeMap<u16, Bucket>,
+    rate_limited: u64,
+}
+
+/// Sustained per-seat `Input` budget, samples per second. The client
+/// sends one per ~60 Hz session tick; double that leaves headroom for
+/// bursty delivery without letting a flood through. A designed bound,
+/// not an original rule (F25-AC06).
+pub const INPUT_RATE_HZ: u32 = 120;
+
+/// How many `Input` samples a seat may land back-to-back before the
+/// sustained [`INPUT_RATE_HZ`] applies — a stalled link's catch-up burst.
+pub const INPUT_BURST: u32 = 16;
+
+const TOKEN: u64 = 1000;
+
+/// One seat's token bucket, in milli-tokens so the refill stays integer.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    milli_tokens: u64,
+    at: Instant,
+}
+
+impl Bucket {
+    fn full(at: Instant) -> Self {
+        Bucket {
+            milli_tokens: u64::from(INPUT_BURST) * TOKEN,
+            at,
+        }
+    }
+
+    /// Refill to `now`, then take one token if there is one.
+    fn take(&mut self, now: Instant) -> bool {
+        let micros = now.saturating_duration_since(self.at).as_micros();
+        let refill = micros.saturating_mul(u128::from(INPUT_RATE_HZ)) / 1000;
+        let cap = u64::from(INPUT_BURST) * TOKEN;
+        self.milli_tokens = u64::try_from(u128::from(self.milli_tokens).saturating_add(refill))
+            .unwrap_or(u64::MAX)
+            .min(cap);
+        self.at = self.at.max(now);
+        if self.milli_tokens >= TOKEN {
+            self.milli_tokens -= TOKEN;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// The host's per-player data-plane mailbox (F25-A). Each admitted
@@ -312,7 +359,30 @@ impl RemoteInputs {
     /// legs and any future unordered transport — spec req 1's sequence
     /// handling.
     fn store(&self, id: u16, input: DriveInput) {
+        self.store_at(id, input, Instant::now());
+    }
+
+    /// [`Self::store`] against an explicit arrival instant, so the rate
+    /// bound is testable without sleeping.
+    ///
+    /// Each seat has a token bucket ([`INPUT_RATE_HZ`], [`INPUT_BURST`]):
+    /// a sample arriving with the bucket empty is dropped and counted in
+    /// [`Self::rate_limited`] — a flooding peer costs one counter bump per
+    /// frame, never a queue, and its newest admitted sample stays put.
+    fn store_at(&self, id: u16, input: DriveInput, now: Instant) {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.buckets.len() >= MAX_PLAYERS as usize && !mail.buckets.contains_key(&id) {
+            return;
+        }
+        if !mail
+            .buckets
+            .entry(id)
+            .or_insert_with(|| Bucket::full(now))
+            .take(now)
+        {
+            mail.rate_limited += 1;
+            return;
+        }
         if mail
             .inputs
             .get(&id)
@@ -327,9 +397,18 @@ impl RemoteInputs {
             id,
             StampedInput {
                 input,
-                received: Instant::now(),
+                received: now,
             },
         );
+    }
+
+    /// `Input` frames dropped by the per-seat rate bound, over the
+    /// mailbox's lifetime (all seats).
+    pub fn rate_limited(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rate_limited
     }
 
     /// `id`'s newest sample, if one ever arrived.
@@ -372,6 +451,7 @@ impl RemoteInputs {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         mail.inputs.remove(&id);
         mail.resets.remove(&id);
+        mail.buckets.remove(&id);
     }
 
     /// Occupied input slots — for the consumer's diagnostics; never
@@ -399,6 +479,7 @@ impl RemoteInputs {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         mail.inputs.clear();
         mail.resets.clear();
+        mail.buckets.clear();
     }
 }
 
@@ -2967,6 +3048,45 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// A flood far above the bound lands only the burst plus the
+    /// refill, the rest are counted and dropped — never queued — and a
+    /// quiet interval restores the budget. Deterministic: explicit
+    /// arrival instants, no sleeping.
+    #[test]
+    fn an_input_flood_is_bounded_and_counted() {
+        let inputs = RemoteInputs::default();
+        let t0 = Instant::now();
+        // 1000 samples inside one millisecond: the burst lands, the rest drop.
+        for seq in 1..=1000u64 {
+            inputs.store_at(1, drive_input(seq), t0 + Duration::from_micros(seq));
+        }
+        let landed = u64::from(INPUT_BURST);
+        assert_eq!(inputs.rate_limited(), 1000 - landed);
+        assert_eq!(inputs.latest(1).unwrap().input.seq, landed);
+        // A second seat has its own budget.
+        inputs.store_at(2, drive_input(1), t0);
+        assert_eq!(inputs.rate_limited(), 1000 - landed);
+        // At the sustained rate nothing is dropped.
+        let step = Duration::from_secs(1) / INPUT_RATE_HZ;
+        let base = t0 + Duration::from_secs(10);
+        for k in 0..240u64 {
+            inputs.store_at(1, drive_input(2000 + k), base + step * k as u32);
+        }
+        assert_eq!(inputs.rate_limited(), 1000 - landed);
+        assert_eq!(inputs.latest(1).unwrap().input.seq, 2239);
+        // The map stays bounded by the roster ceiling.
+        for id in 10..40u16 {
+            inputs.store_at(id, drive_input(1), base);
+        }
+        assert!(inputs.input_len() <= MAX_PLAYERS as usize);
+        // A departing seat's budget goes with it.
+        inputs.remove(1);
+        for seq in 1..=u64::from(INPUT_BURST) {
+            inputs.store_at(1, drive_input(seq), base);
+        }
+        assert_eq!(inputs.latest(1).unwrap().input.seq, u64::from(INPUT_BURST));
     }
 
     fn drive_input(seq: u64) -> DriveInput {

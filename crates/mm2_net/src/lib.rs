@@ -54,8 +54,8 @@ pub use conn::{
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
 pub use lobby::{
-    Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause, PickValidator,
-    RemoteInputs, StampedInput,
+    Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST, INPUT_RATE_HZ, LateJoin,
+    LeaveCause, PickValidator, RemoteInputs, StampedInput,
 };
 pub use proto::{
     DriveInput, Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_SNAP_CARS, MAX_SNAP_CNR_SEATS,
