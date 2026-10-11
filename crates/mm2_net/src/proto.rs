@@ -80,8 +80,12 @@
 /// prediction. A v24 peer would predict different roll and wheel contacts
 /// for the same assets, so reject it before entering a session. v26:
 /// `Message::Leaves` — the authority's proximity drawbridge leaves,
-/// which open for whoever came near them on the host (F26-A.4).
-pub const PROTOCOL_VERSION: u16 = 26;
+/// which open for whoever came near them on the host (F26-A.4). v27:
+/// `Message::Signals` — the authority's traffic-signal phase (the member
+/// road currently green at each light-controlled junction) as its own
+/// host→client frame, so a client renders the host's lights rather than
+/// none (F26-A.4b).
+pub const PROTOCOL_VERSION: u16 = 27;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -113,6 +117,7 @@ const TAG_WORLD: u8 = 0x12;
 const TAG_CNR: u8 = 0x13;
 const TAG_KEEPALIVE: u8 = 0x14;
 const TAG_LEAVES: u8 = 0x15;
+const TAG_SIGNALS: u8 = 0x16;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -539,6 +544,33 @@ pub struct SnapLeaf {
     pub angle: f32,
 }
 
+/// Bound on one [`Message::Signals`] frame's rows: one row per
+/// light-controlled junction a city authors. Retail San Francisco has
+/// about 180 and London about 220 (measured over the shipped `.bai`
+/// files), so the bound is far above need while a hostile count still
+/// cannot claim an unbounded tail. `u16` because the number of
+/// junctions in a modded city can exceed a byte.
+pub const MAX_SNAP_SIGNALS: u16 = 512;
+
+/// A [`SnapSignal::green`] value meaning the junction is in its all-red
+/// clearance slice — no member road holds the phase.
+pub const SIGNAL_NO_GREEN: u16 = u16::MAX;
+
+/// One light-controlled junction's replicated phase inside a
+/// [`Message::Signals`] frame (v27, F26-A.4b). The junction is named by
+/// `junction`, its BAI intersection index, and `green` is the BAI road
+/// index currently holding the phase (or [`SIGNAL_NO_GREEN`]). Head
+/// positions and their authored rules are deterministic scene data
+/// both peers derive from the same `.bai`, so the frame carries only
+/// the phase the authority decides. *State*, not an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapSignal {
+    /// The BAI intersection index.
+    pub junction: u16,
+    /// The BAI road index holding the phase, or [`SIGNAL_NO_GREEN`].
+    pub green: u16,
+}
+
 /// One ambient car's replicated state inside a [`Message::Traffic`]
 /// frame (v19, F26-A). The car is named by `id`, an opaque key the
 /// host minted when it spawned the car (never an `ObjectId`, which
@@ -884,6 +916,23 @@ pub enum Message {
         /// One row per proximity leaf.
         rows: Vec<SnapLeaf>,
     },
+    /// Host → every client: the authority's traffic-signal phase (v27,
+    /// F26-A.4b) — one row per light-controlled junction, so a client
+    /// renders the host's lights rather than none. A client never
+    /// decides a phase itself; it applies the road the host names and
+    /// derives each head's aspect from it. `tick` is the host's world
+    /// tick at capture and orders frames per generation; `generation`
+    /// gates it like [`Message::Snap`]. Bounded by
+    /// [`MAX_SNAP_SIGNALS`]. *State*: a lost frame self-corrects on the
+    /// next.
+    Signals {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// The authority's world tick at capture.
+        tick: u64,
+        /// One row per light-controlled junction.
+        rows: Vec<SnapSignal>,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -939,6 +988,9 @@ pub enum ProtoError {
     /// A leaves frame declared more than [`MAX_SNAP_LEAVES`] rows.
     #[error("leaves frame declares {0} rows, bound is {MAX_SNAP_LEAVES}")]
     OversizeLeaves(u8),
+    /// A signals frame declared more than [`MAX_SNAP_SIGNALS`] rows.
+    #[error("signals frame declares {0} rows, bound is {MAX_SNAP_SIGNALS}")]
+    OversizeSignals(u16),
 }
 
 impl RejectCode {
@@ -1349,6 +1401,25 @@ impl Message {
                     out.extend_from_slice(&row.angle.to_le_bytes());
                 }
             }
+            Self::Signals {
+                generation,
+                tick,
+                rows,
+            } => {
+                out.push(TAG_SIGNALS);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                if rows.len() > MAX_SNAP_SIGNALS as usize {
+                    return Err(ProtoError::OversizeSignals(
+                        rows.len().min(u16::MAX as usize) as u16,
+                    ));
+                }
+                out.extend_from_slice(&(rows.len() as u16).to_le_bytes());
+                for row in rows {
+                    out.extend_from_slice(&row.junction.to_le_bytes());
+                    out.extend_from_slice(&row.green.to_le_bytes());
+                }
+            }
             Self::World { generation, ticks } => {
                 out.push(TAG_WORLD);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -1629,6 +1700,26 @@ impl Message {
                     });
                 }
                 Self::Leaves {
+                    generation,
+                    tick,
+                    rows,
+                }
+            }
+            TAG_SIGNALS => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let count = cur.u16()?;
+                if count > MAX_SNAP_SIGNALS {
+                    return Err(ProtoError::OversizeSignals(count));
+                }
+                let mut rows = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    rows.push(SnapSignal {
+                        junction: cur.u16()?,
+                        green: cur.u16()?,
+                    });
+                }
+                Self::Signals {
                     generation,
                     tick,
                     rows,
@@ -2243,6 +2334,81 @@ mod tests {
             Message::decode(&wide),
             Err(ProtoError::OversizeLeaves(MAX_SNAP_LEAVES + 1))
         );
+    }
+
+    #[test]
+    fn signal_frames_round_trip_and_are_bounded() {
+        let row = |i: u32| SnapSignal {
+            junction: i as u16,
+            green: if i % 5 == 4 {
+                SIGNAL_NO_GREEN
+            } else {
+                i as u16 + 1
+            },
+        };
+        let frame = |n: u32| Message::Signals {
+            generation: 7,
+            tick: 99,
+            rows: (0..n).map(row).collect(),
+        };
+        for n in [0, 1, MAX_SNAP_SIGNALS as u32] {
+            let msg = frame(n);
+            assert_eq!(Message::decode(&msg.encode().unwrap()).unwrap(), msg);
+        }
+        // A full frame's row count is a `u16` on the wire, and each row
+        // is two `u16`s (`junction`, `green`), so the byte length is the
+        // header plus four bytes per row.
+        let bytes = frame(MAX_SNAP_SIGNALS as u32).encode().unwrap();
+        assert_eq!(bytes.len(), 1 + 8 + 8 + 2 + 4 * MAX_SNAP_SIGNALS as usize);
+        assert_eq!(
+            frame(MAX_SNAP_SIGNALS as u32 + 1).encode(),
+            Err(ProtoError::OversizeSignals(MAX_SNAP_SIGNALS + 1))
+        );
+        let mut wide = vec![TAG_SIGNALS];
+        wide.extend_from_slice(&[0; 16]);
+        wide.extend_from_slice(&(MAX_SNAP_SIGNALS + 1).to_le_bytes());
+        assert_eq!(
+            Message::decode(&wide),
+            Err(ProtoError::OversizeSignals(MAX_SNAP_SIGNALS + 1))
+        );
+        // A count past a byte still decodes to the bound error, never a
+        // small, plausible-looking one.
+        let mut huge = vec![TAG_SIGNALS];
+        huge.extend_from_slice(&[0; 16]);
+        huge.extend_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(
+            Message::decode(&huge),
+            Err(ProtoError::OversizeSignals(u16::MAX))
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_padded_signal_frame_is_refused() {
+        let bytes = Message::Signals {
+            generation: 3,
+            tick: 9,
+            rows: vec![
+                SnapSignal {
+                    junction: 4,
+                    green: 9,
+                },
+                SnapSignal {
+                    junction: 5,
+                    green: SIGNAL_NO_GREEN,
+                },
+            ],
+        }
+        .encode()
+        .unwrap();
+        for cut in 1..bytes.len() {
+            assert!(
+                Message::decode(&bytes[..cut]).is_err(),
+                "a {cut}-byte prefix decoded"
+            );
+        }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
     }
 
     #[test]
