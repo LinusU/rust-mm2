@@ -161,6 +161,24 @@ impl ModReport {
         self.gameplay == 0
     }
 
+    /// One-line verdict, the same text for every process that reports it
+    /// (the dedicated host's `--explain` output is checked against an
+    /// in-process mount of the same mods).
+    pub fn verdict_line(&self) -> String {
+        format!(
+            "mod {}: {} (gameplay {}, cosmetic {}, shadowed {})",
+            self.id,
+            if self.is_cosmetic_only() {
+                "cosmetic-only"
+            } else {
+                "gameplay"
+            },
+            self.gameplay,
+            self.cosmetic,
+            self.shadowed,
+        )
+    }
+
     /// Why the manifest's claim disagrees with the files the mod wins, or
     /// `None` when there is no claim or it holds. The claim never changes
     /// the verdict; this only tells the author their `effect` is wrong.

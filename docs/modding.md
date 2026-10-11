@@ -217,6 +217,15 @@ the byte-level identity of gameplay content.
     game's mount log on stdout, `mm2-host`'s on stderr, `mm2-inspect
     conflicts` on stdout).
   Use `mm2-inspect list` + `lookup` to verify which file is live.
+  `mm2-host --explain <logical>` (repeatable) prints each mod's verdict
+  line and the same `Explanation::render` block to stderr before it listens;
+  `net_host::a_host_process_explains_mod_conflicts_like_an_in_process_mount`
+  and the inspector's `resolve_matches_an_in_process_mount_explanation`
+  hold both to an in-process mount of the same dirs, and the host's
+  advertised `fingerprint=` to `fingerprint::gameplay` of that mount
+  (F29-AC03, synthetic content). Provenance has no cache of its own:
+  `Explanation` is recomputed from the immutable `Vfs`, whose `revision()`
+  and gameplay fingerprint are the identities described above.
 - `mm2-inspect [--mods <dir>] deps <install> <car> [--paint N]
   [--expect-mod <id>]` loads a car through the production loader with the
   VFS tracing every read (`Vfs::trace_reads`), then lists the files the load

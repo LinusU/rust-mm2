@@ -445,3 +445,84 @@ fn an_unrunnable_event_is_refused_at_flag_time() {
         assert!(stderr.contains(needle), "{args:?} stderr: {stderr}");
     }
 }
+
+/// F29-AC03: the dedicated host process and an in-process mount (what the
+/// app and the inspector both build with `mount_install` + `mount_mods`)
+/// explain a mod conflict identically — the same winner, shadowed sources,
+/// reason and per-mod verdict — and the host's advertised fingerprint is
+/// the one the in-process mount computes. Bounded by `WAIT`, not sleeps.
+#[test]
+fn a_host_process_explains_mod_conflicts_like_an_in_process_mount() {
+    use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
+    use mm2_content::fingerprint;
+
+    fn write(root: &std::path::Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    write(&install, "texture/shared.png", "install");
+    write(&install, "tune/shared.txt", "install");
+    for id in ["alpha", "beta"] {
+        let m = mods.join(id);
+        write(&m, "mod.toml", &format!("[mod]\nid = \"{id}\"\n"));
+        write(&m, "texture/shared.png", id);
+    }
+    // Only alpha touches gameplay, and beta shadows it nowhere there.
+    write(&mods.join("alpha"), "tune/shared.txt", "alpha");
+
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &install, &InstallMount::default()).unwrap();
+    mount_mods(&mut vfs, &mods).unwrap();
+    let paths = ["texture/shared.png", "tune/shared.txt"];
+    let mut expected = String::new();
+    for report in fingerprint::mod_reports(&vfs) {
+        expected.push_str(&report.verdict_line());
+        expected.push('\n');
+    }
+    for p in paths {
+        expected.push_str(&vfs.explain(p).unwrap().render());
+    }
+    let reports = fingerprint::mod_reports(&vfs);
+    assert!(
+        reports.iter().any(|r| !r.is_cosmetic_only())
+            && reports.iter().any(|r| r.is_cosmetic_only()),
+        "the fixture yields both verdicts: {reports:?}"
+    );
+
+    let mut args: Vec<String> = [
+        "--mm2-path",
+        install.to_str().unwrap(),
+        "--mods",
+        mods.to_str().unwrap(),
+        "--dev-world",
+        "--bind",
+        "127.0.0.1:0",
+    ]
+    .map(String::from)
+    .to_vec();
+    for p in paths {
+        args.extend(["--explain".to_string(), p.to_string()]);
+    }
+    let host = HostProc::spawn(HOST_EXE, &args);
+    let (_, fp, _) = listening(&host);
+    let stderr = host.stderr_containing("tune/shared.txt", WAIT);
+    // Stderr also carries the mount log; the explanation is the contiguous
+    // block from the first verdict line on.
+    let start = stderr
+        .find("mod alpha:")
+        .unwrap_or_else(|| panic!("no verdict in host stderr:\n{stderr}"));
+    let got = &stderr[start..];
+    assert!(
+        got.starts_with(&expected),
+        "host explanation differs from the in-process one\n--- host ---\n{got}\n--- expected ---\n{expected}"
+    );
+    assert_eq!(
+        fp,
+        fingerprint::gameplay(&vfs).unwrap().hash,
+        "the cache identity the host advertises matches the in-process mount"
+    );
+}

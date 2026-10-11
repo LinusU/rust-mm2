@@ -403,3 +403,32 @@ fn deps_traces_an_event_and_credits_only_the_mod_that_replaced_its_files() {
     let neither = inspect(&["deps", install]);
     assert!(!neither.status.success());
 }
+
+/// F29-AC03: the inspector prints exactly the `Explanation::render` text an
+/// in-process mount (the app's `mount_install` + `mount_mods`) produces, so
+/// the app, the inspector and the dedicated host (checked against the same
+/// mount in `mm2_app`'s `net_host`) explain a conflict alike.
+#[test]
+fn resolve_matches_an_in_process_mount_explanation() {
+    use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
+
+    let f = fixture();
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, Path::new(&f.install), &InstallMount::default()).unwrap();
+    mount_mods(&mut vfs, Path::new(&f.mods)).unwrap();
+    let expected = vfs.explain("texture/shared.png").unwrap().render();
+
+    let out = inspect(&[
+        "--mods",
+        &f.mods,
+        "resolve",
+        &f.install,
+        "texture/shared.png",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.ends_with(&expected),
+        "{text}\n--- expected ---\n{expected}"
+    );
+}

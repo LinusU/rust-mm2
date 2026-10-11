@@ -67,6 +67,13 @@ struct Cli {
     #[arg(long)]
     mods: Option<PathBuf>,
 
+    /// Print the provenance of a logical path (`Vfs::explain`: winner,
+    /// shadowed sources, why) and every mod's verdict to stderr before
+    /// listening, so an operator can compare it with `mm2-inspect resolve`.
+    /// Repeatable. A path no source provides is a startup failure.
+    #[arg(long, value_name = "logical/path")]
+    explain: Vec<String>,
+
     /// Address to listen on. Loopback+ephemeral is the default; passing
     /// a LAN interface is an explicit operator choice — the host never
     /// binds a public interface unprompted.
@@ -142,6 +149,21 @@ fn main() {
             Err(e) => {
                 eprintln!("error: mounting mods {}: {e}", mods.display());
                 std::process::exit(2);
+            }
+        }
+    }
+
+    if !cli.explain.is_empty() {
+        for report in fingerprint::mod_reports(&vfs) {
+            eprintln!("{}", report.verdict_line());
+        }
+        for path in &cli.explain {
+            match vfs.explain(path) {
+                Some(ex) => eprint!("{}", ex.render()),
+                None => {
+                    eprintln!("error: --explain {path}: no source provides it");
+                    std::process::exit(2);
+                }
             }
         }
     }
