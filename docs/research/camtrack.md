@@ -174,18 +174,50 @@ approaches π (below). `HillMin/HillMax` are radians in the stock data
 ### 5. Reverse swing (verified_original arithmetic)
 
 `ReverseOn` (1 by default and in the 38 stock records that author it; the
-other 11 omit it and keep the default 1): when `carsim+0x304`
-(`Transmission.CurrentGear`, 0 = reverse) is 0, the car is not handbraking
-hard and the throttle exceeds 0.05 (`carsim+0x2bc`, `0x5afc1c`), a timer
-counts to **2.0 s (hard-coded, `0x5af578`)**, then a `reversing` flag
-(`0x248`) is set and a side sign (`0x250` = −1 if steer input > 0.1, else +1)
-chosen. The camera then orbits the aim point by an angle ramping toward
-`±π` at **`RevOnApp` rad/s**, and back to 0 at **`RevOffApp` rad/s**
-once the car leaves reverse (the angle is rotated about `up` with `0x4bce50`).
-`ReverseOn == −1` pins the angle at π whenever the flag is set. The
-blend factor `|angle|/π` scales the hill bias out.
-**`RevDelay` (`0x174`) is never read** — the 2.0 s is a constant, so editing
-the field changes nothing in the retail build.
+other 11 omit it and keep the default 1). Re-read for #1212, the
+reverse detection `0x51dc50` is, with `ReverseOn == 1`:
+
+- **In reverse gear** (`carsim+0x304 == 0`): a carsim handbrake
+  (`+0x1550`) above 0.5 zeroes the live `AppXZPos`; and while the
+  `reversing` flag (`0x248`) is clear and the engine throttle
+  (`+0x2bc`) is ≥ 0.05, a timer (`0x24c`) adds `dt`. At **2.0 s
+  (hard-coded, `0x5af578`)** the flag is set and the side (`0x250`)
+  chosen: −1 if steering (`+0x1554`) > 0.1, else +1. The timer is not
+  reset by releasing the throttle, only by leaving reverse gear.
+  (An earlier reading of this note had the handbrake gating the timer;
+  the code only uses it to zero `AppXZPos`.)
+- **Out of reverse gear**: if the flag was set the side is re-chosen
+  from the steering, and an angle with `|angle| > 3.1405928`
+  (π − 0.001, `0x5b3f0c`) is snapped to `side·π`; the flag and the
+  timer are cleared either way.
+
+`0x51e3e0` then ramps the orbit angle (the slot at `[0x184]+8`):
+toward `side·π` at **`RevOnApp` rad/s** while the flag is set, toward 0 at
+**`RevOffApp` rad/s** otherwise, never passing the target, in the
+fixed `dt`. `ReverseOn == −1` instead sets the flag in every frame and
+pins the angle at π while it is set (0 otherwise). The desired eye is
+rotated about the aim point round the world-up axis by that angle (the
+eye minus `T` goes through `0x4bce50`, then `T` is added back), and the
+eye approaches the swung position as usual. The *sign convention* of
+`0x4bce50` is not read: the port rotates right-handed about +Y, so the
+direction the boom sweeps is **inferred**; that it ends in front of the
+car is not.
+The blend factor `f = |angle|/π` (0 at 0, 1 at ≥ π) enters the hill
+bias as `HillBias·(1 − 2f)` — it **flips the sign** at a full swing
+rather than fading it out — added to the pitch slot `[0x184]+0xc`,
+which rotates the eye about the camera's right axis. Applying it needs
+the engine's rotation sign convention and the `0x51dec0` slope
+geometry (a `0x4c0420` call is unresolved), so the hill bias stays
+**unbound**; `HillMin/Max/Lerp` are parsed and validated only.
+**`RevDelay` (`0x174`) is never read** — the 2.0 s is a constant, so
+editing the field changes nothing in the retail build.
+
+`TrackBreak` (same function, `0x51ddca`): `== 2`, or `== 1` with the
+body's up-axis `y` (`matrix+0x10`) < 0.35, sets `0x194` (broken) and
+clears `0x190` (grounded) and returns before the grounded/airborne
+bookkeeping. The only readers of `0x190/0x194/0x198` are the
+unrecovered flag machine at `0x51e4ad..0x51e53b`, so the port records the
+verdict (`FollowState::broken`) but it moves nothing.
 
 ### 6. `MinMaxOn` is a vertical clamp (verified_original)
 
