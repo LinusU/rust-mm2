@@ -33,6 +33,7 @@ use mm2_formats::cardata::{self, CardataBody, CardataIssue};
 use mm2_formats::creaturedata::{self, CreatureKind, VoiceTable};
 use mm2_formats::dmus::{DmContainer, DmKind};
 use mm2_formats::music::{self, MusicTable};
+use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
 use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
 /// Everything the audit measures, kept separate from printing so tests
@@ -71,6 +72,19 @@ pub struct AudioReport {
     /// Distinct creaturedata wave references with no shipped wave:
     /// `(stem, naming tables)`.
     pub creature_missing: Vec<(String, Vec<String>)>,
+    /// `aud/spchdata` cue tables and registries that parsed cleanly.
+    pub speech_supported: usize,
+    /// `aud/spchdata` files that failed or carry diagnostics:
+    /// `(path, why)`. A diagnostic is an authored quirk, so these are
+    /// listed in `quirks` (a hard parse failure also lands in `failures`).
+    pub speech_unsupported: Vec<(String, String)>,
+    /// Distinct cue wave stems the speech tables can draw (every
+    /// `add+1..=end` suffix of every usable row).
+    pub speech_clips_total: usize,
+    /// …of which resolve to a shipped wave.
+    pub speech_clips_resolved: usize,
+    /// Cue wave stems with no shipped wave: `(stem, naming table)`.
+    pub speech_clips_missing: Vec<(String, String)>,
     /// Deferred `aud/**` CSVs that are plain text (F08 families).
     pub deferred_text: usize,
     /// Deferred text CSVs per `aud/<family>` directory.
@@ -140,6 +154,123 @@ pub struct AudioReport {
     pub refs_resolved: usize,
     /// Unresolved references: name → referring tables.
     pub dead_refs: Vec<(String, Vec<String>)>,
+}
+
+/// One audio family's coverage line (F08-AC04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRow {
+    /// Family label.
+    pub family: &'static str,
+    /// Files in the family.
+    pub files: usize,
+    /// Files with sample decode (or parse) success *and* a runtime
+    /// consumer that plays them.
+    pub supported: usize,
+    /// Files that parse or decode but have no playback semantics yet,
+    /// or that carry parse diagnostics.
+    pub unsupported: usize,
+    /// References the family authors that name no shipped file.
+    pub missing: usize,
+    /// Decode/parse failures.
+    pub failed: usize,
+    /// What `unsupported` means for this family.
+    pub note: &'static str,
+}
+
+impl AudioReport {
+    /// The per-family coverage matrix, derived from the census.
+    pub fn families(&self) -> Vec<FamilyRow> {
+        let wave_failed = self
+            .failures
+            .iter()
+            .filter(|(p, _)| p.ends_with(".wav"))
+            .count();
+        let non_pcm: usize = self
+            .wave_tags
+            .iter()
+            .filter(|(t, _)| **t != mm2_formats::wav::FORMAT_PCM)
+            .map(|(_, n)| n)
+            .sum();
+        let creature = self.creature_supported + self.creature_unsupported.len();
+        let other_tables = self.tables.len().saturating_sub(creature);
+        let other_missing = self
+            .dead_refs
+            .iter()
+            .filter(|(_, users)| users.iter().any(|u| !u.starts_with("aud/creaturedata/")))
+            .count();
+        let table_failed = self
+            .failures
+            .iter()
+            .filter(|(p, _)| p.ends_with(".csv") && !p.starts_with("aud/spchdata/"))
+            .count();
+        let speech_failed = self
+            .failures
+            .iter()
+            .filter(|(p, _)| p.starts_with("aud/spchdata/"))
+            .count();
+        let dm_failed = self
+            .failures
+            .iter()
+            .filter(|(p, _)| !p.ends_with(".wav") && !p.ends_with(".csv"))
+            .count();
+        let speech_files = self.speech_supported + self.speech_unsupported.len() + speech_failed;
+        vec![
+            FamilyRow {
+                family: "waves (aud11/aud22)",
+                files: self.waves + wave_failed,
+                supported: self.waves - non_pcm.min(self.waves),
+                unsupported: non_pcm,
+                missing: 0,
+                failed: wave_failed,
+                note: "non-PCM waves",
+            },
+            FamilyRow {
+                family: "vehicle + object tables (cardata/ambient)",
+                files: other_tables + table_failed,
+                supported: other_tables,
+                unsupported: 0,
+                missing: other_missing,
+                failed: table_failed,
+                note: "",
+            },
+            FamilyRow {
+                family: "creature voices (creaturedata)",
+                files: creature,
+                supported: self.creature_supported,
+                unsupported: self.creature_unsupported.len(),
+                missing: self.creature_missing.len(),
+                failed: 0,
+                note: "files with diagnostics",
+            },
+            FamilyRow {
+                family: "commentary cues (spchdata)",
+                files: speech_files,
+                supported: self.speech_supported,
+                unsupported: self.speech_unsupported.len(),
+                missing: self.speech_clips_missing.len(),
+                failed: speech_failed,
+                note: "tables with diagnostics",
+            },
+            FamilyRow {
+                family: "music cue tables (dmusic/csv_files)",
+                files: self.music_tables.len(),
+                supported: 0,
+                unsupported: self.music_tables.len(),
+                missing: self.dead_music_refs.len(),
+                failed: 0,
+                note: "parsed; row choice and state triggers unrecovered (UNK-25)",
+            },
+            FamilyRow {
+                family: "DirectMusic containers (dmusic)",
+                files: self.dm_parsed + dm_failed,
+                supported: 0,
+                unsupported: self.dm_parsed,
+                missing: self.dead_dm_refs.len(),
+                failed: dm_failed,
+                note: "structure parsed; no synthesizer, so no music plays",
+            },
+        ]
+    }
 }
 
 /// Track kinds (`Track::kind_name`) nearly every retail segment carries.
@@ -303,6 +434,8 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
     // container authors: owner file name → referenced file names.
     let mut dm_files: BTreeMap<String, String> = BTreeMap::new();
     let mut dm_edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Speech cue wave stem → naming table, collected while walking.
+    let mut speech_cues: BTreeMap<String, String> = BTreeMap::new();
 
     let mut logicals: Vec<String> = vfs
         .list()
@@ -525,7 +658,10 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
                         r.tables.push((logical.clone(), summary));
                     }
                 }
-                // spchdata: F08 family — counted, probed text-vs-binary.
+                None if logical.starts_with("aud/spchdata/") => {
+                    absorb_speech(&mut r, logical, &bytes, &mut speech_cues);
+                }
+                // Other deferred families — counted, probed text-vs-binary.
                 None => match std::str::from_utf8(&bytes) {
                     Ok(_) => {
                         r.deferred_text += 1;
@@ -556,6 +692,14 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             .collect();
         if !users.is_empty() {
             r.creature_missing.push((name.clone(), users));
+        }
+    }
+    r.speech_clips_total = speech_cues.len();
+    for (stem, table) in &speech_cues {
+        if stems.contains(stem) {
+            r.speech_clips_resolved += 1;
+        } else {
+            r.speech_clips_missing.push((stem.clone(), table.clone()));
         }
     }
     // Music-table stem → shipped DirectMusic container cross-check.
@@ -666,6 +810,85 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
     r
 }
 
+/// Widest suffix draw the census enumerates per row; a wider authored
+/// range is reported, not walked.
+const MAX_CUE_DRAW: i64 = 1000;
+
+/// Fold one `aud/spchdata/**` file into the speech census: a city
+/// registry or a cue table, and every wave stem the usable rows can
+/// draw (`cue_wave_stem`, the runtime's own naming).
+fn absorb_speech(
+    r: &mut AudioReport,
+    logical: &str,
+    bytes: &[u8],
+    cues: &mut BTreeMap<String, String>,
+) {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        r.deferred_binary.push(logical.to_string());
+        return;
+    };
+    let is_registry = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim().to_ascii_lowercase().starts_with("num announcers"));
+    if is_registry {
+        match AnnouncerIndex::parse(text) {
+            Ok(i) if i.diagnostics.is_empty() => r.speech_supported += 1,
+            Ok(i) => {
+                let why = i
+                    .diagnostics
+                    .iter()
+                    .map(|d| format!("line {}: {}", d.line, d.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                r.quirks.push(format!("{logical}: {why}"));
+                r.speech_unsupported.push((logical.to_string(), why));
+            }
+            Err(e) => r.failures.push((logical.to_string(), e.to_string())),
+        }
+        return;
+    }
+    let table = match CueTable::parse(text) {
+        Ok(t) => t,
+        Err(e) => {
+            r.failures.push((logical.to_string(), e.to_string()));
+            return;
+        }
+    };
+    let semantic = table.validate();
+    let diags: Vec<_> = table.diagnostics.iter().chain(&semantic).collect();
+    if diags.is_empty() {
+        r.speech_supported += 1;
+    } else {
+        let why = diags
+            .iter()
+            .map(|d| format!("line {}: {}", d.line, d.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        r.quirks.push(format!("{logical}: {why}"));
+        r.speech_unsupported.push((logical.to_string(), why));
+    }
+    // `aud/spchdata/<speaker>/<table>.csv` draws `<speaker><prefix><NN>`;
+    // a top-level table authors speaker-qualified prefixes.
+    let speaker = logical
+        .strip_prefix("aud/spchdata/")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(dir, _)| dir)
+        // Lesson tables author whole stems (`CCL01INTRO` →
+        // `ccl01intro01`), so no speaker prefix applies.
+        .filter(|dir| !matches!(*dir, "ccl" | "ccs"))
+        .unwrap_or("");
+    for row in table.sections.iter().flat_map(|s| &s.rows) {
+        if !row.problems().is_empty() || row.end - row.add > MAX_CUE_DRAW {
+            continue;
+        }
+        for suffix in row.add + 1..=row.end {
+            cues.entry(mm2_game::cue_wave_stem(speaker, &row.prefix, suffix))
+                .or_insert_with(|| logical.to_string());
+        }
+    }
+}
+
 /// Print the report; `strict` fails on failures and issues (authored
 /// quirks and findings are reported but do not fail strict).
 pub fn print_report(r: &AudioReport) {
@@ -684,6 +907,32 @@ pub fn print_report(r: &AudioReport) {
     }
     for (name, users) in &r.creature_missing {
         println!("    missing wave {name} (in {})", users.join(", "));
+    }
+    println!("== audio families (F08-AC04) ==");
+    println!(
+        "  {:<44} {:>6} {:>9} {:>11} {:>8} {:>7}",
+        "family", "files", "supported", "unsupported", "missing", "failed"
+    );
+    for f in r.families() {
+        println!(
+            "  {:<44} {:>6} {:>9} {:>11} {:>8} {:>7}  {}",
+            f.family, f.files, f.supported, f.unsupported, f.missing, f.failed, f.note
+        );
+    }
+    println!(
+        "  speech clips: {} drawable, {} resolve, {} missing; wave decode: {}/{} files",
+        r.speech_clips_total,
+        r.speech_clips_resolved,
+        r.speech_clips_missing.len(),
+        r.waves,
+        r.waves
+            + r.failures
+                .iter()
+                .filter(|(p, _)| p.ends_with(".wav"))
+                .count()
+    );
+    for (stem, table) in &r.speech_clips_missing {
+        println!("    missing speech wave {stem} (drawn by {table})");
     }
     if !r.deferred_dirs.is_empty() {
         println!("  deferred text csv (F08 families):");
@@ -933,14 +1182,32 @@ mod tests {
         write(d, "tune/vpbug.info", b"Description = Test\n");
         // A dmusic segment and a deferred speech table.
         write(d, "aud/dmusic/x.sgt", &riff(b"DMSG"));
-        write(d, "aud/spchdata/al1/blitz.csv", b"header\n");
+        write(
+            d,
+            "aud/spchdata/al1/blitz.csv",
+            b"Name prefix/type header,end sufix value,sufix add value\nPRERACE header,,\nWEARAIN,2,0\n",
+        );
 
         let r = audit(&vfs_of(d));
         assert_eq!(r.waves, 2);
         assert_eq!(r.wave_census[&(22050, 1, 16)], 1);
         assert_eq!(r.wave_census[&(11025, 1, 16)], 1);
         assert_eq!(r.riff_forms["DMSG"], 1);
-        assert_eq!(r.deferred_text, 1);
+        // The speech table is parsed, not deferred: two drawable clips,
+        // neither shipped.
+        assert_eq!(r.deferred_text, 0);
+        assert_eq!(r.speech_supported, 1);
+        assert_eq!(r.speech_clips_total, 2);
+        assert_eq!(r.speech_clips_missing.len(), 2);
+        assert_eq!(r.speech_clips_missing[0].0, "al1wearain01");
+        let fam = r.families();
+        let speech = fam.iter().find(|f| f.family.contains("spchdata")).unwrap();
+        assert_eq!((speech.files, speech.supported, speech.missing), (1, 1, 2));
+        let dm = fam
+            .iter()
+            .find(|f| f.family.contains("DirectMusic"))
+            .unwrap();
+        assert_eq!((dm.supported, dm.unsupported), (0, 1));
         assert_eq!(r.tables.len(), 1);
         assert_eq!(r.cardata_kinds["car audio"], 1);
         // TESTHORN + REVERSE + TESTIDLE referenced; testhorn and
