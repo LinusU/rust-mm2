@@ -328,6 +328,20 @@ fn never_capturing() -> bool {
     false
 }
 
+/// The no-argument launch registers both lobby roles before either has
+/// a link. Build and run that combined schedule so ambiguous system-type
+/// ordering fails here instead of panicking before the menu opens.
+#[test]
+fn the_menu_boots_with_both_lobby_roles_registered() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    mm2_app::lobby_systems::add_client_systems(&mut app, never_capturing);
+    mm2_app::lobby_systems::add_host_systems(&mut app, never_capturing);
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Menu);
+    assert!(shell(&app).active);
+}
+
 /// A headless app wired like the binary's menu mode: parked session,
 /// the menu resources and the production session/menu systems, minus
 /// the window.
@@ -794,6 +808,8 @@ fn the_menu_draws_into_its_own_camera() {
 fn cruise_launches_then_quit_returns_to_the_menu() {
     let tmp = install();
     let mut app = menu_app(tmp.path(), None);
+    mm2_app::lobby_systems::add_client_systems(&mut app, never_capturing);
+    mm2_app::lobby_systems::add_host_systems(&mut app, never_capturing);
     app.update();
 
     activate_row(&mut app, "Cruise");
@@ -4460,12 +4476,14 @@ fn the_menu_joins_a_lobby_another_menu_opened() {
 
     let mut host = menu_app(tmp.path(), None);
     add_host_systems(&mut host, never_capturing);
+    add_client_systems(&mut host, never_capturing);
     let mut client = menu_app(tmp.path(), None);
     // The messages the binary registers for the replicas the set applies.
     client.add_message::<mm2_app::netdrive::RemoteImpact>();
     client.add_message::<mm2_game::BangerStateChanged>();
     client.add_message::<mm2_game::RaceStarted>();
     add_client_systems(&mut client, never_capturing);
+    add_host_systems(&mut client, never_capturing);
     host.update();
     client.update();
 

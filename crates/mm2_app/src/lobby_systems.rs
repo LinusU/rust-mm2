@@ -25,6 +25,12 @@ struct JoinedLobby;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 struct HostedLobby;
 
+/// Only the client's reconcile instance. Menu launches register the
+/// same function for both roles, so ordering against its system type
+/// would be ambiguous even while one role's run condition is false.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct JoinedReconcile;
+
 /// The joined lobby's per-update systems. Registered for a `--join`
 /// launch and for the menu (whose *Join lobby* row opens a link at run
 /// time); every one only runs while a [`net::LobbyLink`] exists.
@@ -48,10 +54,12 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
             // load then applies whole rather than skipping the
             // local seat's rows (its v14 terminal edge
             // included) on the frame they become receivable.
-            netdrive::reconcile_remote_players.after(net::drive_lobby),
+            netdrive::reconcile_remote_players
+                .after(net::drive_lobby)
+                .in_set(JoinedReconcile),
             netdrive::apply_snapshots
                 .after(net::drive_lobby)
-                .after(netdrive::reconcile_remote_players),
+                .after(JoinedReconcile),
             netdrive::drive_remote_lerp,
             // F26-A: the host's knocked/broken/settled props
             // fold into the client's own stamped world.
