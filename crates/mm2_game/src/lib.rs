@@ -23,6 +23,7 @@ pub mod hudmap;
 pub mod ids;
 pub mod impact;
 pub mod lesson;
+pub mod lesson_rules;
 pub mod movers;
 pub mod nav;
 pub mod object_audio;
@@ -80,6 +81,12 @@ pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use lesson::{
     LegFailure, LegReport, LegResult, LessonPass, LessonPhase, LessonRun, NoLegs, ReportEffect,
     RetryError, StaleReason,
+};
+pub use lesson_rules::{
+    CORNER_DEFAULT_MIN_MPH, CORNER_GATES_BEFORE_SPEED, CORNER_SPEED_GRACE_SECS,
+    FOLLOW_ESCAPE_RANGE_M, FOLLOW_PASS_RANGE_M, LeadObservation, LegObservation, LegRule,
+    MPH_PER_MS, PURSUER_SIGHT_RANGE_M, RuleError, RuleState, STOP_LEAD_MAX_DAMAGE, Verdict,
+    WreckPolicy,
 };
 pub use nav::{
     ArcEnd, ArcExit, ArcId, CrossingPath, EndSignal, LaneHit, LaneId, LaneKind, LaneQuery,

@@ -5,7 +5,8 @@
 //! A lesson is a sequence of legs (`mm2_content::lesson_legs`; the exams
 //! chain two or three). [`LessonRun`] is the pure state machine over
 //! them. Whatever evaluates a leg — the shared gate-run race runtime
-//! today, the per-family evaluators when UNK-35 is recovered — reports a
+//! today, the per-family rules of [`crate::lesson_rules`] once the
+//! session feeds them — reports a
 //! [`LegReport`]; the run decides what that means for the lesson:
 //!
 //! - **Order** (designed, `DSN-73`): legs clear strictly in authored
@@ -25,7 +26,7 @@
 //!   A passed lesson is terminal; replaying it (`CC-4`) is a new run.
 //!
 //! What a leg *requires* to count as cleared is not decided here —
-//! that is the family evaluators' job and stays open (UNK-35).
+//! that is the family rules' job ([`crate::lesson_rules`], `CC-9`).
 //!
 //! [`DisabledOutcome::RestartEvent`]: crate::DisabledOutcome::RestartEvent
 
@@ -79,9 +80,10 @@ impl LegReport {
     /// A terminal race state wins over `disabled`: a finish landing
     /// as the car is wrecked is still a finish (the same inclusive
     /// reading `DSN-7` gives the deadline). This is the *baseline*
-    /// verdict, not a family evaluator's — what a cornering, follow,
-    /// stop, jump or cop-chase leg additionally requires is open
-    /// (`UNK-35`).
+    /// verdict — the executable's whole rule for jump, cross-traffic,
+    /// maneuver and map legs; a cornering, follow, stop or cop-chase
+    /// leg additionally answers to its [`LegRule`](crate::LegRule)
+    /// (`CC-9`), reported through [`LegReport::from_verdict`].
     pub fn from_gate_run(
         attempt: u32,
         leg: u32,
