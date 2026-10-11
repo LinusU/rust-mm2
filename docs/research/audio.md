@@ -6,7 +6,7 @@ Measured on the retail install (VFS fingerprint `fnv1a64:e91e6cd4b2ae30d9`,
 fully decoded:
 
 ```
-2503 waves, 103 tables, 552 deferred text csv, 0 binary csv,
+2503 waves, 124 tables, 526 deferred text csv, 0 binary csv,
 3 extras (.bat), 0 failures, 0 issues, 35 quirks, 1 finding, 1 dead ref
 ```
 
@@ -667,14 +667,42 @@ at most 4 UI voices sound at once. Evidence: synthetic scripted
 navigation in `tests/menu.rs`, retail stem decode (`MM2_RETAIL`). Not
 captured audibly.
 
-## Deferred (F08 scope)
+## Creature voice tables (`aud/creaturedata`, F08-B.4)
 
-`aud/spchdata/**` (526) now parses — `## Speech cue tables`; only the
+`aud/spchdata/**` (526) parses — `## Speech cue tables`; only the
 environmental prerace families are runtime-bound, the event/result/
-C&R cue sections stay unbound. Still unparsed: `aud/creaturedata/**`
-(21 — ped/ambient voice tables; verified plain text:
-`Min speed,Max speed,min time in range,…` headers). Three `.bat` work files (`renshit.bat`
-etc.) are extras.
+C&R cue sections stay unbound. The 21 `aud/creaturedata/*.csv` files
+(plain text, CRLF) parse through `mm2_formats::creaturedata`, and
+`mm2-inspect audio` reports them as `21 supported, 0 unsupported,
+0 missing wave ref(s)` (retail, 2026-10-11; every sample name resolves
+to a shipped wave). Three `.bat` work files (`renshit.bat` etc.) are
+extras.
+
+Two schemas:
+
+- **Voice tables** — `default_{f,m}pedvoice<N>`,
+  `default_ambcarvoice_{l,s}<N>` and per-vehicle
+  `va_<vehicle>_ambcarvoice_{l,s}`. A sequence of blocks, each a
+  header line, a numeric row, a `sample name,volume,…` header and
+  sample rows (`<stem>,<volume>[,<play after seconds>]`, trailing empty
+  cells are padding):
+  - `Min speed,Max speed,min time in range,max time out of range` +
+    `<min>,<max>,<in>,<out>` — a speed band (ped tables author one
+    `0,500,0.01,0` band of `*SCREAM*` samples; ambient-car tables a
+    `0,20,5,0` band, a `50,999999,0.25,5` band — `999999` reads as
+    unbounded — and an impact band);
+  - `min impact force` + `<force>` (retail `5500`) — an impact band
+    whose sample header adds `play after seconds`.
+- **Counts** — `num{male,female}pedvoicefiles`,
+  `numambcarvoicefiles_{l,s}`: `Num files` then one integer. The
+  counts do not always equal the number of `default_*` files shipped
+  (e.g. `nummalepedvoicefiles` is 1 beside three `default_mpedvoice*`),
+  so they are not treated as a file inventory.
+
+Runtime semantics are **unknown**, not recovered from the exe: the
+speed and force units, what "min time in range"/"max time out of
+range" gate, how a sample is drawn, and the numbered-file selection.
+Nothing in the runtime consumes these tables yet.
 
 ## Open semantics
 
@@ -719,7 +747,8 @@ etc.) are extras.
 - DirectMusic segment/style/band decoding and playback (F08); the
   `csv_files` tables are parsed (AUD-13) but their selection and
   transition semantics are not recovered.
-- `spchdata`/`creaturedata` grammars (F08).
+- `creaturedata` runtime semantics (units, time gates, selection) —
+  grammar parses, meaning unrecovered.
 
 ## Race feedback effects (2026-10-03)
 

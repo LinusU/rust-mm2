@@ -13,6 +13,7 @@ pub mod camtrack;
 pub mod cardata;
 pub mod cpvs;
 pub mod crashdata;
+pub mod creaturedata;
 pub mod dash;
 pub mod dave;
 pub mod dmus;

@@ -5,8 +5,10 @@
 //! stems.
 //!
 //! Families owned by other features stay in the denominator but are
-//! only classified: `aud/spchdata`/`aud/creaturedata` (speech and
-//! pedestrian voices, F08) are probed text-vs-binary, and the
+//! only classified: `aud/spchdata` (speech, F08) is probed text-vs-binary,
+//! `aud/creaturedata` (ped/ambient voices) is parsed
+//! (`mm2_formats::creaturedata`) with supported/unsupported/missing
+//! counts, and the
 //! `aud/dmusic` RIFF containers (`DMSG`/`DMST`/`DLS `/`DMBD`) are
 //! parsed structurally (`mm2_formats::dmus`: tracks, band instruments,
 //! DLS waves, `DMRF` references resolved against the shipped files and
@@ -28,6 +30,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_formats::cardata::{self, CardataBody, CardataIssue};
+use mm2_formats::creaturedata::{self, CreatureKind, VoiceTable};
 use mm2_formats::dmus::{DmContainer, DmKind};
 use mm2_formats::music::{self, MusicTable};
 use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
@@ -60,6 +63,14 @@ pub struct AudioReport {
     pub tables: Vec<(String, String)>,
     /// Cardata files by grammar.
     pub cardata_kinds: BTreeMap<&'static str, usize>,
+    /// `aud/creaturedata` files parsed without diagnostics.
+    pub creature_supported: usize,
+    /// `aud/creaturedata` files that failed or carry diagnostics:
+    /// `(path, why)`. Also listed in `failures`/`issues`.
+    pub creature_unsupported: Vec<(String, String)>,
+    /// Distinct creaturedata wave references with no shipped wave:
+    /// `(stem, naming tables)`.
+    pub creature_missing: Vec<(String, Vec<String>)>,
     /// Deferred `aud/**` CSVs that are plain text (F08 families).
     pub deferred_text: usize,
     /// Deferred text CSVs per `aud/<family>` directory.
@@ -470,8 +481,51 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
                         Err(e) => r.failures.push((logical.clone(), e.to_string())),
                     }
                 }
-                // spchdata/creaturedata: F08 families — counted, probed
-                // text-vs-binary, not parsed here.
+                // Ped/ambient voice tables (F08-B.4): grammar parsed,
+                // runtime semantics unrecovered.
+                None if creaturedata::classify(logical).is_some() => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let before = r.issues.len();
+                    let summary = match creaturedata::classify(logical) {
+                        Some(CreatureKind::Count) => match creaturedata::parse_count(&text) {
+                            Ok(n) => Some(format!("count {n}")),
+                            Err(e) => {
+                                r.failures.push((logical.clone(), e.to_string()));
+                                r.creature_unsupported
+                                    .push((logical.clone(), e.to_string()));
+                                None
+                            }
+                        },
+                        _ => {
+                            let t = VoiceTable::parse(&text);
+                            for d in t.diagnostics.iter().chain(&t.validate()) {
+                                r.issues
+                                    .push(format!("{logical}: line {}: {}", d.line, d.message));
+                            }
+                            for s in t.samples() {
+                                refs.entry(s.name.to_ascii_lowercase())
+                                    .or_default()
+                                    .push(logical.clone());
+                            }
+                            Some(format!(
+                                "{} speed band(s), {} impact band(s), {} sample(s)",
+                                t.speed_bands.len(),
+                                t.impact_bands.len(),
+                                t.samples().count()
+                            ))
+                        }
+                    };
+                    if let Some(summary) = summary {
+                        if r.issues.len() == before {
+                            r.creature_supported += 1;
+                        } else {
+                            r.creature_unsupported
+                                .push((logical.clone(), r.issues[before..].join("; ")));
+                        }
+                        r.tables.push((logical.clone(), summary));
+                    }
+                }
+                // spchdata: F08 family — counted, probed text-vs-binary.
                 None => match std::str::from_utf8(&bytes) {
                     Ok(_) => {
                         r.deferred_text += 1;
@@ -492,6 +546,16 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             r.refs_resolved += 1;
         } else {
             r.dead_refs.push((name.clone(), users.clone()));
+        }
+    }
+    for (name, users) in &r.dead_refs {
+        let users: Vec<String> = users
+            .iter()
+            .filter(|u| u.starts_with("aud/creaturedata/"))
+            .cloned()
+            .collect();
+        if !users.is_empty() {
+            r.creature_missing.push((name.clone(), users));
         }
     }
     // Music-table stem → shipped DirectMusic container cross-check.
@@ -608,6 +672,18 @@ pub fn print_report(r: &AudioReport) {
     println!("== audio tables (aud/cardata/**, aud/ambient/**) ==");
     for (path, summary) in &r.tables {
         println!("  {path:<62} {summary}");
+    }
+    println!(
+        "  creaturedata (ped/ambient voices): {} supported, {} unsupported, {} missing wave ref(s)",
+        r.creature_supported,
+        r.creature_unsupported.len(),
+        r.creature_missing.len()
+    );
+    for (p, why) in &r.creature_unsupported {
+        println!("    unsupported {p}: {why}");
+    }
+    for (name, users) in &r.creature_missing {
+        println!("    missing wave {name} (in {})", users.join(", "));
     }
     if !r.deferred_dirs.is_empty() {
         println!("  deferred text csv (F08 families):");
@@ -1114,8 +1190,8 @@ mod tests {
         write(d, "aud/aud11/broken.wav", b"not a riff at all");
         // A .sty carrying a segment form word is a mismatch.
         write(d, "aud/dmusic/x.sty", &riff(b"DMSG"));
-        // A binary blob masquerading as csv (creaturedata shape).
-        write(d, "aud/creaturedata/voice.csv", &[0xf3, 0xcd, 0xcc, 0x53]);
+        // A binary blob masquerading as csv (spchdata shape).
+        write(d, "aud/spchdata/voice.csv", &[0xf3, 0xcd, 0xcc, 0x53]);
         write(d, "aud/cardata/player/vpx.bat", b"echo hi\n");
 
         let r = audit(&vfs_of(d));
@@ -1124,6 +1200,27 @@ mod tests {
         assert_eq!(r.riff_mismatches.len(), 1);
         assert_eq!(r.deferred_binary.len(), 1);
         assert_eq!(r.extras["bat"], 1);
+    }
+
+    #[test]
+    fn creaturedata_is_supported_unsupported_or_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "aud/aud11/known.wav", &pcm_wav(11025, 4));
+        write(
+            d,
+            "aud/creaturedata/ok.csv",
+            b"Min speed,Max speed,min time in range,max time out of range\r\n0,5,1,0\r\nsample name,volume,,\r\nKNOWN,0.9,,\r\nGHOST,0.9,,\r\n",
+        );
+        write(d, "aud/creaturedata/bad.csv", b"junk row\n");
+        write(d, "aud/creaturedata/numx.csv", b"Num files\r\n3\r\n");
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.creature_supported, 2);
+        assert_eq!(r.creature_unsupported.len(), 1);
+        assert!(r.creature_unsupported[0].0.ends_with("bad.csv"));
+        assert_eq!(r.creature_missing.len(), 1);
+        assert_eq!(r.creature_missing[0].0, "ghost");
+        assert_eq!(r.deferred_text, 0);
     }
 
     #[test]
