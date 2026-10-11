@@ -124,7 +124,6 @@ the probe's window:
 
 | id | 0-100 km/h | top m/s | stop s | brake m | rev m/s | controls |
 | --- | --- | --- | --- | --- | --- | --- |
-
 | vp4x4 | 4.2 s | 46.7 | n/r | n/r | -19.5 | FAIL(stop) |
 | vpauditt | 4.3 s | 65.3 | 0.6 | 4.5 | -19.4 | ok |
 | vpbug | 7.4 s | 49.9 | 1.3 | 8.7 | -17.4 | ok |
@@ -147,7 +146,6 @@ the probe's window:
 | vpsemi | 9.1 s | 44.2 | 2.2 | 16.2 | -13.3 | ok |
 | vpvwcup | 3.9 s | 68.1 | 1.1 | 8.6 | -19.2 | ok |
 
-
 The `--controls` leg reports **20/21 ok**: `vp4x4` is `FAIL(stop)` —
 it launches to 15.1 m/s but never reports a stop inside the window
 (its override-matrix base stop is `n/r` for the same reason). That is a
@@ -164,7 +162,6 @@ The `app smoke` column of the September table (`status=pass`,
 is **not** re-run in this refresh and is dropped from the table rather
 than carried over unmeasured; re-run `mm2 --car <id> --headless
 --frames 120` per car to refresh it.
-
 
 ## Landing and spawn clearance
 
