@@ -74,10 +74,22 @@ Statuses:
 
 Evidence level reached: **synthetic integration** (the `mm2_app`
 `tests/menu.rs` suite through the real `Session::begin`, profile store
-and pause/results overlays on a fixture install). No rendered or
-original-content capture was produced: the `--menu --menu-screen <s>
---screenshot` path panics at window creation in a session with no
-display (`winit … no handler was set`).
+and pause/results overlays on a fixture install).
+
+Rendered captures **do** work in a session with a window server: `mm2
+--mm2-path "$MM2_RETAIL" --menu --frames 90 --screenshot menu.png`
+writes a real PNG of the shell (the "SELECT YOUR DRIVE" root screen over
+the retail city art), and `--menu-screen <garage|races|profiles|options|
+controls>` renders each page. The menu is not a second window or capture
+route: it differs from a `--city … --frames 90 --screenshot` run only in
+the systems added to the same `App`, so the window creation is identical.
+The earlier "panics at window creation" report was a session with no
+window server — on macOS `display_available` was a no-op, so the run
+reached winit's `create_window`, which panics instead of reporting. It now
+asks CoreGraphics (`CGGetActiveDisplayList`) for an active display and a
+window-server-less run prints `status=unavailable` (exit 4); that is
+reproduced by running either capture under `sandbox-exec` with the window
+server denied (MENU-SCREENSHOT-PANIC, #1188).
 
 | AC | Evidence (`crates/mm2_app/tests/menu.rs` unless noted) | State |
 |---|---|---|

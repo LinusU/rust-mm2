@@ -1376,11 +1376,7 @@ fn main() {
         if !cli.headless && !display_available() {
             println!(
                 "{}",
-                record(
-                    smoke::SmokeStatus::Unavailable,
-                    "no display detected (DISPLAY/WAYLAND_DISPLAY unset)".into(),
-                )
-                .line()
+                record(smoke::SmokeStatus::Unavailable, no_display_detail().into()).line()
             );
             std::process::exit(smoke::SmokeStatus::Unavailable.exit_code());
         }
@@ -2417,14 +2413,64 @@ fn main() {
 }
 
 /// Whether a windowing system is present for a windowed/visual run.
-/// macOS and Windows always have one in a GUI session; a headless Linux
-/// box does not.
+///
+/// A GUI-less Linux box names no display in the environment. macOS has no
+/// such variable, so it asks CoreGraphics whether the session has an
+/// active display at all. A process with no connection to the window
+/// server — a GUI-less launch, a session parked at the login window or
+/// with no display attached, a sandbox — draws to none, and winit would
+/// panic inside window creation rather than report it. Windows names no
+/// display either; a windowless service session is out of scope here.
 fn display_available() -> bool {
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
-    } else {
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_active_display()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
         true
     }
+}
+
+/// Why a windowed run found no display, in the platform's own terms.
+fn no_display_detail() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "no display detected (DISPLAY/WAYLAND_DISPLAY unset)"
+    } else if cfg!(target_os = "macos") {
+        "no display detected (no active CoreGraphics display: this session has no window server)"
+    } else {
+        "no display detected"
+    }
+}
+
+/// Whether CoreGraphics reports at least one active display — the
+/// documented query for "which screens can this process draw to".
+///
+/// It answers none in a session with no window server (a GUI-less launch,
+/// a locked/login-window session, a sandboxed process), which is exactly
+/// when winit's `create_window` fails. CoreGraphics is a system framework
+/// on every macOS, so this needs no crate; `kCGErrorSuccess` is 0.
+#[cfg(target_os = "macos")]
+fn macos_active_display() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        /// `CGError CGGetActiveDisplayList(uint32_t, CGDirectDisplayID *, uint32_t *)`.
+        /// `max_displays = 0` with a null list only writes the count.
+        fn CGGetActiveDisplayList(
+            max_displays: u32,
+            active_displays: *mut u32,
+            display_count: *mut u32,
+        ) -> i32;
+    }
+    let mut count: u32 = 0;
+    // SAFETY: `display_count` points at a live `u32`; a null list with
+    // `max_displays == 0` asks for the number only and writes no list.
+    let error = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) };
+    error == 0 && count > 0
 }
 
 /// Whether a `--frames` capture is running.
