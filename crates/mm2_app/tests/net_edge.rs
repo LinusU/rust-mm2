@@ -403,7 +403,7 @@ fn a_killed_host_ends_a_driving_client() {
     host.cmd("start");
     host.until("event=started generation=1");
     // Let the session actually run — snapshots flowing — before the kill.
-    std::thread::sleep(Duration::from_secs(2));
+    client.until_within("event=snap_applied first=true", WAIT);
 
     host.kill();
     let rec = client.until("smoke=");

@@ -257,6 +257,18 @@ fn assert_client_drove_round(rec: &str, min_remotes: u64, round: u64) -> NetFiel
     net
 }
 
+/// Bound on a client reaching its first applied `Snap`: a retail load
+/// on a contended machine is minutes, so this is a failure guard.
+const LIVE_BOUND: Duration = Duration::from_secs(300);
+
+/// Wait on the client's `event=snap_applied first=true` record — the
+/// session has begun and the data plane is carrying state, so an
+/// impairment armed now bites only data-plane frames (`Start` is a
+/// one-shot verb with no retransmit).
+fn until_live(client: &Proc) -> String {
+    client.until_within("event=snap_applied first=true", LIVE_BOUND)
+}
+
 /// Wait until both `mm2 --join` clients have readied on the host's
 /// record stream (`event=ready id=<n> ready=true`), then start.
 fn start_when_ready(host: &mut Proc, clients: u32) {
@@ -395,7 +407,8 @@ fn run_reset_pair(
     start_when_ready(&mut host, 2);
     if let (Some(proxy), Some(impair)) = (&proxy, impair) {
         // `Start` rides Down: let the clean lane deliver it first.
-        std::thread::sleep(Duration::from_millis(400));
+        until_live(&alice);
+        until_live(&bob);
         proxy.set(LinkDir::Up, impair);
         proxy.set(LinkDir::Down, impair);
     }
@@ -1014,7 +1027,7 @@ fn an_impaired_two_process_session_still_converges() {
     // `Start` rides Down: let the still-clean lane deliver it before
     // the snap stream earns its recipe (a one-shot verb has no
     // retransmit — the data plane is what the harness is for).
-    std::thread::sleep(Duration::from_millis(400));
+    until_live(&alice);
     proxy.set(LinkDir::Down, recipe);
 
     // Same cap staggering as the clean leg: bob's record pins rem2
@@ -1096,7 +1109,8 @@ fn run_matrix_cell(
     // reasoning as the single-recipe leg above. The lobby phase
     // crossing clean is what makes every armed frame a data-plane
     // frame (`Input` up, `Snap` down).
-    std::thread::sleep(Duration::from_millis(400));
+    until_live(&alice);
+    until_live(&bob);
     proxy.set(LinkDir::Up, cell.impair);
     proxy.set(LinkDir::Down, cell.impair);
 
@@ -1857,7 +1871,7 @@ fn a_decided_cops_and_robbers_match_reaches_a_client_on_an_impaired_link() {
     start_when_ready(&mut host, 1);
     // `Start` is a one-shot verb with no retransmit: let the still-clean
     // link deliver it, then arm the recipe on the data plane.
-    std::thread::sleep(Duration::from_millis(400));
+    until_live(&client);
     proxy.set(LinkDir::Up, recipe);
     proxy.set(LinkDir::Down, recipe);
 
@@ -2025,7 +2039,7 @@ fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
     client_args.push("--parked".into());
     let client = Proc::spawn(MM2_EXE, &client_args);
     host.until_within("event=vehicle id=1", bound);
-    std::thread::sleep(Duration::from_millis(400));
+    until_live(&client);
     proxy.set(LinkDir::Up, recipe);
     proxy.set(LinkDir::Down, recipe);
 
@@ -2200,7 +2214,7 @@ fn run_breakdown(retail: &std::path::Path, event: &str, impair: Option<Impair>) 
     start_when_ready(&mut host, 1);
     if let (Some(proxy), Some(impair)) = (&proxy, impair) {
         // `Start` rides Down: let the clean lane deliver it first.
-        std::thread::sleep(Duration::from_millis(400));
+        until_live(&client);
         proxy.set(LinkDir::Up, impair);
         proxy.set(LinkDir::Down, impair);
     }
@@ -2542,7 +2556,8 @@ fn run_shove_trio(
     host.until_within("event=started generation=1", STEP);
     if let (Some(proxy), Some(impair)) = (&proxy, impair) {
         // `Start` rides Down: let the clean lane deliver it first.
-        std::thread::sleep(Duration::from_millis(400));
+        until_live(&alice);
+        until_live(&bob);
         proxy.set(LinkDir::Up, impair);
         proxy.set(LinkDir::Down, impair);
     }
@@ -2743,7 +2758,7 @@ fn a_networked_retail_race_agrees_across_an_impaired_link() {
     // `Start` rides Down: let the still-clean lane deliver it (a
     // one-shot verb has no retransmit), then arm both directions for
     // the whole race window.
-    std::thread::sleep(Duration::from_millis(400));
+    until_live(&client);
     let recipe = Impair {
         delay: Duration::from_millis(40),
         jitter: Duration::from_millis(30),

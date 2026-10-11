@@ -2072,14 +2072,13 @@ sleep standing in for "the datum has crossed a socket or thread").
   reset ask (`requests_granted == 1` is already spun on first), the
   `netdrive::INPUT_STALE` wait, and the 300 ms writer-flush grace in
   `net_drive.rs` before reading proxy counters.
-- **Not convertible from the test side.** `net_drive.rs` sleeps 400 ms
-  (seven sites) between `event=started` on the host and arming the
-  impairment proxy so the one-shot `Start` verb crosses the clean lane
-  first, and `net_edge.rs::a_killed_host_ends_a_driving_client` sleeps 2 s
-  to let snapshots flow before the kill. The `mm2` client prints no record
-  when it has applied `Start` or its first `Snap`, so there is no
-  condition to spin on. Converting them needs a client-side record in
-  production code; filed as a follow-up rather than done here.
+- **Converted (#1183).** The `mm2` client prints
+  `event=snap_applied first=true generation=<n>` the first time it applies
+  a `Snap` of a generation (`netdrive::apply_snap_frame`) — proof `Start`
+  landed and the data plane carries state. `net_drive.rs` waits on it
+  (`until_live`, bounded) where it used to sleep 400 ms before arming the
+  impairment proxy, and `net_edge.rs::a_killed_host_ends_a_driving_client`
+  waits on it before the kill instead of sleeping 2 s.
 
 ## Evidence level
 
