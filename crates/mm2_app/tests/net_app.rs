@@ -38,8 +38,8 @@ use mm2_game::{
     SurfaceMaterial, SurfaceState, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_net::{
-    Client, Conn, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin,
-    LeaveCause, LinkDir, Message, SNAP_NO_SURFACE, SnapEntry, SnapImpact, VehiclePick,
+    Client, Conn, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, KEEPALIVE_INTERVAL,
+    LateJoin, LeaveCause, LinkDir, Message, SNAP_NO_SURFACE, SnapEntry, SnapImpact, VehiclePick,
     accept_hello, hello, listen_loopback,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput, VehicleState};
@@ -748,6 +748,89 @@ fn a_dropped_leave_is_retried_until_the_host_reaps_the_seat() {
         cause,
         Some(LeaveCause::Quit),
         "the retried Leave reaped the seat as a clean quit"
+    );
+    host.shutdown();
+}
+
+/// NET-ROSTER-LOSSY: the host announces a removal with one roster
+/// broadcast, and on a lossy link that frame can be dropped — a survivor
+/// then kept the departed peer's seat until the next membership change
+/// (a quiet lobby: forever). The host now resends the roster on every
+/// keepalive tick (`KEEPALIVE_INTERVAL`), so the survivor converges
+/// within a tick or two of the link recovering. The seeded proxy drops
+/// every host→alice frame while bob leaves, so the removal's roster
+/// cannot land on her; no further membership change follows.
+#[test]
+fn a_dropped_removal_roster_is_repaired_by_the_periodic_roster() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1307).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .unwrap();
+    let mut app = bridge_app(vfs, link);
+    let bob = Client::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "bob".to_string(), fp),
+    )
+    .unwrap();
+
+    let roster_len = |app: &App| app.world().resource::<LobbyState>().roster.len();
+    let deadline = Instant::now() + WAIT;
+    while roster_len(&app) != 2 {
+        app.update();
+        while host.try_recv().is_ok() {}
+        assert!(Instant::now() < deadline, "alice never saw both seats");
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // Everything the host sends alice is dropped from here, bob's
+    // removal roster included.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    bob.leave().unwrap();
+    let mut left = false;
+    while !left {
+        while let Ok(ev) = host.try_recv() {
+            left |= matches!(ev, HostEvent::Left { id: 2, .. });
+        }
+        assert!(Instant::now() < deadline, "the host never reaped bob");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let dropped = Instant::now() + Duration::from_secs(2);
+    while proxy.stats(LinkDir::Down).dropped < 1 {
+        assert!(Instant::now() < dropped, "no roster frame was dropped");
+        thread::sleep(Duration::from_millis(2));
+    }
+    // The removal's roster is gone with the drop: alice still holds the
+    // ghost seat.
+    app.update();
+    assert_eq!(roster_len(&app), 2, "alice must still hold the ghost seat");
+
+    // The link recovers; the next periodic roster carries the removal.
+    proxy.set(LinkDir::Down, Impair::default());
+    let bound = Instant::now() + KEEPALIVE_INTERVAL * 3;
+    while roster_len(&app) != 1 && Instant::now() < bound {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        roster_len(&app),
+        1,
+        "the periodic roster dropped the ghost seat within three ticks"
     );
     host.shutdown();
 }

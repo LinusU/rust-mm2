@@ -1022,9 +1022,15 @@ fn run(
             Ok(msg) => msg,
             Err(RecvTimeoutError::Timeout) => {
                 last_sent = Instant::now();
-                if !broadcast(&mut players, &Message::Keepalive, &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
-                }
+                // The roster rides every keepalive tick too: a removal's
+                // one-shot broadcast can be lost on a lossy link, and a
+                // survivor would keep the departed peer's seat until the
+                // next membership change. Resending the (idempotent,
+                // newest-wins) snapshot bounds that to one tick. A failed
+                // keepalive write needs no extra pass: `broadcast_roster`
+                // below reports the corrected roster either way.
+                broadcast(&mut players, &Message::Keepalive, &events, &inputs);
+                broadcast_roster(&mut players, &events, &inputs);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
