@@ -2870,8 +2870,17 @@ mod tests {
             })
             .unwrap();
         });
+        // The host resends the (idempotent) roster on each keepalive tick
+        // too (NET-ROSTER-LOSSY), so those ride in between; the first
+        // message that is not one is the broadcast.
+        let first = loop {
+            match alice.recv().unwrap() {
+                Message::Roster { .. } => continue,
+                other => break other,
+            }
+        };
         assert_eq!(
-            alice.recv().unwrap(),
+            first,
             Message::World {
                 generation: 1,
                 ticks: 9
