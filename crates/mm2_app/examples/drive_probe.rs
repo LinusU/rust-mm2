@@ -892,7 +892,7 @@ fn probe_corner_g(cfg: &VehicleConfig, speed: f32) -> f32 {
 struct ControlProbe {
     /// Forward speed the launch reached, m/s.
     launch_speed: f32,
-    /// Seconds of full brake to `|forward_speed| <= STOP_SPEED`; NaN
+    /// Seconds of full brake to `forward_speed <= STOP_SPEED`; NaN
     /// when the car never stopped inside `BRAKE_CAP`.
     brake_time: f32,
     /// Ground covered while braking, metres; NaN on the same timeout.
@@ -915,7 +915,7 @@ const LAUNCH_TARGET: f32 = 15.0;
 /// Frames the launch gets before the check brakes from whatever speed
 /// it reached — heavy vehicles need the runway.
 const LAUNCH_CAP: usize = HZ * 10;
-/// `|forward_speed|` that counts as stopped, m/s.
+/// Forward speed at or below which the braking car counts as stopped, m/s.
 const STOP_SPEED: f32 = 0.2;
 /// Frames of full brake before the stop leg times out.
 const BRAKE_CAP: usize = HZ * 12;
@@ -967,7 +967,13 @@ fn probe_controls(cfg: &VehicleConfig) -> ControlProbe {
     for f in 0..BRAKE_CAP {
         app.update();
         let (v, _, _) = sample(&app);
-        if v.abs() <= STOP_SPEED {
+        // Signed, not `abs()`: a car rolling to rest chatters around
+        // zero by more than the window (vp4x4 reads 0.23, 0.37, 0.31,
+        // 0.36 then -0.22 m/s), so a band test can step over the stop.
+        // Braking from a forward launch, "forward speed fell to the
+        // threshold or below" is the stop, whether the car then rests
+        // or starts to reverse.
+        if v <= STOP_SPEED {
             brake_time = (f + 1) as f32 / HZ as f32;
             stopped = true;
             break;

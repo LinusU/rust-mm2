@@ -124,7 +124,7 @@ the probe's window:
 
 | id | 0-100 km/h | top m/s | stop s | brake m | rev m/s | controls |
 | --- | --- | --- | --- | --- | --- | --- |
-| vp4x4 | 4.2 s | 46.7 | n/r | n/r | -19.5 | FAIL(stop) |
+| vp4x4 | 4.2 s | 46.7 | 1.8 | 11.9 | -19.5 | ok |
 | vpauditt | 4.3 s | 65.3 | 0.6 | 4.5 | -19.4 | ok |
 | vpbug | 7.4 s | 49.9 | 1.3 | 8.7 | -17.4 | ok |
 | vpbullet | 4.4 s | 59.4 | 1.6 | 11.7 | -16.6 | ok |
@@ -146,11 +146,16 @@ the probe's window:
 | vpsemi | 9.1 s | 44.2 | 2.2 | 16.2 | -13.3 | ok |
 | vpvwcup | 3.9 s | 68.1 | 1.1 | 8.6 | -19.2 | ok |
 
-The `--controls` leg reports **20/21 ok**: `vp4x4` is `FAIL(stop)` —
-it launches to 15.1 m/s but never reports a stop inside the window
-(its override-matrix base stop is `n/r` for the same reason). That is a
-measurement on current main, recorded rather than argued away; it is
-filed as its own task. `vpmoonrover` now launches (0-100 7.2 s) and
+The `--controls` leg reports **21/21 ok**. `vp4x4` was `FAIL(stop)`
+until 2026-10-11 as a probe artefact, not a handling defect (task
+#1296): braking from 15 m/s it decelerates normally (~2.3 m/s²) and
+comes to rest around frame 103, but its forward speed chatters near zero
+(0.23, 0.37, 0.31, 0.36, then -0.22 m/s) and never lands inside the
+old `|v| <= 0.2` band; the held brake then reverses it to -19.5 m/s as
+for every car. The stop is now "forward speed fell to 0.2 m/s or
+below", which gives 1.8 s / 11.9 m for `vp4x4` and leaves all 20 other
+rows unchanged. The low-speed chatter itself is unexplained and left
+unmeasured here. `vpmoonrover` now launches (0-100 7.2 s) and
 passes every controls leg; the September `FAIL(drive)` row is gone.
 `vpcentury`'s stop (1.4 s / 10.4 m) replaces the September 2.3 s / 24.2 m
 anomaly. Cornering columns of the default leg (g at 10/20/30/40 m/s)
@@ -266,13 +271,13 @@ carrying identical handling — is the retail test
 Per-car sweep, re-run 2026-10-11 on current main (`drive_probe
 --override-matrix`, same fingerprinted install; the 2026-10-10 run
 predated the retail-handling reproduction commits). The leg reports
-20/21 `ok`: `vp4x4` is `FAIL(grip)` because its base stop is `n/r`
-(see the Dynamic table). The base columns agree with the default and
+21/21 `ok` (`vp4x4`'s base stop was `n/r` before the 2026-10-11 stop
+criterion fix; see the Dynamic table). The base columns agree with the default and
 `--controls` legs above:
 
 | id | 0-100 base→eng | top base→eng m/s | stop base→grip s | dist base→grip m |
 | --- | --- | --- | --- | --- |
-| vp4x4 | 4.2→7.6 | 46.7→45.7 | n/r→2.8 | n/r→17.8 |
+| vp4x4 | 4.2→7.6 | 46.7→45.7 | 1.8→2.8 | 11.9→17.8 |
 | vpauditt | 4.3→8.2 | 65.3→54.6 | 0.6→1.4 | 4.5→10.3 |
 | vpbug | 7.4→15.2 | 49.9→36.7 | 1.3→2.5 | 8.7→17.2 |
 | vpbullet | 4.4→8.7 | 59.4→51.8 | 1.6→3.3 | 11.7→28.3 |
@@ -295,8 +300,7 @@ predated the retail-handling reproduction commits). The leg reports
 | vpvwcup | 3.9→7.8 | 68.1→52.6 | 1.1→2.3 | 8.6→20.0 |
 
 Read: every ready car's 0-100 and top-speed measurements move under
-the halved-engine override, and every stop under halved grip (except
-`vp4x4`, whose base stop never completes), so the override channel
+the halved-engine override, and every stop under halved grip , so the override channel
 reaches the live simulation on the whole roster. Observations on this
 build, recorded rather than argued away:
 
@@ -310,8 +314,11 @@ build, recorded rather than argued away:
   *shorter* under halved grip) does not reproduce: the stop is
   1.4→2.5 s / 10.4→18.6 m, monotonic. The September base cells
   (2.3 s / 24.2 m) predate later handling changes on main.
-- **`vp4x4`** never reports a stop on the base config inside the
-  probe's window (see Dynamic table); filed as a follow-up.
+- **`vp4x4`'s missing stop** was the probe's `|v| <= 0.2` band being
+  stepped over by low-speed speed chatter, not a brake, handbrake or
+  creep problem (task #1296; see the Dynamic table). `--drop` still
+  reports `vpcentury` settle `NaN` while `ok`: its 0.5 s stillness test
+  (`|v| < 0.3`, `|ω| < 0.5`) never holds inside 4 s; not diagnosed.
 
 Single-car rows from the earlier pass, kept for the record (vpbug,
 same install): `longitudinal_grip` halved → 0-100 5.4→9.4 s
