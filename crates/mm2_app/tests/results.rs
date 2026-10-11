@@ -671,3 +671,244 @@ fn results_rows_answer_any_connected_pad() {
         "South on the second pad activates the focused row"
     );
 }
+
+// ---- Cops & Robbers match results (F17-AC01) -------------------------
+//
+// The same overlay serves a decided match: the session reaches
+// `Results` through the authority's `end_decided_match`, and the lines
+// are read from the `CnrHost`'s match — the screen scores nothing. One
+// test per variant; each plays real `GoldMatch` rounds (pickup, then
+// delivery at the side's own marker) before the end rule decides it.
+
+mod cnr_results {
+    use super::*;
+    use mm2_app::cnr::{CnrHost, end_decided_match};
+    use mm2_game::gold::{
+        CarrierLoad, CnrVariant, Contact, DeliveryVerdict, EndRule, GoldMatch, GoldRules,
+        PickupVerdict, Side,
+    };
+
+    fn rules(variant: CnrVariant, end: EndRule) -> GoldRules {
+        GoldRules {
+            variant,
+            end,
+            load: CarrierLoad {
+                added_mass_kg: 250.0,
+                handling_scalar: 0.9,
+            },
+            pickup_points: 25,
+            delivery_points: 100,
+            pickup_radius: 5.0,
+            delivery_radius: 12.0,
+            drop_lockout_ticks: 120,
+        }
+    }
+
+    /// A `Local`-authority session in `Playing` with a match seating the
+    /// local car on `mine` and one remote on `theirs`; returns the app
+    /// and (local, remote) ids.
+    fn match_app(
+        variant: CnrVariant,
+        end: EndRule,
+        mine: Side,
+        theirs: Side,
+    ) -> (App, PlayerId, PlayerId) {
+        let mut session = Session::new();
+        session.begin(SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let local = session.mint_player_id();
+        let remote = session.mint_player_id();
+        let pool = (0..4)
+            .map(|i| Vec3::new(i as f32 * 90.0, 0.0, 20.0))
+            .collect();
+        let game = GoldMatch::new(
+            session.generation(),
+            session.mint_object_id(),
+            rules(variant, end),
+            pool,
+            3,
+            &[(local, mine), (remote, theirs)],
+        )
+        .unwrap();
+        let generation = session.generation();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(CnrHost::new(game))
+            .init_resource::<SessionControl>()
+            .init_resource::<ResultsMenu>()
+            .add_systems(
+                Update,
+                (end_decided_match, results::results_present).chain(),
+            );
+        app.world_mut().spawn((
+            SessionEntity(generation),
+            Player {
+                id: local,
+                control: PlayerControl::Local,
+            },
+        ));
+        (app, local, remote)
+    }
+
+    /// `n` full rounds for `player`: take the gold where it lies, then
+    /// deliver at the marker its side delivers to.
+    fn deliver_rounds(app: &mut App, player: PlayerId, n: usize) {
+        let mut host = app.world_mut().resource_mut::<CnrHost>();
+        let game = &mut host.game;
+        for _ in 0..n {
+            let at = game.gold_position().unwrap();
+            let verdict = game.resolve_pickups(&[Contact {
+                player,
+                round: game.round(),
+                position: at,
+            }]);
+            assert!(
+                matches!(verdict[0], PickupVerdict::Granted { .. }),
+                "{verdict:?}"
+            );
+            let side = game.side_of(player).unwrap();
+            let marker = game.sites().target(side.delivery_target());
+            let verdict = game.deliver(player, game.round(), marker);
+            assert!(
+                matches!(verdict, DeliveryVerdict::Delivered { .. }),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    fn run_clock_out(app: &mut App) {
+        let mut host = app.world_mut().resource_mut::<CnrHost>();
+        for _ in 0..20 {
+            host.game.tick();
+        }
+        assert!(host.game.outcome().is_some());
+    }
+
+    fn texts_after_results(app: &mut App) -> Vec<String> {
+        assert_eq!(phase(app), SessionPhase::Playing, "undecided: no screen");
+        app.update();
+        assert_eq!(phase(app), SessionPhase::Results);
+        app.update();
+        assert_eq!(overlay_roots(app), 1, "the results overlay drew");
+        overlay_texts(app)
+    }
+
+    fn has(texts: &[String], line: &str) -> bool {
+        texts.iter().any(|t| t == line)
+    }
+
+    #[test]
+    fn free_for_all_lists_individual_points_and_no_team_totals() {
+        let (mut app, me, them) = match_app(
+            CnrVariant::FreeForAll,
+            EndRule::Ticks(5),
+            Side::Solo,
+            Side::Solo,
+        );
+        deliver_rounds(&mut app, me, 1);
+        run_clock_out(&mut app);
+        let texts = texts_after_results(&mut app);
+        assert!(has(&texts, "Cops & Robbers"), "{texts:?}");
+        assert!(has(&texts, "YOU WIN"), "{texts:?}");
+        assert!(has(&texts, "1. You - 125 pts"), "{texts:?}");
+        assert!(
+            has(&texts, &format!("2. Player {} - 0 pts", them.0)),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("time - played")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("COPS") || t.contains("RED")),
+            "a free-for-all has no team totals: {texts:?}"
+        );
+        // A local match is replayed by the session itself.
+        assert!(
+            has(&texts, "> Quit") && has(&texts, "  Play again"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn cops_vs_robbers_shows_team_totals_and_the_point_limit() {
+        let (mut app, me, robber) = match_app(
+            CnrVariant::CopsVsRobbers,
+            EndRule::Points(200),
+            Side::Cops,
+            Side::Robbers,
+        );
+        deliver_rounds(&mut app, me, 1);
+        deliver_rounds(&mut app, robber, 2);
+        assert_eq!(
+            app.world()
+                .resource::<CnrHost>()
+                .game
+                .outcome()
+                .map(|o| o.reason),
+            Some(mm2_game::gold::EndReason::PointLimit)
+        );
+        let texts = texts_after_results(&mut app);
+        assert!(has(&texts, "ROBBERS WIN"), "{texts:?}");
+        assert!(has(&texts, "point limit - played 0:00"), "{texts:?}");
+        assert!(has(&texts, "ROBBERS 250   COPS 125"), "{texts:?}");
+        assert!(
+            has(
+                &texts,
+                &format!("1. Player {} (ROBBERS) - 250 pts", robber.0)
+            ),
+            "{texts:?}"
+        );
+        assert!(has(&texts, "2. You (COPS) - 125 pts"), "{texts:?}");
+    }
+
+    #[test]
+    fn robbers_vs_robbers_names_the_winning_team_and_marks_a_leaver() {
+        let (mut app, me, rival) = match_app(
+            CnrVariant::RobbersVsRobbers,
+            EndRule::Ticks(5),
+            Side::Blue,
+            Side::Red,
+        );
+        deliver_rounds(&mut app, rival, 1);
+        deliver_rounds(&mut app, me, 2);
+        // The rival drops out mid-match: their points still count for
+        // their side, and the screen says they left.
+        {
+            let mut host = app.world_mut().resource_mut::<CnrHost>();
+            host.game.leave(rival, Vec3::ZERO).unwrap();
+        }
+        run_clock_out(&mut app);
+        let texts = texts_after_results(&mut app);
+        assert!(has(&texts, "BLUE WIN"), "{texts:?}");
+        assert!(has(&texts, "RED 125   BLUE 250"), "{texts:?}");
+        assert!(has(&texts, "1. You (BLUE) - 250 pts"), "{texts:?}");
+        assert!(
+            has(
+                &texts,
+                &format!("2. Player {} (RED) - 125 pts - left", rival.0)
+            ),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn level_totals_read_as_a_tie() {
+        let (mut app, _, _) = match_app(
+            CnrVariant::CopsVsRobbers,
+            EndRule::Ticks(5),
+            Side::Cops,
+            Side::Robbers,
+        );
+        run_clock_out(&mut app);
+        let texts = texts_after_results(&mut app);
+        assert!(has(&texts, "TIE"), "{texts:?}");
+        assert!(has(&texts, "ROBBERS 0   COPS 0"), "{texts:?}");
+    }
+}
