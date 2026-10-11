@@ -5600,3 +5600,145 @@ fn retail_music_tables_bind_and_report_unsupported() {
     assert!(music.line().starts_with(UNSUPPORTED), "{}", music.line());
     eprintln!("{}", music.line());
 }
+
+// ---------------------------------------------------------------------------
+// F08-B: city ambience — a container-listed table attenuates with the
+// listener's distance, falls silent past its max distance, and its
+// emitters and voices die with the session (F08-AC01, F08-AC06).
+// ---------------------------------------------------------------------------
+
+/// A one-loop ambience table (`min 10`, `max 100`, volume 0.8) standing
+/// at the origin, listed by `testambientcontainer`.
+fn city_ambience_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "aud/aud22/ambient/gull.22k.wav", &pcm_wav(22050, 220));
+    write(
+        d,
+        "aud/ambient/testambientcontainer.csv",
+        b"file names\ntestgulls\n",
+    );
+    write(
+        d,
+        "aud/ambient/testgulls.csv",
+        b"Min distance,Max distance,3D priority,Audible area\n10,100,12,0\nsample name,sample volume,sample type,oneshot time limit low,oneshot time limit high,active,min speed,max speed,Doppler\ngull,0.8,0,0,0,1,0,999999,0\nVECTORPOINTS,,,,,,,,\nx,y,z\n0,0,0\n",
+    );
+    tmp
+}
+
+fn city_ambience_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(Update, mm2_app::object_sound::object_sound_voices);
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Spawn the fixture city's ambience the way `load_session_world` does.
+fn spawn_city_ambience(app: &mut App) -> usize {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .run_system_once(move |mut commands: Commands, vfs: Res<Mm2Vfs>| {
+            mm2_app::object_sound::spawn_ambience(
+                &mut commands,
+                &vfs.0,
+                "test",
+                SessionEntity(generation),
+            )
+        })
+        .unwrap()
+}
+
+fn place_listener(app: &mut App, listener: Option<Entity>, x: f32) -> Entity {
+    let at = GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.0));
+    match listener {
+        Some(e) => {
+            app.world_mut().entity_mut(e).insert(at);
+            e
+        }
+        None => app
+            .world_mut()
+            .spawn((SpatialListener::new(0.2), Transform::default(), at))
+            .id(),
+    }
+}
+
+/// The volume every live ambience voice was spawned at.
+fn ambience_volumes(app: &mut App) -> Vec<f32> {
+    let world = app.world_mut();
+    let mut q = world.query::<(&mm2_app::object_sound::ObjectSoundVoice, &PlaybackSettings)>();
+    q.iter(world)
+        .map(|(_, s)| match s.volume {
+            Volume::Linear(v) => v,
+            other => panic!("unexpected volume {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn city_ambience_attenuates_with_distance_and_dies_with_the_session() {
+    let dir = city_ambience_dir();
+    let mut app = city_ambience_app(dir.path());
+    assert_eq!(
+        spawn_city_ambience(&mut app),
+        1,
+        "container lists one table"
+    );
+
+    // 50 m: inside max, outside min — 1 - (50² - 10²) / (100² - 10²).
+    let ear = place_listener(&mut app, None, 50.0);
+    app.update();
+    let near = ambience_volumes(&mut app);
+    assert_eq!(near.len(), 1, "one loop voice in range");
+    let expect = 0.8 * (1.0 - (2500.0 - 100.0) / (10_000.0 - 100.0));
+    assert!((near[0] - expect).abs() < 1e-4, "{} vs {expect}", near[0]);
+
+    // 5 m: inside min distance — still the one loop voice.
+    place_listener(&mut app, Some(ear), 5.0);
+    app.update();
+    // The loop is already sounding; its sink is re-levelled, not respawned.
+    assert_eq!(ambience_volumes(&mut app).len(), 1);
+
+    // Past the max distance the object is cut off entirely.
+    place_listener(&mut app, Some(ear), 500.0);
+    app.update();
+    app.update();
+    assert!(ambience_volumes(&mut app).is_empty(), "silent out of range");
+
+    // Back in earshot it restarts, then a session teardown sweeps the
+    // emitter and its voice; a second session's ambience starts clean.
+    place_listener(&mut app, Some(ear), 20.0);
+    app.update();
+    assert_eq!(ambience_volumes(&mut app).len(), 1);
+    for _ in 0..2 {
+        app.world_mut()
+            .run_system_once(despawn_session_entities)
+            .unwrap();
+        app.update();
+        assert!(
+            ambience_volumes(&mut app).is_empty(),
+            "voices outlive session"
+        );
+        let world = app.world_mut();
+        let mut emitters = world.query::<&mm2_app::object_sound::ObjectSound>();
+        assert_eq!(emitters.iter(world).count(), 0, "emitters outlive session");
+        // The listener is a persistent camera, not a session entity.
+        assert_eq!(spawn_city_ambience(&mut app), 1);
+        app.update();
+        assert_eq!(ambience_volumes(&mut app).len(), 1);
+    }
+}
