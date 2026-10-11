@@ -10,7 +10,8 @@
 //! same fixed steps from each actor's recorded start, so a re-seeked
 //! peer is step-for-step what the host would have. Proximity leaves
 //! are not seeked — their state depends on where cars were, not on
-//! time alone, and they stay local until the host carries a trigger.
+//! time alone; the host carries them as `Message::Leaves`
+//! ([`crate::leafnet`], F26-A.4).
 //!
 //! A Cruise session has no race row, so the host also publishes the
 //! clock itself ([`publish_world_clock`], protocol v20
@@ -1033,6 +1034,7 @@ mod tests {
             partner: None,
             hinge: Vec3::ZERO,
             base: Quat::IDENTITY,
+            slot: 0,
         };
         let timed = app.world_mut().spawn(leaf(DrawbridgeMode::Timed)).id();
         let prox = app.world_mut().spawn(leaf(DrawbridgeMode::Proximity)).id();
@@ -1091,6 +1093,7 @@ mod tests {
                 partner: None,
                 hinge: Vec3::ZERO,
                 base: Quat::IDENTITY,
+                slot: 0,
             })
             .id();
         app.update();

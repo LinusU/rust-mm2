@@ -481,6 +481,9 @@ pub struct RemoteSnaps {
     pub(crate) traffic: crate::worldtraffic::TrafficStage,
     /// The world-clock inbox (protocol v20, F26-A) — newest frame wins.
     pub(crate) world: crate::worldclock::WorldStage,
+    /// The proximity-leaves inbox (protocol v26, F26-A.4) — newest
+    /// frame wins.
+    pub(crate) leaves: crate::leafnet::LeafStage,
     /// The Cops & Robbers inbox (protocol v21, F27-B) — freshest frame
     /// per generation.
     pub(crate) cnr: crate::cnrnet::CnrStage,
@@ -844,6 +847,16 @@ impl RemoteSnaps {
         self.world.push(generation, ticks);
     }
 
+    /// Queue a received proximity-leaves frame (protocol v26, F26-A.4).
+    pub fn push_leaves(&mut self, generation: u64, tick: u64, rows: Vec<mm2_net::SnapLeaf>) {
+        self.leaves.push(generation, tick, rows);
+    }
+
+    /// The proximity-leaves inbox — counters for the record/tests.
+    pub fn leaves(&self) -> &crate::leafnet::LeafStage {
+        &self.leaves
+    }
+
     /// Queue a received Cops & Robbers frame (protocol v21, F27-B).
     pub fn push_cnr(&mut self, generation: u64, frame: &mm2_net::SnapCnr) {
         self.cnr.push(generation, frame);
@@ -914,6 +927,7 @@ impl RemoteSnaps {
         self.props.reset();
         self.traffic.reset();
         self.world.reset();
+        self.leaves.reset();
         self.cnr.reset();
     }
 }

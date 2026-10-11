@@ -12,8 +12,8 @@ use bevy::ecs::schedule::SystemCondition;
 use bevy::prelude::*;
 
 use crate::{
-    audio, cnr, cnrnet, input, net, netdrive, scripted, sequence, session, worldclock, worldprops,
-    worldtraffic,
+    audio, cnr, cnrnet, input, leafnet, net, netdrive, scripted, sequence, session, worldclock,
+    worldprops, worldtraffic,
 };
 
 /// Every system of the joined lobby's set, so the close that removes its
@@ -62,6 +62,8 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
             // F26-A: the host's world clock — the timed
             // scenery re-seeks to it on a Cruise client too.
             worldclock::apply_world_clock.after(net::drive_lobby),
+            // F26-A.4: the host's proximity drawbridge leaves.
+            leafnet::apply_leaves.after(net::drive_lobby),
             // F27-B.3: the host's Cops & Robbers match — the
             // replica the HUD and markers read (idle until a
             // match frame arrives).
@@ -155,6 +157,8 @@ pub fn add_host_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + C
             worldtraffic::publish_traffic.after(net::drive_host),
             // F26-A: the world clock rides its own tiny frame.
             worldclock::publish_world_clock.after(net::drive_host),
+            // F26-A.4: proximity leaves ride their own frame.
+            leafnet::publish_leaves.after(net::drive_host),
             // F27-B.3: the Cops & Robbers match rides its own
             // frame (idle until a `CnrHost` exists).
             cnrnet::publish_cnr.after(net::drive_host),

@@ -46,6 +46,10 @@ pub struct DrawbridgeLeaf {
     pub hinge: Vec3,
     /// World rotation of the closed leaf.
     pub base: Quat,
+    /// The leaf's index in the bridge file's leaf order — the same on
+    /// every peer that loaded the same file, so the host can name a
+    /// proximity leaf to its clients (F26-A.4).
+    pub slot: u16,
 }
 
 impl DrawbridgeLeaf {
@@ -186,6 +190,7 @@ pub fn spawn_drawbridges(
                 partner,
                 hinge,
                 base,
+                slot: (pi * 2 + li) as u16,
             };
             let transform = Transform::from_translation(hinge)
                 .with_rotation(leaf.rotation_at(leaf.motion.angle));
@@ -277,8 +282,11 @@ type LeafQuery<'a> = (
 /// leaves run their cycle. The pose is written for the state just
 /// reached, and the angular velocity carries the body to the next
 /// step's state, so a car on a moving leaf rides its surface rather
-/// than being shoved by a teleport. Runs on every peer: the cycle is
-/// deterministic from session start.
+/// than being shoved by a teleport. Runs on every peer: the timed cycle
+/// is deterministic from session start. A proximity trigger is decided
+/// by the authority alone (it sees every car) and reaches the clients
+/// as `Message::Leaves` (`leafnet`), so a client never opens one on its
+/// own cars.
 pub fn drive_drawbridges(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
@@ -294,8 +302,10 @@ pub fn drive_drawbridges(
     let dt = time.delta_secs();
     let radius2 = PROXIMITY_RADIUS * PROXIMITY_RADIUS;
     let mut triggered = Vec::new();
+    let may_trigger = session.authority_role().is_authority();
     for (entity, leaf, ..) in &leaves {
-        if leaf.motion.mode == DrawbridgeMode::Proximity
+        if may_trigger
+            && leaf.motion.mode == DrawbridgeMode::Proximity
             && leaf.motion.phase == LeafPhase::Resting
             && cars
                 .iter()
@@ -346,6 +356,7 @@ mod tests {
             partner: None,
             hinge: Vec3::ZERO,
             base,
+            slot: 0,
         };
         let tip_local = Vec3::new(0.0, 0.0, -30.0 * mirror_sign());
         let closed = leaf.rotation_at(0.0) * tip_local;
@@ -367,6 +378,7 @@ mod tests {
             partner: None,
             hinge: Vec3::ZERO,
             base,
+            slot: 0,
         };
         let dt = 0.1;
         let omega = leaf.base * Vec3::X * (mirror_sign() * RAISE_RATE);
