@@ -1962,3 +1962,39 @@ fn signal_aspect_follows_the_authoritative_phase() {
     }
     assert!(saw_all_red, "the clearance slice must red every member");
 }
+
+/// F26-A.4b: the authority's `Junctions::signal_aspect` and the one
+/// mapping a networked client applies without a graph
+/// (`SignalAspect::of_phase`) never disagree — over a full cycle, for
+/// members, non-members and every rule. This is what lets a client
+/// render the host's phase when only the green road crosses the wire.
+#[test]
+fn of_phase_agrees_with_signal_aspect_for_every_head() {
+    let g = chain_with_rules(1, 1);
+    let members = Junctions::signal_members(&g, 0);
+    assert_eq!(members, vec![0, 1]);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 4;
+    j.policy.clear_ticks = 2;
+    let rules = [
+        Some(VehicleRule::TrafficLight),
+        Some(VehicleRule::NeverStop),
+        Some(VehicleRule::AlwaysStop),
+        Some(VehicleRule::StopSign),
+        None,
+    ];
+    for _ in 0..30 {
+        let green = j.green_road(&g, 0);
+        for road in [0u16, 1, 9] {
+            let member = members.contains(&road);
+            for rule in rules {
+                assert_eq!(
+                    j.signal_aspect(0, &members, road, rule),
+                    SignalAspect::of_phase(member, green, road, rule),
+                    "road {road}, rule {rule:?}, phase {green:?}"
+                );
+            }
+        }
+        j.advance_tick();
+    }
+}

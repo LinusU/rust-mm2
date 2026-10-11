@@ -906,6 +906,40 @@ pub enum SignalAspect {
     Stop,
 }
 
+impl SignalAspect {
+    /// The aspect a head on `road` with `rule` shows while its
+    /// junction's green member is `green` — the road currently holding
+    /// the phase, or `None` during the all-red clearance slice.
+    /// `member` says whether `road` is in the junction's
+    /// light-controlled member set (a `TrafficLight` head whose road is
+    /// not, e.g. a one-way upstream end, shows the same green fallback
+    /// [`Junctions::gate`] resolves to). This is the one mapping both
+    /// the authority ([`Junctions::signal_aspect`]) and a networked
+    /// client (applying the host's replicated phase) share, so a
+    /// client's lamps read exactly the authority's.
+    pub fn of_phase(
+        member: bool,
+        green: Option<u16>,
+        road: u16,
+        rule: Option<VehicleRule>,
+    ) -> Self {
+        match rule {
+            None | Some(VehicleRule::NeverStop) => SignalAspect::Green,
+            Some(VehicleRule::AlwaysStop) => SignalAspect::Red,
+            Some(VehicleRule::StopSign) => SignalAspect::Stop,
+            Some(VehicleRule::TrafficLight) => {
+                if !member {
+                    return SignalAspect::Green;
+                }
+                match green {
+                    Some(green) if green == road => SignalAspect::Green,
+                    _ => SignalAspect::Red,
+                }
+            }
+        }
+    }
+}
+
 /// Per-intersection controller state the ambient driver consults each
 /// tick — the "one authoritative controller" the F10 spec asks for,
 /// scoped to junction admission only (ambient routing stays separate
@@ -1200,20 +1234,11 @@ impl Junctions {
         road: u16,
         rule: Option<VehicleRule>,
     ) -> SignalAspect {
-        match rule {
-            None | Some(VehicleRule::NeverStop) => SignalAspect::Green,
-            Some(VehicleRule::AlwaysStop) => SignalAspect::Red,
-            Some(VehicleRule::StopSign) => SignalAspect::Stop,
-            Some(VehicleRule::TrafficLight) => {
-                if !members.contains(&road) {
-                    return SignalAspect::Green;
-                }
-                match self.green_member(ix, members) {
-                    Some(green) if green == road => SignalAspect::Green,
-                    _ => SignalAspect::Red,
-                }
-            }
-        }
+        let member = members.contains(&road);
+        // `of_phase` ignores the phase for a non-member road, so the
+        // member lookup only has to be correct where it is read.
+        let green = self.green_member(ix, members);
+        SignalAspect::of_phase(member, green, road, rule)
     }
 
     /// Forget `car` everywhere — on transfer out of a junction and on
