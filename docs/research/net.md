@@ -1734,6 +1734,59 @@ it), `CORRECTION_SNAP_DIST`
 (1 s) bounds ask rate. The proxy's `MAX_QUEUED` (4096/lane) is harness
 state, not protocol.
 
+### Remote-copy drift (F25-AC02/AC03)
+
+*Measured evidence — in-process apps over real loopback.*
+`net_app`'s `the_remote_copys_drift_is_measured_per_recipe_cell` runs
+the same recipe cells (`support::impair_cells`) with the host's own
+seat scripted along a straight line at 20 m/s on the wall clock. Each
+loop samples the client copy's displayed `Position` against the
+host's truth at that instant; on a straight constant-speed track the
+error is a display lag, `lag = error / speed`. The first 100 updates
+fill the pipe and are not sampled; 200 samples follow. Then the link
+is disarmed, the host seat stops, and the copy must come to rest on it
+(< 0.05 m) inside 600 updates, with no `resets` (the 20 m snap bound
+never tripping) on the way. One recorded run (`drift cell=` lines;
+both directions armed, only the downstream carries the pose):
+
+| cell | recipe (both dirs) | lag mean | lag p95 | lag max | max error | settled after |
+|---|---|---|---|---|---|---|
+| clean | — | 17 ms | 21 ms | 21 ms | 0.42 m | 3 updates |
+| latency | 100 ms + 20 ms jit | 127 ms | 140 ms | 147 ms | 2.94 m | 1 |
+| jitter | 10 ms + 60 ms jit | 48 ms | 66 ms | 75 ms | 1.50 m | 2 |
+| loss | 20% | 18 ms | 27 ms | 39 ms | 0.78 m | 2 |
+| loss-heavy | 60% | 31 ms | 57 ms | 57 ms | 1.15 m | 4 |
+| duplicate | 50% | 18 ms | 26 ms | 29 ms | 0.58 m | 3 |
+| reorder | 50% | 17 ms | 25 ms | 27 ms | 0.54 m | 3 |
+| combined | 40 ms + 30 ms jit + 5% loss + 10% dup + 10% reo | 70 ms | 86 ms | 98 ms | 1.95 m | 3 |
+
+What it shows, and the decision it supports:
+
+- **The copy's lag is the transport delay plus one blend interval and
+  nothing more.** Clean sits at ~17 ms (the arrival gap the blend
+  spans); the latency cell adds its 100 ms hold (127 ms); jitter and
+  loss add at most their spread / one lost-gap (≤ 75 ms, ≤ 57 ms).
+  Max lag stayed below the delay + jitter bound plus a blend in every
+  cell, i.e. ≤ 3 m at 20 m/s — an order of magnitude inside the 20 m
+  `CORRECTION_SNAP_DIST`, which never tripped (`resets=0`).
+- **There is no sub-epoch drift to reconcile.** The copy is
+  re-anchored on every applied snapshot (`RemoteLerp` blends from the
+  displayed pose to the asserted one), so error cannot accumulate; once
+  the host stops, every cell settles within four updates of the link
+  being clean.
+- **Decision: no continuous drift reconciliation and no interpolation
+  delay change.** Lag is irreducible latency, not divergence;
+  extrapolating to hide it would trade a bounded, uniform lag for
+  overshoot on every direction change and reintroduce unbounded
+  extrapolation under loss (spec req 5 forbids it). Raising the blend
+  window would only add lag. The measurement is kept as a regression
+  guard; revisit if the blend interval clamp (0.005–0.5 s) or the
+  cadence changes.
+- **Scope.** Straight-line constant-speed motion only: it isolates
+  transport lag, not the shape error a turning car's chord blend
+  carries, and it is in-process loopback with a scripted seat, not
+  Avian-driven. LAN/Internet scope and rendered play stay open.
+
 ## Two-process driving (F25-B)
 
 `crates/mm2_app/tests/net_drive.rs` is the data plane's first

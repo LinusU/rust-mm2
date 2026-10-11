@@ -11402,3 +11402,147 @@ fn the_world_clock_converges_through_each_impairment_cell() {
         client.world_mut().resource_mut::<LobbyLink>().leave();
     }
 }
+
+/// F25-AC02/AC03: the remote copy's *drift* under each impairment
+/// recipe. The host's own seat drives a straight line at a constant
+/// [`DRIFT_SPEED`] on the wall clock, so the copy's position error
+/// along the track is a display lag in time: `lag = error / speed`.
+/// Each iteration samples the copy's displayed `Position` against the
+/// host's truth at that instant. Then the link is disarmed and the
+/// host seat stops: the copy must settle on it (no permanent sub-epoch
+/// divergence) inside a bounded deadline, and no correction may have
+/// tripped the snap bound on the way. The `drift cell=` record lines
+/// feed `docs/research/net.md` ("Remote-copy drift").
+#[test]
+fn the_remote_copys_drift_is_measured_per_recipe_cell() {
+    for (index, (name, impair)) in support::impair_cells().into_iter().enumerate() {
+        run_drift_cell(name, impair, index as u64 + 31);
+    }
+}
+
+/// Constant speed of the scripted host seat, m/s.
+const DRIFT_SPEED: f32 = 20.0;
+
+fn run_drift_cell(name: &str, impair: Impair, seed: u64) {
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+    let (proxy, mut host, mut client) = impaired_pair(name, seed);
+    let seat = host
+        .world_mut()
+        .spawn((
+            NetPlayer(0),
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            netdrive::ResetEpoch(0),
+            ObjectIdentity(ObjectId {
+                generation: 1,
+                slot: 100,
+            }),
+            Position(Vec3::new(0.0, 1.0, 0.0)),
+            Rotation::default(),
+            LinearVelocity::default(),
+            AngularVelocity::default(),
+        ))
+        .id();
+    // The client's own seat, so the reconcile has a driver to stamp.
+    client.world_mut().spawn((
+        PlayerVehicle,
+        Player {
+            id: mm2_game::PlayerId(1),
+            control: PlayerControl::Local,
+        },
+        mm2_game::AuthorityRole::Predicted,
+        Position::default(),
+        Rotation::default(),
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+    ));
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+
+    let copy_x = |client: &mut App| {
+        client
+            .world_mut()
+            .query_filtered::<&Position, With<RemotePick>>()
+            .iter(client.world())
+            .next()
+            .map(|p| p.0.x)
+            .expect("the remote copy vanished")
+    };
+    let drive = |host: &mut App, x: f32, v: f32| {
+        let mut e = host.world_mut().entity_mut(seat);
+        e.get_mut::<Position>().unwrap().0.x = x;
+        e.get_mut::<LinearVelocity>().unwrap().0.x = v;
+    };
+
+    proxy.set(LinkDir::Up, impair);
+    proxy.set(LinkDir::Down, impair);
+    let t0 = Instant::now();
+    let mut lags_ms: Vec<f32> = Vec::new();
+    let mut x = 0.0;
+    for i in 0..300 {
+        x = DRIFT_SPEED * t0.elapsed().as_secs_f32();
+        drive(&mut host, x, DRIFT_SPEED);
+        host.update();
+        client.update();
+        // The first stretch only fills the pipe (a delayed link has
+        // delivered nothing yet): sample the steady state.
+        if i >= 100 {
+            lags_ms.push((x - copy_x(&mut client)) / DRIFT_SPEED * 1000.0);
+        }
+        thread::sleep(Duration::from_millis(4));
+    }
+    let resets = client.world().resource::<netdrive::NetDriveReport>().resets;
+
+    // Disarm, stop the host seat where it is, and bound the settle.
+    proxy.set(LinkDir::Up, Impair::default());
+    proxy.set(LinkDir::Down, Impair::default());
+    let mut settled_after = None;
+    for i in 0..600 {
+        drive(&mut host, x, 0.0);
+        host.update();
+        client.update();
+        if (x - copy_x(&mut client)).abs() < 0.05 {
+            settled_after = Some(i);
+            break;
+        }
+        thread::sleep(Duration::from_millis(4));
+    }
+
+    lags_ms.sort_by(f32::total_cmp);
+    let n = lags_ms.len();
+    let mean = lags_ms.iter().sum::<f32>() / n as f32;
+    let p95 = lags_ms[n * 95 / 100];
+    let (min, max) = (lags_ms[0], lags_ms[n - 1]);
+    eprintln!(
+        "drift cell={name} seed={seed} lag_ms mean={mean:.0} p95={p95:.0} min={min:.0} max={max:.0} \
+         max_err_m={:.2} settle_updates={settled_after:?} resets={resets}",
+        max * DRIFT_SPEED / 1000.0,
+    );
+
+    assert!(
+        settled_after.is_some(),
+        "cell {name}: the copy never settled on the stopped host seat"
+    );
+    assert_eq!(
+        resets, 0,
+        "cell {name}: a correction tripped the snap bound mid-drive"
+    );
+    assert!(
+        max * DRIFT_SPEED / 1000.0 < 20.0,
+        "cell {name}: the copy lagged {max:.0} ms, past the snap bound"
+    );
+    proxy.set(LinkDir::Up, Impair::default());
+    client.world_mut().resource_mut::<LobbyLink>().leave();
+    for _ in 0..10 {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(4));
+    }
+}
