@@ -397,9 +397,11 @@ fn run_reset_pair(
     let alice = Proc::spawn(MM2_EXE, &alice_args);
     let mut bob_args = join_args(install, join_addr, "bob", 6000);
     // Bob is the control seat: he asks nothing. On a clean link he stays
-    // until alice has left; through a lossy relay alice's one-shot
-    // `Leave` can be dropped and the relay keeps her socket open, so he
-    // would never see her go — there he just runs his frame budget.
+    // until alice has left. Through a lossy relay alice's `Leave` is
+    // retried until the host reads a copy, so the *host* still reaps her
+    // — but the one roster snapshot that reports it to bob rides the
+    // same lossy lane and can be dropped, so he does not gate on
+    // `peer-left` there; he just runs his frame budget.
     if impair.is_none() {
         bob_args.extend(["--until-peer-left", "--deadline", "90"].map(String::from));
     }
@@ -2549,11 +2551,12 @@ fn run_shove_trio(
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
     // A driven client's frame budget is a non-binding ceiling (like the
     // host's), and its run ends on the authority's settle tick. Waiting
-    // on the wire tick rather than a frame count — or on bob's
-    // departure, which a lossy link can swallow — is what keeps both
-    // records at the same point of the authority's sim: the seats have
-    // come to rest, so alice's and bob's copies of every seat agree
-    // whatever their local throughput. Frames stay only the ceiling.
+    // on the wire tick rather than a frame count — or on the peer's
+    // departure, whose roster snapshot the lossy lane can swallow — is
+    // what keeps both records at the same point of the authority's sim:
+    // the seats have come to rest, so alice's and bob's copies of every
+    // seat agree whatever their local throughput. Frames stay only the
+    // ceiling.
     let (alice_flags, bob_flags) = if host_rams {
         let driven = |driver: &str| {
             let mut flags = join_args(install, join_addr, driver, HOST_FRAME_CEILING);

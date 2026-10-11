@@ -2543,6 +2543,44 @@ mod tests {
         }
     }
 
+    /// A `Leave` reaps the seat in a *running* session too — the
+    /// removal path runs on `Phase::InSession` exactly as on the lobby,
+    /// so the app client's retried `Leave` (NET-LEAVE-LOSSY) frees a
+    /// ghost seat mid-match and the survivor's roster drops it.
+    #[test]
+    fn a_mid_session_leave_frees_the_seat_and_rebroadcasts() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        let mut bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap(); // Joined alice
+        host.recv_timeout(WAIT).unwrap(); // Joined bob
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+        ready_up(&host, &mut alice, "vpbug");
+        ready_up(&host, &mut bob, "vpsemi");
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 1 }) => {}
+            other => panic!("expected Started{{1}}, got {other:?}"),
+        }
+        recv_start(&mut alice);
+        recv_start(&mut bob);
+
+        // Bob quits the running session.
+        bob.leave().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 2,
+                cause: LeaveCause::Quit,
+                ..
+            }) => {}
+            other => panic!("expected a Quit Left, got {other:?}"),
+        }
+        // The survivor's roster no longer lists the departed seat.
+        let roster = recv_roster(&mut alice, 1);
+        assert_eq!(roster[0].driver, "alice");
+    }
+
     #[test]
     fn a_cancel_outside_a_session_is_a_noop() {
         let host = sessioned_host();

@@ -665,6 +665,93 @@ fn leaving_the_lobby_reports_quit_and_exits_cleanly() {
     host.shutdown();
 }
 
+/// `NET-LEAVE-LOSSY`: a client's `Leave` is a single frame with no reply
+/// of its own — the host's socket close is the acknowledgement — so a
+/// dropped copy used to leave a ghost seat until the socket died. The
+/// seeded [`ImpairProxy`] drops the *first* `Leave` deterministically;
+/// the client's retry must carry the quit through and the host must reap
+/// the seat inside the watchdog.
+#[test]
+fn a_dropped_leave_is_retried_until_the_host_reaps_the_seat() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    // The peer dials the proxy, the proxy dials the host: the handshake
+    // crosses the transparent lane and only the leave is impaired.
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1303).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .unwrap();
+    let mut app = bridge_app(vfs, link);
+    app.update();
+
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match host.try_recv() {
+            Ok(HostEvent::Joined { id: 1, .. }) => break,
+            Ok(_) => continue,
+            Err(_) => {
+                assert!(Instant::now() < deadline, "the join never landed");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    // Every client→host frame is dropped from here: the first `Leave`
+    // cannot land. No `app.update()` runs while the recipe is armed, so
+    // the one copy `leave()` just wrote is the only Up frame in flight —
+    // the leg can name *the first* `Leave` as the dropped one.
+    proxy.set(
+        LinkDir::Up,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    app.world_mut().resource_mut::<LobbyLink>().leave();
+    let dropped = Instant::now() + Duration::from_secs(2);
+    while proxy.stats(LinkDir::Up).dropped < 1 {
+        assert!(
+            Instant::now() < dropped,
+            "the first Leave was never dropped"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    let up = proxy.stats(LinkDir::Up);
+    assert_eq!(
+        up.dropped, 1,
+        "exactly the one Leave copy was dropped: {up:?}"
+    );
+
+    // The link recovers; the retry must reap the seat well inside the
+    // watchdog, and the host records a clean `Quit`.
+    proxy.set(LinkDir::Up, Impair::default());
+    let bound = Instant::now() + Duration::from_secs(2);
+    let mut cause = None;
+    while Instant::now() < bound && cause.is_none() {
+        app.update();
+        while let Ok(ev) = host.try_recv() {
+            if let HostEvent::Left { cause: c, .. } = ev {
+                cause = Some(c);
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        cause,
+        Some(LeaveCause::Quit),
+        "the retried Leave reaped the seat as a clean quit"
+    );
+    host.shutdown();
+}
+
 /// A `quit` intent consumed at `Menu` while a lobby owns the surface
 /// must not exit the app — `drive_session` defers to the link.
 #[test]

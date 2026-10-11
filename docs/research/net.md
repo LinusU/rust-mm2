@@ -395,7 +395,11 @@ fails the client's `recv` with a timeout, which the pump reports as
 `Closed` like any other loss. The in-race `WireStall` handling stays
 the finer-grained stall policy; this only bounds the transport. The
 reverse (host dropping a silent client) is not implemented: a client
-only ever answers with traffic it chooses to send.
+only ever answers with traffic it chooses to send, and there is no
+client→host keepalive to age. A deliberate quit is the exception and
+does not need one: `Leave` is repeated by the leaving client until the
+host's close acknowledges it (below), so a lost copy cannot strand a
+ghost seat.
 `net_edge::a_stopped_host_*` SIGSTOPs a real `mm2-host`.
 
 ## Content fingerprints
@@ -474,7 +478,16 @@ always before its first `Roster` (see "Session advertisement" below).
   `SetReady`/`SetVehicle`/`Leave`; anything else drops it as
   `LeaveCause::Malformed`. A dead socket is
   `Lost`; `Leave` is `Quit` — `Client::leave` half-closes and drains so
-  a quit isn't RST'd into looking like a drop. Established-lobby writes
+  a quit isn't RST'd into looking like a drop. `Leave` carries no reply,
+  so its acknowledgement is the host's close; because a single copy can
+  be dropped on a lossy link, the leaving client repeats it every
+  `LEAVE_RETRY_INTERVAL` (100 ms, designed) until that close lands or
+  the five-second watchdog ends the link — bounded copies, never an
+  unbounded retry. `mm2_app::net::LobbyLink::retry_leave` drives the
+  in-app client (once per frame, so a lobby *or* a running session is
+  covered — the host's removal path is phase-independent) and
+  `mm2-join`'s watchdog thread drives the headless one. Established-lobby
+  writes
   carry `WRITE_TIMEOUT` (10 s) so a peer that stops reading is dropped
   rather than freezing a broadcast. Every removal — quit, drop or a
   failed broadcast write — disconnects the peer socket, so the blocked
@@ -689,8 +702,9 @@ shared world/spawn path — never a parallel multiplayer loader.
 Exit ownership follows the surface: with a `LobbyLink` present,
 `drive_session`'s `Menu` quit arm does not write `AppExit` (a quit
 returns to the lobby), and `drive_lobby` writes the eventual exit —
-`0` after our own `Leave` is acknowledged (bounded by a five-second
-watchdog against a host that never closes), `1` on a lost host or a
+`0` after our own `Leave` is acknowledged (the `Leave` is repeated each
+frame until the host's close or the five-second watchdog, so a dropped
+copy cannot leave a ghost seat), `1` on a lost host or a
 refused session. The stock `F4` restart binding is `Local`-authority
 only — a remote session's restarts belong to the host's
 `Cancel`/`Start` pair. A networked-authority session is also

@@ -333,6 +333,17 @@ pub fn vehicle_validator(catalog: &VehicleCatalog) -> PickValidator {
 /// `LEAVE_WATCHDOG`; a host that never closes cannot wedge a quit.
 const LEAVE_WATCHDOG: Duration = Duration::from_secs(5);
 
+/// How often a leaving client repeats its `Leave` until the host's close
+/// acknowledges it (designed, like `RESET_RETRY`/`RESULTS_FRAME_REPEATS`
+/// — nothing original is involved). A single `Leave` frame can be lost on
+/// a lossy link; it carries no reply of its own, so the removal stays
+/// invisible until the socket closes. Repeating it makes the host's close
+/// the acknowledgement: the first copy the host reads reaps the seat.
+/// `mm2-join` shares this cadence, and the whole retry window is bounded
+/// by [`LEAVE_WATCHDOG`], so the worst case is a bounded handful of
+/// copies against a host that never closes.
+pub const LEAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 /// One lobby transition the pump thread observed — the `Client`'s
 /// inbound message stream plus the terminal link-death marker.
 #[derive(Debug)]
@@ -370,6 +381,9 @@ pub struct LobbyLink {
     /// `leave()` was sent — `Some` the instant it went out, doubling
     /// as the watchdog's clock.
     leaving: Option<Instant>,
+    /// When the newest `Leave` copy went out — the clock the repeat
+    /// rides (see [`LobbyLink::retry_leave`]).
+    leave_sent: Option<Instant>,
     /// The pump reported `Closed` — the link is dead.
     pub closed: bool,
     /// Re-ready after every `Cancel` — the host resets readiness when it
@@ -405,6 +419,7 @@ impl LobbyLink {
             mods_active,
             dev,
             leaving: None,
+            leave_sent: None,
             closed: false,
             keep_ready: false,
         })
@@ -445,12 +460,48 @@ impl LobbyLink {
     }
 
     /// Say goodbye — the host records a `Quit` and closes our socket;
-    /// the pump then reports `Closed`. Idempotent.
+    /// the pump then reports `Closed`. Idempotent. The `Leave` is
+    /// repeated by [`LobbyLink::retry_leave`] until that close lands: a
+    /// single copy can be dropped, and no reply tells us it was lost.
     pub fn leave(&mut self) {
         if self.leaving.is_none() {
             self.leaving = Some(Instant::now());
-            let _ = self.ctl.leave();
+            self.send_leave();
         }
+    }
+
+    /// One `Leave` copy out, stamping the retry clock. The send is
+    /// best-effort, like `Drop`'s: a broken socket is already a dead
+    /// link, not a reason to skip the rest of the goodbye.
+    fn send_leave(&mut self) {
+        let _ = self.ctl.leave();
+        self.leave_sent = Some(Instant::now());
+    }
+
+    /// Repeat our `Leave` until the host's close acknowledges it, at most
+    /// once per [`LEAVE_RETRY_INTERVAL`] and never past the
+    /// [`LEAVE_WATCHDOG`] window. Called once per frame by
+    /// [`drive_lobby`]; a no-op until [`LobbyLink::leave`] has been
+    /// called and once the pump has reported `Closed`.
+    pub fn retry_leave(&mut self) {
+        if self.leaving.is_none() || self.closed {
+            return;
+        }
+        if self
+            .leaving
+            .is_some_and(|since| since.elapsed() > LEAVE_WATCHDOG)
+        {
+            // The watchdog is about to end the link; a copy past it can
+            // only race the exit.
+            return;
+        }
+        if self
+            .leave_sent
+            .is_some_and(|at| at.elapsed() < LEAVE_RETRY_INTERVAL)
+        {
+            return;
+        }
+        self.send_leave();
     }
 
     /// Drain whatever the pump has queued — non-blocking.
@@ -642,6 +693,12 @@ pub fn drive_lobby(
             LobbyEvent::Message(_) => {}
         }
     }
+
+    // Our `Leave` is a frame with no reply: repeat it until the pump's
+    // `Closed` says the host read a copy and closed the socket, so a
+    // dropped copy cannot leave a ghost seat on the host or its other
+    // clients.
+    link.retry_leave();
 
     // A link ending — our `leave()` or a dead host — takes a live
     // session down with it; the teardown rides the normal

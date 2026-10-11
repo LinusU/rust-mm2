@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use mm2_app::{net, smoke};
@@ -124,12 +124,24 @@ fn check_advertised(vfs: &Vfs, ad: &SessionAdvertisement) -> Result<(), String> 
 /// Mark the process as leaving: `code` is the exit status taken once
 /// the host closes our socket (0 = `quit`, 1 = refused session). The
 /// `Leave` prompts the host's close and wakes the blocked `recv`; the
-/// watchdog bounds the wait on a host that never closes.
+/// watchdog bounds the wait on a host that never closes. A single `Leave`
+/// can be dropped on a lossy link, so the watchdog thread — the only
+/// clock this process has while it blocks in `recv` — repeats it every
+/// [`net::LEAVE_RETRY_INTERVAL`] until the host's close wins the race.
 fn leave(leaving: &Arc<AtomicI32>, ctl: &ClientCtl, code: i32) {
-    leaving.store(code, Ordering::Relaxed);
+    // First `leave` wins: a later call must neither re-arm the exit code
+    // nor start a second retry thread.
+    if leaving.swap(code, Ordering::Relaxed) != -1 {
+        return;
+    }
     let _ = ctl.leave();
+    let ctl = ctl.clone();
     thread::spawn(move || {
-        thread::sleep(LEAVE_WATCHDOG);
+        let deadline = Instant::now() + LEAVE_WATCHDOG;
+        while Instant::now() < deadline {
+            thread::sleep(net::LEAVE_RETRY_INTERVAL);
+            let _ = ctl.leave();
+        }
         std::process::exit(code);
     });
 }
