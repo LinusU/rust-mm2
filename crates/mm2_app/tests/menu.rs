@@ -5728,3 +5728,133 @@ fn a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch() {
         "so does the narrowed gate"
     );
 }
+
+/// A 22 kHz mono wave long enough to still sound a few frames on.
+fn ui_wav() -> Vec<u8> {
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&22_050u32.to_le_bytes());
+    fmt.extend_from_slice(&44_100u32.to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes());
+    fmt.extend_from_slice(&16u16.to_le_bytes());
+    let pcm = vec![0x20u8; 2205 * 2];
+    let mut body = Vec::from(&b"WAVEfmt "[..]);
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    body.extend_from_slice(&pcm);
+    let mut out = Vec::from(&b"RIFF"[..]);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+fn ui_report(app: &App) -> mm2_app::ui_sound::UiSoundReport {
+    app.world()
+        .resource::<mm2_app::ui_sound::UiSound>()
+        .report
+        .clone()
+}
+
+/// F08-AC02 menu half: a scripted navigation plays `moveselector` per
+/// settled focus move, folds a held-key burst into one tick, plays
+/// `selectionmade` on an enabled confirm, stays silent on a no-op move
+/// and on `Back` (no retail clip), and tags the voices with the Effects
+/// bus kind.
+#[test]
+fn scripted_navigation_plays_ui_clips_once_and_coalesces_bursts() {
+    use mm2_app::audio::{AudioVoice, PcmAudio, VoiceKind};
+    use mm2_app::ui_sound::{UiSound, UiVoice, ui_sound_play};
+
+    let tmp = install();
+    write(tmp.path(), "aud/aud22/moveselector.22k.wav", ui_wav());
+    write(tmp.path(), "aud/aud22/selectionmade.22k.wav", ui_wav());
+    let mut app = menu_app(tmp.path(), None);
+    app.init_resource::<Assets<PcmAudio>>()
+        .init_resource::<UiSound>()
+        .add_systems(Update, ui_sound_play.after(menu::menu_input));
+    app.update();
+    assert_eq!(ui_report(&app), Default::default(), "boot is silent");
+
+    // A held-key burst: three Downs on consecutive frames (16 ms apart).
+    for _ in 0..3 {
+        press(&mut app, KeyCode::ArrowDown);
+    }
+    let r = ui_report(&app);
+    assert_eq!((r.played, r.coalesced), (1, 2), "{r:?}");
+
+    // Let the gap pass, then one more move sounds again.
+    for _ in 0..6 {
+        app.update();
+    }
+    press(&mut app, KeyCode::ArrowDown);
+    assert_eq!(ui_report(&app).played, 2);
+
+    // Jump to Options (focus_row), then confirm it after the gap.
+    focus_row(&mut app, "Options");
+    let base = ui_report(&app);
+    for _ in 0..6 {
+        app.update();
+    }
+    press(&mut app, KeyCode::Enter);
+    let r = ui_report(&app);
+    assert_eq!(r.played, base.played + 1, "confirm plays once: {r:?}");
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
+
+    // Back leaves the screen but has no retail clip: counted, not played.
+    press(&mut app, KeyCode::Escape);
+    let r = ui_report(&app);
+    assert_eq!(r.played, base.played + 1);
+    assert_eq!(r.unmapped, base.unmapped + 1);
+    assert_eq!(r.failed, 0);
+
+    let w = app.world_mut();
+    let mut q = w.query::<(&AudioVoice, &UiVoice)>();
+    let stems: Vec<&str> = q
+        .iter(w)
+        .map(|(v, u)| {
+            assert_eq!(v.kind, VoiceKind::Ui);
+            u.stem
+        })
+        .collect();
+    assert!(stems.contains(&"moveselector") && stems.contains(&"selectionmade"));
+    assert_eq!(VoiceKind::Ui.bus(), mm2_app::settings::AudioBus::Effects);
+}
+
+/// Bounded concurrency and an absent clip, on the gate itself.
+#[test]
+fn ui_gate_bounds_voices_and_a_missing_clip_is_reported() {
+    use mm2_app::ui_sound::{MAX_VOICES, UiCue, UiGate, Verdict};
+    let mut gate = UiGate::default();
+    assert_eq!(gate.admit(UiCue::Move, 1.0, 0), Verdict::Play);
+    assert_eq!(gate.admit(UiCue::Move, 1.01, 0), Verdict::Coalesced);
+    assert_eq!(gate.admit(UiCue::Confirm, 1.01, 0), Verdict::Play);
+    assert_eq!(gate.admit(UiCue::Confirm, 1.5, MAX_VOICES), Verdict::Full);
+    assert_eq!(gate.admit(UiCue::Move, 2.0, 0), Verdict::Play);
+    assert_eq!(UiCue::Back.stem(), None);
+}
+
+/// Original-content validation (opt-in: `MM2_RETAIL`): the two retail
+/// UI stems resolve and decode through the production bank.
+#[test]
+fn retail_ui_stems_resolve_and_decode() {
+    use mm2_app::audio::{PcmAudio, WaveBank};
+    use mm2_app::ui_sound::UiCue;
+    use mm2_assets::{InstallMount, mount_install};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail UI stem decode NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves = Assets::<PcmAudio>::default();
+    for cue in [UiCue::Move, UiCue::Confirm] {
+        let stem = cue.stem().unwrap();
+        bank.load(&vfs, &mut waves, stem)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+    }
+}

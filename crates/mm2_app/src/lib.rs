@@ -79,6 +79,7 @@ pub mod stuck;
 pub mod texel_fx;
 pub mod texture_budget;
 pub mod traffic;
+pub mod ui_sound;
 pub mod underground;
 pub mod water;
 pub mod wheel_fx;

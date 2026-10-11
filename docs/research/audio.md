@@ -637,7 +637,35 @@ one `SpeechArbiter`; only the arbiter spawns a voice.
 
 Evidence: synthetic (`tests/speech.rs`, plus the existing commentary
 suites running through the arbiter). F08-AC03 bus-mute half and
-AC02's menu/collision events are not covered here.
+AC02's collision events are not covered here (menu: below).
+
+### Menu/UI sounds (F08-B.3)
+
+Inventory (`mm2-inspect list`, retail): no `aud/ui*` directory; the menu
+clips are flat waves in `aud/aud11/` and `aud/aud22/`:
+`moveselector`, `selectionmade`, per-screen stings `uigo`, `uioptions`,
+`uiraces`, `uirecords`, `uivehicles`, `uidriver`, `uimulti`, the
+weather/time pickers `uisunny`/`uicloudy`/`uirain`/`uisnow`/
+`uimorning`/`uinoon`/`uisunset`/`uinight`, plus `switch`, `messagenote`
+and one `<car>select` per vehicle. Only the first two are bound
+(`crate::ui_sound`, designed — by name, not recovered from the
+executable):
+
+| Event | Stem |
+| --- | --- |
+| focus moved (row or side entry) | `moveselector` |
+| enabled `Activate` | `selectionmade` |
+| `Back` | none — no clip is identifiable; counted `unmapped`, silent |
+
+The `ui*` stings, `switch`, `messagenote` and `*select` clips have
+unrecovered triggers and are unbound. `ui.csv` is a music cue
+(see above), not a sound table.
+
+The Options screen has no UI bus, so UI voices (`VoiceKind::Ui`) ride
+Effects. A focus move within 60 ms of the last played one is coalesced;
+at most 4 UI voices sound at once. Evidence: synthetic scripted
+navigation in `tests/menu.rs`, retail stem decode (`MM2_RETAIL`). Not
+captured audibly.
 
 ## Deferred (F08 scope)
 

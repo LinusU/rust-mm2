@@ -3227,6 +3227,8 @@ pub struct MenuTarget<'w, 's> {
     /// Present while a join's handshake is unanswered — a launch or
     /// another lobby waits for it.
     dialing: Option<Res<'w, crate::net::MenuDial>>,
+    /// The menu's click sounds (absent: silent).
+    ui_sound: Option<ResMut<'w, crate::ui_sound::UiSound>>,
 }
 
 /// Map keyboard + gamepad into [`MenuCommand`]s, run them through
@@ -3369,7 +3371,20 @@ pub fn menu_input(
         } else {
             None
         };
+        let snap = |shell: &MenuShell| crate::ui_sound::NavSnapshot {
+            screen: shell.screen.clone(),
+            focus: shell.focus,
+            side: shell.side,
+        };
+        let before = snap(&shell);
+        let activatable = shell.focused_row().is_some_and(|r| r.enabled.is_ok());
         let effects = shell.apply(cmd, &mut data, &vfs.0);
+        if let Some(ui) = target.ui_sound.as_deref_mut()
+            && let Some(cue) =
+                crate::ui_sound::classify(cmd, &before, &snap(&shell), activatable, effects.len())
+        {
+            ui.push(cue);
+        }
         if abandoned.is_some() {
             shell.status = abandoned;
         }

@@ -1199,6 +1199,8 @@ pub enum VoiceKind {
     /// drawbridge, ferry or Underground sound
     /// (`crate::object_sound`).
     Object,
+    /// One menu focus-move/confirm clip (`crate::ui_sound`).
+    Ui,
 }
 
 impl VoiceKind {
@@ -1218,7 +1220,9 @@ impl VoiceKind {
             | Self::Rolling
             | Self::Clutch
             | Self::AmbientEngine
-            | Self::Siren => AudioBus::Effects,
+            | Self::Siren
+            // No UI bus on the Options screen: menu clips ride Effects.
+            | Self::Ui => AudioBus::Effects,
         }
     }
 }

@@ -2250,6 +2250,7 @@ fn main() {
             _ => menu::Screen::Root,
         };
         app.insert_resource(shell)
+            .init_resource::<mm2_app::ui_sound::UiSound>()
             .insert_resource(net::MenuHostBind(cli.menu_bind))
             .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
             .insert_resource(
@@ -2275,6 +2276,7 @@ fn main() {
                     menu::menu_input
                         .run_if(not(capturing))
                         .run_if(not(display_trial::display_trial_pending)),
+                    mm2_app::ui_sound::ui_sound_play,
                     menu::menu_present,
                     menu::menu_preview_motion,
                 )
