@@ -594,3 +594,90 @@ fn rainy_weather_binds_the_authored_ambience() {
         .count();
     assert_eq!(stale, 0, "gen-1 bed voices survived the restart");
 }
+
+/// Drive `app` until the session reaches `want`, failing loudly.
+fn settle(app: &mut App, want: fn(&SessionPhase) -> bool, what: &str) {
+    for _ in 0..120 {
+        app.update();
+        if want(app.world().resource::<Session>().phase()) {
+            return;
+        }
+    }
+    let phase = app.world().resource::<Session>().phase().name();
+    panic!("never reached {what}; stuck in {phase}");
+}
+
+/// Everything the weather owns, counted in one place: live drops,
+/// ambience voices and the session-scoped rig/binding resources.
+fn weather_footprint(app: &mut App) -> (usize, usize, bool, bool, bool) {
+    let drops = live_drops(app);
+    let voices = app
+        .world_mut()
+        .query::<&mm2_app::audio::WeatherVoice>()
+        .iter(app.world())
+        .count();
+    (
+        drops,
+        voices,
+        app.world().get_resource::<Precipitation>().is_some(),
+        app.world().get_resource::<PrecipFx>().is_some(),
+        app.world()
+            .get_resource::<mm2_app::audio::WeatherAudio>()
+            .is_some(),
+    )
+}
+
+/// F18-AC03: quitting a rainy session unloads every precipitation
+/// drop, ambience voice and weather resource, and cycling the preset
+/// through repeated sessions (rainy → dry → rainy → ...) keeps the
+/// live counts inside the authored bound with nothing left behind at
+/// each exit.
+#[test]
+fn weather_unloads_on_exit_and_stays_bounded_across_preset_changes() {
+    let tmp = city_install();
+    write_rain(tmp.path());
+    write_rain_audio(tmp.path());
+    let mut app = city_app(city_config(3), vfs_of(tmp.path()));
+
+    for (round, weather) in [3u8, 0, 3, 3, 0, 3].into_iter().enumerate() {
+        if round > 0 {
+            app.world_mut()
+                .resource_mut::<Session>()
+                .begin(city_config(weather))
+                .unwrap();
+        }
+        settle(&mut app, |p| matches!(p, SessionPhase::Playing), "Playing");
+        for _ in 0..90 {
+            app.update();
+        }
+
+        let (drops, voices, rig, fx, audio) = weather_footprint(&mut app);
+        if weather == 3 {
+            let bound = app.world().resource::<Precipitation>().max_live;
+            assert!(drops > 0, "round {round}: a rainy session has drops");
+            assert!(
+                drops <= bound,
+                "round {round}: {drops} drops exceed {bound}"
+            );
+            assert_eq!(voices, 2, "round {round}: both ambience beds live once");
+            assert!(rig && fx && audio, "round {round}: rainy bindings present");
+        } else {
+            assert_eq!(
+                (drops, voices, rig, fx, audio),
+                (0, 0, false, false, false),
+                "round {round}: a dry session carries no weather state"
+            );
+        }
+
+        app.world_mut().resource_mut::<SessionControl>().quit = true;
+        settle(&mut app, |p| matches!(p, SessionPhase::Menu), "Menu");
+        // The intent outlives the unload; consume it like the menu shell
+        // would so the next session is not quit on arrival.
+        app.world_mut().resource_mut::<SessionControl>().quit = false;
+        assert_eq!(
+            weather_footprint(&mut app),
+            (0, 0, false, false, false),
+            "round {round}: weather state survived the session exit"
+        );
+    }
+}

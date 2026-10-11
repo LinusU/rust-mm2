@@ -1277,8 +1277,9 @@ fn two_distinct_surfaces(app: &mut App, lo: [f32; 3], hi: [f32; 3]) -> Option<[S
 /// Park the session car on one sample and read what every grounded
 /// wheel's tire path actually applied — the authored material grip ×
 /// the session's environment factor — for eight frames after it
-/// settles. Returns the grounded-wheel frames measured.
-fn measure_grip_at(app: &mut App, sample: SurfaceSample, want: f32) -> usize {
+/// settles. Returns the grounded-wheel frames measured and the bit
+/// pattern of every distinct applied grip seen.
+fn measure_grip_at(app: &mut App, sample: SurfaceSample, want: f32) -> (usize, Vec<u32>) {
     use mm2_game::PlayerVehicle;
 
     let car = app
@@ -1296,6 +1297,7 @@ fn measure_grip_at(app: &mut App, sample: SurfaceSample, want: f32) -> usize {
     run(app, 60);
 
     let mut checked = 0;
+    let mut seen: Vec<u32> = Vec::new();
     for _ in 0..8 {
         app.update();
         let state = app.world().get::<VehicleState>(car).unwrap();
@@ -1315,10 +1317,13 @@ fn measure_grip_at(app: &mut App, sample: SurfaceSample, want: f32) -> usize {
                 w.surface_grip
             );
             checked += 1;
+            if !seen.contains(&w.surface_grip.to_bits()) {
+                seen.push(w.surface_grip.to_bits());
+            }
         }
     }
     assert!(checked > 0, "the car never grounded at {:?}", sample.at);
-    checked
+    (checked, seen)
 }
 
 /// F06-AC02's original-content run: the same weather × surface matrix
@@ -1415,7 +1420,18 @@ fn retail_weather_and_surface_move_traction_in_the_real_force_path() {
         };
         for sample in pair {
             let want = sample.grip * traction;
-            let frames = measure_grip_at(&mut app, sample, want);
+            let (frames, seen) = measure_grip_at(&mut app, sample, want);
+            if weather == 0 {
+                // F18-AC02's dry leg: the pre-weather baseline is the
+                // authored material grip alone, and a clear session
+                // must apply exactly that — bit for bit, no x1.0
+                // rounding or tolerance.
+                assert_eq!(
+                    seen,
+                    vec![sample.grip.to_bits()],
+                    "dry applied grip differs from the authored baseline"
+                );
+            }
             eprintln!(
                 "retail sf weather {weather}: {} authored grip {:.4} -> {:.4} applied ({frames} wheel frames)",
                 name_of(sample.material),
@@ -1439,4 +1455,65 @@ fn retail_weather_and_surface_move_traction_in_the_real_force_path() {
     grips.sort_by(f32::total_cmp);
     grips.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
     assert_eq!(grips.len(), 4, "{applied:?}");
+}
+
+/// F18-AC03's wheel-particle leg: no puff — nor the effect table —
+/// outlives its session's exit, across repeated sessions. (Puffs have
+/// no authored live cap; they die on `Life`, so only unload is asserted.)
+#[test]
+fn wheel_puffs_unload_on_exit_across_repeated_sessions() {
+    let tmp = city_install();
+    write_wheel_fx(tmp.path());
+    let mut app = city_app(vfs_of(tmp.path()));
+    let live = |app: &mut App| {
+        app.world_mut()
+            .query::<&WheelPuff>()
+            .iter(app.world())
+            .count()
+    };
+
+    for round in 0..3 {
+        if round > 0 {
+            app.world_mut()
+                .resource_mut::<Session>()
+                .begin(city_config(0))
+                .unwrap();
+        }
+        app.update();
+        assert!(playing(&mut app), "round {round}: never reached Playing");
+        let grass = material_index(&mut app, "testgrass");
+        let surface = surface_tag(&mut app, grass);
+        let car = test_car(&mut app, 77);
+        set_wheel(&mut app, car, 0, Some(surface), 0.8);
+        let mut peak = 0;
+        for _ in 0..120 {
+            app.update();
+            peak = peak.max(live(&mut app));
+        }
+        assert!(peak > 0, "round {round}: a slipping wheel emits");
+
+        app.world_mut().resource_mut::<SessionControl>().quit = true;
+        for _ in 0..120 {
+            app.update();
+            if matches!(
+                app.world().resource::<Session>().phase(),
+                SessionPhase::Menu
+            ) {
+                break;
+            }
+        }
+        app.world_mut().resource_mut::<SessionControl>().quit = false;
+        assert!(
+            matches!(
+                app.world().resource::<Session>().phase(),
+                SessionPhase::Menu
+            ),
+            "round {round}: the session never unloaded"
+        );
+        assert_eq!(live(&mut app), 0, "round {round}: puffs survived the exit");
+        assert!(
+            app.world().get_resource::<wheel_fx::WheelFx>().is_none(),
+            "round {round}: the effect table survived the exit"
+        );
+    }
 }
