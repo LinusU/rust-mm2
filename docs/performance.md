@@ -1,0 +1,76 @@
+# Performance baseline and how to reproduce it
+
+Measurement only (F30-A). Nothing here changes engine behaviour, and no
+optimisation has been made on its strength. The instruments are described
+in the README's "Frame-time profiling"; this page records one run of the
+reproducible set and what it does and does not show.
+
+## Reproduce
+
+```sh
+MM2_RETAIL=<original install> scripts/bench.sh [out-dir] [frames]
+```
+
+Builds the release `mm2`, then drives `--city sf` and `--city london` with
+`--bot --car vpauditt --no-vsync` for `frames` (default 1500) frames each
+and writes `<scene>.csv`, `<scene>.csv.report.json` (`mm2-perf-report/1`:
+commit, build, CPU/GPU, content fingerprints, settings, percentiles, soak
+verdict) and `<scene>.summary.txt` under `out-dir` (default `target/bench`).
+It needs a display, a GPU and the original install; hosted CI has none, so
+this is original-content / rendered evidence only, local. Do not commit the
+outputs.
+
+## Recorded run (2026-10-11)
+
+Apple M1 (8 logical cores, Metal, integrated), macOS, release profile,
+1280x720, MSAA 4x, shadows High, vsync off, 60 Hz fixed step, 1500 frames
+(first 120 dropped). Content fingerprint for the install used: catalog
+`fnv1a64:0711c87e6d11b21a`, gameplay `fnv1a64:3abca35555b5f542`
+(5591 files, 28,832,429 bytes). Engine commit `d2d584f` plus the
+uncommitted `scripts/bench.sh`.
+
+**Caveat: the machine was shared.** Load average was ~13 on 8 cores while
+the run executed (other agents building and testing), so absolute times
+are pessimistic and not a baseline to hold future work to. Re-record on an
+otherwise idle machine before using the numbers for a regression budget.
+
+| | SF | London |
+|---|---|---|
+| frame ms median / p95 / p99 / max | 44.3 / 120.2 / 180.0 / 254.8 | 41.9 / 54.8 / 66.7 / 116.8 |
+| mean ms per frame: fixed / update / render | 17.8 / 10.3 / 24.6 | 12.2 / 10.2 / 20.1 |
+| fixed steps per frame (mean / max) | 3.16 / 15 | 2.55 / 6 |
+| Avian ms per step: broad / narrow / solver | 0.06 / 0.35 / 0.41 | 0.07 / 0.26 / 0.33 |
+| max contacts | 448 | 324 |
+| live entities first / last / max | 43821 / 43734 / 43868 | 43762 / 43767 / 43788 |
+| live audio voices first / last / max | 55 / 55 / 59 | 49 / 48 / 52 |
+| frames over the 250 ms virtual cap | 2 (42.2 ms discarded) | 0 |
+| soak verdict | **fail** (overload only; entities and voices pass) | pass |
+
+## What it shows
+
+- Entity and voice counts are flat in both scenes over 1380 measured
+  frames; the soak's only failure is the two SF frames that exceeded the
+  virtual-clock cap and so discarded game time (worst fixed-step catch-up:
+  15 steps in one frame). Those frames coincide with the machine load, so
+  whether an idle machine still overloads is open.
+- Avian is not the cost: its three phases sum to about 0.8 ms per fixed
+  step (SF) while the whole `fixed` stage takes 17.8 ms over 3.16 steps,
+  roughly 5.6 ms per step. Most of the fixed-step time is therefore in
+  other fixed-step systems, not collision or solving. The per-system split
+  is **not measured**; `perf.rs` only times the three stages and Avian.
+- `render` (24.6 / 20.1 ms) is the largest stage and `update` is a steady
+  ~10 ms. A `sample` of the SF process (main thread: about 57% in the
+  update schedule, the rest in render) agrees with that, but the capture
+  was taken under the same load and is dominated by waiting threads, so it
+  does not name a function worth optimising. Frustum/OBB intersection and
+  shadow specialisation appear among the visible non-idle frames.
+
+## Still open (F30-AC01 / AC02)
+
+- Per-system timing inside the fixed and update stages to name the
+  bottleneck (needed before F30-B optimises anything).
+- A baseline on an idle machine, and a scene set that includes a race and
+  a networked session (this run covers free-roam SF and London only).
+- Draw calls, GPU memory, allocations and network bandwidth columns.
+- AC02's populated race/network soak, and the unresolved ~+60 entities per
+  600 frames wander seen in the longer SF run noted in the soak history.

@@ -309,6 +309,9 @@ local evidence — it embeds nothing from the install except hashes and
 counts — and a run is only comparable with another that has the same
 commit, build, hardware, fingerprints and settings.
 
+`scripts/bench.sh` runs the fixed scene set and `docs/performance.md`
+records a baseline and what it leaves unmeasured.
+
 For a CPU profile of where inside those stages the time goes, macOS's
 `sample <pid> 20 1 -file out.txt` works on the stock release binary
 (Instruments is not required).
