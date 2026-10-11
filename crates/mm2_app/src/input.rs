@@ -235,6 +235,14 @@ const RAM_STEER_GAIN: f32 = 2.0;
 /// ~2.5 m with no contact on the second seat).
 const RAM_STANDOFF: f32 = 30.0;
 
+/// Range (m) inside which a *joined client's* pursuit keeps the original
+/// per-frame law (re-zeroing the lock whenever the target is near and off
+/// the nose). The run-up fix in [`ram_drive`] is authority-only — the host
+/// ram is the one whose inputs act at once; a client's inputs reach the
+/// authority late and the collision legs drive a client ram, so its law
+/// is left exactly as it was.
+const RAM_CLIENT_STANDOFF: f32 = 14.0;
+
 /// Pace (m/s) above which [`ram_drive`] lifts off the throttle: at the
 /// dev car's top speed its lock circle is too wide to return on.
 const RAM_SPEED: f32 = 11.0;
@@ -254,6 +262,20 @@ const RAM_ALIGNED: f32 = 0.45;
 /// Factored out to keep the system's parameter list lint-clean.
 type RamTargets<'w, 's> =
     Query<'w, 's, (Entity, &'static GlobalTransform), (With<Vehicle>, Without<PlayerVehicle>)>;
+
+/// The nearest other vehicle to `from`, as its entity and pose. Used by
+/// the pursuit when it has no latched target (a joined client latches
+/// none: see [`ram_drive`]).
+fn nearest_ram_target(from: Vec3, others: &RamTargets<'_, '_>) -> Option<(Entity, Vec3)> {
+    others
+        .iter()
+        .min_by(|(_, a), (_, b)| {
+            a.translation()
+                .distance_squared(from)
+                .total_cmp(&b.translation().distance_squared(from))
+        })
+        .map(|(e, t)| (e, t.translation()))
+}
 
 /// The pursuit evidence driver (F25-C): full throttle, steering at the
 /// nearest other vehicle in the world — a real driven car-to-car
@@ -305,26 +327,31 @@ pub fn ram_drive(
         // latched entity is held while it exists, so the approach law
         // sees a fixed target; if the target despawns the next nearest is
         // taken.
+        //
+        // Authority-only: a joined client keeps the per-frame nearest law
+        // (its ram's late inputs act on the authority's copy, and the
+        // collision legs drive it), so this run-up fix never changes it.
         let target = if driving && !struck {
-            match strike.target.and_then(|e| others.get(e).ok()) {
-                Some((_, t)) => Some(t.translation()),
-                None => {
-                    let nearest = others.iter().min_by(|(_, a), (_, b)| {
-                        a.translation()
-                            .distance_squared(from)
-                            .total_cmp(&b.translation().distance_squared(from))
-                    });
-                    strike.target = nearest.map(|(e, _)| e);
-                    nearest.map(|(_, t)| t.translation())
+            if authority {
+                match strike.target.and_then(|e| others.get(e).ok()) {
+                    Some((_, t)) => Some(t.translation()),
+                    None => {
+                        let picked = nearest_ram_target(from, &others);
+                        strike.target = picked.map(|(e, _)| e);
+                        picked.map(|(_, t)| t)
+                    }
                 }
+            } else {
+                nearest_ram_target(from, &others).map(|(_, t)| t)
             }
         } else {
             None
         };
         // The run-up has pulled the range past the stand-off: from here
         // the pursuit is allowed to turn onto the target (see
-        // [`ram_input`]).
-        if let Some(to) = target
+        // [`ram_input`]). Authority-only: a client never opens.
+        if authority
+            && let Some(to) = target
             && !strike.opened
             && from.distance(to) > RAM_STANDOFF
         {
@@ -337,8 +364,24 @@ pub fn ram_drive(
                 handbrake: 1.0,
                 ..default()
             }
+        } else if authority {
+            ram_input(
+                at,
+                vel.length(),
+                target,
+                turn_pace,
+                strike.opened,
+                RAM_STANDOFF,
+            )
         } else {
-            ram_input(at, vel.length(), target, turn_pace, strike.opened)
+            ram_input(
+                at,
+                vel.length(),
+                target,
+                turn_pace,
+                false,
+                RAM_CLIENT_STANDOFF,
+            )
         };
     }
 }
@@ -383,13 +426,16 @@ impl RamStrike {
 /// One frame of [`ram_drive`]'s law: the car at `at` moving `speed`
 /// m/s, pursuing `target` (none = drive straight), holding `turn_pace`
 /// while the target is off the nose. `opened` says whether the run-up
-/// has already pulled the range out past [`RAM_STANDOFF`].
+/// has already pulled the range out past `standoff`; a caller that
+/// passes `opened = false` with the original stand-off gets the
+/// per-frame law a joined client keeps.
 pub fn ram_input(
     at: &GlobalTransform,
     speed: f32,
     target: Option<Vec3>,
     turn_pace: f32,
     opened: bool,
+    standoff: f32,
 ) -> VehicleInput {
     let from = at.translation();
     // Forward is −Z at yaw 0 — the `Quat::from_rotation_y` frame
@@ -402,15 +448,16 @@ pub fn ram_input(
     // Pulling the range out: a target close and off the nose cannot be
     // turned onto — a car at full lock orbits a neighbour on the next
     // grid seat without touching it — so drive straight until the run-up
-    // has put the target at a range the lock circle can take. Once that
-    // range is opened the pursuer keeps steering for the rest of the
-    // pursuit: re-zeroing the lock every time the target is near again
-    // parks the car in a stable orbit whose bearing never crosses
-    // [`RAM_ALIGNED`], so it never charges at all (measured,
-    // NET-SHOVE-WEAK-RAM: a latched single target orbited for the whole
-    // run).
+    // has put the target at a range the lock circle can take. The
+    // authority latches that opening (`opened`): once the range is out it
+    // keeps steering for the rest of the pursuit, because re-zeroing the
+    // lock every time the target is near again parks the car in a stable
+    // orbit whose bearing never crosses [`RAM_ALIGNED`], so it never
+    // charges at all (measured, NET-SHOVE-WEAK-RAM: a latched single
+    // target orbited for the whole run). A joined client is always called
+    // with `opened = false`, which leaves its original per-frame re-zero.
     let opening = match (target, bearing) {
-        (Some(to), Some(b)) => !opened && from.distance(to) < RAM_STANDOFF && b.abs() > RAM_ALIGNED,
+        (Some(to), Some(b)) => !opened && from.distance(to) < standoff && b.abs() > RAM_ALIGNED,
         _ => false,
     };
     let steering = match bearing {

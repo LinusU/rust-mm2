@@ -799,8 +799,19 @@ fn an_unfocused_window_ignores_the_pad_shift() {
 mod ram {
     use super::*;
 
+    /// The stand-off the authority ram opens its range with (see
+    /// `input::RAM_STANDOFF`): the unit tests exercise that law.
+    const STANDOFF: f32 = 30.0;
+
     fn input_at(speed: f32, target: Option<Vec3>) -> VehicleInput {
-        input::ram_input(&GlobalTransform::default(), speed, target, 5.0, false)
+        input::ram_input(
+            &GlobalTransform::default(),
+            speed,
+            target,
+            5.0,
+            false,
+            STANDOFF,
+        )
     }
 
     #[test]
@@ -839,6 +850,7 @@ mod ram {
             Some(Vec3::new(4.0, 0.0, 0.0)),
             5.0,
             true,
+            STANDOFF,
         );
         assert!(beside.steering > 0.0, "{beside:?}");
     }
@@ -866,6 +878,7 @@ mod ram {
             Some(Vec3::new(30.0, 0.0, -10.0)),
             11.0,
             false,
+            STANDOFF,
         );
         assert_eq!(wide.throttle, 1.0, "{wide:?}");
     }
