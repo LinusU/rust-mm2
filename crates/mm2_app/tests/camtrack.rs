@@ -8,16 +8,19 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
-    CameraMode, ChaseCamera, ChaseLens, CollideKind, FreeCamera, TrackReport, approach_axis,
-    chase_follow, desired_eye, dev_cam_cycle_at, follow_rate_target, load_track_cams,
-    slew_follow_rate, toggle_camera,
+    CameraMode, ChaseCamera, ChaseLens, CollideKind, DriverState, FreeCamera, ReverseSwing,
+    TrackReport, approach_axis, chase_follow, desired_eye, dev_cam_cycle_at, follow_rate_target,
+    load_track_cams, slew_follow_rate, toggle_camera, track_broken,
 };
 use mm2_app::dash::CockpitCamera;
 use mm2_app::input::vehicle_input;
 use mm2_app::session::SpawnPoint;
 use mm2_assets::Vfs;
 use mm2_formats::camtrack::TrackCamSpec;
-use mm2_game::{DevOverrides, PlayerVehicle, Session, SessionConfig, SessionPhase};
+use mm2_game::{
+    AuthorityRole, DevOverrides, ObjectId, PlayerVehicle, Session, SessionConfig, SessionPhase,
+    VehicleTelemetry,
+};
 use mm2_vehicle::VehicleInput;
 use std::time::Duration;
 
@@ -1526,4 +1529,243 @@ fn approach_axis_knee_lowpass_and_clamp() {
     assert_eq!(approach_axis(0.0, 0.01, &mut st, 50.0, &lens, dt), 0.01);
     let mut st = 100.0;
     assert_eq!(approach_axis(0.0, -0.01, &mut st, 50.0, &lens, dt), -0.01);
+}
+
+fn reverse_lens(extra: &str) -> ChaseLens {
+    let text = format!(
+        "type: a\ncamTrackCS {{\n  Offset 0.0 1.0 4.0\n  RevOnApp 2.0\n  RevOffApp 4.0\n  {extra}\n}}\n"
+    );
+    ChaseLens::authored(&TrackCamSpec::parse(&text).unwrap())
+}
+
+fn reversing(steer: f32) -> DriverState {
+    DriverState {
+        reverse_gear: true,
+        throttle: 1.0,
+        steer,
+        handbrake: 0.0,
+    }
+}
+
+/// UNK-36 `0x51dc50`: the swing needs 2.0 s (hard-coded; `RevDelay` is
+/// never read) of throttle in reverse gear, with the side taken from the
+/// steering at that moment (right, > 0.1, is -1).
+#[test]
+fn reverse_swing_waits_the_constant_delay_and_picks_the_side() {
+    let dt = 1.0 / 60.0;
+    for (steer, side) in [(0.5, -1.0), (0.1, 1.0), (-0.9, 1.0)] {
+        // A record that authors RevDelay 9 still swings after 2.0 s.
+        let lens = reverse_lens("RevDelay 9.0");
+        let mut sw = ReverseSwing::default();
+        for _ in 0..119 {
+            sw.detect(&lens, &reversing(steer), dt);
+        }
+        assert!(!sw.reversing, "not before 2 s");
+        sw.detect(&lens, &reversing(steer), dt);
+        sw.detect(&lens, &reversing(steer), dt);
+        assert!(sw.reversing && sw.side == side, "steer {steer}");
+    }
+    // Coasting in reverse gear never starts the timer.
+    let mut sw = ReverseSwing::default();
+    let idle = DriverState {
+        throttle: 0.04,
+        ..reversing(0.0)
+    };
+    for _ in 0..600 {
+        sw.detect(&lens_default(), &idle, dt);
+    }
+    assert!(!sw.reversing && sw.timer == 0.0);
+}
+
+fn lens_default() -> ChaseLens {
+    reverse_lens("")
+}
+
+/// `0x51e3e0`: the angle ramps to `side·π` at `RevOnApp`, back to 0 at
+/// `RevOffApp`, and never overshoots either target.
+#[test]
+fn reverse_swing_ramps_at_the_authored_rates() {
+    let lens = lens_default();
+    let dt = 0.25;
+    let mut sw = ReverseSwing {
+        reversing: true,
+        side: -1.0,
+        ..Default::default()
+    };
+    sw.ramp(&lens, dt);
+    assert!((sw.angle + 0.5).abs() < 1e-6);
+    for _ in 0..20 {
+        sw.ramp(&lens, dt);
+    }
+    assert_eq!(sw.angle, -std::f32::consts::PI);
+    // Out of reverse: unwinds toward 0 at 4 rad/s, clamped at 0.
+    sw.reversing = false;
+    sw.ramp(&lens, dt);
+    assert!((sw.angle - (-std::f32::consts::PI + 1.0)).abs() < 1e-5);
+    for _ in 0..20 {
+        sw.ramp(&lens, dt);
+    }
+    assert_eq!(sw.angle, 0.0);
+}
+
+/// Leaving reverse gear clears the flag; a swing within 0.001 rad of a
+/// half turn is snapped to `side·π` first, so the unwind goes the way
+/// the steering says.
+#[test]
+fn leaving_reverse_clears_the_flag_and_snaps_a_full_swing() {
+    let lens = lens_default();
+    let mut sw = ReverseSwing {
+        reversing: true,
+        side: -1.0,
+        angle: -3.1412,
+        timer: 2.5,
+    };
+    let forward = DriverState {
+        steer: -0.5,
+        ..Default::default()
+    };
+    sw.detect(&lens, &forward, 1.0 / 60.0);
+    assert!(!sw.reversing && sw.timer == 0.0);
+    assert_eq!(sw.angle, std::f32::consts::PI, "steered left: +π side");
+    // A partial swing is left where it is.
+    let mut sw = ReverseSwing {
+        reversing: true,
+        angle: 1.0,
+        ..Default::default()
+    };
+    sw.detect(&lens, &forward, 1.0 / 60.0);
+    assert_eq!(sw.angle, 1.0);
+}
+
+/// `ReverseOn` -1 pins the swing at π while the flag is set; 0 (and
+/// any other value) never swings; the handbrake in reverse gear zeroes
+/// the live follow rate only for `ReverseOn` 1.
+#[test]
+fn reverse_on_modes() {
+    let dt = 1.0 / 60.0;
+    let pinned = reverse_lens("ReverseOn -1");
+    let mut sw = ReverseSwing::default();
+    sw.detect(&pinned, &DriverState::default(), dt);
+    sw.ramp(&pinned, dt);
+    assert_eq!(sw.angle, std::f32::consts::PI);
+    let off = reverse_lens("ReverseOn 0");
+    let mut sw = ReverseSwing::default();
+    for _ in 0..300 {
+        sw.detect(&off, &reversing(0.0), dt);
+        sw.ramp(&off, dt);
+    }
+    assert!(!sw.reversing && sw.angle == 0.0);
+    let held = DriverState {
+        handbrake: 0.6,
+        ..reversing(0.0)
+    };
+    assert!(ReverseSwing::default().detect(&lens_default(), &held, dt));
+    assert!(!ReverseSwing::default().detect(&off, &held, dt));
+    let light = DriverState {
+        handbrake: 0.5,
+        ..reversing(0.0)
+    };
+    assert!(!ReverseSwing::default().detect(&lens_default(), &light, dt));
+}
+
+/// A record that omits the reverse cluster keeps the constructor
+/// defaults (ReverseOn 1, RevOnApp 2, RevOffApp 4).
+#[test]
+fn reverse_defaults_follow_the_constructor() {
+    let lens = reverse_lens("");
+    assert_eq!(
+        (lens.reverse_on, lens.rev_on_app, lens.rev_off_app),
+        (1, 2.0, 4.0)
+    );
+    let bare = ChaseLens::authored(
+        &TrackCamSpec::parse("type: a\ncamTrackCS {\n  Offset 0 1 4\n}\n").unwrap(),
+    );
+    assert_eq!(
+        (bare.reverse_on, bare.rev_on_app, bare.rev_off_app),
+        (1, 2.0, 4.0)
+    );
+}
+
+/// `0x51dc50`: TrackBreak 2 always breaks, 1 only when the body's up
+/// axis has y < 0.35, 0 never.
+#[test]
+fn track_break_modes() {
+    assert!(track_broken(2, 1.0));
+    assert!(track_broken(1, 0.34));
+    assert!(!track_broken(1, 0.35));
+    assert!(!track_broken(1, 1.0));
+    assert!(!track_broken(0, -1.0));
+}
+
+/// End to end through `chase_follow`: a car held in reverse gear with
+/// the pedal down swings the boom from behind the car to in front of it
+/// after the 2 s delay (UNK-36 `0x51dc50`/`0x51e3e0`), and back once
+/// the car leaves reverse.
+#[test]
+fn reversing_car_swings_the_chase_boom_round_and_back() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    let car = spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let text = "type: a\ncamTrackCS {\n  Offset 0.0 1.0 4.0\n  TrackTo 0.0 1.0 0.0\n  ApproachOn 0\n  RevOnApp 2.0\n  RevOffApp 4.0\n}\n";
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: ChaseLens::authored(&TrackCamSpec::parse(text).unwrap()),
+            ..default()
+        },
+        true,
+    );
+    let telemetry = |reverse| VehicleTelemetry {
+        object: ObjectId {
+            generation: 0,
+            slot: 1,
+        },
+        tick: 0,
+        authority: AuthorityRole::Authority,
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::ZERO,
+        forward_speed: 0.0,
+        rpm: 0.0,
+        engine_load: 0.0,
+        gear: 0,
+        reverse,
+        shifting: false,
+        wheels: Vec::new(),
+        damage: Default::default(),
+    };
+    let eye_z = |app: &App| app.world().get::<Transform>(cam).unwrap().translation.z;
+    app.world_mut().entity_mut(car).insert((
+        telemetry(true),
+        VehicleInput {
+            brake: 1.0,
+            ..default()
+        },
+    ));
+    app.update();
+    assert!((eye_z(&app) - 4.0).abs() < 1e-4, "starts behind the car");
+    // 2 s delay, then π at 2 rad/s: 1.5 s more.
+    for _ in 0..(60 * 2 + 1) {
+        app.update();
+    }
+    assert!(eye_z(&app) > 4.0 - 4.0 * 0.9, "swing has begun");
+    for _ in 0..(60 * 2) {
+        app.update();
+    }
+    assert!(
+        (eye_z(&app) + 4.0).abs() < 1e-3,
+        "in front: {}",
+        eye_z(&app)
+    );
+    // Out of reverse: unwinds at 4 rad/s, π in 0.79 s.
+    app.world_mut().entity_mut(car).insert(telemetry(false));
+    for _ in 0..60 {
+        app.update();
+    }
+    assert!(
+        (eye_z(&app) - 4.0).abs() < 1e-3,
+        "back behind: {}",
+        eye_z(&app)
+    );
 }

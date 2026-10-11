@@ -442,8 +442,8 @@ impl TrackCamSpec {
     pub fn reverse_mode(&self) -> i32 {
         match usable1(self.reverse_on) {
             None => 1,
-            Some(v) if v == 1.0 => 1,
-            Some(v) if v == -1.0 => -1,
+            Some(1.0) => 1,
+            Some(-1.0) => -1,
             Some(_) => 0,
         }
     }

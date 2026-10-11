@@ -12,7 +12,8 @@ use mm2_formats::{
     camtrack::{TrackCamSpec, usable1},
     dash::PovCamSpec,
 };
-use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase};
+use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleTelemetry};
+use mm2_vehicle::vehicle::VehicleInput;
 
 use crate::input::control_just_pressed;
 
@@ -99,6 +100,17 @@ pub struct ChaseLens {
     /// `VertOffset` — scales the look target's lift
     /// `LookAbove = (Offset.y − 0.8)·VertOffset` (recovered, UNK-36).
     pub vert_offset: f32,
+    /// `ReverseOn` (`0x51dc50`/`0x51e3e0`, UNK-36): 1 swings the camera
+    /// round the aim point after the reverse-gear delay, -1 pins it
+    /// round while the flag is set, anything else leaves it alone.
+    pub reverse_on: i32,
+    /// `RevOnApp` / `RevOffApp` — rad/s the swing ramps toward ±π /
+    /// back to 0. `RevDelay` is never read by the retail camera.
+    pub rev_on_app: f32,
+    pub rev_off_app: f32,
+    /// `TrackBreak` (`0x51dc50`): 1 breaks tracking while the body's up
+    /// axis has `y < 0.35`, 2 always; anything else never.
+    pub track_break: u8,
     /// `CollideType` (`0x51eeb0`, UNK-36): 1 = instant five-ray pull-in,
     /// 2 = eased single-ray pull-in, anything else does nothing.
     pub collide: CollideKind,
@@ -151,6 +163,8 @@ mod ctor {
     pub const APP_APP: f32 = 0.7;
     pub const APP_POS_MIN: f32 = 0.25;
     pub const VERT_OFFSET: f32 = 0.6;
+    pub const REV_ON_APP: f32 = 2.0;
+    pub const REV_OFF_APP: f32 = 4.0;
 }
 
 impl ChaseLens {
@@ -196,6 +210,10 @@ impl ChaseLens {
             approach: spec.approach_enabled(),
             app_xz_init: usable1(spec.app_xz_pos).filter(|r| *r >= 0.0),
             vert_offset: usable1(spec.vert_offset).unwrap_or(ctor::VERT_OFFSET),
+            reverse_on: spec.reverse_mode(),
+            rev_on_app: rate(spec.rev_on_app, ctor::REV_ON_APP),
+            rev_off_app: rate(spec.rev_off_app, ctor::REV_OFF_APP),
+            track_break: spec.track_break_mode(),
             collide: CollideKind::from_mode(spec.collide_mode()),
             min_max: spec.min_max_gated(),
             // `camera_fov_deg` reads an undrawable `CameraFOV`
@@ -229,6 +247,10 @@ impl ChaseLens {
             approach: true,
             app_xz_init: None,
             vert_offset: ctor::VERT_OFFSET,
+            reverse_on: 1,
+            rev_on_app: ctor::REV_ON_APP,
+            rev_off_app: ctor::REV_OFF_APP,
+            track_break: 0,
             collide: CollideKind::Off,
             min_max: false,
             fov_deg: PerspectiveProjection::default().fov.to_degrees(),
@@ -278,6 +300,122 @@ pub struct FollowState {
     /// `CollideType 2`'s eased squared eye–aim distance (`0x264`);
     /// `None` while the original's active flag (`0x258`) is clear.
     pub collide_sq: Option<f32>,
+    /// The reverse swing (`0x248`/`0x24c`/`0x250` and the angle slot).
+    pub swing: ReverseSwing,
+    /// `TrackBreak` verdict of the last frame (`0x194`). Recorded only:
+    /// the consumer is the unrecovered airborne/re-anchor flag machine
+    /// (UNK-36), so it does not move the eye.
+    pub broken: bool,
+}
+
+/// What the player is doing, as `camTrackCS`'s reverse detection reads
+/// it from the car simulation (`0x51dc50`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DriverState {
+    /// `Transmission.CurrentGear == 0`.
+    pub reverse_gear: bool,
+    /// The engine throttle (`carsim+0x2bc`); in reverse that is the
+    /// pedal the player's auto-reverse swapped to, i.e. our brake.
+    pub throttle: f32,
+    /// Steering, `+` right (`carsim+0x1554`).
+    pub steer: f32,
+    /// Handbrake input (`carsim+0x1550`).
+    pub handbrake: f32,
+}
+
+/// The reverse-swing machine of `camTrackCS` (UNK-36).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReverseSwing {
+    /// Seconds of throttle held in reverse gear (`0x24c`).
+    pub timer: f32,
+    /// The `reversing` flag (`0x248`).
+    pub reversing: bool,
+    /// Side the swing goes: -1 when steering right, else +1 (`0x250`).
+    pub side: f32,
+    /// Orbit angle about the aim point, radians.
+    pub angle: f32,
+}
+
+/// The reverse-gear delay: a constant in retail (`0x5af578`); the
+/// record's `RevDelay` is never read.
+const REVERSE_DELAY: f32 = 2.0;
+/// Steering beyond which the swing goes the other way (`0x5af400`).
+const REVERSE_STEER: f32 = 0.1;
+/// Throttle the delay timer needs (`0x5afc1c`).
+const REVERSE_THROTTLE: f32 = 0.05;
+/// Handbrake level above which reverse gear zeroes `AppXZPos` (`0x5af360`).
+const REVERSE_HANDBRAKE: f32 = 0.5;
+/// Slack under π within which leaving reverse snaps the angle to the
+/// full half turn (`0x5b3f0c`).
+const REVERSE_SNAP: f32 = 3.1405928;
+
+impl ReverseSwing {
+    fn side_for(steer: f32) -> f32 {
+        if steer > REVERSE_STEER { -1.0 } else { 1.0 }
+    }
+
+    /// Reverse detection (`0x51dc50`). Returns whether the live follow
+    /// rate is zeroed this frame (handbrake held in reverse gear).
+    pub fn detect(&mut self, lens: &ChaseLens, d: &DriverState, dt: f32) -> bool {
+        match lens.reverse_on {
+            1 if d.reverse_gear => {
+                if !self.reversing && d.throttle >= REVERSE_THROTTLE {
+                    self.timer += dt;
+                    if self.timer >= REVERSE_DELAY {
+                        self.reversing = true;
+                        self.side = Self::side_for(d.steer);
+                    }
+                }
+                d.handbrake > REVERSE_HANDBRAKE
+            }
+            1 => {
+                if self.reversing {
+                    self.side = Self::side_for(d.steer);
+                    if self.angle.abs() > REVERSE_SNAP {
+                        self.angle = self.side * std::f32::consts::PI;
+                    }
+                }
+                self.reversing = false;
+                self.timer = 0.0;
+                false
+            }
+            -1 => {
+                self.reversing = true;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The angle ramp of the desired-eye step (`0x51e3e0`): toward
+    /// `side·π` at `RevOnApp` while reversing, toward 0 at `RevOffApp`
+    /// otherwise, never passing the target. `ReverseOn == -1` pins it.
+    pub fn ramp(&mut self, lens: &ChaseLens, dt: f32) {
+        use std::f32::consts::PI;
+        match lens.reverse_on {
+            1 => {
+                let (target, rate) = if self.reversing {
+                    (self.side * PI, lens.rev_on_app)
+                } else {
+                    (0.0, lens.rev_off_app)
+                };
+                let step = rate * dt;
+                if self.angle < target {
+                    self.angle = (self.angle + step).min(target);
+                } else if self.angle > target {
+                    self.angle = (self.angle - step).max(target);
+                }
+            }
+            -1 => self.angle = if self.reversing { PI } else { 0.0 },
+            _ => {}
+        }
+    }
+}
+
+/// `TrackBreak` (`0x51dc50`): 2 always breaks, 1 breaks when the body's
+/// up axis `y` is below 0.35.
+pub fn track_broken(mode: u8, body_up_y: f32) -> bool {
+    mode == 2 || (mode == 1 && body_up_y < 0.35)
 }
 
 /// The follow rate the car's speed asks for (`0x51eb20`, UNK-36):
@@ -763,6 +901,7 @@ type RootPlayer = (With<PlayerVehicle>, Without<ChildOf>);
 /// inferred, not recovered, so the look is applied directly. The
 /// projection follows the lens's `CameraFOV`/`CameraNear`/`CameraFar`,
 /// and `CollideType` pulls the camera in front of occluding geometry.
+#[allow(clippy::type_complexity)] // the player query threads pose, velocity, input and telemetry
 pub fn chase_follow(
     time: Res<Time>,
     mode: Res<CameraMode>,
@@ -770,13 +909,34 @@ pub fn chase_follow(
     spawn: Option<Res<crate::session::SpawnPoint>>,
     settings: Option<Res<crate::settings::GraphicsSettings>>,
     mut cams: Query<(&mut ChaseCamera, &mut Transform, &mut Projection), Without<PlayerVehicle>>,
-    vehicle: Query<(Entity, &Transform, &LinearVelocity), RootPlayer>,
+    vehicle: Query<
+        (
+            Entity,
+            &Transform,
+            &LinearVelocity,
+            Option<&VehicleInput>,
+            Option<&VehicleTelemetry>,
+        ),
+        RootPlayer,
+    >,
 ) {
     if !matches!(*mode, CameraMode::Chase | CameraMode::ChaseFar) {
         return;
     }
-    let Ok((veh_ent, veh_xf, vel)) = vehicle.single() else {
+    let Ok((veh_ent, veh_xf, vel, input, telemetry)) = vehicle.single() else {
         return;
+    };
+    let reverse_gear = telemetry.is_some_and(|t| t.reverse);
+    let input = input.copied().unwrap_or_default();
+    let driver = DriverState {
+        reverse_gear,
+        throttle: if reverse_gear {
+            input.brake
+        } else {
+            input.throttle
+        },
+        steer: input.steering,
+        handbrake: input.handbrake,
     };
     // PlayerVehicle is a root entity, so its local transform is its world
     // render pose. Interpolation writes this before Update; GlobalTransform
@@ -814,7 +974,20 @@ pub fn chase_follow(
             *proj = Projection::Perspective(want);
         }
 
+        if jumped {
+            cam.follow.swing = ReverseSwing::default();
+        }
+        let zero_rate = cam.follow.swing.detect(&lens, &driver, dt);
+        cam.follow.broken = track_broken(lens.track_break, (veh_rot * Vec3::Y).y);
+        if zero_rate && !jumped {
+            cam.follow.app_xz = Some(0.0);
+        }
         let (aim, desired) = desired_eye(veh_pos, veh_rot, &lens);
+        // The swing orbits the desired eye round the aim point about up
+        // (`0x51e3e0`); the eye then approaches the swung position.
+        cam.follow.swing.ramp(&lens, dt);
+        let desired =
+            aim + Quat::from_axis_angle(Vec3::Y, cam.follow.swing.angle) * (desired - aim);
         let rate_target = follow_rate_target(&lens, speed);
         let rate = match cam.follow.app_xz {
             Some(cur) if !jumped => {
