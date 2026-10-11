@@ -635,3 +635,45 @@ clips differ in source level (not investigated further). This
 renders the computed mix, not rodio's resampler; the original's mix
 and trigger remain unrecovered (DSN-61/UNK-25). Open: a human listen
 to the three WAVs (`OWNER:` follow-up) and AC04.
+
+## F18-AC02/AC03 traction causality and unload (2026-10-11)
+
+**Evidence level:** original-content validation (AC02) plus synthetic
+integration (AC03). Rendered/playtest evidence is not claimed.
+
+### AC02 — dry unchanged, wet scaled, through the real force path
+
+`cargo test -p mm2_app --test app retail_weather_and_surface -- --nocapture`
+with `MM2_RETAIL` set parks the session car on the retail `sf` map's two
+most distinct drivable surfaces (found by ray, not assumed) under a clear
+and a rainy session and reads the grip the tire path applied
+(`VehicleState::wheels[].surface_grip`, 32 grounded-wheel frames each):
+
+| surface   | authored grip | clear (applied) | rainy (applied) |
+|-----------|---------------|-----------------|-----------------|
+| grass     | 1.0000        | 1.0000          | 0.8000          |
+| deepwater | 0.7222        | 0.7222          | 0.5778          |
+
+Four distinct grips over (weather × surface). The **dry baseline** is the
+pre-weather behaviour: before the weather factor existed the applied
+grip was the authored material grip alone. The test now compares the clear
+session's applied grip to that authored value by **bit pattern**
+(`f32::to_bits`), not a tolerance, so a clear session cannot drift even by
+a rounding step; the rainy leg keeps the `1e-5` tolerance against
+`grip × WET_TRACTION (0.8)`. No handling parameter was touched. The
+multiplier is applied once (material grip × session factor) — the same
+check that guards against a duplicate weather multiplier.
+
+### AC03 — unload on exit, bounded across preset changes
+
+- `precip::weather_unloads_on_exit_and_stays_bounded_across_preset_changes`
+  runs six consecutive sessions (rainy, dry, rainy, rainy, dry, rainy) on
+  one app, quitting each. While rainy: drops > 0 and ≤
+  `Precipitation::max_live`, exactly two `WeatherVoice` beds, and the
+  `Precipitation`/`PrecipFx`/`WeatherAudio` resources bound. A dry session
+  binds none of them. After every quit: zero `PrecipDrop`, zero
+  `WeatherVoice`, and all three resources removed.
+- `wheel_fx::wheel_puffs_unload_on_exit_across_repeated_sessions` does the
+  same for wheel particles over three sessions (zero `WheelPuff` and no
+  `WheelFx` table after each exit). Wheel puffs have no authored live cap
+  (they die on `Life`), so only unload is asserted, not a bound.
