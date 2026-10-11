@@ -7,8 +7,8 @@ number below comes off the fingerprinted install
 on 2026-09-22, the first render captures on 2026-09-24, the dynamic
 table (accel/cornering, `--controls`, `--drop`) and the override sweep
 were re-derived on 2026-10-11 from current main, and the F02-C
-follow-up pass on 2026-10-10 introduced the
-`--override-matrix` leg, ran the override sweep through the new one-command `--override-matrix` leg,
+follow-up pass on 2026-10-10 added the
+one-command `--override-matrix` leg,
 added the retail `handling_override` test, and captured the default
 plus first alternate paint of every car; the synthetic legs are the
 `mm2_vehicle` / `mm2_app` test suites.
