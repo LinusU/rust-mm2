@@ -184,6 +184,16 @@ There is no cache directory and no log file; diagnostics go to the
 terminal. `--mods` directories are read, never written. Windows paths are
 *untested*.
 
+Verified 2026-10-11 on macOS arm64 (commit `d26bfff`): `scripts/package.sh`
+exits 0 ("package clean: 8 files" for the folder and for the extracted
+tarball, private-path scan clean), and the `mm2` extracted from the
+tarball, run from `/`, passes `--headless --dev-world --bot --frames 300`
+with the same result (`status=pass travel=70.0m`) as the build-tree
+binary. Without `--bot` the headless smoke reports `status=fail ... car
+never drove` for both, because the default driver holds no input. That is
+the smoke's own verdict, not a packaging fault. This is a smoke of the
+package, not the game-rule test suite (F30-AC06 stays open).
+
 ## Entry points
 
 ```sh

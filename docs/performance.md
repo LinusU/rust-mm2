@@ -46,7 +46,32 @@ otherwise idle machine before using the numbers for a regression budget.
 | frames over the 250 ms virtual cap | 2 (42.2 ms discarded) | 0 |
 | soak verdict | **fail** (overload only; entities and voices pass) | pass |
 
-## What it shows
+## Second run (2026-10-11, lighter load)
+
+Same machine, settings and command as above, engine commit `d26bfff`
+(clean tree). Load average was 4-7 on 8 cores during the run (other
+agents still active), so this is better than the first run but still not
+an idle-machine baseline.
+
+| | SF | London |
+|---|---|---|
+| frame ms median / p95 / p99 / max | 18.6 / 20.1 / 33.8 / 53.1 | 19.7 / 24.9 / 34.6 / 60.8 |
+| mean ms per frame: fixed / update / render | 2.8 / 5.1 / 11.1 | 3.2 / 5.3 / 11.9 |
+| fixed steps per frame (mean / max) | 1.14 / 3 | 1.22 / 4 |
+| max contacts | 395 | 323 |
+| live entities first / last / max | 43849 / 43700 / 43854 | 43696 / 43720 / 43777 |
+| live audio voices first / last / max | 57 / 56 / 57 | 49 / 50 / 52 |
+| frames over the 250 ms virtual cap | 0 | 0 |
+| soak verdict | pass | pass |
+
+The first run's SF soak failure (two frames over the virtual cap) did not
+reproduce, which supports it having been machine load. The fixed stage
+dropped from 17.8 to 2.8 ms per frame, so the first run's "most of the
+fixed-step time is in other systems" figure was largely contention, not a
+property of the engine. Evidence level: original-content, rendered, local;
+free-roam only (no race, no networked session), so F30-AC02 stays open.
+
+## What it shows (first run)
 
 - Entity and voice counts are flat in both scenes over 1380 measured
   frames; the soak's only failure is the two SF frames that exceeded the
