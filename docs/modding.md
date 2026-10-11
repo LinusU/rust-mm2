@@ -211,7 +211,11 @@ the byte-level identity of gameplay content.
     listing.
   - `mm2_assets::mount_mods` — used by the game, `mm2-host`, `mm2-join` and
     the inspector alike — logs the same summary at mount: `warn` for a mod
-    conflict, `info` for a mod overriding original content.
+    conflict, `info` for a mod overriding original content. Every surface
+    prints the identical `OverrideSummary` line, e.g.
+    `CONFLICT beta over alpha: 1 path(s), first texture/shared.png` (the
+    game's mount log on stdout, `mm2-host`'s on stderr, `mm2-inspect
+    conflicts` on stdout).
   Use `mm2-inspect list` + `lookup` to verify which file is live.
 - `mm2-inspect [--mods <dir>] deps <install> <car> [--paint N]
   [--expect-mod <id>]` loads a car through the production loader with the

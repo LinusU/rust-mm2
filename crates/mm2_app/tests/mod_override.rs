@@ -973,3 +973,63 @@ fn a_malformed_selected_override_is_reported_not_papered_over() {
         "an unsupported encoding is an error, not the base cue"
     );
 }
+
+/// F29-AC03: the same ranked provenance line for one mod-against-mod
+/// conflict from the game's mount log and the dedicated server's startup.
+/// `mm2-inspect conflicts` prints the identical line (asserted in
+/// `tools/mm2_inspect/tests/conflicts.rs`), as does `mount_mods` itself.
+/// Synthetic data; the retail run is left to a human with `MM2_RETAIL`.
+#[test]
+fn a_mod_conflict_reads_the_same_in_the_game_log_and_the_server_startup() {
+    use crate::support::{Proc, WAIT};
+
+    const EXPECTED: &str = "CONFLICT beta over alpha: 1 path(s), first texture/shared.png";
+    let tmp = tempfile::tempdir().unwrap();
+    let (install, mods) = (tmp.path().join("install"), tmp.path().join("mods"));
+    std::fs::create_dir_all(&install).unwrap();
+    write(&install, "texture/shared.png", b"install");
+    for id in ["alpha", "beta"] {
+        let d = mods.join(id);
+        manifest(&d, id);
+        write(&d, "texture/shared.png", id.as_bytes());
+    }
+    let (install_arg, mods_arg) = (
+        install.to_str().unwrap().to_string(),
+        mods.to_str().unwrap().to_string(),
+    );
+
+    // The game: any mod-mounting run logs at mount; `--trace-deps` is the
+    // cheap windowless one.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mm2"))
+        .args(["--mm2-path", &install_arg, "--mods", &mods_arg])
+        .args(["--trace-deps", "--siren-cue", "wail"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("spawn mm2");
+    // The game's subscriber writes to stdout.
+    let game = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        game.contains(EXPECTED),
+        "game mount log ({:?}):\n{game}",
+        out.status
+    );
+
+    // The dedicated server: the log is on stderr at startup, stdout stays
+    // the record stream.
+    let host = Proc::spawn(
+        env!("CARGO_BIN_EXE_mm2-host"),
+        &[
+            "--mm2-path".into(),
+            install_arg,
+            "--mods".into(),
+            mods_arg,
+            "--dev-world".into(),
+            "--bind".into(),
+            "127.0.0.1:0".into(),
+        ],
+    );
+    let first = host.line();
+    assert!(first.starts_with("listening="), "{first}");
+    let server = host.stderr_containing(EXPECTED, WAIT);
+    assert!(server.contains(EXPECTED), "server startup:\n{server}");
+}

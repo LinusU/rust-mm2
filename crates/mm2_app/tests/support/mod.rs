@@ -162,6 +162,20 @@ impl Proc {
         }
     }
 
+    /// Wait, bounded, until the child's stderr contains `needle` and return
+    /// everything it has written so far. The drain thread runs behind the
+    /// child, so a record already read from stdout may precede its stderr.
+    pub fn stderr_containing(&self, needle: &str, bound: Duration) -> String {
+        let deadline = Instant::now() + bound;
+        loop {
+            let text = self.stderr.lock().unwrap().clone();
+            if text.contains(needle) || Instant::now() >= deadline {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// One operator command on the child's stdin (`start`, `cancel`,
     /// `ready`, `vehicle …`, `quit`).
     pub fn cmd(&mut self, command: &str) {

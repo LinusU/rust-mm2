@@ -113,6 +113,14 @@ struct Cli {
 }
 
 fn main() {
+    // Stderr only: stdout is the machine-readable record stream. Without a
+    // subscriber the mount log (mod conflicts) would be silent here.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
     let cli = Cli::parse();
 
     // Content: install (read-only) plus any mods — the same mounting

@@ -1082,18 +1082,7 @@ fn conflicts(
         println!("{}", ex.render());
     }
     for o in mm2_assets::override_summary(&vfs) {
-        println!(
-            "{} {} over {}: {} path(s), first {}",
-            if o.between_mods {
-                "CONFLICT"
-            } else {
-                "override"
-            },
-            o.winner,
-            o.shadowed,
-            o.paths,
-            o.example
-        );
+        println!("{o}");
     }
     let mod_conflicts = all.iter().filter(|ex| ex.is_mod_conflict()).count();
     println!(

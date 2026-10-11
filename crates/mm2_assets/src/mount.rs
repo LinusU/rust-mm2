@@ -128,21 +128,9 @@ pub fn mount_mods(vfs: &mut Vfs, mods_dir: &Path) -> Result<Vec<ModManifest>, As
     let manifests = vfs.mount_mods_dir(mods_dir, priority::MOD)?;
     for o in override_summary(vfs) {
         if o.between_mods {
-            tracing::warn!(
-                winner = %o.winner,
-                shadowed = %o.shadowed,
-                paths = o.paths,
-                example = %o.example,
-                "mod conflict: the later-mounted mod wins"
-            );
+            tracing::warn!("mod conflict, the later-mounted mod wins: {o}");
         } else if o.winner_is_mod {
-            tracing::info!(
-                winner = %o.winner,
-                shadowed = %o.shadowed,
-                paths = o.paths,
-                example = %o.example,
-                "mod overrides original content"
-            );
+            tracing::info!("mod overrides original content: {o}");
         }
     }
     Ok(manifests)
@@ -172,6 +160,27 @@ pub struct OverrideSummary {
     /// Both sides are mods (a conflict, not an intentional replacement of
     /// original content).
     pub between_mods: bool,
+}
+
+impl std::fmt::Display for OverrideSummary {
+    /// The one provenance line every surface prints — the mount log of the
+    /// game, `mm2-host` and `mm2-join`, and `mm2-inspect conflicts` — so
+    /// the same conflict reads identically everywhere.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} over {}: {} path(s), first {}",
+            if self.between_mods {
+                "CONFLICT"
+            } else {
+                "override"
+            },
+            self.winner,
+            self.shadowed,
+            self.paths,
+            self.example
+        )
+    }
 }
 
 /// Group every conflict in `vfs` by (winner, shadowed) source pair, sorted

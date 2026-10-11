@@ -84,7 +84,8 @@ fn conflicts_lists_overrides_and_strict_fails_on_mod_conflicts() {
         "a path with one provider is not a conflict: {text}"
     );
     assert!(
-        text.contains("CONFLICT beta over alpha: 1 path(s)"),
+        text.lines()
+            .any(|l| l == "CONFLICT beta over alpha: 1 path(s), first texture/shared.png"),
         "{text}"
     );
     assert!(
