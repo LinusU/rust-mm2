@@ -1738,7 +1738,12 @@ fn main() {
             // Blitz/Checkpoint breakdown episodes run down and repair
             // right after the outcome starts them, before the
             // impairment sync reads the wreck's state.
-            (damage::resolve_disabled, damage::resolve_breakdown).chain(),
+            (
+                damage::resolve_disabled,
+                damage::resolve_breakdown,
+                damage::resolve_lesson_wreck,
+            )
+                .chain(),
             // F05-B.7: damage→engine-impairment coupling (DSN-25) —
             // after `resolve_disabled` so a wreck's repair clears the
             // factor the same tick the tier leaves `Disabled`.

@@ -71,6 +71,11 @@ pub const CORNER_GATES_BEFORE_SPEED: u32 = 1;
 /// is wrecked — the lesson passed — once its damage reaches this.
 pub const STOP_LEAD_MAX_DAMAGE: f32 = 150_000.0;
 
+/// Seconds a wrecked car waits before [`WreckPolicy::ResetCar`] resets
+/// it in place (`CC-9`: the 3 s wreck delay of the follow, cop-chase and
+/// stop handlers).
+pub const WRECK_RESET_SECONDS: f32 = 3.0;
+
 /// What the original does with a wrecked player car.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WreckPolicy {

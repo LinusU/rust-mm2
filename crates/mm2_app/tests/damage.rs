@@ -94,6 +94,7 @@ fn damage_app(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
                 (damage::apply_impact_damage, damage::dev_wreck_at).chain(),
                 damage::resolve_disabled,
                 damage::resolve_breakdown,
+                damage::resolve_lesson_wreck,
                 damage::sync_impairment,
             )
                 .chain(),
@@ -473,6 +474,129 @@ fn disabled_in_a_crash_course_still_restarts_the_lesson() {
         "the lesson's restart intent must be queued"
     );
     assert_eq!(report(&app).recovered, 0, "a restart is not a repair");
+}
+
+/// A one-leg lesson running `rule` on a throwaway course.
+fn lesson_driver(rule: mm2_game::LegRule) -> mm2_app::lesson::LessonDriver {
+    let leg = mm2_content::LessonLeg {
+        filename: "wreck".into(),
+        objective: mm2_content::LessonObjective::Maneuver,
+        rule: Some(rule),
+        source: "crash0:wreck".into(),
+        definition: RaceDefinition {
+            checkpoints: vec![Checkpoint {
+                center: Vec3::new(300.0, 0.0, 0.0),
+                radius: 15.0,
+                height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
+                heading_deg: -90.0,
+                require_direction: false,
+            }],
+            finish: None,
+            rule: CheckpointRule::AnyOrder,
+            laps: 1,
+            time_limit_ticks: None,
+            params: EventParams::default(),
+            countdown_ticks: 2,
+            start_slots: vec![],
+        },
+    };
+    let legs = vec![leg];
+    mm2_app::lesson::LessonDriver::new(mm2_app::race::LessonSetup {
+        key: mm2_game::EventKey {
+            city: "sf".into(),
+            table: EventTableKind::CrashCourse,
+            stem: "crash0".into(),
+        },
+        run: mm2_game::LessonRun::new(legs.len()).unwrap(),
+        legs,
+        rewards: Default::default(),
+        availability: Default::default(),
+        aimap: None,
+        police: Default::default(),
+        lead_cars: Default::default(),
+    })
+}
+
+/// CC-9: a wreck on a follow, cop-chase or stop leg is recovered in
+/// place after 3 s, not restarted.
+#[test]
+fn a_wreck_on_a_recovering_lesson_leg_resets_the_car_after_three_seconds() {
+    for rule in [
+        mm2_game::LegRule::Follow,
+        mm2_game::LegRule::CopChase,
+        mm2_game::LegRule::Stop,
+    ] {
+        let (mut app, car, object) = damage_app(
+            event_config(EventTableKind::CrashCourse),
+            Vec3::new(0.0, 1.2, 0.0),
+        );
+        app.insert_resource(lesson_driver(rule));
+        write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+        app.update();
+        assert!(
+            !app.world().resource::<SessionControl>().restart,
+            "{rule:?}: a recoverable wreck must not restart the lesson"
+        );
+        assert!(
+            app.world()
+                .get::<mm2_app::damage::LessonWreck>(car)
+                .is_some()
+        );
+        assert_eq!(
+            app.world().get::<VehicleDamage>(car).unwrap().condition(),
+            DamageTier::Disabled,
+            "{rule:?}: still wrecked while waiting"
+        );
+        // Two seconds in: still waiting.
+        for _ in 0..120 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .get::<mm2_app::damage::LessonWreck>(car)
+                .is_some()
+        );
+        // Past three seconds: repaired and running again.
+        for _ in 0..90 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .get::<mm2_app::damage::LessonWreck>(car)
+                .is_none()
+        );
+        assert_ne!(
+            app.world().get::<VehicleDamage>(car).unwrap().condition(),
+            DamageTier::Disabled,
+            "{rule:?}: the reset repairs the car"
+        );
+        assert_eq!(report(&app).recovered, 1);
+        assert!(!app.world().resource::<SessionControl>().restart);
+    }
+}
+
+/// CC-9: jump/cross-traffic/maneuver/map (gate run) and corner legs
+/// fail on a wreck, so the port's lesson restart stands.
+#[test]
+fn a_wreck_on_a_failing_lesson_leg_still_restarts_the_lesson() {
+    for rule in [mm2_game::LegRule::GateRun, mm2_game::LegRule::corner(0.0)] {
+        let (mut app, car, object) = damage_app(
+            event_config(EventTableKind::CrashCourse),
+            Vec3::new(0.0, 1.2, 0.0),
+        );
+        app.insert_resource(lesson_driver(rule));
+        write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+        app.update();
+        assert!(
+            app.world().resource::<SessionControl>().restart,
+            "{rule:?}: the lesson's restart intent must be queued"
+        );
+        assert!(
+            app.world()
+                .get::<mm2_app::damage::LessonWreck>(car)
+                .is_none()
+        );
+    }
 }
 
 #[test]

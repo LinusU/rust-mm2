@@ -86,7 +86,7 @@ pub use lesson_rules::{
     CORNER_DEFAULT_MIN_MPH, CORNER_GATES_BEFORE_SPEED, CORNER_SPEED_GRACE_SECS,
     FOLLOW_ESCAPE_RANGE_M, FOLLOW_PASS_RANGE_M, LeadObservation, LegObservation, LegRule,
     MPH_PER_MS, PURSUER_SIGHT_RANGE_M, RuleError, RuleState, STOP_LEAD_MAX_DAMAGE, Verdict,
-    WreckPolicy,
+    WRECK_RESET_SECONDS, WreckPolicy,
 };
 pub use nav::{
     ArcEnd, ArcExit, ArcId, CrossingPath, EndSignal, LaneHit, LaneId, LaneKind, LaneQuery,

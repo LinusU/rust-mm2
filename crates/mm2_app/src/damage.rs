@@ -39,6 +39,7 @@
 
 use std::collections::HashMap;
 
+use crate::lesson::LessonDriver;
 use crate::police::{PoliceCar, recovery_driver};
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -46,7 +47,7 @@ use mm2_game::{
     BREAKDOWN_SECONDS, DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict,
     DisabledOutcome, ImpactEvent, ImpactId, ImpairmentPolicy, ObjectId, ObjectIdentity, Player,
     PlayerControl, RaceState, Session, VehicleBreakdown, VehicleBreaks, VehicleDamage,
-    VehicleStuck, disabled_outcome,
+    VehicleStuck, WRECK_RESET_SECONDS, WreckPolicy, disabled_outcome,
 };
 use mm2_vehicle::{EngineImpairment, ResetVehicle, UprightLanding};
 
@@ -285,10 +286,11 @@ pub fn resolve_disabled(
     session: Res<Session>,
     mut control: ResMut<SessionControl>,
     spawn: Option<Res<SpawnPoint>>,
-    mut race: Option<ResMut<RaceState>>,
+    // One tuple: the system is at Bevy's 16-parameter limit.
+    (mut race, lesson): (Option<ResMut<RaceState>>, Option<Res<LessonDriver>>),
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>, Has<PoliceCar>)>,
     landing: UprightLanding,
-    mut damaged: Query<(&mut VehicleDamage, Has<VehicleBreakdown>)>,
+    mut damaged: Query<(&mut VehicleDamage, Has<VehicleBreakdown>, Has<LessonWreck>)>,
     mut stuck: Query<&mut VehicleStuck>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<DamageReport>,
@@ -321,7 +323,7 @@ pub fn resolve_disabled(
         let Some(&(entity, control_kind)) = index.get(&event.object) else {
             continue;
         };
-        let Ok((mut damage, broken_down)) = damaged.get_mut(entity) else {
+        let Ok((mut damage, broken_down, lesson_wrecked)) = damaged.get_mut(entity) else {
             continue;
         };
         // Idempotent: an earlier resolution in this tick already
@@ -354,6 +356,26 @@ pub fn resolve_disabled(
                                 "player vehicle destroyed — broken down"
                             );
                             commands.entity(entity).insert(VehicleBreakdown::new());
+                        }
+                    }
+                    // CC-9: a follow, cop-chase or stop leg does not fail
+                    // on a wreck — the car is reset in place after 3 s.
+                    DisabledOutcome::RestartEvent
+                        if lesson
+                            .as_ref()
+                            .and_then(|l| l.wreck_policy())
+                            .is_some_and(|p| p == WreckPolicy::ResetCar) =>
+                    {
+                        // Further blows on a car already down change
+                        // nothing — the episode owns the wreck.
+                        if !lesson_wrecked {
+                            info!(
+                                total = damage.total(),
+                                tick = event.tick,
+                                seconds = WRECK_RESET_SECONDS,
+                                "player vehicle destroyed — lesson recovers it in place"
+                            );
+                            commands.entity(entity).insert(LessonWreck::new());
                         }
                     }
                     DisabledOutcome::RestartEvent => {
@@ -473,6 +495,92 @@ pub fn resolve_disabled(
             // cop resolves as AI — `recovery_driver`).
             None => {}
         }
+    }
+}
+
+/// A wrecked Crash Course car waiting out [`WRECK_RESET_SECONDS`]
+/// before [`resolve_lesson_wreck`] resets it in place (CC-9,
+/// [`WreckPolicy::ResetCar`]). Authority-owned like [`VehicleDamage`].
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct LessonWreck {
+    /// Seconds left before the reset.
+    pub remaining: f32,
+}
+
+impl LessonWreck {
+    /// A fresh wait of [`WRECK_RESET_SECONDS`].
+    pub fn new() -> Self {
+        Self {
+            remaining: WRECK_RESET_SECONDS,
+        }
+    }
+
+    /// Advance by `dt` seconds; `true` once the wait is over. A
+    /// non-finite or non-positive step never advances it.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if dt.is_finite() && dt > 0.0 {
+            self.remaining -= dt;
+        }
+        self.remaining <= 0.0
+    }
+}
+
+impl Default for LessonWreck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-step: run each [`LessonWreck`] wait down and, when it ends,
+/// reset the car in place (level, on the ground under it — the
+/// [`ResetVehicle`] path every recovery takes) and repair it, so the
+/// lesson goes on. Frozen while the session is not `Playing`.
+#[allow(clippy::too_many_arguments)] // Bevy system: the repair threads the same handles `resolve_disabled` does
+pub fn resolve_lesson_wreck(
+    session: Res<Session>,
+    time: Res<Time<Fixed>>,
+    landing: UprightLanding,
+    mut cars: Query<(Entity, &mut LessonWreck, &mut VehicleDamage)>,
+    mut stuck: Query<&mut VehicleStuck>,
+    mut resets: MessageWriter<ResetVehicle>,
+    mut breaks: Query<&mut VehicleBreaks>,
+    mut break_visuals: Query<(&BreakPartVisual, &mut Visibility, &ChildOf)>,
+    mut break_report: ResMut<BreakReport>,
+    mut texel: crate::texel_fx::TexelRepair,
+    mut report: ResMut<DamageReport>,
+    mut commands: Commands,
+) {
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let dt = time.delta_secs();
+    for (entity, mut wait, mut damage) in &mut cars {
+        if !wait.tick(dt) {
+            continue;
+        }
+        if let Some((position, yaw)) = landing.of(entity) {
+            resets.write(ResetVehicle {
+                entity: Some(entity),
+                position,
+                yaw,
+            });
+        }
+        if let Ok(mut detector) = stuck.get_mut(entity) {
+            detector.disarm();
+        }
+        damage.reset();
+        if let Ok(mut rig) = breaks.get_mut(entity) {
+            break_report.restored +=
+                crate::breakaway::restore_rig(entity, &mut rig, &mut break_visuals, &mut commands)
+                    as u64;
+        }
+        texel.reset(entity);
+        commands.entity(entity).remove::<LessonWreck>();
+        report.recovered += 1;
+        info!(
+            tick = session.tick(),
+            "lesson car reset in place after its wreck"
+        );
     }
 }
 

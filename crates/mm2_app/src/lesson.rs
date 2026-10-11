@@ -20,9 +20,12 @@
 //!   runtime ends the session at `Results` like a failed event. The
 //!   retry is the session's own restart, which tears the world down and
 //!   rebuilds the driver on leg 0 with cleared counters (the `DMG-2`
-//!   reading `DSN-73` encodes). A wrecked car already restarts the
-//!   session through `resolve_disabled`'s `RestartEvent`, so this
-//!   driver never sees a "disabled" verdict.
+//!   reading `DSN-73` encodes). A wrecked car on a jump, cross-traffic,
+//!   corner, maneuver or map leg restarts the session through
+//!   `resolve_disabled`'s `RestartEvent`, so this driver never sees a
+//!   "disabled" verdict; on a follow, cop-chase or stop leg
+//!   ([`LessonDriver::wreck_policy`]) the car is instead reset in place
+//!   after 3 s (`resolve_lesson_wreck`) and the leg goes on.
 //!
 //! [`advance_race`](crate::race::advance_race) consults
 //! [`LessonDriver::holds_results`] so clearing a *non-final* leg does
@@ -51,7 +54,7 @@ use mm2_game::{
     LessonPass, LessonPhase, LessonRun, MPH_PER_MS, PURSUER_SIGHT_RANGE_M, ParticipantState,
     Player, PlayerControl, RACE_TICK_HZ, RacePhase, RaceProgress, RaceState, ReportEffect,
     RuleError, RuleState, STOP_LEAD_MAX_DAMAGE, Session, SessionEntity, SessionPhase, StaleReason,
-    VehicleDamage,
+    VehicleDamage, WreckPolicy,
 };
 use mm2_vehicle::{ResetVehicle, VehicleState};
 
@@ -155,6 +158,17 @@ impl LessonDriver {
     pub fn race_state(&self, generation: u64) -> Option<RaceState> {
         self.current_leg()
             .map(|leg| RaceState::new(leg.definition.clone(), generation))
+    }
+
+    /// What a wrecked player car does to the leg in play (`CC-9`):
+    /// `None` once the lesson is no longer running. A leg whose family
+    /// is unresolved runs the gate-run baseline, which fails on a wreck.
+    pub fn wreck_policy(&self) -> Option<WreckPolicy> {
+        let leg = self.run.current_leg()?;
+        Some(
+            self.rule_of(leg)
+                .map_or(WreckPolicy::FailLeg, |rule| rule.wreck_policy()),
+        )
     }
 
     /// The rule the leg in play runs, `None` for an unresolved family.
