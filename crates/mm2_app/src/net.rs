@@ -657,6 +657,11 @@ pub fn drive_lobby(
                 tick,
                 rows,
             }) => snaps.push_leaves(generation, tick, rows),
+            LobbyEvent::Message(Message::Signals {
+                generation,
+                tick,
+                rows,
+            }) => snaps.push_signals(generation, tick, rows),
             LobbyEvent::Message(Message::Cnr { generation, frame }) => {
                 snaps.push_cnr(generation, &frame)
             }

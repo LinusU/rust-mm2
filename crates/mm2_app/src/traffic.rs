@@ -315,7 +315,7 @@ const SIGNAL_LAMP_RADIUS: f32 = 0.45;
 
 /// The shared lamp mesh and per-aspect materials every signal
 /// indicator draws with.
-struct SignalAssets {
+pub(crate) struct SignalAssets {
     lamp: Handle<Mesh>,
     green: Handle<StandardMaterial>,
     red: Handle<StandardMaterial>,
@@ -323,7 +323,7 @@ struct SignalAssets {
 }
 
 impl SignalAssets {
-    fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
+    pub(crate) fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
         // Unlit vivid colours — readable in daylight without lighting
         // support, the same convention the checkpoint markers use.
         let mut mat = |r: f32, g: f32, b: f32| {
@@ -341,13 +341,70 @@ impl SignalAssets {
         }
     }
 
-    fn material(&self, aspect: SignalAspect) -> &Handle<StandardMaterial> {
+    pub(crate) fn lamp(&self) -> &Handle<Mesh> {
+        &self.lamp
+    }
+
+    pub(crate) fn material(&self, aspect: SignalAspect) -> &Handle<StandardMaterial> {
         match aspect {
             SignalAspect::Green => &self.green,
             SignalAspect::Red => &self.red,
             SignalAspect::Stop => &self.amber,
         }
     }
+}
+
+/// One authored signal head a session renders (F10-B.7): its junction,
+/// the member road it governs, the authored rule that selects its
+/// aspect, whether the road is in the junction's light-controlled
+/// member set, and the authored world position.
+pub(crate) struct SignalHead {
+    pub junction: u16,
+    pub road: u16,
+    pub rule: Option<VehicleRule>,
+    /// Whether `road` is in `Junctions::signal_members` for `junction`
+    /// — a `TrafficLight` head whose road is not shows the green
+    /// fallback, not a phase-dependent aspect.
+    pub member: bool,
+    pub origin: Vec3,
+}
+
+/// Enumerate the authored signal heads a session renders: every
+/// [`NavGraph::signals`] entry in authored order that passes the
+/// [`SIGNAL_MAX_DISTANCE`] sanity bound against its junction zone (a
+/// wild outlier is counted in the returned drop count rather than drawn
+/// kilometres off the road). Both the authority that spawns the heads
+/// and a networked client that renders them share this so the two
+/// derive the same scene from the same `.bai`.
+pub(crate) fn authored_signal_heads(
+    graph: &NavGraph,
+    policy: &JunctionPolicy,
+) -> (Vec<SignalHead>, usize) {
+    let mut heads = Vec::new();
+    let mut dropped = 0usize;
+    let mut members: HashMap<u16, Vec<u16>> = HashMap::new();
+    for head in graph.signals() {
+        let ix = head.junction;
+        let origin = Vec3::from(head.signal.origin);
+        if junction_zone(graph, ix, policy).is_none_or(|(center, _)| {
+            !Vec3::from(center).is_finite()
+                || origin.distance(Vec3::from(center)) > SIGNAL_MAX_DISTANCE
+        }) {
+            dropped += 1;
+            continue;
+        }
+        let member_set = members
+            .entry(ix)
+            .or_insert_with(|| Junctions::signal_members(graph, ix));
+        heads.push(SignalHead {
+            junction: ix,
+            road: head.road,
+            rule: head.rule(),
+            member: member_set.contains(&head.road),
+            origin,
+        });
+    }
+    (heads, dropped)
 }
 
 /// One authored traffic signal (F10-B.7): a session-owned indicator
@@ -364,6 +421,10 @@ pub struct TrafficSignal {
     pub road: u16,
     /// The approach's authored rule — selects the aspect.
     pub rule: Option<VehicleRule>,
+    /// Whether the road is in the junction's light-controlled member
+    /// set — precomputed at spawn so a client applying the host's phase
+    /// ([`crate::signalnet`]) needs no graph of its own.
+    pub member: bool,
     /// The aspect currently applied — the update skips entities whose
     /// state did not change.
     pub aspect: SignalAspect,
@@ -693,43 +754,78 @@ fn spawn_traffic_signals(
     traffic: &mut AmbientTraffic,
     owner: SessionEntity,
 ) {
-    // The junction's member list is per-intersection — cache it
-    // rather than rescanning every end's rule per signal.
-    let jpolicy = JunctionPolicy::default();
-    let mut members: HashMap<u16, Vec<u16>> = HashMap::new();
-    for head in traffic.graph.signals() {
-        let ix = head.junction;
-        let origin = Vec3::from(head.signal.origin);
-        if junction_zone(&traffic.graph, ix, &jpolicy).is_none_or(|(center, _)| {
-            !Vec3::from(center).is_finite()
-                || origin.distance(Vec3::from(center)) > SIGNAL_MAX_DISTANCE
-        }) {
-            // No sane zone or a wild outlier — drop it and count
-            // the loss rather than draw a stray lamp kilometres
-            // off the road.
-            traffic.signals_dropped += 1;
-            continue;
-        }
-        let rule = head.rule();
-        let member = members
-            .entry(ix)
-            .or_insert_with(|| Junctions::signal_members(&traffic.graph, ix));
-        let aspect = traffic.junctions.signal_aspect(ix, member, head.road, rule);
+    let (heads, dropped) = authored_signal_heads(&traffic.graph, &JunctionPolicy::default());
+    // A wild authored outlier — drop it and count the loss rather than
+    // draw a stray lamp kilometres off the road.
+    traffic.signals_dropped += dropped;
+    let mut greens: HashMap<u16, Option<u16>> = HashMap::new();
+    for head in heads {
+        let green = *greens
+            .entry(head.junction)
+            .or_insert_with(|| traffic.junctions.green_road(&traffic.graph, head.junction));
+        let aspect = SignalAspect::of_phase(head.member, green, head.road, head.rule);
         commands.spawn((
             owner,
             TrafficSignal {
-                junction: ix,
+                junction: head.junction,
                 road: head.road,
-                rule,
+                rule: head.rule,
+                member: head.member,
                 aspect,
             },
-            Mesh3d(traffic.signal_assets.lamp.clone()),
+            Mesh3d(traffic.signal_assets.lamp().clone()),
             MeshMaterial3d(traffic.signal_assets.material(aspect).clone()),
-            Transform::from_translation(origin),
+            Transform::from_translation(head.origin),
             Visibility::Visible,
         ));
         traffic.signals += 1;
     }
+}
+
+/// Spawn the client's traffic-signal heads for a `Remote` city session
+/// (F26-A.4b): the same authored heads the authority draws, at their
+/// authored positions, from the same `.bai` both peers share. Each
+/// head starts at its phase-independent aspect (a light member starts
+/// red until the host's [`Message::Signals`](mm2_net::Message::Signals)
+/// frame names its phase); [`crate::signalnet::apply_signals`] then
+/// keeps the light members on the host's phase. Returns the shared
+/// assets the apply system needs, or `None` when the graph cannot load
+/// (the session simply renders no signals, like a failed ambient load).
+pub(crate) fn spawn_client_signals(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    stem: &str,
+    owner: SessionEntity,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Option<SignalAssets> {
+    let build = match mm2_content::load_nav_graph(vfs, stem) {
+        Ok(build) => build,
+        Err(e) => {
+            warn!(error = %e, "signal replica: nav graph failed — no signal heads");
+            return None;
+        }
+    };
+    let assets = SignalAssets::new(meshes, materials);
+    let (heads, _dropped) = authored_signal_heads(&build.graph, &JunctionPolicy::default());
+    for head in heads {
+        let aspect = SignalAspect::of_phase(head.member, None, head.road, head.rule);
+        commands.spawn((
+            owner,
+            TrafficSignal {
+                junction: head.junction,
+                road: head.road,
+                rule: head.rule,
+                member: head.member,
+                aspect,
+            },
+            Mesh3d(assets.lamp().clone()),
+            MeshMaterial3d(assets.material(aspect).clone()),
+            Transform::from_translation(head.origin),
+            Visibility::Visible,
+        ));
+    }
+    Some(assets)
 }
 
 /// Keep every authored signal indicator's aspect in step with the
@@ -755,14 +851,14 @@ pub fn drive_signals(
     ) {
         return;
     }
-    let mut members: HashMap<u16, Vec<u16>> = HashMap::new();
+    // The junction's green is per-intersection — cache it rather than
+    // rescanning the member set for every head at the junction.
+    let mut greens: HashMap<u16, Option<u16>> = HashMap::new();
     for (mut sig, mut material) in &mut signals {
-        let member = members
+        let green = *greens
             .entry(sig.junction)
-            .or_insert_with(|| Junctions::signal_members(&traffic.graph, sig.junction));
-        let aspect = traffic
-            .junctions
-            .signal_aspect(sig.junction, member, sig.road, sig.rule);
+            .or_insert_with(|| traffic.junctions.green_road(&traffic.graph, sig.junction));
+        let aspect = SignalAspect::of_phase(sig.member, green, sig.road, sig.rule);
         if aspect != sig.aspect {
             sig.aspect = aspect;
             material.0 = traffic.signal_assets.material(aspect).clone();

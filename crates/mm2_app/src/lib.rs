@@ -71,6 +71,7 @@ pub mod scripted;
 pub mod sequence;
 pub mod session;
 pub mod settings;
+pub mod signalnet;
 pub mod smoke;
 pub mod spark_fx;
 pub mod speech;

@@ -496,6 +496,8 @@ fn add_lobby_client_systems(app: &mut App) {
                 // F26-A: the host's world clock — same wiring.
                 crate::worldclock::apply_world_clock.after(net::drive_lobby),
                 crate::leafnet::apply_leaves.after(net::drive_lobby),
+                // F26-A.4b: the host's traffic-signal phase — same wiring.
+                crate::signalnet::apply_signals.after(net::drive_lobby),
                 // F27-B.3: the host's Cops & Robbers match — same wiring.
                 crate::cnrnet::apply_cnr.after(net::drive_lobby),
                 crate::cnr::end_replicated_match.after(crate::cnrnet::apply_cnr),
@@ -1076,6 +1078,8 @@ fn run_headless(
                         // F26-A: the world clock — same wiring.
                         crate::worldclock::publish_world_clock.after(net::drive_host),
                         crate::leafnet::publish_leaves.after(net::drive_host),
+                        // F26-A.4b: the traffic-signal phase — same wiring.
+                        crate::signalnet::publish_signals.after(net::drive_host),
                         // F27-B.3: the Cops & Robbers match — same wiring.
                         crate::cnrnet::publish_cnr.after(net::drive_host),
                     ),

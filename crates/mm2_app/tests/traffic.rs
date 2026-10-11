@@ -439,11 +439,14 @@ fn replica_present(app: &App) -> bool {
 /// traffic ... in MP races"): a networked *Cruise* fields the host's
 /// traffic and a client only copies it; a networked *race* fields none
 /// on either side. The `Host` leg runs the ordinary seeded population;
-/// the `Remote` leg simulates no car, no signal and no second world —
-/// it holds the replica the host's frames land on.
+/// the `Remote` leg simulates no car and no second world — it holds the
+/// replica the host's frames land on, and renders the same authored
+/// signal heads the host does (F26-A.4b), whose fixture authors no
+/// lights, so both sides draw none.
 #[test]
 fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
     let install = city_install();
+    let mut host_signals = None;
     for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
         let mut config = city_config();
         config.authority = authority;
@@ -468,6 +471,7 @@ fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
                 );
                 assert!(!replica_present(&app), "Host: no replica");
                 assert!(!ambient_cars(&mut app).is_empty(), "Host: seeded cars");
+                host_signals = Some(signals);
             }
             _ => {
                 assert!(
@@ -479,7 +483,13 @@ fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
                     ambient_cars(&mut app).is_empty(),
                     "Remote: no lane follower"
                 );
-                assert_eq!(signals, 0, "Remote: no signal heads");
+                // F26-A.4b: the client renders the *same* authored heads
+                // the host does, not none.
+                assert_eq!(
+                    signals,
+                    host_signals.expect("the Host leg runs first"),
+                    "Remote: the client renders the host's authored heads"
+                );
             }
         }
         // The local participant still loads and drives.
@@ -4272,4 +4282,61 @@ fn a_wild_signal_origin_drops_and_stays_counted() {
     };
     assert_eq!((signals, dropped), (0, 1));
     assert!(signal_heads(&mut app).is_empty());
+}
+
+/// F26-A.4b: a `Remote` city Cruise client spawns the very heads the
+/// authority draws — same authored `.bai`, same positions, no
+/// simulated population — each light member resting red until the
+/// host's `Message::Signals` phase frame lands, and it holds a
+/// [`mm2_app::signalnet::SignalReplica`] for `apply_signals` to fold
+/// those frames into.
+#[test]
+fn a_remote_client_renders_the_authored_signal_heads() {
+    let r0_light = [2.0, 5.5, -2.0];
+    let r1_light = [-2.0, 5.5, 2.0];
+    let install = signal_install((1, Some(r0_light)), (1, Some(r1_light)));
+    let mut config = city_config();
+    config.authority = SessionAuthority::Remote;
+    // Dev overrides are not network-legal — the lobby refuses to
+    // advertise them, so a real client runs a clean config.
+    config.dev = DevOverrides::default();
+    let mut app = test_app(config, vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    assert!(
+        app.world().get_resource::<AmbientTraffic>().is_none(),
+        "the client simulates no population"
+    );
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::signalnet::SignalReplica>()
+            .is_some(),
+        "the client holds the replica the phase frames land on"
+    );
+    let heads = signal_heads(&mut app);
+    assert_eq!(heads.len(), 2, "the same two authored heads the host draws");
+    let mut by_road: std::collections::HashMap<u16, (SignalAspect, Vec3)> =
+        heads.iter().map(|(_, r, _, a, p)| (*r, (*a, *p))).collect();
+    for (ix, _, rule, aspect, _) in &heads {
+        assert_eq!(*ix, 0, "the heads face the only junction");
+        assert_eq!(*rule, Some(VehicleRule::TrafficLight));
+        assert_eq!(
+            *aspect,
+            SignalAspect::Red,
+            "no phase yet — a light member rests red"
+        );
+    }
+    assert_eq!(
+        by_road.remove(&0).map(|(_, p)| p),
+        Some(Vec3::from(r0_light)),
+        "road 0's head stands at its authored origin"
+    );
+    assert_eq!(
+        by_road.remove(&1).map(|(_, p)| p),
+        Some(Vec3::from(r1_light)),
+        "road 1's head stands at its authored origin"
+    );
 }

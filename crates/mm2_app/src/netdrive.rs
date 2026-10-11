@@ -489,6 +489,9 @@ pub struct RemoteSnaps {
     /// The proximity-leaves inbox (protocol v26, F26-A.4) — newest
     /// frame wins.
     pub(crate) leaves: crate::leafnet::LeafStage,
+    /// The traffic-signal inbox (protocol v27, F26-A.4b) — newest frame
+    /// per generation wins.
+    pub(crate) signals: crate::signalnet::SignalStage,
     /// The Cops & Robbers inbox (protocol v21, F27-B) — freshest frame
     /// per generation.
     pub(crate) cnr: crate::cnrnet::CnrStage,
@@ -862,6 +865,16 @@ impl RemoteSnaps {
         &self.leaves
     }
 
+    /// Queue a received traffic-signal frame (protocol v27, F26-A.4b).
+    pub fn push_signals(&mut self, generation: u64, tick: u64, rows: Vec<mm2_net::SnapSignal>) {
+        self.signals.push(generation, tick, rows);
+    }
+
+    /// The traffic-signal inbox — counters for the record/tests.
+    pub fn signals(&self) -> &crate::signalnet::SignalStage {
+        &self.signals
+    }
+
     /// Queue a received Cops & Robbers frame (protocol v21, F27-B).
     pub fn push_cnr(&mut self, generation: u64, frame: &mm2_net::SnapCnr) {
         self.cnr.push(generation, frame);
@@ -933,6 +946,7 @@ impl RemoteSnaps {
         self.traffic.reset();
         self.world.reset();
         self.leaves.reset();
+        self.signals.reset();
         self.cnr.reset();
     }
 }

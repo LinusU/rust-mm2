@@ -310,6 +310,10 @@ pub fn drive_session(
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<crate::worldtraffic::TrafficReplica>();
+            // F26-A.4b: the client's replicated signal world (its heads
+            // are session-owned and chain-despawn) dies with the session
+            // like the traffic replica.
+            commands.remove_resource::<crate::signalnet::SignalReplica>();
             // F19-B.2: the sidewalk crowd (its figures are
             // `SessionEntity`-stamped and chain-despawn) and its density.
             commands.remove_resource::<crate::crowd::PedCrowd>();
@@ -1742,6 +1746,17 @@ pub fn load_session_world(
         if let Some(r) = crate::worldtraffic::load_traffic_replica(&vfs.0, &config) {
             commands.insert_resource(r);
         }
+        // F26-A.4b: a `Remote` city Cruise client renders the host's
+        // traffic-signal heads; the phase itself arrives as
+        // `Message::Signals`.
+        crate::signalnet::load_signal_replica(
+            &mut commands,
+            &vfs.0,
+            &config,
+            owner,
+            &mut assets.meshes,
+            &mut assets.materials,
+        );
         // F19-B.2: the pedestrian density this session runs under
         // (pick, else the event's authored `Peds`, else the default);
         // `maintain_pedestrians` builds the crowd from it on the first
