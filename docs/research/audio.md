@@ -611,6 +611,34 @@ is a dead authored reference (AUD-13).
 - **Work files** (`copy of *.csv`, `*.wrk.csv`) parse but are excluded
   from roster coverage sets.
 
+### Speech arbitration (F08-B.2, designed)
+
+How the original arbitrated overlapping speech is unrecovered (UNK-25);
+the policy below is **designed**, in `mm2_app::speech`. Every dialogue
+source (pre-race announcer and lesson instructor, closing-gate and
+result lines, Cops & Robbers calls) resolves its line and submits it to
+one `SpeechArbiter`; only the arbiter spawns a voice.
+
+- Priority, lowest first: `Ambience` (pre-race weather/time-of-day,
+  lesson intro) < `Call` (C&R) < `Checkpoint` (`FINALCHECKPOINT`) <
+  `Result` (`RESULTS*`, lesson verdict). Highest waiting line speaks
+  first, FIFO inside a level.
+- One line at a time with a 0.25 s gap. A strictly higher priority
+  interrupts the line in progress (`aud=` `interrupted`); equal or lower
+  waits.
+- At most 6 lines wait; a full queue evicts its lowest/oldest line for a
+  strictly higher one, else refuses the newcomer (`dropped`). C&R keeps
+  its own bound of 3 calls and 6 s staleness.
+- Repeat suppression: a wave that started in the last 10 s is not started
+  again (`suppressed`); C&R calls opt out (each pickup is its own event).
+- Cleanup: the arbiter carries the session generation and is cleared on
+  unload, so two restarts leave no queued or playing dialogue; voices
+  are `SessionEntity`-stamped as before.
+
+Evidence: synthetic (`tests/speech.rs`, plus the existing commentary
+suites running through the arbiter). F08-AC03 bus-mute half and
+AC02's menu/collision events are not covered here.
+
 ## Deferred (F08 scope)
 
 `aud/spchdata/**` (526) now parses — `## Speech cue tables`; only the

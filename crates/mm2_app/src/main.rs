@@ -1665,6 +1665,7 @@ fn main() {
     // `AudioPlugin` DefaultPlugins brings; voices spawn as entities and
     // teardown owns them (`aud=` on the smoke record).
     .init_resource::<audio::AudioReport>()
+    .init_resource::<mm2_app::speech::SpeechArbiter>()
     .add_message::<audio::HornRequest>()
     .add_audio_source::<audio::PcmAudio>()
     .init_resource::<mm2_game::ResultLedger>()

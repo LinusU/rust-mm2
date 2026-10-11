@@ -18,6 +18,7 @@ use mm2_app::audio::{AudioReport, AudioVoice, CommentaryVoice, PcmAudio, VoiceKi
 use mm2_app::cnr::{CnrEvent, CnrHost};
 use mm2_app::cnrnet::CnrReplica;
 use mm2_app::cnrvoice::{CnrCommentary, MAX_PENDING_CALLS};
+use mm2_app::speech::SpeechArbiter;
 use mm2_assets::Vfs;
 use mm2_formats::spchdata::CueTable;
 use mm2_game::gold::{
@@ -156,8 +157,15 @@ fn app(dir: &Path, phase: SessionPhase) -> App {
         .insert_resource(voice)
         .init_resource::<Assets<PcmAudio>>()
         .init_resource::<AudioReport>()
+        .init_resource::<SpeechArbiter>()
         .add_message::<CnrEvent>()
-        .add_systems(Update, mm2_app::cnrvoice::cnr_commentary_voices);
+        .add_systems(
+            Update,
+            (
+                mm2_app::cnrvoice::cnr_commentary_voices,
+                mm2_app::speech::speech_arbiter.after(mm2_app::cnrvoice::cnr_commentary_voices),
+            ),
+        );
     app.finish();
     app.cleanup();
     app
@@ -295,9 +303,9 @@ fn a_burst_keeps_a_bounded_queue_and_counts_the_overflow() {
         emit(&mut app, picked(A, Side::Robbers, false));
     }
     app.update();
-    let c = app.world().resource::<CnrCommentary>();
+    let arbiter = app.world().resource::<SpeechArbiter>();
     // One line started this frame; the bound held for the rest.
-    assert_eq!(c.pending(), MAX_PENDING_CALLS - 1);
+    assert_eq!(arbiter.queued(), MAX_PENDING_CALLS - 1);
     assert_eq!(app.world().resource::<AudioReport>().dropped, 2);
 }
 

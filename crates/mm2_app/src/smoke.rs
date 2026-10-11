@@ -589,6 +589,7 @@ fn run_headless(
         .init_resource::<crate::wheel_fx::WheelFxReport>()
         .init_resource::<crate::texel_fx::TexelDamageReport>()
         .init_resource::<crate::audio::AudioReport>()
+        .init_resource::<crate::speech::SpeechArbiter>()
         .init_resource::<Assets<crate::audio::PcmAudio>>()
         .add_message::<crate::audio::HornRequest>()
         .init_resource::<mm2_game::ResultLedger>()
@@ -2398,8 +2399,23 @@ fn run_headless(
             } else {
                 String::new()
             };
+            // F08-B.2: speech cut off by a higher-priority line (`i`) and
+            // repeats the floor refused (`u`) — absent when zero.
+            let speech = format!(
+                "{}{}",
+                if r.interrupted > 0 {
+                    format!("+{}i", r.interrupted)
+                } else {
+                    String::new()
+                },
+                if r.suppressed > 0 {
+                    format!("+{}u", r.suppressed)
+                } else {
+                    String::new()
+                }
+            );
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{scrapes}{dropped}{failed}{cue_issues}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{scrapes}{dropped}{failed}{cue_issues}{speech}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

@@ -73,6 +73,7 @@ pub mod session;
 pub mod settings;
 pub mod smoke;
 pub mod spark_fx;
+pub mod speech;
 pub mod speedometer;
 pub mod stuck;
 pub mod texel_fx;

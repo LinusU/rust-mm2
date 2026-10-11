@@ -70,6 +70,7 @@ mod session;
 mod settings;
 mod smoke;
 mod spark_fx;
+mod speech;
 mod speedometer;
 mod stuck;
 mod surface;

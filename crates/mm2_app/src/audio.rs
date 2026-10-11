@@ -172,6 +172,7 @@ use mm2_vehicle::config::TireConfig;
 use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState, WheelState};
 
 use crate::settings::{AudioBus, GraphicsSettings};
+use crate::speech::{SpeechArbiter, SpeechLine, SpeechPriority};
 
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
@@ -917,9 +918,6 @@ fn wave_rank(logical: &str) -> (u32, u32) {
     (tier, rate)
 }
 
-/// Seconds between queued commentary cues — a designed sequencing
-/// gap; the original's cue cadence is unrecovered (UNK-25).
-const COMMENTARY_GAP: f32 = 0.25;
 /// Commentary one-shot gain — authored level, same policy as the
 /// authored horn/impact plays (designed; the original's speech mix
 /// is unrecovered, UNK-25).
@@ -1021,6 +1019,15 @@ impl EventCue {
     fn is_lesson(self) -> bool {
         matches!(self, Self::LessonPass | Self::LessonFail)
     }
+
+    /// The floor this cue speaks with: the closing-gate call outranks
+    /// the pre-race lines, a result or lesson verdict outranks both.
+    fn priority(self) -> SpeechPriority {
+        match self {
+            Self::FinalCheckpoint => SpeechPriority::Checkpoint,
+            Self::Results(_) | Self::LessonPass | Self::LessonFail => SpeechPriority::Result,
+        }
+    }
 }
 
 /// Session-scoped environmental commentary (F18-B.5): inserted by
@@ -1041,15 +1048,10 @@ pub struct CommentaryAudio {
     /// The registry→speaker→cue→wave resolve ran (each failure
     /// counted once — never retried per frame).
     resolved: bool,
-    /// Decoded one-shots awaiting their slot, in authored order —
-    /// bounded at the authored cue count by construction.
-    queue: VecDeque<(String, Handle<PcmAudio>)>,
-    /// Pre-race seconds accumulated (`Countdown`/`Playing` only).
-    elapsed: f32,
-    /// `elapsed` the next queued cue may start at — the first cue
-    /// fires on the first live frame; later ones wait out the
-    /// previous clip plus [`COMMENTARY_GAP`].
-    next_at: f32,
+    /// Decoded one-shots resolved this frame, in authored order,
+    /// handed to the session's [`SpeechArbiter`] before the system
+    /// returns — the arbiter owns every line's timing.
+    queue: VecDeque<(String, Handle<PcmAudio>, SpeechPriority)>,
     /// Seeded draw stream — the speaker index and each cue's suffix
     /// draw ride it, so a replayed session hears the same announcer
     /// and the same lines.
@@ -1089,8 +1091,6 @@ impl CommentaryAudio {
             ],
             resolved: false,
             queue: VecDeque::new(),
-            elapsed: 0.0,
-            next_at: 0.0,
             rng: NavRng::new(seed.wrapping_add(COMMENTARY_DOMAIN)),
             event_table: None,
             lesson_table: None,
@@ -1620,6 +1620,12 @@ pub struct AudioReport {
     /// gauge rewritten every drive pass, not a cumulative count
     /// (F18-B.3).
     pub interior: bool,
+    /// Dialogue lines cut off mid-clip by a higher-priority line
+    /// (F08-B.2); each is also counted in `commentary`, it did start.
+    pub interrupted: u64,
+    /// Dialogue lines refused as a repeat of a wave that just spoke
+    /// (F08-B.2); never spawned, so not in `commentary`.
+    pub suppressed: u64,
     /// Commentary cue voices spawned this session — a subset of
     /// `voices` (F18-B.5); at most one per bound cue family.
     pub commentary: u64,
@@ -1660,6 +1666,8 @@ impl AudioReport {
             + self.thunder
             + self.interior as u64
             + self.commentary
+            + self.interrupted
+            + self.suppressed
             + self.race_cues
             + self.objects
             + self.cue_issues
@@ -1674,8 +1682,13 @@ impl AudioReport {
 /// Session-scoped reset — scheduled `run_if(session::unloading)`
 /// alongside the other report resets `drive_session` performs (kept
 /// separate so the driver stays under Bevy's system-parameter limit).
-pub fn reset_audio_report(mut report: ResMut<AudioReport>) {
+pub fn reset_audio_report(mut report: ResMut<AudioReport>, arbiter: Option<ResMut<SpeechArbiter>>) {
     report.reset();
+    // F08-B.2: no queued or playing dialogue survives into the next
+    // session (F08-AC06).
+    if let Some(mut arbiter) = arbiter {
+        arbiter.clear();
+    }
 }
 
 /// Horn press → [`HornRequest`] — ENTER per CTL-1, gated like driving
@@ -2986,14 +2999,13 @@ pub fn weather_voices(
 /// unrecovered (UNK-25).
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn commentary_voices(
-    mut commands: Commands,
     session: Res<Session>,
-    time: Res<Time>,
     commentary: Option<ResMut<CommentaryAudio>>,
     vfs: Option<Res<Mm2Vfs>>,
     bank: Option<ResMut<WaveBank>>,
     mut waves: ResMut<Assets<PcmAudio>>,
     mut report: ResMut<AudioReport>,
+    mut arbiter: ResMut<SpeechArbiter>,
 ) {
     let (Some(mut commentary), Some(vfs), Some(mut bank)) = (commentary, vfs, bank) else {
         return;
@@ -3009,7 +3021,6 @@ pub fn commentary_voices(
     ) {
         return;
     }
-    commentary.elapsed += time.delta_secs();
     if !commentary.resolved {
         commentary.resolved = true;
         if *phase != SessionPhase::Results {
@@ -3022,28 +3033,23 @@ pub fn commentary_voices(
     for cue in std::mem::take(&mut commentary.requests) {
         resolve_event_cue(commentary, cue, &vfs.0, &mut bank, &mut waves, &mut report);
     }
-    // Sequencing — the first cue fires immediately; each later one
-    // waits out the previous clip's duration plus the gap.
-    if commentary.elapsed >= commentary.next_at
-        && let Some((stem, handle)) = commentary.queue.pop_front()
-    {
-        let clip_secs = waves.get(&handle).map(|w| w.duration()).unwrap_or(0.0);
-        commands.spawn((
-            AudioVoice {
-                kind: VoiceKind::Commentary,
+    // Sequencing, priority and interruption belong to the arbiter: the
+    // first line fires on the first live frame, later ones wait out the
+    // clip in progress plus the gap.
+    for (stem, clip, priority) in std::mem::take(&mut commentary.queue) {
+        let secs = waves.get(&clip).map(|w| w.duration()).unwrap_or(0.0);
+        arbiter.submit(
+            session.generation(),
+            SpeechLine {
+                stem,
+                clip,
+                secs,
+                priority,
+                max_age: None,
+                suppress_repeats: true,
             },
-            CommentaryVoice { stem },
-            SessionEntity(session.generation()),
-            AudioPlayer(handle),
-            PlaybackSettings {
-                mode: PlaybackMode::Despawn,
-                volume: Volume::Linear(COMMENTARY_VOLUME),
-                ..Default::default()
-            },
-        ));
-        report.voices += 1;
-        report.commentary += 1;
-        commentary.next_at = commentary.elapsed + clip_secs + COMMENTARY_GAP;
+            &mut report,
+        );
     }
 }
 
@@ -3060,6 +3066,10 @@ pub fn commentary_systems()
         crate::lesson::lesson_verdict_cue.before(commentary_voices),
         commentary_voices,
         crate::cnrvoice::cnr_commentary_voices,
+        // F08-B.2: the one place a dialogue voice is spawned.
+        crate::speech::speech_arbiter
+            .after(commentary_voices)
+            .after(crate::cnrvoice::cnr_commentary_voices),
         // F08-B.1: resolve the music cue-table binding the record's
         // `music=` field reports as unsupported.
         crate::music::music_state,
@@ -3088,6 +3098,7 @@ fn queue_lesson_intro(
         waves,
         report,
         ("", &path, &[PRERACE_SECTION]),
+        SpeechPriority::Ambience,
     );
 }
 
@@ -3146,6 +3157,7 @@ fn resolve_commentary(
             waves,
             report,
             (&speaker, &path, &[section_name]),
+            SpeechPriority::Ambience,
         );
     }
 }
@@ -3173,6 +3185,7 @@ fn resolve_event_cue(
                 waves,
                 report,
                 ("", &path, cue.sections()),
+                cue.priority(),
             );
         }
         return;
@@ -3190,6 +3203,7 @@ fn resolve_event_cue(
         waves,
         report,
         (&speaker, &path, cue.sections()),
+        cue.priority(),
     );
 }
 
@@ -3206,6 +3220,7 @@ fn queue_cue(
     waves: &mut Assets<PcmAudio>,
     report: &mut AudioReport,
     (speaker, path, sections): (&str, &str, &[&str]),
+    priority: SpeechPriority,
 ) {
     let fail = |report: &mut AudioReport, msg: String| {
         report.failed += 1;
@@ -3265,7 +3280,7 @@ fn queue_cue(
     };
     let wave = cue_wave_stem(speaker, &row.prefix, suffix);
     match bank.load(vfs, waves, &wave) {
-        Ok(handle) => commentary.queue.push_back((wave, handle)),
+        Ok(handle) => commentary.queue.push_back((wave, handle, priority)),
         Err(e) => fail(report, format!("{path} cue {wave}: {e}")),
     }
 }

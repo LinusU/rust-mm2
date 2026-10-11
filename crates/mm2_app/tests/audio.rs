@@ -3613,11 +3613,13 @@ fn commentary_app_for(
         .insert_resource(bank)
         .init_resource::<Assets<PcmAudio>>()
         .init_resource::<AudioReport>()
+        .init_resource::<mm2_app::speech::SpeechArbiter>()
         .add_systems(
             Update,
             (
                 mm2_app::lesson::lesson_verdict_cue.before(audio::commentary_voices),
                 audio::commentary_voices,
+                mm2_app::speech::speech_arbiter.after(audio::commentary_voices),
             ),
         );
     if let Some(commentary) = CommentaryAudio::bind(Some("sf"), commentary_conditions(), seed) {
@@ -3959,7 +3961,14 @@ fn final_checkpoint_app(dir: &Path, table: Option<&'static str>) -> (App, Entity
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
         1.0 / 60.0,
     )));
-    app.add_systems(Update, audio::commentary_voices);
+    app.init_resource::<mm2_app::speech::SpeechArbiter>()
+        .add_systems(
+            Update,
+            (
+                audio::commentary_voices,
+                mm2_app::speech::speech_arbiter.after(audio::commentary_voices),
+            ),
+        );
     let bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
         .unwrap()
         .with_event_table(table);

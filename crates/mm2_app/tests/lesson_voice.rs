@@ -294,6 +294,7 @@ fn lesson_app(vfs: Vfs) -> App {
             ),
         )
         // The very system chain `main.rs` and the smoke run register.
+        .init_resource::<mm2_app::speech::SpeechArbiter>()
         .add_systems(Update, audio::commentary_systems());
     app.finish();
     app.cleanup();
