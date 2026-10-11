@@ -3259,6 +3259,15 @@ fn apply_snap_frame(
         report.snaps_staled += 1;
         return;
     }
+    // The first frame of a generation is the observable "the client is
+    // live" edge: process-level tests wait on this record instead of
+    // sleeping after the host's `event=started`.
+    if snaps.applied.is_none_or(|(g, _)| g != snap.generation) {
+        println!(
+            "event=snap_applied first=true generation={}",
+            snap.generation
+        );
+    }
     snaps.applied = Some((snap.generation, snap.tick));
     let now = time.elapsed_secs_f64();
     // The blend interval is the observed arrival gap, clamped so a
