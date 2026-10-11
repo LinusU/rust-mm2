@@ -38,6 +38,28 @@ use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
 /// Everything the audit measures, kept separate from printing so tests
 /// can exercise it on synthetic installs.
+/// What the retail speech tables author under one section name.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SpeechSection {
+    /// Tables carrying the section.
+    pub tables: usize,
+    /// Cue rows authored under it.
+    pub rows: usize,
+    /// Distinct drawable wave stems.
+    pub clips: BTreeSet<String>,
+    /// …of which no shipped wave answers (filled after the wave scan).
+    pub missing: usize,
+}
+
+/// Sections the runtime binds to a trigger (`mm2_app::audio`); every
+/// other authored section is unbound and its trigger unknown (UNK-25).
+fn speech_section_bound(name: &str) -> bool {
+    matches!(
+        name,
+        "WEATHER" | "TIMEOFDAY" | "PRERACE" | "FINALCHECKPOINT"
+    ) || name.starts_with("RESULTS")
+}
+
 #[derive(Default)]
 pub struct AudioReport {
     /// `aud/**` files examined (directory index entries excluded).
@@ -85,6 +107,9 @@ pub struct AudioReport {
     pub speech_clips_resolved: usize,
     /// Cue wave stems with no shipped wave: `(stem, naming table)`.
     pub speech_clips_missing: Vec<(String, String)>,
+    /// Per authored cue section (the `<NAME> header` marker, upper-cased)
+    /// across every speech table: tables, cue rows and drawable clips.
+    pub speech_sections: BTreeMap<String, SpeechSection>,
     /// Deferred `aud/**` CSVs that are plain text (F08 families).
     pub deferred_text: usize,
     /// Deferred text CSVs per `aud/<family>` directory.
@@ -694,6 +719,9 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
             r.creature_missing.push((name.clone(), users));
         }
     }
+    for sec in r.speech_sections.values_mut() {
+        sec.missing = sec.clips.iter().filter(|c| !stems.contains(*c)).count();
+    }
     r.speech_clips_total = speech_cues.len();
     for (stem, table) in &speech_cues {
         if stems.contains(stem) {
@@ -878,13 +906,22 @@ fn absorb_speech(
         // `ccl01intro01`), so no speaker prefix applies.
         .filter(|dir| !matches!(*dir, "ccl" | "ccs"))
         .unwrap_or("");
-    for row in table.sections.iter().flat_map(|s| &s.rows) {
-        if !row.problems().is_empty() || row.end - row.add > MAX_CUE_DRAW {
-            continue;
-        }
-        for suffix in row.add + 1..=row.end {
-            cues.entry(mm2_game::cue_wave_stem(speaker, &row.prefix, suffix))
-                .or_insert_with(|| logical.to_string());
+    for section in &table.sections {
+        let stats = r
+            .speech_sections
+            .entry(section.name.to_ascii_uppercase())
+            .or_default();
+        stats.tables += 1;
+        stats.rows += section.rows.len();
+        for row in &section.rows {
+            if !row.problems().is_empty() || row.end - row.add > MAX_CUE_DRAW {
+                continue;
+            }
+            for suffix in row.add + 1..=row.end {
+                let stem = mm2_game::cue_wave_stem(speaker, &row.prefix, suffix);
+                stats.clips.insert(stem.clone());
+                cues.entry(stem).or_insert_with(|| logical.to_string());
+            }
         }
     }
 }
@@ -931,6 +968,27 @@ pub fn print_report(r: &AudioReport) {
                 .filter(|(p, _)| p.ends_with(".wav"))
                 .count()
     );
+    println!("  speech sections (authored cue types; bound = runtime trigger exists):");
+    println!(
+        "    {:<20} {:>6} {:>5} {:>7} {:>8} {:>8}  bound",
+        "section", "tables", "rows", "clips", "resolved", "missing"
+    );
+    for (name, s) in &r.speech_sections {
+        println!(
+            "    {:<20} {:>6} {:>5} {:>7} {:>8} {:>8}  {}",
+            name,
+            s.tables,
+            s.rows,
+            s.clips.len(),
+            s.clips.len() - s.missing,
+            s.missing,
+            if speech_section_bound(name) {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+    }
     for (stem, table) in &r.speech_clips_missing {
         println!("    missing speech wave {stem} (drawn by {table})");
     }
@@ -1200,6 +1258,12 @@ mod tests {
         assert_eq!(r.speech_clips_total, 2);
         assert_eq!(r.speech_clips_missing.len(), 2);
         assert_eq!(r.speech_clips_missing[0].0, "al1wearain01");
+        let pre = &r.speech_sections["PRERACE"];
+        assert_eq!(
+            (pre.tables, pre.rows, pre.clips.len(), pre.missing),
+            (1, 1, 2, 2)
+        );
+        assert!(speech_section_bound("RESULTSWIN") && !speech_section_bound("UNLOCKRACE"));
         let fam = r.families();
         let speech = fam.iter().find(|f| f.family.contains("spchdata")).unwrap();
         assert_eq!((speech.files, speech.supported, speech.missing), (1, 1, 2));
