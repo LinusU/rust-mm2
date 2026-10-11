@@ -625,6 +625,63 @@ clones the clean texture as the car's writable render texture
   captures (local, not committed): a nose-first landing stamps the
   hood/windshield/lamps while the same car's rear stays clean.
 
+## Original breakaway rule (UNK-13, read from `Midtown2.exe` 2026-10-11)
+
+Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
+`vehCarDamage` tune-field loader (`MaxDamage` string at `0x4cb402`: fields
+`MaxDamage +0x34`, `MedDamage +0x38`, `ImpactThreshold +0x3c`,
+`RegenerateRate +0x40`, accumulated damage `+0x30`) and on the
+`break0..3`/`break01..03` name table (`0x4cd1ef`, `0x4cd776`).
+**verified_original** unless marked.
+
+- **Where the parts live.** `vehCarModel::Init` builds two part
+  managers (32-byte objects, ctor `0x4d8570`): the one at model `+0xa0`
+  holds the eight `break*` parts (slot ids `0x1e..0x25`, bit `1<<k`
+  visibility mask at model `+0xa8`); the one at model `+0xac` holds
+  `whl0..3`/`hub0..3` (+ `variant%d` swaps). A part entry (`0x4d8520`,
+  0x4c bytes) is `{attached byte, id, mtx, banger record index, ...}`.
+- **Impact path (break parts).** The impact leaf `0x4cb130(impact)` reads
+  the impact record's impulse (`+0x34`). Gate 1: `impulse > ImpactThreshold`
+  (`0x4cb1fb`; plus a `vehCarSim +0x24c < 10` clause that additionally
+  needs the other body's `+0x24` set). Past it: `0x4caeb0` adds the impulse
+  to the accumulated damage, then `0x4d8890(impulse, &contact, modelIdx)` on
+  the `+0xa0` manager. `0x4d8890` returns unless `impulse >= manager[+4]`;
+  `manager[+4]` is `10000.0` (`0x461c4000`, written by the ctor at
+  `0x4d8581`) and nothing in `vehCarModel::Init` overwrites it, so for a
+  car the gate is a single constant. It then scans the *attached* parts
+  for the smallest squared distance between the part's anchor and the
+  contact point and calls `0x4d8930` on that one part: it spawns a banger
+  instance from the part's record, clears the part's attached flag,
+  copies the car's pose, and kicks it with random components scaled by the
+  manager's ranges (`+0x10..+0x1c`, ctor defaults 4/1/2/1).
+  So: **one part per impact, the nearest, gated by one manager-wide
+  impulse, not by accumulated damage and not by `ImpulseLimit2`.**
+- **`ImpulseLimit2` on the part record.** Not read anywhere on that path
+  (`0x4d8890`/`0x4d8930` never touch record `+0x54`). It acts on the
+  *spawned fragment* afterwards, as for any banger (banger.md § `ImpulseLimit2`
+  consumer). The `Mass × {31.25, 2500}` ladder therefore says how easily a
+  *fallen* part breaks further or tumbles, not when it leaves the car.
+- **Damage path (wheels/hubs).** `vehCarDamage::Update` ends (`0x4cadf0`) with
+  `if (damage >= MaxDamage) carModel->0x4cdc90()`. That routine strips
+  parts of the `+0xac` manager once per episode (flag `+0xa4`): a
+  `vehCarSim +0x24c` value `> 100` removes everything, `> 75` two random
+  wheel/hub pairs plus a variant, `> 50` one pair, otherwise it just marks
+  the episode done. The model reset `0x4cdfe0` clears the flag and restores
+  the full mask (`0xffffffff`). *Unknown:* what `+0x24c` is (it is also
+  compared with 10 and 15 on the impact path); `MedDamage` is not read here.
+- **Not recovered.** The unit of the impact record's `+0x34` (it is the
+  quantity added to damage, so the same scale as `MaxDamage`/`ImpactThreshold`,
+  but our `severity` estimate is not shown to equal it — hence whether
+  10000 is reachable at the same speeds as in the original); whether
+  `0x4cb130` is fed once per contact or once per frame of contact.
+
+**Consequences for the port.** Breakaway detachment is *not*
+damage-driven, so there is no accumulated-damage detach to implement.
+The shipped DSN-21 gate (`severity × part_mass > ImpulseLimit2`, every
+part tested independently) departs from the recovered rule; replacing it
+needs the impulse unit first. Wheel/hub loss at `MaxDamage` is a damage-driven
+behaviour the port does not have yet. Both are filed as follow-up tasks.
+
 ## Open questions
 
 - The original accumulation model: what quantity `MaxDamage`
@@ -653,7 +710,9 @@ clones the clean texture as the car's writable render texture
 - `MirrorPivot` semantics — the implemented mirror-about-x reading
   is designed; every retail value is 0, so no authored case
   distinguishes readings yet.
-- Which parts detach at which damage level; whether break detachment
+- (Answered 2026-10-11, see § Original breakaway rule: impact-driven,
+  nearest part, manager-wide impulse; wheels/hubs damage-driven at
+  `MaxDamage`.) Which parts detach at which damage level; whether break detachment
   is damage-driven or impact-driven (the implemented reading is
   impact-driven against `severity × part_mass`, DSN-21 — the authored
   `ImpulseLimit2 = Mass × {31.25, 2500}` structure supports a
