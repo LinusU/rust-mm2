@@ -111,7 +111,7 @@ Parser: `mm2_formats::fog::FogTable` (`rows`, `row(slot)`,
 `validate()` → `FogIssue`: row count, non-finite/negative values,
 out-of-range colour, `end <= start` degenerate band).
 
-## `.ldef` — ambient light definitions (verified, semantics unrecovered)
+## `.ldef` — ambient light definitions (verified: not runtime-consumed)
 
 35 files: the shared `city/amb_<w><t>_<v>.ldef` grid (w ∈ {c,f,p,r},
 t ∈ {a,d,m,n}, v ∈ {f,l} — 32 files, letter semantics inferred:
@@ -129,8 +129,16 @@ then integer rows — two signed pairs on every retail file:
 
 Measured naming alignment (inferred pairing, audit-checked): every
 `amb_<grid>.ldef` has a `texture/sky_<grid>.tex` counterpart — 32/32 on
-retail. The integer pairs are preserved verbatim; a milli-radian
-heading/pitch reading is plausible but unverified (UNK-24).
+retail.
+
+**Not consumed, and no consumer to write.** Measured 2026-10-11:
+`Midtown2.exe` contains zero occurrences of the strings `ldef` or
+`amb_`, and no asset `Open` builds either name (the environment loader's
+only `city/<stem>.*` opens are `sky`, `cpvs`, `lmap` and `water`). Like
+`city/<stem>.pvshist` (WLD-23), `.ldef` is offline bake-tool data the
+shipped engine never reads — there is nothing to bind. The integer pairs
+are preserved verbatim; a milli-radian heading/pitch reading stays
+plausible but unverified (UNK-24) — moot while nothing consumes them.
 
 Parser: `mm2_formats::ldef::Ldef` (`source_ref`, `rows`,
 `texture_stem()`).
@@ -273,22 +281,50 @@ overlaps one). Exposure feeds `track_recovery`'s contact classification
 
 Parser: `mm2_formats::water::WaterDef`.
 
-## `.lmap` — per-room light map (runtime-loaded; value semantics unrecovered)
+## `.lmap` — per-room light map (runtime-loaded; value recovered, unbound)
 
 Binary `LMP0` + `u32 count` + `count` i32 entries, filling the file
 exactly. Retail: london 1341 entries (= PSDL rooms), sf 1125 entries
 (authored mismatch — 46 short of sf's 1171 rooms; reported, not an
-issue). Most values are −267; entry 0 is −842150451 (0xCDCDCDCD — an
-authored/uninitialized sentinel, preserved verbatim, documented rather
-than normalized).
+issue). Every entry but the first is −267; entry 0 is −842150451
+(`0xCDCDCDCD` — the original allocator's uninitialised-heap fill, not an
+authored value; preserved verbatim, documented rather than normalized).
+`mm2-inspect weather` reports the value census so this stays
+reproducible.
 
-The file *is* runtime-loaded — the exe's city loader carries
-`"wrong lightmap version"` and `"room count mismatch"` diagnostics
-against it (measured 2026-09-23), so it feeds the original's room
-lighting rather than a bake pipeline. What each i32 *means* stays
-unrecovered (UNK-24); we do not consume it yet.
+**The file is runtime-loaded, and its value is now recovered**
+(measured against `Midtown2.exe` 2026-10-11). `cityLevel::Load`
+(`0x4442d5`) builds one 0x28-byte record per PSDL room, then opens
+`Open("city", <stem>, "lmap")` (`0x444318`); it rejects the table unless
+the first dword is `LMP0` (`0x30504d4c`) and the count equals the room
+count, diagnosing `"%s: wrong lightmap version, please re-import"` and
+`"%s: room count mismatch, please re-import."` respectively, and reads
+each entry into the matching room record's `+0x1c` field (a
+missing/rejected table leaves every room at `-1`, i.e. `0xFFFFFFFF`).
+The room draw path (`0x4457a0`) then decomposes that i32: its low three
+bytes, each scaled by `1/255` (`[0x5af480]` = `0.00392157`), become the
+`[r, g, b]` vector passed to `0x443690`, which multiplies the room's
+three directional lights' per-channel colours. An entry is therefore a
+**packed `0xAARRGGBB` per-room light scale** — the byte order is the
+`PackColorBGRA` convention the `.ltNN` ambient already uses (the alpha
+byte is unused). Retail's −267 (`0xFFFFFEF5`) unpacks to
+`r=255, g=254, b=245` → scale ≈ `(1.000, 0.996, 0.961)`, a barely-warm
+full white; `-1` (`0xFFFFFFFF`) is the loader's "no table" default — the
+same full white. The channel-order reading is *inferred* (in the exe the
+three unpacked bytes scale the three light-colour fields; which field is
+`r` rests on the shared BGRA packing), so `mm2_formats::lmap`'s
+`light_scale` is documented as the recovered reading, not a written
+spec.
 
-Parser: `mm2_formats::lmap::Lmap`.
+**Not bound, and deliberately so.** The original applies the scale *per
+room* to that room's own directional lights; this engine's lighting is a
+session-global rig (DSN-28) with no per-room light to scale. Because the
+retail body value is uniform, any global approximation would be
+invisible on stock content and unverifiable — a fabricated change rather
+than a measured one — so `.lmap` joins `.ldef` and `.pvshist` as
+recorded-not-consumed (UNK-24).
+
+Parser: `mm2_formats::lmap::Lmap` (`entries`, `light_scale`).
 
 ## `mm2-inspect weather`
 
@@ -308,8 +344,10 @@ stats; cross-checks:
   are parsed but not cross-checked — their labels use a different
   convention).
 - `<stem>.cpvs` `lists == psdl.rooms + 1`; `.lmap` count vs rooms
-  (authored-mismatch note); `.pvshist` max room ≤ rooms; `.water` refs
-  ≤ rooms — all against `city/<stem>.psdl`.
+  (authored-mismatch note) plus a value census — every non-fill value
+  with its count and recovered light scale (retail: `1124×-267` sf /
+  `1340×-267` london plus one `0xCDCDCDCD` fill each); `.pvshist` max
+  room ≤ rooms; `.water` refs ≤ rooms — all against `city/<stem>.psdl`.
 - Every non-base `.cpvs` is classified against the base table's
   decoded visibility — identical / strict subset / strict superset /
   independent (note lines; bake-sweep evidence, never issues).
@@ -502,10 +540,14 @@ retail sf, 2026-09-27) shows faint droplet streaks around the camera —
 the quads render and anchor — but no playtest or side-by-side against
 the original exists; presentation parity stays unverified (UNK-40).
 
-Still not consumed (UNK-24 stays open): `.ldef` rows, `.lmap` values
-(runtime-loaded by the original — see above — but unbound here), the
-`wearain` commentary-cue wave families and remaining audio effects,
-and authoritative network replication of conditions (F18 req 5). The
+Still not consumed (UNK-24 stays open): `.lmap` values (runtime-loaded by
+the original and now value-recovered — a packed per-room light scale;
+see above — but unbound because our rig is session-global and retail is
+uniform), the `wearain` commentary-cue wave families and remaining audio
+effects, and authoritative network replication of conditions (F18
+req 5). `.ldef` and `.pvshist` are bake-tool data (no exe reference
+exists for either) — they need no consumer, which is itself the recorded
+answer. The
 precipitation bed/thunder leg landed in F18-B.3 — `WeatherAudio`
 resolves `rainexterior`/`raininterior`/`thunder` through the session
 `WaveBank`, crossfades the beds on the shared 64 m shelter probe and

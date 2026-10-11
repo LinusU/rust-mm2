@@ -32,8 +32,10 @@
 //! missing/unparseable/degenerate fog table binds nothing with the
 //! reason recorded in [`FogReport::absent`].
 //!
-//! Deferred: `.cpvs` PVS culling, `.lmap`/`.ldef` semantics —
-//! UNK-24.
+//! Not consumed here (UNK-24): `.ldef` has no exe reference (offline
+//! bake-tool data), and `.lmap`'s recovered per-room light scale is
+//! deliberately unbound because this rig is session-global. `.cpvs`
+//! culling is its own consumer (`crate::pvs`, DSN-33).
 
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;

@@ -4052,7 +4052,8 @@ fn materials(
 /// checked against the `.ltNN` name at the same slot (the measured
 /// positional mapping — verified 16/16 on both retail cities); and
 /// per-city `.cpvs`/`.lmap`/`.pvshist`/`.water` room references are
-/// checked against the PSDL room table.
+/// checked against the PSDL room table, with each `.lmap`'s entry
+/// values reported as a census (count and recovered light scale).
 /// `--city` narrows the per-city expected denominator and the PSDL
 /// cross-checks; `--strict` exits nonzero on any failure or issue.
 fn weather(
@@ -4065,7 +4066,7 @@ fn weather(
     use mm2_formats::fog::FogTable;
     use mm2_formats::ldef::Ldef;
     use mm2_formats::lighting::{LIGHTING_PRESET_COUNT, LightingPreset};
-    use mm2_formats::lmap::Lmap;
+    use mm2_formats::lmap::{LMAP_SENTINEL, Lmap, light_scale};
     use mm2_formats::psdl::{AttributeType, texture_ref_index};
     use mm2_formats::sky::SkyDef;
     use mm2_formats::water::WaterDef;
@@ -4382,15 +4383,32 @@ fn weather(
             match Lmap::parse(&bytes) {
                 Ok(l) => {
                     parsed += 1;
-                    let sentinel = l.entries.iter().filter(|&&v| v == -842150451).count();
+                    // Value census (the recovered reading — a packed
+                    // 0xAARRGGBB per-room light scale; see the parser
+                    // and docs/research/environment.md). Retail is
+                    // uniform, so distinct values are few; a mod's
+                    // variation shows here. The 0xCDCDCDCD fill is the
+                    // original allocator's uninitialised pattern, not an
+                    // authored value.
+                    let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
+                    for &v in &l.entries {
+                        *counts.entry(v).or_default() += 1;
+                    }
+                    let census = counts
+                        .iter()
+                        .map(|(&v, &n)| {
+                            if v == LMAP_SENTINEL {
+                                format!("{n} 0xCDCDCDCD fill")
+                            } else {
+                                let [r, g, b] = light_scale(v);
+                                format!("{n}×{v} (scale {r:.3}/{g:.3}/{b:.3})")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     println!(
-                        "  {logical:<52} {tag:<9} ok — {} entries{}",
-                        l.entries.len(),
-                        if sentinel > 0 {
-                            format!(" ({sentinel} 0xCDCDCDCD sentinel value(s))")
-                        } else {
-                            String::new()
-                        }
+                        "  {logical:<52} {tag:<9} ok — {} entries ({census})",
+                        l.entries.len()
                     );
                     if let Some(c) = file_stem.and_then(city_of) {
                         lmap_by_city.insert(c, (logical.clone(), l));
