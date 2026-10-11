@@ -324,7 +324,9 @@ cargo run -- --dev-world --mods examples/mods   # checker override visible
 ```
 
 `examples/mods/checker-override` replaces the dev world's ground texture
-through the same VFS path the city uses.
+through the same VFS path the city uses. `examples/mods/synthetic-retune`
+is the gameplay counterpart: one invented (not original-derived) `vehCarSim`
+tune that moves the gameplay fingerprint and makes runs record-ineligible.
 
 ### Inspection tool
 

@@ -170,6 +170,14 @@ then exits 2. Any other spelling is a manifest error (a typo must not read as
 declares one, and `mm2_inspect`'s `the_shipped_example_mods_declare_an_effect_their_files_confirm`
 fails if an example's claim stops matching its files.
 
+The shipped examples are one of each: `examples/mods/checker-override` is the
+cosmetic sample (a repaint) and `examples/mods/synthetic-retune` is the
+gameplay sample. The latter ships a single invented `vehCarSim` tune at
+`tune/vehicle/vpdemo.vehcarsim`; its values are made up for demonstration,
+nothing is original-derived and no retail asset is included. Because it wins
+a gameplay path it moves the multiplayer fingerprint and makes runs
+record-ineligible — which is what a gameplay mod should do.
+
 ## Replacement is a remount (cache identity)
 
 Replacing content is restart-based: the game mounts the install and the
