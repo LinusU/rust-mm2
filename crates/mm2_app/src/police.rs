@@ -272,6 +272,11 @@ const EYE_HEIGHT: f32 = 1.3;
 /// clear (the target's own collider is excluded, but its shadow on a
 /// kerb is not a wall).
 const SIGHT_SLACK: f32 = 1.5;
+/// Height (m) above a car's origin the original lifts *both* ends of
+/// the Crash Course cop-sight ray (`0x41a1c0`, `CC-9`: "both lifted
+/// 3.5 m") — the cop-chase and corner rules' "is a cop in sight?" test.
+/// Distinct from [`EYE_HEIGHT`], which the pursuit itself uses.
+pub const LESSON_SIGHT_HEIGHT: f32 = 3.5;
 
 /// The session city's routing graph, as the police chase reads it
 /// (F20-B.2) — the same [`NavGraph::build_for_routing`] graph the
@@ -529,6 +534,29 @@ fn line_clear(spatial: &SpatialQuery, from: Vec3, to: Vec3) -> bool {
     spatial
         .cast_ray(from, dir, len, false, &filter)
         .is_none_or(|hit| hit.distance >= len - SIGHT_SLACK)
+}
+
+/// Whether a cop at `cop` has a clear line of sight to a car at
+/// `target` for the Crash Course cop-chase/corner rule — the original's
+/// `0x41a1c0` test (`CC-9`): within `range` metres and an unobstructed
+/// ray, *both* ends lifted [`LESSON_SIGHT_HEIGHT`]. Only
+/// [`GameLayer::World`](crate::layers::GameLayer) blocks sight (another
+/// car never hides the target), as in [`line_clear`].
+///
+/// The range test is between the cars' origins — the ray's lift changes
+/// neither side of the distance. [`mm2_game::PURSUER_SIGHT_RANGE_M`] is
+/// the rule's own constant (200 m); the pursuit's separate
+/// `contact_range` is not this test.
+pub fn cop_sight_clear(spatial: &SpatialQuery, cop: Vec3, target: Vec3, range: f32) -> bool {
+    if !range.is_finite() || range <= 0.0 {
+        return false;
+    }
+    (cop - target).length() <= range
+        && line_clear(
+            spatial,
+            cop + Vec3::Y * LESSON_SIGHT_HEIGHT,
+            target + Vec3::Y * LESSON_SIGHT_HEIGHT,
+        )
 }
 
 /// Advance every fielded cop's [`Pursuit`] and drive it (F20-A.3).

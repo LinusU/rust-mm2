@@ -243,9 +243,8 @@ fn a_restarted_lesson_re_enters_on_leg_zero_with_a_fresh_driver() {
     let mut app = event_app(lesson_config(1), vfs_of(tmp.path()));
     app.update();
     // Clear leg 0 on the sequencer: the driver is now on leg 1.
-    app.world_mut()
-        .resource_mut::<LessonDriver>()
-        .observe(&ParticipantState::Finished {
+    app.world_mut().resource_mut::<LessonDriver>().observe(
+        &ParticipantState::Finished {
             race_ticks: 100,
             result: ResultId {
                 generation: 1,
@@ -253,7 +252,15 @@ fn a_restarted_lesson_re_enters_on_leg_zero_with_a_fresh_driver() {
                 event: None,
                 sequence: 0,
             },
-        });
+        },
+        // Leg 0 is a corner leg (crash1's `gates,4,…`); its family rule
+        // clears on a completed course with no pursuer in sight.
+        &mm2_game::LegObservation {
+            course_complete: true,
+            ..mm2_game::LegObservation::IDLE
+        },
+        100,
+    );
     assert_eq!(
         app.world().resource::<LessonDriver>().run().phase(),
         LessonPhase::Running { leg: 1 }
@@ -1051,6 +1058,8 @@ fn a_retried_retail_lesson_rebuilds_the_same_world() {
                             sequence: 0,
                         },
                     },
+                    &mm2_game::LegObservation::IDLE,
+                    100,
                 );
                 app.world_mut().resource_mut::<SessionControl>().restart = true;
                 let mut reached = false;

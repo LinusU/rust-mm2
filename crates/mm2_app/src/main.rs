@@ -1774,6 +1774,9 @@ fn main() {
             // reset never sweeps a checkpoint (AC02).
             race::reanchor_teleported_participants,
             race::advance_race,
+            // F21-C.3: a stop leg's lead gets the lesson's damage bounds
+            // once the race is released.
+            lesson::arm_stop_lead_damage,
             // F21-B.4: a lesson's leg swap reads the terminal state
             // `advance_race` just wrote (idle without a `LessonDriver`).
             lesson::drive_lesson,
@@ -1788,11 +1791,14 @@ fn main() {
             // pose. The F10-B.7 signal update reads the junction
             // controller the driver just advanced, so it runs last
             // (knock → drive → drape → maintain → signals).
-            traffic::knock_ambient,
-            traffic::drive_ambient,
-            traffic::drape_ambient,
-            traffic::maintain_ambient,
-            traffic::drive_signals,
+            (
+                traffic::knock_ambient,
+                traffic::drive_ambient,
+                traffic::drape_ambient,
+                traffic::maintain_ambient,
+                traffic::drive_signals,
+            )
+                .chain(),
         )
             .chain(),
     )

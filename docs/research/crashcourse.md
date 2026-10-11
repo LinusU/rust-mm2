@@ -400,20 +400,34 @@ for the same families ("Frequent Flyer" 205, "Straight, With Chaser"
   lesson_rules.rs` (synthetic observations; the constants are the
   executable's).
 - `mm2_content::lesson_legs` builds the jump gate mode and attaches
-  `LessonLeg::rule`; `LessonObjective::rule_evidence` is
-  `OriginalVerified` for the skeleton families (nothing more to
-  evaluate; the leg definition already runs it) and `SyntheticOnly`
-  for follow, cop chase, corner and stop (rule recovered, evaluator
-  tested, **not yet fed live**). Retail coverage: sf 5 original-
-  verified / 8 synthetic-only / 0 unresolved, london 7 / 6 / 0
+  `LessonLeg::rule`; `LessonObjective::rule_evidence` is now
+  `OriginalVerified` for **every** retail family — the skeleton
+  families (nothing more to evaluate) and follow, cop chase, corner
+  and stop, whose recovered evaluator the live session now feeds
+  (F21-C.3). A follow leg builds untimed. Retail coverage: sf 13
+  original-verified / 0 synthetic-only / 0 unresolved, london 13 / 0 / 0
   (`mm2-inspect crash-course`).
-- **Not wired in the session** (filed as follow-up tasks): feeding
-  `LegObservation` from the running session (player speed, lead-car
-  distance and arrival, lead damage, pursuer sight) and letting the
-  driver consult the rule; ending a follow/stop/cop leg on the rule
-  instead of on the last gate; the untimed follow leg; and the
-  wreck-recovery (reset in place) policy for follow, cop chase and stop
-  versus `DisabledOutcome::RestartEvent`.
+- **Wired in the session (F21-C.3):** `mm2_app::lesson::drive_lesson`
+  builds a `mm2_game::LegObservation` each `FixedLast` tick from the
+  running session — the player's speed, gates passed, the race clock
+  and the local car's wreck; the nearest `opponents::LeadCar`'s
+  squared distance, `route_finished` (`opponents::lead_route_finished`,
+  the original's `0x53d6c0`) and damage tier; and a
+  `police::cop_sight_clear` pursuer test (both ends lifted 3.5 m, the
+  original's `0x41a1c0`; only `GameLayer::World` blocks sight). A
+  non-`GateRun` leg is decided by `LegRule::evaluate`, and the session
+  no longer ends on the last gate of such a leg until the rule clears
+  (`LessonDriver::holds_results`/`is_over`; `advance_race`'s edge now
+  also runs in `RacePhase::Complete`); a stop leg's lead takes the
+  lesson's `MaxDamage` 150 000 via `lesson::arm_stop_lead_damage`
+  (`0x4198a3`); a lead-family leg seen with no lead is a surfaced
+  `RuleError`, never a pass.
+- **Still not wired:** the lead's *goal direction* for `0x53d6c0`
+  (the port infers the final route leg's heading — `docs/
+  original-rules.md` DSN-75), and the wreck-recovery (reset in place
+  after 3 s) policy for follow, cop chase and stop, which
+  `WreckPolicy` reports but nothing yet acts on versus
+  `DisabledOutcome::RestartEvent`.
 
 ## Open questions
 

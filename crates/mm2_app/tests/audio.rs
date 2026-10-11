@@ -4474,7 +4474,9 @@ fn a_lesson_verdict_speaks_the_matching_line_once() {
         }
         assert_eq!(app.world().resource::<AudioReport>().commentary, 3);
 
-        driver.observe(&leg_outcome(pass));
+        // `GateRun` leg: the observation is ignored, only the terminal
+        // participant state decides it.
+        driver.observe(&leg_outcome(pass), &mm2_game::LegObservation::IDLE, 0);
         app.insert_resource(driver);
         for _ in 0..400 {
             app.update();

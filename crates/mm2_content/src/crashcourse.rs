@@ -176,10 +176,12 @@ impl RuleEvidence {
 }
 
 impl LessonObjective {
-    /// Evidence level of this family's pass/fail rule (F21-C.2).
+    /// Evidence level of this family's pass/fail rule (F21-C.2, F21-C.3).
     ///
     /// The `Event` dispatch and every family handler were read from
-    /// `Midtown2.exe` (`CC-8`/`CC-9`, `docs/research/crashcourse.md`):
+    /// `Midtown2.exe` (`CC-8`/`CC-9`, `docs/research/crashcourse.md`),
+    /// and the live session now feeds the recovered evaluator
+    /// (`F21-C.3`):
     ///
     /// - **Jump, cross-traffic, maneuver, map** are `OriginalVerified`:
     ///   the executable's handlers add nothing to the shared skeleton
@@ -187,12 +189,14 @@ impl LessonObjective {
     ///   is what the leg definition and the gate-run baseline already
     ///   run — the evaluator is [`mm2_game::LegRule::GateRun`] and the
     ///   jump's any-order gate rule lives in the leg definition.
-    /// - **Follow, cop chase, corner, stop** are `SyntheticOnly`: the
-    ///   rule is recovered and its evaluator ([`mm2_game::LegRule`])
-    ///   is tested, but only against synthetic observations — the
-    ///   session does not feed it yet (lead-car distance, pursuer
-    ///   sight, player speed, lead damage), so a live lesson of these
-    ///   families still ends on the baseline.
+    /// - **Follow, cop chase, corner, stop** are `OriginalVerified`: the
+    ///   rule is recovered and its evaluator ([`mm2_game::LegRule`]) is
+    ///   tested against synthetic observations *and* driven from the
+    ///   running session (`mm2_app::lesson::drive_lesson` builds a
+    ///   [`mm2_game::LegObservation`] each tick — lead-car distance and
+    ///   arrival, lead damage, pursuer sight, player speed — and the
+    ///   driver decides the leg with `LegRule::evaluate`, the untimed
+    ///   follow leg included).
     /// - Codes the executable has no retail row for (`Unknown`)
     ///   remain `Unresolved`.
     ///
@@ -200,12 +204,14 @@ impl LessonObjective {
     /// arm here, which is what moves the coverage report.
     pub fn rule_evidence(&self) -> RuleEvidence {
         match self {
-            Self::Jump | Self::CrossTraffic | Self::Maneuver | Self::Map => {
-                RuleEvidence::OriginalVerified
-            }
-            Self::Follow | Self::CopChase | Self::Corner | Self::Stop => {
-                RuleEvidence::SyntheticOnly
-            }
+            Self::Jump
+            | Self::CrossTraffic
+            | Self::Maneuver
+            | Self::Map
+            | Self::Follow
+            | Self::CopChase
+            | Self::Corner
+            | Self::Stop => RuleEvidence::OriginalVerified,
             Self::Unknown(_) => RuleEvidence::Unresolved,
         }
     }
@@ -758,21 +764,13 @@ mod tests {
 
     #[test]
     fn evidence_follows_what_the_executable_handlers_were_read_to_do() {
-        // F21-C.2: the skeleton-only families are verified, the
-        // lead-car/pursuer/speed families have a tested evaluator the
-        // session does not feed yet, and codes with no retail row stay
-        // unresolved.
-        for code in [0, 5, 7, 9] {
+        // F21-C.3: every retail family's rule is recovered and now fed
+        // live, so all of them are original-verified; codes with no
+        // retail row stay unresolved.
+        for code in [0, 2, 3, 4, 5, 7, 8, 9] {
             assert_eq!(
                 LessonObjective::from_code(code).rule_evidence(),
                 RuleEvidence::OriginalVerified,
-                "code {code}"
-            );
-        }
-        for code in [2, 3, 4, 8] {
-            assert_eq!(
-                LessonObjective::from_code(code).rule_evidence(),
-                RuleEvidence::SyntheticOnly,
                 "code {code}"
             );
         }

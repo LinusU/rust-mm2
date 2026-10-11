@@ -390,4 +390,10 @@ fn legs_carry_the_rule_of_their_family() {
             None,
         ]
     );
+    // The follow handler never starts the timer, so its authored 36 s
+    // does nothing — the leg builds untimed (CC-8/F21-C.3). The stop
+    // and cop-chase legs keep their authored limits.
+    assert_eq!(legs[0].definition.time_limit_ticks, None);
+    assert_eq!(legs[2].definition.time_limit_ticks, Some(50 * RACE_TICK_HZ));
+    assert_eq!(legs[3].definition.time_limit_ticks, Some(60 * RACE_TICK_HZ));
 }

@@ -10,18 +10,23 @@ use avian3d::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::lesson::{LessonDriver, drive_lesson};
+use mm2_app::lesson::{LessonDriver, arm_stop_lead_damage, drive_lesson};
+use mm2_app::opponents::{DriveStats, LeadCar, OpponentDriver};
+use mm2_app::police::PoliceCar;
 use mm2_app::race::{
     CheckpointMarker, LessonSetup, advance_race, reanchor_teleported_participants,
     spawn_checkpoint_markers,
 };
+use mm2_app::racing_line::{CORNER_BRAKE_DEFAULT, CarLimits};
 use mm2_app::results::{ResultsMenu, ResultsUi, results_present};
+use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_content::{LessonLeg, LessonObjective};
 use mm2_game::{
-    Checkpoint, CheckpointRule, EventKey, EventTableKind, LegFailure, LessonPhase, LessonRun,
-    ParticipantState, Player, PlayerControl, RaceDefinition, RacePhase, RaceProgress, RaceStart,
-    RaceStarted, RaceState, ResultLedger, Session, SessionConfig, SessionEntity, SessionPhase,
-    advance_session_tick,
+    Checkpoint, CheckpointRule, DamageSpec, EventKey, EventTableKind, LegFailure, LegRule,
+    LessonPhase, LessonRun, OpponentRoute, OpponentRoutePoint, OpponentSpec, ParticipantState,
+    Player, PlayerControl, PoliceSpec, RaceDefinition, RacePhase, RaceProgress, RaceStart,
+    RaceStarted, RaceState, ResultLedger, STOP_LEAD_MAX_DAMAGE, Session, SessionConfig,
+    SessionEntity, SessionPhase, VehicleDamage, advance_session_tick,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleConfig, VehicleState};
 
@@ -130,7 +135,13 @@ fn lesson_app_with(setup: LessonSetup, config: SessionConfig) -> (App, Entity) {
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
-            (reanchor_teleported_participants, advance_race, drive_lesson).chain(),
+            (
+                reanchor_teleported_participants,
+                advance_race,
+                arm_stop_lead_damage,
+                drive_lesson,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
@@ -556,4 +567,435 @@ fn a_failed_lesson_names_the_leg_and_the_reason() {
         "{texts:?}"
     );
     assert!(!texts.iter().any(|t| t.contains("passed")), "{texts:?}");
+}
+
+// ---------------------------------------------------------------------------
+// F21-C.3: the family leg rules fed from the live session
+// ---------------------------------------------------------------------------
+
+/// A one-leg setup for a family whose rule decides the leg, with the
+/// gates the leg spans and the player's start slot. Untimed: a rule leg
+/// is not the gate-run baseline, and the follow family ignores the
+/// authored limit entirely.
+fn rule_leg(
+    name: &str,
+    rule: LegRule,
+    objective: LessonObjective,
+    gates: &[Vec3],
+    start: Vec3,
+) -> LessonLeg {
+    LessonLeg {
+        filename: name.into(),
+        objective,
+        rule: Some(rule),
+        source: format!("crash0:{name}"),
+        definition: RaceDefinition {
+            checkpoints: gates.iter().map(|p| gate(p.x, p.z)).collect(),
+            finish: None,
+            rule: CheckpointRule::AnyOrder,
+            laps: 1,
+            time_limit_ticks: None,
+            params: mm2_game::EventParams::default(),
+            countdown_ticks: 2,
+            start_slots: vec![RaceStart {
+                position: start,
+                yaw_deg: Some(0.0),
+            }],
+        },
+    }
+}
+
+fn single_leg_setup(leg: LessonLeg) -> LessonSetup {
+    LessonSetup {
+        key: EventKey {
+            city: "london".into(),
+            table: EventTableKind::CrashCourse,
+            stem: "lesson1".into(),
+        },
+        run: LessonRun::new(1).unwrap(),
+        legs: vec![leg],
+        rewards: Default::default(),
+        availability: Default::default(),
+        aimap: None,
+        police: mm2_game::PoliceRoster::default(),
+        lead_cars: mm2_game::OpponentRoster::default(),
+    }
+}
+
+/// A bare [`OpponentDriver`] bound to `route`/`next` — the fields the
+/// lesson's lead observation reads.
+fn opponent_driver(route: Option<OpponentRoute>, next: usize) -> OpponentDriver {
+    OpponentDriver {
+        index: 0,
+        spec: OpponentSpec {
+            vehicle: "vpt".into(),
+            params: vec![],
+            route: None,
+        },
+        route,
+        tuning: ScriptedTuning::DEFAULT,
+        avoid_players: false,
+        avoid_opponents: false,
+        look_ahead: 75.0,
+        next,
+        recovery: ScriptedBot::default(),
+        pass_entity: None,
+        pass_side: 0.0,
+        clear_frames: 0,
+        stall_frames: 0,
+        stall_pos: Vec3::ZERO,
+        pass_ban: None,
+        stuck_pos: Vec3::ZERO,
+        stuck_frames: 0,
+        stuck_peak: 0,
+        reanchors: 0,
+        catch_up_policy: mm2_game::CatchUpPolicy::default(),
+        catch_up: 0.0,
+        limits: CarLimits::of(&VehicleConfig::default(), None),
+        corner_brake: CORNER_BRAKE_DEFAULT,
+        stats: DriveStats::default(),
+    }
+}
+
+fn route(points: &[Vec3]) -> OpponentRoute {
+    OpponentRoute {
+        points: points
+            .iter()
+            .map(|p| OpponentRoutePoint {
+                position: *p,
+                brake: 0.0,
+                forward_offset: 0.0,
+                side_offset: 0.0,
+                target_speed: 0.0,
+                speed_start: 0.0,
+                side_start: 0.0,
+            })
+            .collect(),
+    }
+}
+
+/// A lesson lead at `pos`: the [`LeadCar`] marker `drive_lesson` finds
+/// it by, plus the driving line whose chase state the follow/stop rules
+/// read. `damage` stands in for the authored `vehcardamage` when a test
+/// needs the lead wrecked.
+fn spawn_lead(
+    app: &mut App,
+    pos: Vec3,
+    line: &[Vec3],
+    next: usize,
+    damage: Option<VehicleDamage>,
+) -> Entity {
+    let mut entity = app.world_mut().spawn((
+        LeadCar,
+        Position(pos),
+        Transform::from_translation(pos),
+        opponent_driver(Some(route(line)), next),
+    ));
+    if let Some(damage) = damage {
+        entity.insert(damage);
+    }
+    entity.id()
+}
+
+fn spawn_cop(app: &mut App, pos: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            PoliceCar {
+                index: 0,
+                spec: PoliceSpec {
+                    vehicle: "vpcop".into(),
+                    position: pos,
+                    heading_deg: None,
+                    params: vec![],
+                    line: 1,
+                },
+            },
+            Position(pos),
+            Transform::from_translation(pos),
+        ))
+        .id()
+}
+
+/// Release the countdown without moving (the family rules under test do
+/// not need a gate crossing).
+fn release(app: &mut App) {
+    run(app, 4);
+    assert_eq!(race(app).phase, RacePhase::Running);
+}
+
+/// Sweep the car from `from` to `to` for one step and let the race
+/// systems observe the crossing.
+fn cross(app: &mut App, car: Entity, from: Vec3, to: Vec3) {
+    set_position(app, car, from);
+    run(app, 1);
+    set_position(app, car, to);
+    run(app, 2);
+}
+
+/// Follow, positive: the lead finished its route and sits close — the
+/// lesson passes without any gate crossing (the family's rule decides
+/// the leg, not the gate run).
+#[test]
+fn a_follow_leg_clears_when_the_lead_finishes_within_range() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "follow",
+        LegRule::Follow,
+        LessonObjective::Follow,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    let lead = Vec3::new(-45.0, 0.0, 0.0); // 5 m ahead
+    spawn_lead(&mut app, lead, &[lead], 0, None);
+    run(&mut app, 10);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(driver(&app).run().phase(), LessonPhase::Passed);
+    assert!(driver(&app).pass().is_some());
+}
+
+/// Follow, negative: the lead escaped past 100 m — the lesson fails
+/// with the objective failure, never a pass.
+#[test]
+fn a_follow_leg_fails_when_the_lead_escapes() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "follow",
+        LegRule::Follow,
+        LessonObjective::Follow,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    let line = [Vec3::new(200.0, 0.0, 0.0), Vec3::new(260.0, 0.0, 0.0)];
+    spawn_lead(&mut app, line[0], &line, 0, None); // 250 m from the player
+    run(&mut app, 10);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(
+        driver(&app).run().phase(),
+        LessonPhase::Failed {
+            leg: 0,
+            failure: LegFailure::Objective
+        }
+    );
+    assert!(driver(&app).pass().is_none());
+}
+
+/// Cop chase, positive: the player reaches the finish with the
+/// pursuers out of sight — the lesson passes even though the gate run
+/// completing would end an ordinary leg.
+#[test]
+fn a_cop_chase_leg_clears_when_the_pursuers_lose_the_player() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "copchase",
+        LegRule::CopChase,
+        LessonObjective::CopChase,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, car) = lesson_app(single_leg_setup(leg));
+    spawn_cop(&mut app, Vec3::new(900.0, 0.0, 0.0)); // far outside 200 m
+    clear_leg(&mut app, car, start, Vec3::new(50.0, 0.0, 0.0));
+    run(&mut app, 6);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(driver(&app).run().phase(), LessonPhase::Passed);
+}
+
+/// Cop chase, negative: a cop within sight at the finish fails the
+/// lesson on the objective, however well the course was driven.
+#[test]
+fn a_cop_chase_leg_fails_when_a_cop_has_sight_at_the_finish() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "copchase",
+        LegRule::CopChase,
+        LessonObjective::CopChase,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, car) = lesson_app(single_leg_setup(leg));
+    spawn_cop(&mut app, Vec3::new(40.0, 0.0, 0.0)); // 10 m off the finish
+    clear_leg(&mut app, car, start, Vec3::new(50.0, 0.0, 0.0));
+    run(&mut app, 6);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(
+        driver(&app).run().phase(),
+        LessonPhase::Failed {
+            leg: 0,
+            failure: LegFailure::Objective
+        }
+    );
+}
+
+/// Corner, negative: a gate is passed before the minimum speed was ever
+/// reached — the lesson fails on the objective (the original's
+/// `passed >= 2` test).
+#[test]
+fn a_corner_leg_fails_when_a_gate_is_passed_before_the_speed() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "corner",
+        LegRule::Corner {
+            min_speed_mph: 50.0,
+        },
+        LessonObjective::Corner,
+        &[Vec3::ZERO, Vec3::new(300.0, 0.0, 0.0)],
+        start,
+    );
+    let (mut app, car) = lesson_app(single_leg_setup(leg));
+    release(&mut app);
+    // Crawl through the first gate: below the minimum, one cleared gate
+    // trips the rule.
+    cross(&mut app, car, start, Vec3::new(50.0, 0.0, 0.0));
+    run(&mut app, 4);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(
+        driver(&app).run().phase(),
+        LessonPhase::Failed {
+            leg: 0,
+            failure: LegFailure::Objective
+        }
+    );
+}
+
+/// Corner, positive: the minimum speed is reached before the first real
+/// gate and held, so both gates clear the leg.
+#[test]
+fn a_corner_leg_clears_when_the_speed_is_kept() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "corner",
+        LegRule::Corner {
+            min_speed_mph: 50.0,
+        },
+        LessonObjective::Corner,
+        &[Vec3::ZERO, Vec3::new(300.0, 0.0, 0.0)],
+        start,
+    );
+    let (mut app, car) = lesson_app(single_leg_setup(leg));
+    release(&mut app);
+    // 30 m/s ≈ 67 mph, comfortably over the 50 mph floor, before any
+    // gate is passed.
+    app.world_mut()
+        .get_mut::<VehicleState>(car)
+        .unwrap()
+        .forward_speed = 30.0;
+    run(&mut app, 3);
+    cross(&mut app, car, start, Vec3::new(50.0, 0.0, 0.0));
+    cross(
+        &mut app,
+        car,
+        Vec3::new(250.0, 0.0, 0.0),
+        Vec3::new(350.0, 0.0, 0.0),
+    );
+    run(&mut app, 6);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(driver(&app).run().phase(), LessonPhase::Passed);
+}
+
+/// Stop, positive: the lead is wrecked — the lesson passes even though
+/// the player never cleared a gate.
+#[test]
+fn a_stop_leg_clears_when_the_lead_is_wrecked() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "stop",
+        LegRule::Stop,
+        LessonObjective::Stop,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    let lead = Vec3::new(30.0, 0.0, 0.0);
+    // A large authored bound so `wreck`'s total stays past the lesson's
+    // own `MaxDamage` the arm system writes.
+    let spec = DamageSpec {
+        impact_threshold: 1500.0,
+        med_damage: 500_000.0,
+        max_damage: 1_000_000.0,
+        regenerate_rate: 0.0,
+    };
+    let mut damage = VehicleDamage::new(spec);
+    damage.wreck();
+    spawn_lead(&mut app, lead, &[lead], 0, Some(damage));
+    run(&mut app, 10);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(driver(&app).run().phase(), LessonPhase::Passed);
+}
+
+/// Stop, negative: the lead reached its destination before it was
+/// wrecked — the lesson fails on the objective.
+#[test]
+fn a_stop_leg_fails_when_the_lead_arrives() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "stop",
+        LegRule::Stop,
+        LessonObjective::Stop,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    let lead = Vec3::new(30.0, 0.0, 0.0);
+    spawn_lead(&mut app, lead, &[lead], 0, None); // route finished, healthy
+    run(&mut app, 10);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(
+        driver(&app).run().phase(),
+        LessonPhase::Failed {
+            leg: 0,
+            failure: LegFailure::Objective
+        }
+    );
+}
+
+/// A lead-family leg with no lead car is a setup defect, never a pass:
+/// the rule reports the missing lead and the leg holds.
+#[test]
+fn a_lead_leg_without_a_lead_surfaces_a_rule_error() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "follow",
+        LegRule::Follow,
+        LessonObjective::Follow,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    run(&mut app, 30);
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    assert!(matches!(
+        driver(&app).run().phase(),
+        LessonPhase::Running { leg: 0 }
+    ));
+    assert_eq!(driver(&app).run().stale_reports(), 0);
+}
+
+/// When a stop leg's race goes, the arm system writes the lesson's own
+/// damage bounds onto the lead (`CC-9`, `0x4198a3`) so reaching the
+/// authored bound is what "Destroy that car!" asks.
+#[test]
+fn a_stop_leg_arms_the_leads_damage_bounds() {
+    let start = Vec3::new(-50.0, 0.0, 0.0);
+    let leg = rule_leg(
+        "stop",
+        LegRule::Stop,
+        LessonObjective::Stop,
+        &[Vec3::ZERO],
+        start,
+    );
+    let (mut app, _car) = lesson_app(single_leg_setup(leg));
+    let lead = Vec3::new(30.0, 0.0, 0.0);
+    let spec = DamageSpec {
+        impact_threshold: 1500.0,
+        med_damage: 250.0,
+        max_damage: 500.0,
+        regenerate_rate: 0.0,
+    };
+    let lead = spawn_lead(&mut app, lead, &[lead], 0, Some(VehicleDamage::new(spec)));
+    run(&mut app, 10);
+    let damage = app.world().get::<VehicleDamage>(lead).unwrap();
+    assert_eq!(damage.spec.max_damage, STOP_LEAD_MAX_DAMAGE);
+    assert_eq!(damage.spec.med_damage, STOP_LEAD_MAX_DAMAGE * 0.5);
 }

@@ -690,7 +690,18 @@ fn run_headless(
                 crate::banger::settle_bangers,
                 contracts::publish_vehicle_telemetry,
                 race::reanchor_teleported_participants,
-                race::advance_race,
+                // The countdown releases in `advance_race`; the lesson
+                // driver then reads the terminal state it just wrote
+                // (F21-B.4) and decides a family leg from the live
+                // observation (F21-C.3). The stop leg's lead damage
+                // bounds are armed between them, as in `main.rs`.
+                // Idle without a `LessonDriver`.
+                (
+                    race::advance_race,
+                    crate::lesson::arm_stop_lead_damage,
+                    crate::lesson::drive_lesson,
+                )
+                    .chain(),
                 // F10-A.2: ambient lane-following + recycle/respawn —
                 // the headless record's `traf=` field reads the state
                 // these leave behind. F10-B.6's handover runs before
@@ -698,11 +709,14 @@ fn run_headless(
                 // (knock → drive → drape → maintain); the B.7 signal
                 // update reads the controller state the driver just
                 // advanced, so it runs last.
-                crate::traffic::knock_ambient,
-                crate::traffic::drive_ambient,
-                crate::traffic::drape_ambient,
-                crate::traffic::maintain_ambient,
-                crate::traffic::drive_signals,
+                (
+                    crate::traffic::knock_ambient,
+                    crate::traffic::drive_ambient,
+                    crate::traffic::drape_ambient,
+                    crate::traffic::maintain_ambient,
+                    crate::traffic::drive_signals,
+                )
+                    .chain(),
             )
                 .chain(),
         )

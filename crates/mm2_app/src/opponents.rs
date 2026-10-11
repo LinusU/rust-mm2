@@ -283,6 +283,17 @@ const CATCH_UP_LEG_REF: f32 = 80.0;
 /// Route credit cannot accumulate off the line.
 const ROUTE_ARC_LATERAL: f32 = 25.0;
 
+/// A Crash Course lesson's lead car (F21-B.19) — the `[Opponent]` slot a
+/// follow or stop leg watches. Spawned by [`spawn_lead_cars`] on the
+/// same AI driver as the race opponents but, unlike them, not a
+/// participant: no `RaceProgress`, so the leg gates and the sequencer
+/// never see it. The family rules [`crate::lesson::drive_lesson`] feeds
+/// ([`mm2_game::LegRule`]) find "the lead" by this marker alone — retail
+/// lessons field at most one, and the marker says which cars the lesson
+/// rules may read.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LeadCar;
+
 /// Per-opponent controller state — a component on the vehicle so
 /// session teardown despawns it with everything else the session owns.
 /// Carries the authored [`OpponentSpec`] verbatim (vehicle id, raw
@@ -552,6 +563,60 @@ pub(crate) fn route_is_closed(route: &OpponentRoute) -> bool {
         let first = points[0].position;
         (last.x - first.x).hypot(last.z - first.z) <= ROUTE_LOOP
     }
+}
+
+/// Distance (m, horizontal) within which a lead car on its last route
+/// node counts as having reached the goal point — the original's
+/// `0x53d6c0` constant `900` (squared), `CC-9`.
+pub const LEAD_GOAL_RANGE_M: f32 = 30.0;
+
+/// Distance (m, horizontal) inside which the original additionally
+/// requires the lead to have crossed the goal plane (`0x53d6c0`,
+/// constant `400` squared): within 30 m it has arrived, within 20 m it
+/// must be *past* the plane. `CC-9`.
+pub const LEAD_GOAL_PLANE_M: f32 = 20.0;
+
+/// Whether a lesson's lead car has finished its authored route — the
+/// original's `aiVehicleOpponent::finished` (`0x53d6c0`) that the follow
+/// and stop handlers read (`CC-9`).
+///
+/// `next` is the [`OpponentDriver`]'s chase index and `pos` its
+/// position. The car must be on (or past) its last route node, within
+/// [`LEAD_GOAL_RANGE_M`] of the goal point — the route's final anchor —
+/// and, once inside [`LEAD_GOAL_PLANE_M`], past the goal plane, a side
+/// test along the goal direction. The goal direction was not traced in
+/// the executable (`docs/research/crashcourse.md`, inferred): the final
+/// leg's heading is used, and a final leg with no horizontal extent
+/// (`length² < 1e-6`) has no orientable plane, so proximity alone
+/// counts there.
+pub fn lead_route_finished(route: &OpponentRoute, next: usize, pos: Vec3) -> bool {
+    let points = &route.points;
+    let Some(last) = points.last() else {
+        return false;
+    };
+    // "On its last route node": chasing the final anchor or already
+    // past it (an exhausted open route advances `next` to `len`).
+    if next + 1 < points.len() {
+        return false;
+    }
+    let goal = last.position;
+    let (dx, dz) = (pos.x - goal.x, pos.z - goal.z);
+    let dist_sq = dx * dx + dz * dz;
+    if dist_sq >= LEAD_GOAL_RANGE_M * LEAD_GOAL_RANGE_M {
+        return false;
+    }
+    if dist_sq < LEAD_GOAL_PLANE_M * LEAD_GOAL_PLANE_M
+        && let Some(prev) = points.len().checked_sub(2).and_then(|i| points.get(i))
+    {
+        let dir = Vec3::new(goal.x - prev.position.x, 0.0, goal.z - prev.position.z);
+        if dir.length_squared() > 1e-6 {
+            let dir = dir.normalize();
+            if dx * dir.x + dz * dir.z < 0.0 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Advance the chase index past reached points and return the point to
@@ -1237,6 +1302,10 @@ fn spawn_roster(
             commands
                 .entity(vehicle)
                 .insert(RaceProgress::new(definition));
+        } else {
+            // Not a participant: the Crash Course leg rules (F21-C.3)
+            // find a lesson's lead car by this marker alone.
+            commands.entity(vehicle).insert(LeadCar);
         }
         // Route-bound Ordered progress (DSN-45) — only present on
         // Circuit definitions with a resolvable route.

@@ -28,26 +28,37 @@
 //! [`LessonDriver::holds_results`] so clearing a *non-final* leg does
 //! not end the session; only the lesson's last clear or a failure does.
 //!
-//! The verdict is the gate-run baseline of [`LegReport::from_gate_run`]
-//! — the executable's whole rule for jump, cross-traffic, maneuver and
-//! map legs. What a cornering, follow, stop or cop-chase leg
-//! additionally requires is recovered (`CC-9`, `mm2_game::LegRule`) but
-//! not yet fed from the session. The driver is session state: teardown removes it
+//! For a leg whose family has a recovered rule ([`mm2_game::LegRule`],
+//! `CC-9` — follow, cop chase, corner, stop) the driver evaluates that
+//! rule each tick from a [`LegObservation`] the session builds
+//! ([`drive_lesson`]) and reports its verdict through
+//! [`LegReport::from_verdict`]; the gate-run baseline
+//! ([`LegReport::from_gate_run`]) stays the verdict for jump,
+//! cross-traffic, maneuver, map and any leg whose family is unresolved.
+//! A rule that cannot be evaluated (a missing lead car, a non-finite
+//! observation) is surfaced as [`LegStep::RuleError`], never a pass.
+//!
+//! The driver is session state: teardown removes it
 //! with the [`RaceState`], and while it is present
 //! `record_session_results` keeps every leg's ledger entry off the
 //! profile (a leg clear is not an event finish) and credits the
 //! lesson's own key once, from [`LessonDriver::pass`] alone (F21-B.9).
 
+use avian3d::prelude::{Position, SpatialQuery};
 use bevy::prelude::*;
 use mm2_game::{
-    EventKey, LegFailure, LegReport, LessonPass, LessonPhase, LessonRun, ParticipantState, Player,
-    PlayerControl, RaceProgress, RaceState, ReportEffect, Session, SessionEntity, SessionPhase,
-    StaleReason,
+    DamageTier, EventKey, LeadObservation, LegFailure, LegObservation, LegReport, LegRule,
+    LessonPass, LessonPhase, LessonRun, MPH_PER_MS, PURSUER_SIGHT_RANGE_M, ParticipantState,
+    Player, PlayerControl, RACE_TICK_HZ, RacePhase, RaceProgress, RaceState, ReportEffect,
+    RuleError, RuleState, STOP_LEAD_MAX_DAMAGE, Session, SessionEntity, SessionPhase, StaleReason,
+    VehicleDamage,
 };
-use mm2_vehicle::ResetVehicle;
+use mm2_vehicle::{ResetVehicle, VehicleState};
 
 use crate::audio::{CommentaryAudio, EventCue};
 use crate::netdrive::seat_pose;
+use crate::opponents::{LeadCar, OpponentDriver, lead_route_finished};
+use crate::police::{PoliceCar, cop_sight_clear};
 use crate::race::{CheckpointMarker, LessonSetup, spawn_checkpoint_markers};
 use crate::session::SpawnPoint;
 
@@ -72,6 +83,10 @@ pub enum LegStep {
     },
     /// The sequencer refused the report (counted there, never applied).
     Stale(StaleReason),
+    /// The leg's family rule could not be evaluated — a setup defect (a
+    /// follow or stop leg with no lead car) or a non-finite observation.
+    /// Surfaced, never a pass; the leg holds this tick.
+    RuleError(RuleError),
 }
 
 /// The session resource carrying one lesson run: the legs the race
@@ -84,6 +99,13 @@ pub struct LessonDriver {
     legs: Vec<mm2_content::LessonLeg>,
     run: LessonRun,
     pass: Option<LessonPass>,
+    /// Memory a family rule keeps across the ticks of one leg (the
+    /// corner rule's speed bookkeeping). Reset on every leg advance.
+    rule_state: RuleState,
+    /// Whether the stop leg in play has had its lesson damage bounds
+    /// applied to the lead (the original sets `MaxDamage` once, when the
+    /// race goes). Reset on every leg advance.
+    stop_lead_armed: bool,
 }
 
 impl LessonDriver {
@@ -94,6 +116,8 @@ impl LessonDriver {
             legs: setup.legs,
             run: setup.run,
             pass: None,
+            rule_state: RuleState::default(),
+            stop_lead_armed: false,
         }
     }
 
@@ -133,33 +157,125 @@ impl LessonDriver {
             .map(|leg| RaceState::new(leg.definition.clone(), generation))
     }
 
-    /// Whether a participant's `state` is a clear of a leg that is not
-    /// the lesson's last — one the session must not end on.
-    pub fn holds_results(&self, state: &ParticipantState) -> bool {
-        matches!(state, ParticipantState::Finished { .. })
-            && self
-                .run
-                .current_leg()
-                .is_some_and(|leg| leg + 1 < self.run.leg_count())
+    /// The rule the leg in play runs, `None` for an unresolved family.
+    fn rule_of(&self, leg: u32) -> Option<LegRule> {
+        self.legs.get(leg as usize).and_then(|l| l.rule)
     }
 
-    /// Read the local participant's `state` for the leg in play and
-    /// apply the verdict to the sequencer. Idempotent once the lesson
-    /// stops running: a failed or passed lesson answers
-    /// [`LegStep::Hold`] instead of counting every later tick as a
-    /// stale report.
-    pub fn observe(&mut self, state: &ParticipantState) -> LegStep {
+    /// Whether a participant's `state` is a clear of a leg the session
+    /// must not end on.
+    ///
+    /// A non-final clear always carries on into the next leg. On the
+    /// *final* leg a gate-run clear ends the lesson as usual — but a
+    /// leg whose family rule is not [`LegRule::GateRun`] is decided by
+    /// that rule, so the gate run completing only supplies
+    /// `course_complete` and the session keeps playing until the rule
+    /// itself clears (then `current_leg` is `None`, so this is `false`).
+    pub fn holds_results(&self, state: &ParticipantState) -> bool {
+        if !matches!(state, ParticipantState::Finished { .. }) {
+            return false;
+        }
+        match self.run.current_leg() {
+            Some(leg) if leg + 1 < self.run.leg_count() => true,
+            Some(leg) => matches!(self.rule_of(leg), Some(rule) if rule != LegRule::GateRun),
+            None => false,
+        }
+    }
+
+    /// Whether the lesson reached a terminal phase — passed or failed.
+    /// A family rule can end a leg while the local car still races (a
+    /// follow escape, a corner under-speed, a stop whose lead arrived),
+    /// so the session's `Playing → Results` edge keys on this as well as
+    /// on the participant resolving through the race runtime.
+    pub fn is_over(&self) -> bool {
+        matches!(
+            self.run.phase(),
+            LessonPhase::Passed | LessonPhase::Failed { .. }
+        )
+    }
+
+    /// Whether a stop leg's lead still needs the lesson's damage bounds
+    /// applied — the original sets the lead's `MaxDamage` once, when the
+    /// race goes (`0x4198a3`, `CC-9`). Answers `true` once per stop leg,
+    /// then latches until the leg advances; `false` for every other leg.
+    pub fn arm_stop_lead(&mut self) -> bool {
+        if self.stop_lead_armed {
+            return false;
+        }
+        let running = self
+            .run
+            .current_leg()
+            .is_some_and(|leg| matches!(self.rule_of(leg), Some(LegRule::Stop)));
+        if running {
+            self.stop_lead_armed = true;
+        }
+        running
+    }
+
+    /// Read the local participant's `state` and the leg's `obs` for the
+    /// leg in play and apply the verdict to the sequencer. `ticks` is
+    /// the leg's own clock, the clear time [`LegReport`] carries for a
+    /// rule verdict.
+    ///
+    /// For a family with a recovered rule ([`LegRule`] other than
+    /// [`LegRule::GateRun`]) the rule decides the leg; every other leg
+    /// keeps the gate-run baseline. Idempotent once the lesson stops
+    /// running: a failed or passed lesson answers [`LegStep::Hold`]
+    /// instead of counting every later tick as a stale report.
+    pub fn observe(
+        &mut self,
+        state: &ParticipantState,
+        obs: &LegObservation,
+        ticks: u64,
+    ) -> LegStep {
         let Some(leg) = self.run.current_leg() else {
             return LegStep::Hold;
         };
-        // `disabled` is always false here: a wrecked lesson car
-        // restarts the whole session (`DisabledOutcome::RestartEvent`)
-        // before it could be reported as a failure of this attempt.
-        let Some(report) = LegReport::from_gate_run(self.run.attempt(), leg, state, false) else {
+        // A participant that has not been released yet has no verdict:
+        // a follow leg's distances are meaningless mid-countdown.
+        if matches!(state, ParticipantState::AwaitingStart) {
             return LegStep::Hold;
-        };
+        }
+        match self.rule_of(leg) {
+            Some(rule) if rule != LegRule::GateRun => {
+                let dt = 1.0 / RACE_TICK_HZ as f32;
+                let verdict = match rule.evaluate(&mut self.rule_state, obs, dt) {
+                    Ok(verdict) => verdict,
+                    Err(error) => return LegStep::RuleError(error),
+                };
+                let Some(report) = LegReport::from_verdict(self.run.attempt(), leg, ticks, verdict)
+                else {
+                    // Pending, or the wreck-recovery policy that does not
+                    // end the leg (`ResetCar`).
+                    return LegStep::Hold;
+                };
+                self.apply(report)
+            }
+            // The gate-run baseline (`DSN-72`): jump, cross-traffic,
+            // maneuver, map — and any leg whose family is unresolved.
+            _ => {
+                // `disabled` is always false here: a wrecked lesson car
+                // restarts the whole session
+                // (`DisabledOutcome::RestartEvent`) before it could be
+                // reported as a failure of this attempt.
+                let Some(report) = LegReport::from_gate_run(self.run.attempt(), leg, state, false)
+                else {
+                    return LegStep::Hold;
+                };
+                self.apply(report)
+            }
+        }
+    }
+
+    /// Feed one addressed report to the sequencer and translate its
+    /// effect, resetting the per-leg rule state whenever a leg advances.
+    fn apply(&mut self, report: LegReport) -> LegStep {
         match self.run.report(report) {
-            ReportEffect::Advanced { next_leg } => LegStep::Next { leg: next_leg },
+            ReportEffect::Advanced { next_leg } => {
+                self.rule_state = RuleState::default();
+                self.stop_lead_armed = false;
+                LegStep::Next { leg: next_leg }
+            }
             ReportEffect::Passed => {
                 self.pass = self.run.take_pass();
                 LegStep::Passed
@@ -177,13 +293,30 @@ impl LessonDriver {
 /// Fixed-step lesson driver — see module docs. Runs in `FixedLast`
 /// right after [`advance_race`](crate::race::advance_race), so the
 /// leg's terminal state is read on the tick it lands.
-#[allow(clippy::too_many_arguments)] // Bevy system: the leg swap threads the race, the markers' asset handles and the reseat channel
+///
+/// Each tick it builds the leg's [`LegObservation`] from the live
+/// session — the local car's speed, gates, timer, wreck and position,
+/// the lesson's lead car(s) (`F21-B.19`) and the fielded police — and
+/// hands it to [`LessonDriver::observe`]. Which observation inputs a
+/// leg's rule reads is [`mm2_game::LegRule`]'s business; the follow
+/// leg's untimed definition means its `time_expired` is always false.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system: the leg swap threads the race, the markers' asset handles and the reseat channel; the participant query is the system's real input
 pub fn drive_lesson(
     driver: Option<ResMut<LessonDriver>>,
     race: Option<ResMut<RaceState>>,
     session: Res<Session>,
+    spatial: SpatialQuery,
     spawn: Option<Res<SpawnPoint>>,
-    mut participants: Query<(Entity, &Player, &mut RaceProgress)>,
+    mut participants: Query<(
+        Entity,
+        &Player,
+        &mut RaceProgress,
+        &Position,
+        &VehicleState,
+        Option<&VehicleDamage>,
+    )>,
+    leads: Query<(&Position, &OpponentDriver, Option<&VehicleDamage>), With<LeadCar>>,
+    police: Query<&Position, With<PoliceCar>>,
     markers: Query<Entity, With<CheckpointMarker>>,
     mut resets: MessageWriter<ResetVehicle>,
     mut commands: Commands,
@@ -203,13 +336,47 @@ pub fn drive_lesson(
     ) {
         return;
     }
-    let Some((entity, _, mut progress)) = participants
+    let Some((entity, _, mut progress, position, vstate, damage)) = participants
         .iter_mut()
-        .find(|(_, player, _)| player.control == PlayerControl::Local)
+        .find(|(_, player, _, _, _, _)| player.control == PlayerControl::Local)
     else {
         return;
     };
-    match driver.observe(&progress.state) {
+    // "The lead" is the nearest marked lead car — retail lessons field
+    // at most one (`F21-B.19`), so this is the lesson's lead; a lesson
+    // with none (a follow or stop leg wired no opponent) leaves
+    // `obs.lead` `None`, which the rule surfaces as a `MissingLead`.
+    let mut lead = None;
+    let mut nearest_sq = f32::INFINITY;
+    for (lead_pos, lead_driver, lead_damage) in &leads {
+        let distance_sq = position.0.distance_squared(lead_pos.0);
+        if distance_sq < nearest_sq {
+            nearest_sq = distance_sq;
+            let route_finished = lead_driver
+                .route
+                .as_ref()
+                .is_some_and(|route| lead_route_finished(route, lead_driver.next, lead_pos.0));
+            let wrecked = lead_damage.is_some_and(|d| d.condition() == DamageTier::Disabled);
+            lead = Some(LeadObservation {
+                distance_sq,
+                route_finished,
+                wrecked,
+            });
+        }
+    }
+    let obs = LegObservation {
+        course_complete: matches!(progress.state, ParticipantState::Finished { .. }),
+        gates_passed: progress.cleared_count() as u32,
+        time_expired: matches!(progress.state, ParticipantState::TimedOut { .. }),
+        wrecked: damage.is_some_and(|d| d.condition() == DamageTier::Disabled),
+        speed_mph: vstate.forward_speed.abs() * MPH_PER_MS,
+        lead,
+        pursuer_in_sight: police
+            .iter()
+            .any(|cop| cop_sight_clear(&spatial, cop.0, position.0, PURSUER_SIGHT_RANGE_M)),
+    };
+    let ticks = race.clock;
+    match driver.observe(&progress.state, &obs, ticks) {
         LegStep::Next { leg } => {
             let Some(next) = driver.race_state(session.generation()) else {
                 return;
@@ -253,7 +420,47 @@ pub fn drive_lesson(
             ?failure,
             "lesson failed — restart to retry from the first leg"
         ),
+        LegStep::RuleError(error) => warn!(
+            lesson = %driver.key.stem,
+            %error,
+            "lesson leg rule could not be evaluated — the leg holds"
+        ),
         LegStep::Hold | LegStep::Stale(_) => {}
+    }
+}
+
+/// Apply a stop leg's lesson damage bounds to its lead car (F21-C.3,
+/// `CC-9`): when the race goes the original sets the lead's `MaxDamage`
+/// to [`STOP_LEAD_MAX_DAMAGE`] and `MedDamage` to half (`0x4198a3`), so
+/// reaching the (otherwise far larger) authored bound is what "Destroy
+/// that car!" asks. [`LessonDriver::arm_stop_lead`] latches it once per
+/// stop leg.
+///
+/// Runs in `FixedLast` after [`advance_race`](crate::race::advance_race)
+/// (the countdown it waits out releases there) and against the
+/// authority only. Idle without a lesson, a stop leg, a fielded lead or
+/// a released race.
+pub fn arm_stop_lead_damage(
+    driver: Option<ResMut<LessonDriver>>,
+    race: Option<Res<RaceState>>,
+    session: Res<Session>,
+    mut leads: Query<&mut VehicleDamage, With<LeadCar>>,
+) {
+    let (Some(mut driver), Some(race)) = (driver, race) else {
+        return;
+    };
+    if race.is_stale(session.generation())
+        || !session.authority_role().is_authority()
+        || matches!(race.phase, RacePhase::Countdown { .. })
+    {
+        return;
+    }
+    if !driver.arm_stop_lead() {
+        return;
+    }
+    for mut damage in &mut leads {
+        damage.spec.max_damage = STOP_LEAD_MAX_DAMAGE;
+        damage.spec.med_damage = STOP_LEAD_MAX_DAMAGE * 0.5;
     }
 }
 
@@ -324,6 +531,8 @@ mod tests {
             legs: (0..legs).map(|i| leg(&format!("leg{i}"), None)).collect(),
             run: LessonRun::new(legs).unwrap(),
             pass: None,
+            rule_state: mm2_game::RuleState::default(),
+            stop_lead_armed: false,
         }
     }
 
@@ -343,23 +552,33 @@ mod tests {
         }
     }
 
+    /// Observe a leg with an idle observation — the gate-run baseline
+    /// ignores the observation, so these driver-level tests keep
+    /// driving it through `state` alone.
+    fn observe(d: &mut LessonDriver, state: &ParticipantState) -> LegStep {
+        d.observe(state, &LegObservation::IDLE, 0)
+    }
+
     #[test]
     fn an_undecided_leg_holds() {
         let mut d = driver(2);
-        assert_eq!(d.observe(&ParticipantState::Racing), LegStep::Hold);
-        assert_eq!(d.observe(&ParticipantState::AwaitingStart), LegStep::Hold);
+        assert_eq!(observe(&mut d, &ParticipantState::Racing), LegStep::Hold);
+        assert_eq!(
+            observe(&mut d, &ParticipantState::AwaitingStart),
+            LegStep::Hold
+        );
         assert_eq!(d.run().stale_reports(), 0);
     }
 
     #[test]
     fn a_clear_advances_and_the_last_clear_yields_the_pass_once() {
         let mut d = driver(2);
-        assert_eq!(d.observe(&finished(100)), LegStep::Next { leg: 1 });
+        assert_eq!(observe(&mut d, &finished(100)), LegStep::Next { leg: 1 });
         assert_eq!(d.current_leg().unwrap().filename, "leg1");
-        assert_eq!(d.observe(&finished(250)), LegStep::Passed);
+        assert_eq!(observe(&mut d, &finished(250)), LegStep::Passed);
         assert_eq!(d.pass().unwrap().leg_ticks, vec![100, 250]);
         // Nothing runs afterwards — no stale-report noise per tick.
-        assert_eq!(d.observe(&finished(250)), LegStep::Hold);
+        assert_eq!(observe(&mut d, &finished(250)), LegStep::Hold);
         assert_eq!(d.run().stale_reports(), 0);
         assert!(d.race_state(1).is_none());
     }
@@ -372,13 +591,13 @@ mod tests {
             result: id(),
         };
         assert_eq!(
-            d.observe(&timed_out),
+            observe(&mut d, &timed_out),
             LegStep::Failed {
                 leg: 0,
                 failure: LegFailure::TimedOut
             }
         );
-        assert_eq!(d.observe(&timed_out), LegStep::Hold);
+        assert_eq!(observe(&mut d, &timed_out), LegStep::Hold);
         assert!(d.pass().is_none());
         assert!(d.race_state(1).is_none());
     }
@@ -392,8 +611,31 @@ mod tests {
             race_ticks: 1,
             result: id()
         }));
-        d.observe(&finished(1));
+        observe(&mut d, &finished(1));
         // On the final leg a finish ends the session as usual.
+        assert!(!d.holds_results(&finished(2)));
+    }
+
+    #[test]
+    fn a_family_final_leg_holds_the_results_until_its_rule_clears() {
+        let mut d = driver(1);
+        d.legs[0].rule = Some(LegRule::Follow);
+        // The gate run completing under a family rule does not end the
+        // session — `drive_lesson` must decide the leg.
+        assert!(d.holds_results(&finished(2)));
+        assert!(!d.is_over());
+        // The lead finished its route right on top of the player: the
+        // rule clears the leg, and then there is nothing left to hold.
+        let obs = LegObservation {
+            lead: Some(LeadObservation {
+                distance_sq: 4.0,
+                route_finished: true,
+                wrecked: false,
+            }),
+            ..LegObservation::IDLE
+        };
+        assert_eq!(d.observe(&finished(2), &obs, 2), LegStep::Passed);
+        assert!(d.is_over());
         assert!(!d.holds_results(&finished(2)));
     }
 
@@ -404,7 +646,7 @@ mod tests {
         let first = d.race_state(7).unwrap();
         assert_eq!(first.generation, 7);
         assert_eq!(first.definition.time_limit_ticks, None);
-        d.observe(&finished(1));
+        observe(&mut d, &finished(1));
         let second = d.race_state(7).unwrap();
         assert_eq!(second.definition.time_limit_ticks, Some(500));
     }

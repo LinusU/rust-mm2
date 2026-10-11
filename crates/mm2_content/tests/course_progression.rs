@@ -54,10 +54,9 @@ fn retail_coverage_enumerates_every_lesson_unfiltered() {
                 l.stem
             );
         }
-        // F21-C.2: every retail family has a recovered rule, so no
-        // retail lesson is unresolved; the lead-car/pursuer/speed
-        // families (follow, cop chase, corner, stop) are still fed
-        // nothing live, so they cap a lesson at synthetic-only.
+        // F21-C.3: every retail family has a recovered rule fed from the
+        // live session, so no retail lesson is unresolved (follow, cop
+        // chase, corner and stop included).
         assert_eq!(cov.count(RuleEvidence::Unresolved), 0, "{city}");
         for (row, lesson) in cov.lessons.iter().zip(&course.lessons) {
             let weakest = lesson

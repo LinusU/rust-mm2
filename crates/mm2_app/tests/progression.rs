@@ -764,7 +764,9 @@ fn pay_for_the_lesson(app: &mut App) {
 
 /// Run `driver` until it observes `state` for its only leg.
 fn observe_leg(driver: &mut mm2_app::lesson::LessonDriver, state: &mm2_game::ParticipantState) {
-    driver.observe(state);
+    // The test lessons run the gate-run baseline, whose verdict ignores
+    // the observation, so a neutral one stands in.
+    driver.observe(state, &mm2_game::LegObservation::IDLE, 0);
 }
 
 fn finished_state(app: &mut App, ticks: u64) -> mm2_game::ParticipantState {

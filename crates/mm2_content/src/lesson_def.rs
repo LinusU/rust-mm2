@@ -25,8 +25,9 @@
 //! - **Timer** (inferred, `CC-7`): the sub-event's `TimeLimit` in seconds
 //!   (the Blitz unit, `BLZ-3`); `0` is untimed — the two retail `corner`
 //!   rows author it. The executable never starts the timer for a follow
-//!   leg, so [`LegRule::ignores_time_limit`] families carry a limit the
-//!   rule does not read.
+//!   leg, so a [`LegRule::ignores_time_limit`] family builds the leg with
+//!   no limit at all: the authored value is kept in the catalog but the
+//!   definition is untimed (`None`).
 //! - **The family rule** is [`LessonLeg::rule`] (`CC-9`): the gate run
 //!   plus whatever the family's handler adds — the cornering speed in
 //!   `tail[0]`, a follow lesson's distance to its lead car, a stop's
@@ -191,13 +192,20 @@ fn build_leg(
     // `mmcrashdata` block's `Ambient` is 0 on every retail row.
     let mut params = event.race_params(difficulty).clone();
     params.ambient = sub.amb_density;
+    let family = leg_rule(sub);
     let (checkpoints, finish, rule) = gates(sub.objective, rows).map_err(leg_err)?;
     let definition = RaceDefinition {
         checkpoints,
         finish,
         rule,
         laps: 1,
-        time_limit_ticks: if sub.timed() {
+        // The follow handler never starts the sub-event timer (CC-8:
+        // `0x41601c` clears the car's countdown flag), so its authored
+        // `TimeLimit` — 36 s / 200 s on retail — does nothing. The leg
+        // is untimed whatever the row says (`LegRule::ignores_time_limit`).
+        time_limit_ticks: if family.is_some_and(|r| r.ignores_time_limit()) {
+            None
+        } else if sub.timed() {
             Some(time_limit_ticks(sub.time_limit).map_err(leg_err)?)
         } else if sub.time_limit == 0.0 {
             None
@@ -220,7 +228,7 @@ fn build_leg(
         objective: sub.objective,
         source: sub.source.clone(),
         definition,
-        rule: leg_rule(sub),
+        rule: family,
     })
 }
 

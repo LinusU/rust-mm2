@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_keeps_a_playable_lesson_apart_from_its_unrecovered_rule() {
+    fn coverage_keeps_a_playable_lesson_apart_from_its_recovered_rule() {
         let d = synthetic_install("vpbug");
         write(d.path(), "aud/spchdata/ccl/ccl0.csv", "x\n");
         let vfs = vfs_of(d.path());
@@ -556,8 +556,8 @@ mod tests {
         assert_eq!(c.legs[0], Ok(1));
         assert_eq!(c.legs[1], Ok(1));
         assert_eq!(c.families.iter().collect::<Vec<_>>(), ["follow"]);
-        // Follow: the rule is recovered, the session does not feed it yet.
-        assert_eq!(c.rule, RuleEvidence::SyntheticOnly);
+        // Follow: the recovered rule is fed live (F21-C.3).
+        assert_eq!(c.rule, RuleEvidence::OriginalVerified);
         // The Amateur aimap wires the lead car, the Professional one none.
         assert_eq!(c.lead_cars, [1, 0]);
         assert_eq!(c.police, [0, 0]);

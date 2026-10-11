@@ -643,69 +643,77 @@ pub fn advance_race(
             if !pending && !participants.is_empty() {
                 race.phase = RacePhase::Complete;
             }
-            // UI-5's results-screen rule: the local driver's terminal
-            // resolution ends the playing session. The rest of the
-            // field races on behind the results screen — this system
-            // keeps stepping in `Results`, so every opponent still
-            // earns a recorded finish (DSN-11); the guard on
-            // `is_playing` makes the edge fire once. A non-local
-            // participant resolving while the local driver still races
-            // never ends the local race.
-            //
-            // Networked-authority deferral (F25-B): on a *hosted*
-            // session, `Playing → Results` waits until no `Remote`
-            // participant is unresolved. What a remote client lives on
-            // gates on `Playing` — the wire input feed (an unresolved
-            // remote car would coast, never earning its terminal edge)
-            // and `publish_snapshots` (even the rows minted on the
-            // transition tick itself would die with the stream). The
-            // deferral ends when the last wire seat resolves — the
-            // deadline's mass-timeout clears them all in one pass — or
-            // departs (a despawned entity stops counting). The
-            // transition's own fixed step is the terminal rows' mint,
-            // so `publish_snapshots` owes the wire exactly one
-            // `Results`-phase frame at the frozen transition tick. A
-            // wire seat that goes silent while `Playing` does not hold
-            // this forever: `netdrive::retire_stalled_wire_seats` mints
-            // its `TimedOut` past `WireStall`'s designed bounds, which
-            // lands here as an ordinary resolution — the lobby link,
-            // roster slot and parked car all stay (a retirement, not a
-            // kick). A `Local`
-            // session keeps UI-5's edge exactly: `Remote` there is a
-            // simulated opponent's stamp, not a wire seat.
-            let hosted = session
-                .config()
-                .is_some_and(|c| c.authority == SessionAuthority::Host);
-            let local_done = participants.iter().any(|(player, _, progress, _)| {
-                player.control == PlayerControl::Local
-                    && matches!(
-                        progress.state,
-                        ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
-                    )
-            });
-            let wire_open = hosted
-                && participants.iter().any(|(player, _, progress, _)| {
-                    player.control == PlayerControl::Remote
-                        && matches!(
-                            progress.state,
-                            ParticipantState::AwaitingStart | ParticipantState::Racing
-                        )
-                });
-            // A Crash Course lesson clearing a non-final leg carries on
-            // into the next one — only its last clear or a failure
-            // ends the session (F21-B.4, `drive_lesson`).
-            let lesson_continues = lesson.as_ref().is_some_and(|lesson| {
-                participants.iter().any(|(player, _, progress, _)| {
-                    player.control == PlayerControl::Local && lesson.holds_results(&progress.state)
-                })
-            });
-            if local_done && !wire_open && !lesson_continues && session.is_playing() {
-                session
-                    .transition(SessionPhase::Results)
-                    .expect("Playing → Results is a legal transition");
-            }
         }
         RacePhase::Complete => {}
+    }
+    // UI-5's results-screen rule: the local driver's terminal
+    // resolution — or a Crash Course leg rule that ends the lesson while
+    // the car still races — ends the playing session. The rest of the
+    // field races on behind the results screen — this system keeps
+    // stepping in `Results`, so every opponent still earns a recorded
+    // finish (DSN-11); the guard on `is_playing` makes the edge fire
+    // once. A non-local participant resolving while the local driver
+    // still races never ends the local race.
+    //
+    // This runs for a live field (`Running`, the tick it resolves) *and*
+    // in `Complete`: a lesson's family rule (F21-C.3) can clear — or
+    // fail — a leg after its gate run has frozen the race clock, so the
+    // edge must still fire then. The countdown arm above returns until
+    // it releases, and every other phase returned before the match.
+    if matches!(race.phase, RacePhase::Running | RacePhase::Complete) {
+        // Networked-authority deferral (F25-B): on a *hosted* session,
+        // `Playing → Results` waits until no `Remote` participant is
+        // unresolved. What a remote client lives on gates on `Playing` —
+        // the wire input feed (an unresolved remote car would coast,
+        // never earning its terminal edge) and `publish_snapshots` (even
+        // the rows minted on the transition tick itself would die with
+        // the stream). The deferral ends when the last wire seat
+        // resolves — the deadline's mass-timeout clears them all in one
+        // pass — or departs (a despawned entity stops counting). The
+        // transition's own fixed step is the terminal rows' mint, so
+        // `publish_snapshots` owes the wire exactly one `Results`-phase
+        // frame at the frozen transition tick. A wire seat that goes
+        // silent while `Playing` does not hold this forever:
+        // `netdrive::retire_stalled_wire_seats` mints its `TimedOut`
+        // past `WireStall`'s designed bounds, which lands here as an
+        // ordinary resolution — the lobby link, roster slot and parked
+        // car all stay (a retirement, not a kick). A `Local` session
+        // keeps UI-5's edge exactly: `Remote` there is a simulated
+        // opponent's stamp, not a wire seat.
+        let hosted = session
+            .config()
+            .is_some_and(|c| c.authority == SessionAuthority::Host);
+        let local_done = participants.iter().any(|(player, _, progress, _)| {
+            player.control == PlayerControl::Local
+                && matches!(
+                    progress.state,
+                    ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
+                )
+        });
+        let wire_open = hosted
+            && participants.iter().any(|(player, _, progress, _)| {
+                player.control == PlayerControl::Remote
+                    && matches!(
+                        progress.state,
+                        ParticipantState::AwaitingStart | ParticipantState::Racing
+                    )
+            });
+        // A Crash Course lesson carries on past a leg rule's clear or a
+        // non-final gate clear until its last leg is decided
+        // (F21-B.4/F21-C.3, `drive_lesson`): `holds_results` keeps the
+        // session playing while a rule leg waits, `is_over` ends it once
+        // the rule (or the gate run) has decided the lesson.
+        let lesson_continues = lesson.as_ref().is_some_and(|lesson| {
+            participants.iter().any(|(player, _, progress, _)| {
+                player.control == PlayerControl::Local && lesson.holds_results(&progress.state)
+            })
+        });
+        let lesson_over = lesson.as_ref().is_some_and(|lesson| lesson.is_over());
+        if (local_done || lesson_over) && !wire_open && !lesson_continues && session.is_playing() {
+            session
+                .transition(SessionPhase::Results)
+                .expect("Playing → Results is a legal transition");
+        }
     }
 }
 
