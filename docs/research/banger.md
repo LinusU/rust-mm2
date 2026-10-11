@@ -280,8 +280,9 @@ verified original behaviour — every provisional point is still UNK-22.
   only deduplicated reportable ones. Approach speed is the deepest
   manifold contact's pre-solver `normal_speed` (shared
   `deepest_contact` helper with the impact pipeline). The provisional
-  estimate is the striker's kinetic energy `½·m·v²` compared against
-  `ImpulseLimit2` (F04-C.5 — see the threshold census below); a
+  estimate is the squared contact impulse `|K⁻¹·v|²` of the striker
+  (OPR-1.3, § `ImpulseLimit2` consumer) compared against
+  `ImpulseLimit2` (F04-C.5, #1179); a
   qualifying edge flips `RigidBody` to dynamic once and emits
   `BangerStateChanged`.
 - **Post-solver momentum transfer (F04-C.4).** The activation runs
@@ -683,7 +684,18 @@ readers/writers besides the parser and writer (`0x440c21`,
   The `0x4400d0`/`0x440040` active update (sleep/`Timer`) was only
   skimmed.
 
-Consequences for the runtime slice (DSN-10): the `½·m·v²` stand-in is
+**Implemented (#1179).** `activate_bangers` now gates on this quantity
+(`mm2_game::contact_impulse_squared`, striker's `K` — the first-body
+reading stays inferred). Headless sf smoke, same 1500-frame drive:
+before `bng=5898d/4a/1s/2b`, after `bng=5893d/24a/1s/7b` — the top
+rungs now activate. Census (`retail_impulse_limit_ladder_is_reachable_by_a_one_tonne_striker`):
+975 of 995 records reachable by a 1 t striker at ≤60 m/s (slowest 56.6),
+15 immovable, out of reach: `cp_chinagate_f`, `np_ghirardelli_f`,
+`va_cablecar_f`, `np_alcatraz_*`. `NumParts` > 0 now bounds the
+spawned fragments. Still open: what a sub-limit contact leaves behind,
+which body's `K` the original uses.
+
+Historical note (the gate before #1179): the `½·m·v²` stand-in is
 the wrong quantity — it is quadratic in speed, the original is
 quadratic in the *impulse* (so linear in the striker's effective mass
 times speed, in (N·s)²). For the retail ladder (`ImpulseLimit2 ≈ Mass ×
@@ -699,11 +711,11 @@ note retunes restitution or impulse.
 
 Parsed, bound and provisionally simulated. Everything below is UNK-22:
 
-- What `ImpulseLimit2` is compared against (contact impulse? impact
+- (Resolved by OPR-1.3 — see § `ImpulseLimit2` consumer; the text
+  below is the pre-recovery analysis, kept for the record.) What
+  `ImpulseLimit2` is compared against (contact impulse? impact
   speed? kinetic energy?) and what crossing it does — break vs. tip
-  vs. nothing. The implemented estimate is the striker's kinetic
-  energy `½·m_striker·v²` — a designed reading, not recovered
-  original semantics. The authored data constrains the answer hard
+  vs. nothing. The authored data constrains the answer hard
   (operator report 4 item 3, F04-C.5): `ImpulseLimit2 ≈ Mass ×
   {31.25, 500, 800, 2000, 85342}` across the placed-prop census, so
   the compared quantity must be quadratic in speed for the ladder to
@@ -726,10 +738,9 @@ Parsed, bound and provisionally simulated. Everything below is UNK-22:
   defect (operator report 4 item 2) without touching the authored
   gate, but the original's striker-prop momentum split is
   unrecovered.
-- Whether `NumParts` bounds runtime fragment spawning or is purely an
-  authoring echo of the PKG's BREAK count — the implementation prepares
-  every collidable `BREAK<NN>` chunk regardless of `NumParts`, since the
-  audit verified the two always agree on standalone props.
+- `NumParts` bounds fragment spawning (recovered, OPR-1.3); the runtime
+  takes at most `NumParts` collidable pieces when it is > 0 and keeps
+  the PKG's chunk count when it authors 0 beside pieces.
 - Whether fragments spawn at the activation threshold or a later break
   threshold — implemented as the same `ImpulseLimit2` gate, unverified.
 - `ColliderId`/`AudioId`/`TexNumber` id spaces (collider table? audio
