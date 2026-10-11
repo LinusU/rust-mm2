@@ -480,6 +480,10 @@ fn break_banger(
     // The placement keeps its entity/identity — only the collider and
     // the unified mesh are replaced by the spawned pieces.
     let parent_name = banger_name(bangers, entity);
+    let num_parts = bangers
+        .get(entity)
+        .map(|(_, _, b, _, _, _, _)| b.def.num_parts)
+        .unwrap_or(0);
     if let Ok((_, _, mut banger, _, _, mut linvel, mut angvel)) = bangers.get_mut(entity) {
         banger.phase = BangerPhase::Broken;
         banger.activated = None;
@@ -499,7 +503,14 @@ fn break_banger(
     });
 
     let base_vel = a.dir * launch;
-    for (index, piece) in pieces.collidable().enumerate() {
+    // `NumParts` is the original's fragment loop bound (`0x442442`,
+    // docs/research/banger.md); a record that authors 0 alongside
+    // collidable pieces keeps the PKG's chunk count (UNK-22).
+    let bound = usize::try_from(num_parts)
+        .ok()
+        .filter(|n| *n > 0)
+        .unwrap_or(usize::MAX);
+    for (index, piece) in pieces.collidable().take(bound).enumerate() {
         if !claim_slot(occupied, tick, generation, pool, bangers, writer, commands) {
             debug!(
                 piece = %piece.index,

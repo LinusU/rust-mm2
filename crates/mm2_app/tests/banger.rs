@@ -1132,6 +1132,22 @@ fn other_bangers(app: &mut App, except: Entity) -> Vec<(Entity, ObjectId, Banger
 }
 
 #[test]
+fn num_parts_bounds_the_spawned_fragments() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let mut def = banger_def("bench", 0.0);
+    def.num_parts = 2;
+    let (banger, _) = spawn_breakable(&mut app, Vec3::new(0.0, 0.5, 0.0), def, 3);
+    spawn_striker(
+        &mut app,
+        Vec3::new(-3.0, 0.5, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+    );
+    run(&mut app, FRAMES_PER_SECOND * 5);
+    let fragments = other_bangers(&mut app, banger);
+    assert_eq!(fragments.len(), 2, "NumParts 2 caps three authored pieces");
+}
+
+#[test]
 fn a_breakable_prop_shatters_into_its_authored_pieces() {
     let mut app = test_app_with(SessionAuthority::Local, 32);
     let (banger, object) = spawn_breakable(
