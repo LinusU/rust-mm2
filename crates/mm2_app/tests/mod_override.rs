@@ -307,6 +307,109 @@ fn the_gameplay_fingerprint_separates_physics_edits_from_cosmetic_ones() {
     assert_ne!(tune, prop);
 }
 
+/// F29-AC05 on the *shipped* examples: `examples/mods` is what an author
+/// copies from, so the gameplay example must really move the gameplay
+/// fingerprint and every cosmetic example must really leave it alone. The
+/// `mm2_inspect` guard test checks what their manifests claim; this checks
+/// the engine classifier agrees. Each example is found by its manifest
+/// rather than by a hard-coded path, so renaming one keeps the check honest.
+#[test]
+fn the_shipped_example_mods_move_the_fingerprint_as_their_manifests_claim() {
+    use mm2_assets::DeclaredEffect;
+
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mods");
+    let mut dirs: Vec<_> = std::fs::read_dir(&examples)
+        .expect("the shipped examples/mods exists")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("mod.toml").is_file())
+        .collect();
+    dirs.sort();
+
+    let mut gameplay = Vec::new();
+    let mut cosmetic = Vec::new();
+    for dir in &dirs {
+        let manifest = std::fs::read_to_string(dir.join("mod.toml")).unwrap();
+        if manifest.contains("effect = \"gameplay\"") {
+            gameplay.push(dir.clone());
+        } else if manifest.contains("effect = \"cosmetic\"") {
+            cosmetic.push(dir.clone());
+        }
+    }
+    assert!(
+        !gameplay.is_empty(),
+        "there must be a shipped gameplay example under {examples:?}"
+    );
+    assert!(
+        !cosmetic.is_empty(),
+        "there must be a shipped cosmetic example under {examples:?}"
+    );
+
+    let f = fixture();
+    let base = observe(&f.base, &[]).fingerprint;
+    let mounted = |m: &Path| {
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&f.base, 0).unwrap();
+        let manifest = vfs.mount_mod(m, 300).unwrap();
+        (manifest.effect, vfs)
+    };
+
+    // The cosmetic examples are invisible to the fingerprint, as claimed.
+    for m in &cosmetic {
+        let (effect, vfs) = mounted(m);
+        assert_eq!(effect, Some(DeclaredEffect::Cosmetic), "{m:?}");
+        let reports = fingerprint::mod_reports(&vfs);
+        assert!(reports[0].is_cosmetic_only(), "{reports:?}");
+        assert_eq!(
+            fingerprint::gameplay(&vfs).unwrap().hash,
+            base,
+            "{m:?} claims cosmetic but moves the fingerprint"
+        );
+    }
+
+    // The gameplay example moves it, as claimed.
+    for m in &gameplay {
+        let (effect, vfs) = mounted(m);
+        assert_eq!(effect, Some(DeclaredEffect::Gameplay), "{m:?}");
+        let reports = fingerprint::mod_reports(&vfs);
+        assert!(!reports[0].is_cosmetic_only(), "{reports:?}");
+        assert_ne!(
+            fingerprint::gameplay(&vfs).unwrap().hash,
+            base,
+            "{m:?} claims gameplay but leaves the fingerprint alone"
+        );
+
+        // The shipped tune must be real content an author can copy, not
+        // bytes that only satisfy the classifier: every `.vehcarsim` in the
+        // example decodes as a `VehCarSim` with no unknown fields.
+        for file in files_with_ext(m, "vehcarsim") {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let tune = mm2_formats::tune::TuneFile::parse(&text)
+                .unwrap_or_else(|e| panic!("{file:?} does not parse: {e}"));
+            let sim = mm2_formats::veh::VehCarSim::from_tune(&tune)
+                .unwrap_or_else(|e| panic!("{file:?} does not decode as vehCarSim: {e}"));
+            assert!(sim.warnings.is_empty(), "{file:?}: {:?}", sim.warnings);
+        }
+    }
+}
+
+/// Every file under `dir` (recursively) whose extension is `ext`, sorted.
+fn files_with_ext(dir: &Path, ext: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == ext) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// F29 req 5: the per-mod classification agrees with what the consumers
 /// and the fingerprint observed — the texture and cue mods are
 /// cosmetic-only (record-eligible, join-compatible), the tuning and prop

@@ -1,0 +1,6 @@
+[mod]
+id = "synthetic-retune"
+name = "Synthetic retune (not original)"
+version = "0.1.0"
+effect = "gameplay"
+description = "Ships one invented vehCarSim tune at tune/vehicle/vpdemo.vehcarsim. Every value is made up for demonstration: nothing here is original-derived and no retail asset is included. It wins a gameplay path, so it moves the multiplayer fingerprint and makes runs record-ineligible. Mount with --mods examples/mods."

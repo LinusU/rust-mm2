@@ -1,0 +1,65 @@
+// Invented tuning for documentation only.
+//
+// This is a made-up car tune. Not one value here comes from the retail game
+// and none was derived from it; the file exists so a mod author has a
+// complete, valid vehCarSim to copy. `vpdemo` is not a retail vehicle, so
+// this file adds a new tune rather than replacing an original one.
+type: a
+vehCarSim {
+  Mass 1350.0
+  InertiaBox 2.1 1.4 3.2
+  CenterOfGravity 0.0 -0.15 0.0
+  BoundFriction 0.5
+  BoundElasticity 0.0
+  DrivetrainType 0
+  Aero {
+    Drag 0.55
+    Down 0.1
+  }
+  Engine {
+    MaxHorsePower 260.0
+    IdleRPM 800.0
+    OptRPM 6000.0
+    MaxRPM 8200.0
+  }
+  Trans {
+    AutoNumGears 5
+    Reverse 25.0
+    Low 30.0
+    High 95.0
+  }
+  WheelFront {
+    SuspensionExtent 0.2
+    SuspensionLimit 0.05
+    SuspensionFactor 1.0
+    SuspensionDampCoef 0.1
+    SteeringLimit 0.55
+    BrakeCoef 0.6
+    TireDispLimitLong 0.075
+    TireDampCoefLong 0.75
+    TireDragCoefLong 0.01
+    TireDispLimitLat 0.075
+    TireDampCoefLat 0.75
+    TireDragCoefLat 0.02
+    OptimumSlipPercent 0.05
+    StaticFric 3.0
+    SlidingFric 2.95
+  }
+  WheelBack {
+    SuspensionExtent 0.2
+    SuspensionLimit 0.05
+    SuspensionFactor 1.0
+    SuspensionDampCoef 0.1
+    SteeringLimit 0.0
+    BrakeCoef 0.4
+    TireDispLimitLong 0.075
+    TireDampCoefLong 0.75
+    TireDragCoefLong 0.01
+    TireDispLimitLat 0.075
+    TireDampCoefLat 0.75
+    TireDragCoefLat 0.02
+    OptimumSlipPercent 0.05
+    StaticFric 3.0
+    SlidingFric 2.95
+  }
+}
