@@ -1260,3 +1260,139 @@ fn a_long_chase_keeps_the_pursuers_capped_and_the_recovery_bounded() {
         );
     }
 }
+
+// ---------- F20 edge cases (AC04/AC05) ----------
+
+/// F20 edge case "player changes level at bridge": a bridge deck is real
+/// `GameLayer::World` geometry, so a cop on the road below cannot see a
+/// target on the deck above it — the 3D sight line is blocked even
+/// though the ground distance is well inside the contact range. The
+/// chase gives up within the bound rather than following a target it
+/// cannot see, and when the target comes back down to the cop's level a
+/// fresh chase commits: a level change is a brief loss of contact, never
+/// a permanent stall or a teleport-follow.
+#[test]
+fn a_bridge_deck_hides_a_target_above_and_returning_to_the_cops_level_resumes() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    let player = local_car(&mut app);
+    run_to_racing(&mut app);
+    run(&mut app, 180);
+    let cop = cop_at(&mut app, 0);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+
+    // The target drives up onto a deck ~20 m above the cop; a bridge
+    // deck spans the sight line between them (it crosses y=10..11 at
+    // x≈26, inside the deck's x∈[−60,140]).
+    let deck = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(100.0, 0.5, 60.0),
+            GameLayer::world(),
+            Transform::from_xyz(40.0, 10.5, 140.0),
+        ))
+        .id();
+    let hold = |app: &mut App, at: Vec3| {
+        *app.world_mut().get_mut::<Position>(player).unwrap() = Position(at);
+        *app.world_mut().get_mut::<LinearVelocity>(player).unwrap() = LinearVelocity::ZERO;
+    };
+    let policy = *app.world().resource::<PursuitPolicy>();
+    let on_deck = Vec3::new(60.0, 20.0, 140.0);
+    for _ in 0..((policy.lose_after + 2.0) * 60.0) as usize {
+        hold(&mut app, on_deck);
+        app.update();
+    }
+    assert!(
+        matches!(phase_of(&app, cop), PursuitPhase::Lost(_)),
+        "the cop kept chasing a target hidden by the deck: {:?}",
+        phase_of(&app, cop)
+    );
+    assert!(app.world().get::<EmergencyLights>(cop).is_none());
+
+    // Back down on the cop's level, the deck gone: the cooldown is
+    // honoured, then a second, separate chase commits.
+    app.world_mut().entity_mut(deck).despawn();
+    let on_ground = Vec3::new(60.0, 1.5, 140.0);
+    for _ in 0..((policy.cooldown + policy.reaction + 2.0) * 60.0) as usize {
+        hold(&mut app, on_ground);
+        app.update();
+    }
+    let report = app.world().resource::<PursuitReport>();
+    assert_eq!(report.committed, 2, "{report:?}");
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+}
+
+/// F20 edge case "overturned pursuer": a pursuing cop flung onto its
+/// roof is righted in place by the vehicle self-right assist once it has
+/// settled, and keeps chasing. It neither lies there for the rest of the
+/// session nor teleports away from where it was (only its rotation is
+/// reset — the same in-place landing the `vehstuck` recovery uses).
+#[test]
+fn an_overturned_pursuing_cop_is_righted_in_place_and_keeps_chasing() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    run_to_racing(&mut app);
+    run(&mut app, 180);
+    let cop = cop_at(&mut app, 0);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+    let before = pos_of(&app, cop);
+
+    // Onto its roof, at rest.
+    let roll = Quat::from_axis_angle(Vec3::X, std::f32::consts::PI);
+    app.world_mut().get_mut::<Rotation>(cop).unwrap().0 = roll;
+    app.world_mut().get_mut::<Transform>(cop).unwrap().rotation = roll;
+    *app.world_mut().get_mut::<LinearVelocity>(cop).unwrap() = LinearVelocity::ZERO;
+    *app.world_mut().get_mut::<AngularVelocity>(cop).unwrap() = AngularVelocity::ZERO;
+
+    let delay = app
+        .world()
+        .get::<Vehicle>(cop)
+        .unwrap()
+        .config
+        .assists
+        .self_right_delay;
+    run(&mut app, ((delay + 2.0) * 60.0) as usize);
+
+    let rot = app.world().get::<Rotation>(cop).unwrap().0;
+    assert!(
+        (rot * Vec3::Y).y > 0.7,
+        "the cop was never righted: up = {}",
+        (rot * Vec3::Y).y
+    );
+    let after = pos_of(&app, cop);
+    assert!(
+        (after.x - before.x).hypot(after.z - before.z) < 40.0,
+        "the cop teleported {before:?} → {after:?}"
+    );
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+}
+
+/// F20 edge case "disabled police event" (AC05): the Cruise cop-density
+/// option is the mode's police switch (COP-13). At 0 the lineup is not
+/// fielded at all, and with an eligible target standing in plain sight
+/// for ten seconds no cop is created and no chase is ever counted. An
+/// event that authors no `[Police]` rows fields none the same way
+/// (`a_copless_event_fields_no_police`); an event always fields its
+/// authored `Cops` rows, the density being Cruise-only.
+#[test]
+fn a_police_disabled_cruise_fields_none_and_never_pursues() {
+    let tmp = cruise_install(Some(ROAM));
+    let mut config = cruise_config(SessionAuthority::Local);
+    config.customization = Some(mm2_game::SessionCustomization {
+        conditions: Default::default(),
+        densities: mm2_game::Densities {
+            cops: 0.0,
+            ..mm2_game::Densities::DEFAULT
+        },
+        race: None,
+    });
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.add_systems(Update, police_pursuit);
+    app.update();
+    assert!(cops(&mut app).is_empty(), "density 0 fields no cop");
+    run(&mut app, 600);
+    assert_eq!(
+        *app.world().resource::<PursuitReport>(),
+        PursuitReport::default(),
+        "police disabled, but a chase was counted"
+    );
+}

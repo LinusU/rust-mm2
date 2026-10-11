@@ -54,6 +54,7 @@ mod package;
 mod pedestrian;
 mod pedestrian_retail;
 mod police;
+mod police_retail;
 mod precip;
 mod profile;
 mod progression;
