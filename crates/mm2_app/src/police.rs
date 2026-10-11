@@ -305,13 +305,23 @@ pub struct PursuitReport {
     /// Impacts between a cop and a local human's car ([`count_cop_impacts`]):
     /// the evidence that a pursuing cop really reaches its target.
     pub rams: u32,
+    /// Bounded reverse-and-turn escapes the fleet has executed
+    /// ([`ScriptedBot::escapes`] summed over every fielded cop) — the
+    /// cop-recovery count the retail long-chase soak bounds (F20-AC04).
+    pub escapes: u32,
+    /// Deliberate turn-arounds the fleet has begun
+    /// ([`PoliceDrive::turnarounds`] summed), counted apart from
+    /// `escapes` exactly as the synthetic long-chase test does.
+    pub turnarounds: u32,
 }
 
 impl PursuitReport {
     /// The smoke record's `pur=` value: `<committed>/<gave_up>/<peak>`,
-    /// then `,r<N>` (road lines planned) and `,nr<N>` (queries that found
-    /// none) only when nonzero, so a chase that never left the cop's
-    /// direct range keeps the earlier shape.
+    /// then `,r<N>` (road lines planned), `,nr<N>` (queries that found
+    /// none), `,x<N>` (cop-on-player impacts), `,e<N>` (fleet stuck
+    /// escapes) and `,t<N>` (fleet turn-arounds) only when nonzero, so
+    /// a chase that never left the cop's direct range keeps the earlier
+    /// shape.
     pub fn smoke_detail(&self) -> String {
         let mut s = format!("{}/{}/{}", self.committed, self.gave_up, self.peak);
         if self.planned > 0 {
@@ -322,6 +332,12 @@ impl PursuitReport {
         }
         if self.rams > 0 {
             s.push_str(&format!(",x{}", self.rams));
+        }
+        if self.escapes > 0 {
+            s.push_str(&format!(",e{}", self.escapes));
+        }
+        if self.turnarounds > 0 {
+            s.push_str(&format!(",t{}", self.turnarounds));
         }
         s
     }
@@ -563,12 +579,17 @@ pub fn police_pursuit(
     let mut order: Vec<(usize, Entity)> = cops.iter().map(|c| (c.1.index, c.0)).collect();
     order.sort_unstable();
     let mut pursuing = cops.iter().filter(|c| c.2.is_pursuing()).count();
+    // Fleet recovery tallies: absolute sums (both are monotonic per cop),
+    // so the retail long-chase soak can bound them from the record.
+    let (mut escapes, mut turnarounds) = (0u32, 0u32);
     for (_, entity) in order {
         let Ok((_, _, mut pursuit, mut drive, mut chase, mut input, pos, rot, vstate, mut lights)) =
             cops.get_mut(entity)
         else {
             continue;
         };
+        escapes += drive.bot.escapes;
+        turnarounds += drive.turnarounds;
         let eye = pos.0 + Vec3::Y * EYE_HEIGHT;
         let nearest = targets
             .iter()
@@ -654,6 +675,8 @@ pub fn police_pursuit(
             },
         };
     }
+    report.escapes = escapes;
+    report.turnarounds = turnarounds;
 }
 
 #[cfg(test)]
@@ -1027,6 +1050,11 @@ mod tests {
         assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1");
         r.rams = 4;
         assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1,x4");
+        // The fleet recovery tallies join the same way.
+        r.escapes = 2;
+        assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1,x4,e2");
+        r.turnarounds = 1;
+        assert_eq!(r.smoke_detail(), "1/1/2,r3,nr1,x4,e2,t1");
         assert_eq!((r.noticed, r.dismissed), (1, 0));
     }
 }
