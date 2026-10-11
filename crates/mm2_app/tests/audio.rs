@@ -5560,3 +5560,34 @@ fn a_silent_or_unusable_mix_renders_silence() {
     assert_eq!(wav.len(), 48);
     assert_eq!(decode_wave(&wav).unwrap().samples.len(), 2);
 }
+
+/// Original-content validation (opt-in: `MM2_RETAIL`): the music cue
+/// tables a cruise and a race bind resolve in the real install, and
+/// the production `music_state` system reports them as unsupported.
+#[test]
+fn retail_music_tables_bind_and_report_unsupported() {
+    use mm2_app::music::{MusicAudio, UNSUPPORTED, music_state};
+    use mm2_assets::{InstallMount, mount_install};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail music table binding NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut app = App::new();
+    app.insert_resource(Mm2Vfs(vfs))
+        .init_resource::<AudioReport>()
+        .insert_resource(MusicAudio::bind(Some("sf"), &mm2_game::SessionMode::Cruise).unwrap())
+        .add_systems(Update, music_state);
+    app.update();
+    let report = app.world().resource::<AudioReport>();
+    let music = report.music.as_ref().expect("music binding resolved");
+    assert_eq!(music.tables.len(), 2);
+    for t in &music.tables {
+        assert!(t.rows.is_some_and(|r| r > 0), "{} unresolved", t.path);
+        assert!(t.refs > 0, "{} names no segment", t.path);
+    }
+    assert!(music.line().starts_with(UNSUPPORTED), "{}", music.line());
+    eprintln!("{}", music.line());
+}

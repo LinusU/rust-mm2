@@ -40,6 +40,7 @@ pub mod lobby_systems;
 pub mod manual_gear;
 pub mod menu;
 pub mod movers;
+pub mod music;
 pub mod nav_overlay;
 pub mod navarrow;
 pub mod navarrow3d;

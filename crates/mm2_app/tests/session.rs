@@ -2079,9 +2079,9 @@ fn pause_options_change_save_and_back_out() {
     assert!(!live.auto_right);
     assert_eq!(GraphicsSettings::load(&path), live);
 
-    // Reset (below the four volume rows) restores all and disables
+    // Reset (below the five volume rows) restores all and disables
     // itself.
-    pause_focus_row(&mut app, 13);
+    pause_focus_row(&mut app, 14);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         *app.world().resource::<GraphicsSettings>(),
@@ -2120,8 +2120,8 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
-    // Back is the last of the page's sixteen rows.
-    for _ in 0..15 {
+    // Back is the last of the page's seventeen rows.
+    for _ in 0..16 {
         press_key(&mut app, KeyCode::ArrowDown);
     }
     press_key(&mut app, KeyCode::Enter);
@@ -2147,7 +2147,7 @@ fn open_pause_controls(app: &mut App) {
     assert!(phase_is(app, SessionPhase::Paused));
     pause_focus_row(app, 2);
     press_key(app, KeyCode::Enter);
-    pause_focus_row(app, 14);
+    pause_focus_row(app, 15);
     press_key(app, KeyCode::Enter);
     assert_eq!(
         app.world().resource::<PauseMenu>().page,
@@ -2287,7 +2287,7 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     press_key(&mut app, KeyCode::Escape);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Options, 11));
+        assert_eq!((pause.page, pause.focus), (PausePage::Options, 12));
     }
     press_key(&mut app, KeyCode::Escape);
     {
@@ -2497,7 +2497,7 @@ fn pause_driving_controls_row_needs_controls_and_a_pending_capture_dies_with_the
     press_key(&mut app, KeyCode::Escape);
     pause_focus_row(&mut app, 2);
     press_key(&mut app, KeyCode::Enter);
-    pause_focus_row(&mut app, 14);
+    pause_focus_row(&mut app, 15);
     press_key(&mut app, KeyCode::Enter);
     {
         let pause = app.world().resource::<PauseMenu>();
@@ -2640,7 +2640,7 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
 
-    // Rows 9..=12 are master, effects, commentary, city.
+    // Rows 9..=13 are master, effects, commentary, city, music.
     pause_focus_row(&mut app, 10);
     press_key(&mut app, KeyCode::ArrowLeft);
     press_key(&mut app, KeyCode::ArrowLeft);
@@ -2657,7 +2657,7 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
         "up from 100 wraps to silence"
     );
     // The reset row is offered now and restores the levels.
-    pause_focus_row(&mut app, 13);
+    pause_focus_row(&mut app, 14);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         *app.world().resource::<GraphicsSettings>(),

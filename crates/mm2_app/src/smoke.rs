@@ -2404,6 +2404,13 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F08-B.1: music is never silent-by-accident — a bound session
+    // always says `unsupported`, with the cue tables it would read.
+    let music_detail = world_ecs
+        .get_resource::<crate::audio::AudioReport>()
+        .and_then(|r| r.music.as_ref())
+        .map(|m| format!(" music={}", m.smoke()))
+        .unwrap_or_default();
     // F07-B.8 surface-variant evidence: `surf=wet` when the session's
     // effective weather bound the wet table (or a per-vehicle
     // override of it). Dry/absent stays bit-identical.
@@ -2494,7 +2501,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

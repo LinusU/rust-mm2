@@ -348,8 +348,9 @@ fn vsync_on() -> bool {
 
 /// A volume bus: the group of voices one Options row scales. The
 /// original's Audio Options screen separates Sound FX, Commentary,
-/// Music and City Sounds (CTL-5); there is no music player here yet, so
-/// there is no music bus.
+/// Music and City Sounds (CTL-5). The music bus exists and is
+/// adjustable, but nothing plays on it yet: DirectMusic is not decoded
+/// (see `crate::music`), so its level is stored, never applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioBus {
     /// Engines, impacts, tyres, horns, sirens and the race cues.
@@ -359,6 +360,9 @@ pub enum AudioBus {
     /// The world's own sounds: weather beds, thunder and the moving
     /// objects' (drawbridge, ferry, Underground) ambience.
     City,
+    /// The DirectMusic soundtrack. No voice uses it until the segments
+    /// can be decoded.
+    Music,
 }
 
 /// The user's volume levels, in whole percent so the settings stay `Eq`
@@ -376,6 +380,8 @@ pub struct AudioLevels {
     pub commentary: u8,
     /// [`AudioBus::City`].
     pub city: u8,
+    /// [`AudioBus::Music`].
+    pub music: u8,
 }
 
 impl Default for AudioLevels {
@@ -385,6 +391,7 @@ impl Default for AudioLevels {
             effects: MAX_LEVEL,
             commentary: MAX_LEVEL,
             city: MAX_LEVEL,
+            music: MAX_LEVEL,
         }
     }
 }
@@ -405,11 +412,12 @@ pub enum AudioLevel {
 
 impl AudioLevel {
     /// Every row, in menu order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Master,
         Self::Bus(AudioBus::Effects),
         Self::Bus(AudioBus::Commentary),
         Self::Bus(AudioBus::City),
+        Self::Bus(AudioBus::Music),
     ];
 
     /// The menu label.
@@ -419,6 +427,7 @@ impl AudioLevel {
             Self::Bus(AudioBus::Effects) => "Sound effects volume",
             Self::Bus(AudioBus::Commentary) => "Commentary volume",
             Self::Bus(AudioBus::City) => "City sounds volume",
+            Self::Bus(AudioBus::Music) => "Music volume",
         }
     }
 }
@@ -431,6 +440,7 @@ impl AudioLevels {
             AudioLevel::Bus(AudioBus::Effects) => self.effects,
             AudioLevel::Bus(AudioBus::Commentary) => self.commentary,
             AudioLevel::Bus(AudioBus::City) => self.city,
+            AudioLevel::Bus(AudioBus::Music) => self.music,
         }
     }
 
@@ -442,6 +452,7 @@ impl AudioLevels {
             AudioLevel::Bus(AudioBus::Effects) => self.effects = value,
             AudioLevel::Bus(AudioBus::Commentary) => self.commentary = value,
             AudioLevel::Bus(AudioBus::City) => self.city = value,
+            AudioLevel::Bus(AudioBus::Music) => self.music = value,
         }
         self
     }
@@ -812,6 +823,7 @@ fn pick_audio(
         ("effects", AudioLevel::Bus(AudioBus::Effects)),
         ("commentary", AudioLevel::Bus(AudioBus::Commentary)),
         ("city", AudioLevel::Bus(AudioBus::City)),
+        ("music", AudioLevel::Bus(AudioBus::Music)),
     ] {
         let Some(v) = audio.get(key) else { continue };
         match v.as_u64() {
@@ -1236,6 +1248,7 @@ mod tests {
                 effects: 100,
                 commentary: 0,
                 city: 40,
+                music: 20,
             },
             text_size: TextSize::Larger,
             reduce_flashing: true,
@@ -1459,6 +1472,7 @@ mod tests {
             effects: 40,
             commentary: 0,
             city: 100,
+            music: 0,
         };
         assert!((levels.gain(AudioBus::Effects) - 0.2).abs() < 1e-6);
         assert_eq!(levels.gain(AudioBus::Commentary), 0.0);
@@ -1489,6 +1503,55 @@ mod tests {
         let odd = AudioLevels::default().with(level, 5);
         assert_eq!(odd.stepped(level, false).city, 0);
         assert_eq!(odd.stepped(level, true).city, 15);
+    }
+
+    #[test]
+    fn music_level_loads_from_an_old_file_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        // An audio block from before the music bus existed.
+        std::fs::write(
+            &path,
+            br#"{"audio":{"master":50,"effects":40,"commentary":30,"city":20}}"#,
+        )
+        .unwrap();
+        let old = GraphicsSettings::load(&path);
+        assert_eq!(
+            old.audio.music, MAX_LEVEL,
+            "missing music keeps the default"
+        );
+        assert_eq!(old.audio.city, 20, "the rest of the file still loads");
+        // A value set through the Options step survives a save/load.
+        let set = GraphicsSettings {
+            audio: old.audio.with(AudioLevel::Bus(AudioBus::Music), 30),
+            ..old
+        };
+        set.save(&path).unwrap();
+        assert_eq!(GraphicsSettings::load(&path).audio.music, 30);
+        // The row exists, labelled and stepping like the others.
+        assert!(AudioLevel::ALL.contains(&AudioLevel::Bus(AudioBus::Music)));
+        assert_eq!(
+            set.audio.row(AudioLevel::Bus(AudioBus::Music)),
+            "Music volume: 30%"
+        );
+        // An over-range value clamps, a non-number keeps the default.
+        std::fs::write(&path, br#"{"audio":{"music":250}}"#).unwrap();
+        assert_eq!(GraphicsSettings::load(&path).audio.music, MAX_LEVEL);
+        std::fs::write(&path, br#"{"audio":{"music":"loud","city":30}}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert_eq!((loaded.audio.music, loaded.audio.city), (MAX_LEVEL, 30));
+    }
+
+    #[test]
+    fn muting_the_music_bus_leaves_the_other_buses_alone() {
+        let levels = AudioLevels::default().with(AudioLevel::Bus(AudioBus::Music), 0);
+        assert_eq!(levels.gain(AudioBus::Music), 0.0);
+        for bus in [AudioBus::Effects, AudioBus::Commentary, AudioBus::City] {
+            assert_eq!(levels.gain(bus), 1.0, "{bus:?}");
+        }
+        // And the reverse: muting another bus leaves music audible.
+        let levels = AudioLevels::default().with(AudioLevel::Bus(AudioBus::City), 0);
+        assert_eq!(levels.gain(AudioBus::Music), 1.0);
     }
 
     #[test]

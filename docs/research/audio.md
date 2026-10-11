@@ -375,6 +375,21 @@ inside, which this reader cannot see. The tables name a soundtrack's
 unrecovered (UNK-25) and no segment is decoded, so **no music plays**:
 the unsupported state is stated, not replaced by a loop (F08 req 4).
 
+**Music bus and the unsupported state (F08-B.1).** Options carries a
+`Music volume` row (`audio.music` in the settings file; an older file
+without it loads at 100). It is stored but applied to no voice: nothing
+is mixed on `AudioBus::Music` while DirectMusic is undecoded. Each city
+session binds, by name only (`mm2_app::music`), `singleroam.csv` for a
+cruise or `singlerace.csv` for a race event plus `<city>ambience.csv`
+(Cops & Robbers binds none), parses them with `MusicTable`, and reports
+`music: unsupported (DirectMusic not decoded); cue tables: <name> N
+rows/M refs` (`MusicReport::line`). The smoke record carries
+` music=unsupported:singleroam=<rows>r/<refs>x+sfambience=…` (a table
+that cannot be read shows `=missing`). Which row a session draws and
+when states start remain unrecovered (UNK-25); the binding is not a
+claim about the original's selection. F08-AC05's music half stays
+incomplete.
+
 ## Cardata tables (`aud/cardata/**`, `aud/ambient/**`)
 
 103 CSV tables parse through `mm2_formats::cardata` — path-based

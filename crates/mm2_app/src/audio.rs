@@ -1633,6 +1633,10 @@ pub struct AudioReport {
     /// `AnnouncerIndex` ones stay log-only). Rows with a problem are
     /// skipped, not coerced.
     pub cue_issues: u64,
+    /// The session's DirectMusic cue-table binding and its explicit
+    /// unsupported state (F08-B.1); `None` until resolved or for a dev
+    /// world, which binds no table.
+    pub music: Option<crate::music::MusicReport>,
 }
 
 impl AudioReport {
@@ -3056,6 +3060,9 @@ pub fn commentary_systems()
         crate::lesson::lesson_verdict_cue.before(commentary_voices),
         commentary_voices,
         crate::cnrvoice::cnr_commentary_voices,
+        // F08-B.1: resolve the music cue-table binding the record's
+        // `music=` field reports as unsupported.
+        crate::music::music_state,
     )
         .after(crate::session::drive_session)
 }

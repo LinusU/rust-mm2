@@ -344,6 +344,7 @@ pub fn drive_session(
             // like the ambience — its voices are `SessionEntity`-
             // stamped and chain-despawn.
             commands.remove_resource::<crate::audio::CommentaryAudio>();
+            commands.remove_resource::<crate::music::MusicAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -1318,6 +1319,11 @@ pub fn load_session_world(
         }
         _ => None,
     };
+    // F08-B.1: the DirectMusic cue tables this mode would draw from,
+    // bound only so the report can say music is unsupported.
+    if let Some(music) = crate::music::MusicAudio::bind(siren_city, &config.mode) {
+        commands.insert_resource(music);
+    }
     if let Some(commentary) =
         crate::audio::CommentaryAudio::bind(siren_city, session_conditions, config.seed)
     {

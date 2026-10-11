@@ -3253,12 +3253,13 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
             "Sound effects volume: 100%",
             "Commentary volume: 100%",
             "City sounds volume: 100%",
+            "Music volume: 100%",
             "Reset to defaults",
             "Driving controls"
         ]
     );
     assert_eq!(
-        shell(&app).rows[13].enabled,
+        shell(&app).rows[14].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3309,7 +3310,7 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[13].enabled.is_ok());
+    assert!(shell(&app).rows[14].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
@@ -3322,7 +3323,7 @@ fn option_changes_apply_persist_and_reset() {
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[13].enabled.is_err());
+    assert!(shell(&app).rows[14].enabled.is_err());
 }
 
 /// The volume rows step by ten percent, wrap at both ends, reach the
@@ -5449,7 +5450,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..14 {
+    for _ in 0..15 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
