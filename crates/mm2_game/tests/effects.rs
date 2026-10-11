@@ -7,7 +7,7 @@
 //! the bottom: burst sizing, deterministic draws, the live bound and
 //! the streak integrator — all designed policy (DSN-26).
 
-use bevy::prelude::{Entity, Vec3};
+use bevy::prelude::{Entity, Mat3, Vec3};
 use mm2_formats::banger::BirthRule;
 use mm2_formats::materials::PtxChannels;
 use mm2_formats::tune::TuneFile;
@@ -976,6 +976,8 @@ fn draw_of<'a, 's>(
     WheelDraw {
         dt,
         q,
+        native_rate_scale: None,
+        native_frame: None,
         channels,
         spec_of,
         origin: WHEEL_ORIGIN,
@@ -1304,4 +1306,78 @@ fn wheel_ptx_survives_hostile_blast_and_spew_counts() {
     let e = rig.draw(0, draw_of(1.0, 0.4, Some(road), &spec_of, 0));
     assert_eq!(e.puffs.len(), WheelPtxPolicy::default().max_live);
     assert!(e.dropped > 0);
+}
+
+/// Retail wheel emitters continuously consume InitialBlast, even when the
+/// splash rule has SpewRate=0. Fractional credit must survive a closed gate.
+#[test]
+fn native_wheel_particles_use_initial_blast_as_a_continuous_rate() {
+    let mut spec = dust_spec();
+    spec.initial_blast = 64;
+    spec.spew_rate = 0.0;
+    let specs = [Some(spec)];
+    let lookup = table_lookup(&specs);
+    let channels = Some(PtxChannels {
+        index: [0, -1],
+        threshold: [0.0, 0.0],
+    });
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 17, 1);
+    let mut emitted = 0;
+    for step in 0..120 {
+        let mut draw = draw_of(1.0 / 64.0, 0.2, channels, &lookup, 0);
+        draw.native_rate_scale = Some(0.5);
+        let out = rig.draw(0, draw);
+        if step == 0 {
+            assert!(out.puffs.is_empty(), "no entry burst");
+        }
+        emitted += out.puffs.len();
+    }
+    assert_eq!(emitted, 60);
+    // One half credit, then a zero-slip tick, then another half credit.
+    let mut draw = draw_of(1.0 / 64.0, 0.2, channels, &lookup, 0);
+    draw.native_rate_scale = Some(0.5);
+    assert!(rig.draw(0, draw).puffs.is_empty());
+    let mut draw = draw_of(1.0 / 64.0, 0.0, channels, &lookup, 0);
+    draw.native_rate_scale = Some(0.5);
+    assert!(rig.draw(0, draw).puffs.is_empty());
+    let mut draw = draw_of(1.0 / 64.0, 0.2, channels, &lookup, 0);
+    draw.native_rate_scale = Some(0.5);
+    assert_eq!(rig.draw(0, draw).puffs.len(), 1);
+}
+
+/// Native rolling speed raises spray above a submerged contact patch.
+#[test]
+fn native_wheel_spray_uses_rolling_speed_and_scaled_radius() {
+    let mut spec = dust_spec();
+    spec.initial_blast = 64;
+    spec.spew_rate = 0.0;
+    spec.position_var = Vec3::ZERO;
+    spec.velocity = Vec3::new(0.0, 0.5, 0.0);
+    spec.velocity_var = Vec3::ZERO;
+    spec.radius = 2.0;
+    spec.radius_var = 0.0;
+    let specs = [Some(spec)];
+    let lookup = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 17, 1);
+    let mut draw = draw_of(
+        1.0 / 32.0,
+        0.2,
+        Some(PtxChannels {
+            index: [0, -1],
+            threshold: [0.0, 0.0],
+        }),
+        &lookup,
+        0,
+    );
+    draw.native_rate_scale = Some(0.5);
+    draw.native_frame = Some(mm2_game::NativeParticleFrame {
+        basis: Mat3::IDENTITY,
+        velocity_scale: Vec3::new(0.0, 10.0, 0.0),
+        radius_scale: 0.1,
+    });
+    let out = rig.draw(0, draw);
+    assert_eq!(out.puffs.len(), 1);
+    assert_eq!(out.puffs[0].position, WHEEL_ORIGIN + Vec3::Y * 0.2);
+    assert_eq!(out.puffs[0].velocity, Vec3::Y * 5.0);
+    assert_eq!(out.puffs[0].radius, 0.2);
 }

@@ -92,7 +92,10 @@ and `deepwater` are bound to room attributes; `water` (`s_water` is in
 sf's texture table but referenced by no room attribute), `sand`
 (`s_flower`), `dirt` and `wood` have no reachable collider surface on
 either stock city — their channels serve bound materials outside the
-texture map or mod content.
+texture map or mod content. **Update 2026-10-11:** Hyde Park's placed lake
+(`kl_hydeparklake_l`) binds `water` on all 39 ASCII-bound polygons.
+PSDL-only reachability does not describe the complete city. See
+[shallow-water.md](shallow-water.md).
 
 Retail values:
 
@@ -326,9 +329,10 @@ gates on the wheel's `tire_slippage` utilization — the same 0..1
 measure the skid/rolling audio consumes — with a strict `>`
 comparison against `ptxthreshold`, so a `0` threshold still demands
 nonzero tire work and a parked wheel stays dark even on `water`.
-`InitialBlast` credits on each rising gate edge (a reground re-fires
-it); `SpewRate` accumulates while the gate holds, bounded by
-`SpewTimeLimit`; live puffs bound at `WheelPtxPolicy::max_live` 128 per
+Native cars continuously accumulate load-scaled `InitialBlast` as a rate,
+and scale emitter means by wheel motion (recovered in
+[shallow-water.md](shallow-water.md)). Generic cars retain the designed
+rising-edge `InitialBlast` burst and `SpewRate` inside `SpewTimeLimit`; live puffs bound at `WheelPtxPolicy::max_live` 128 per
 vehicle (F18-AC03). A surface change rebinds both channels; a wheel
 leaving contact closes its gates.
 
@@ -337,7 +341,7 @@ every `PTX_RULE_NAMES` slot resolves its rule through the VFS into a
 `ParticleSpec` (a missing/unreadable/unparseable rule counts
 `WheelFxReport.failed` once and stays dark — never substituted,
 F18-AC06), and `texture/ptx_wheel` builds the sprite quads on the
-measured 8×8 grid (a missing atlas flags `texture=false` and emits
+measured 8×8 grid, with authored frame 0 at bottom left (a missing atlas flags `texture=false` and emits
 untextured puffs). `emit_wheel_fx`/`advance_wheel_fx` run on both the
 windowed and headless smoke paths: each grounded local-car wheel feeds
 its `SurfaceMaterial` (remote/unidentified cars never emit), puffs
@@ -361,7 +365,10 @@ is the 128-puff pool bound working against `dust`'s burst-heavy
 authored rates); london Thames drop (`--spawn=-80,2,805,0`,
 `deepwater` `-1 -1`) records no `wfx=` field at all — the dark
 surface emits nothing even while the car wades between submersion
-recoveries. The `water` splash channel is unreachable on the stock
-PSDLs (see above) — its behavior is integration-test evidence, not
-retail-observed. No playtest or original-parity comparison exists;
-the trigger quantity is a designed reading (UNK-23).
+recoveries. The `water` splash channel is unreachable through the stock
+PSDL attributes alone (see above); the placed Hyde Park lake now reaches it
+through its authored bound material. The 2026-10-11 regression in
+[shallow-water.md](shallow-water.md) exercises this original-content path. No playtest or original-parity comparison exists;
+the native-car trigger quantity and strict threshold comparison are now
+verified from `vehWheelPtx` at `0x4d1e80`/`0x4d1ee0`; the generic-car
+utilization proxy and particle integration/cadence remain designed (UNK-23).

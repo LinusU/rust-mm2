@@ -16,14 +16,13 @@
 //! atlas tile.
 //!
 //! Authored: the field values, the index→name table, the rule files
-//! and the atlas. Designed (DSN-62): the gate quantity (the wheel's
-//! retail wheel `slip_visual` for native cars, arcade `tire_slippage`
-//! utilization otherwise — the same per-wheel measures skid audio reads),
-//! the strict-`>` comparison, the `InitialBlast`-on-edge / `SpewRate`-
-//! while-held reading, the per-vehicle pool bound and the billboard
-//! presentation. The original trigger quantity and emission cadence
-//! are unrecovered (UNK-23) — a threshold-0 channel (retail `water`)
-//! still needs nonzero tire work, so a parked wheel stays dark.
+//! and the atlas. Native-car visual-slip gating with strict `>` is verified
+//! at `0x4d1ee0` (research/shallow-water.md). Designed (DSN-62): the generic
+//! car's `tire_slippage` proxy and edge-blast/SpewRate emission, the
+//! per-vehicle pool bound and billboard presentation. Native cars use the
+//! recovered continuous InitialBlast rate scaled by suspension load.
+//! A threshold-0 channel (retail `water`) still needs nonzero visual slip,
+//! so a parked wheel stays dark.
 
 use std::collections::HashMap;
 
@@ -37,7 +36,7 @@ use mm2_game::{
     ObjectIdentity, PTX_ATLAS_TILES, PTX_RULE_NAMES, ParticleSpec, Player, PlayerControl, Session,
     SessionEntity, SurfaceMaterial, WheelDraw, WheelPtx, WheelPtxPolicy, WheelPuff,
 };
-use mm2_vehicle::{Vehicle, VehicleState};
+use mm2_vehicle::{Vehicle, VehicleInput, VehicleState};
 
 use crate::city;
 
@@ -206,7 +205,13 @@ fn wheel_fx_assets(
         ..default()
     });
     let quads = (0..PTX_ATLAS_TILES * PTX_ATLAS_TILES)
-        .map(|t| meshes.add(crate::damage_fx::tile_quad(t, PTX_ATLAS_TILES)))
+        .map(|t| {
+            // The retail atlas labels 56..63 across its top row: authored
+            // frame 0 starts at bottom left, unlike image UV's top origin.
+            let row = PTX_ATLAS_TILES - 1 - t / PTX_ATLAS_TILES;
+            let tile = row * PTX_ATLAS_TILES + t % PTX_ATLAS_TILES;
+            meshes.add(crate::damage_fx::tile_quad(tile, PTX_ATLAS_TILES))
+        })
         .collect();
     WheelFxAssets { quads, material }
 }
@@ -217,8 +222,9 @@ fn wheel_fx_assets(
 /// pair; the gate quantity is retail `slip_visual` for native cars and
 /// designed `tire_slippage` utilization for arcade cars. Thus the
 /// authored `ptxthreshold` applies on the same 0..1 domain a slip
-/// trigger plausibly reads (the original quantity is unrecovered,
-/// UNK-23). Remote participants are skipped like every effect system —
+/// trigger reads for native cars (`0x4d1ee0`; research/shallow-water.md).
+/// Generic cars retain the designed utilization proxy (UNK-23).
+/// Remote participants are skipped like every effect system —
 /// their presentation is replication scope (F25-B/F26), and a client's
 /// kinematic copy runs no wheel sim to read. A vehicle without a rig
 /// yet binds
@@ -237,6 +243,8 @@ pub fn emit_wheel_fx(
         Entity,
         &Vehicle,
         &VehicleState,
+        &Transform,
+        Option<&VehicleInput>,
         Option<&mut WheelPtx>,
         Option<&ObjectIdentity>,
         Option<&Player>,
@@ -263,7 +271,7 @@ pub fn emit_wheel_fx(
     // tick could overrun the designed pool bound (the spark rig's
     // pattern).
     let mut live: HashMap<Entity, usize> = HashMap::new();
-    for (car, vehicle, state, rig_slot, identity, player) in &mut cars {
+    for (car, vehicle, state, transform, input, rig_slot, identity, player) in &mut cars {
         if player.is_some_and(|p| p.control == PlayerControl::Remote) {
             continue;
         }
@@ -303,19 +311,67 @@ pub fn emit_wheel_fx(
                 .and_then(|c| c.tires.as_ref())
                 .unwrap_or(&vehicle.config.tires);
             let q = crate::audio::wheel_slippage(vehicle.config.original.is_some(), w, tires);
+            let native_rate_scale = vehicle.config.original.as_ref().and_then(|original| {
+                let wheel = original.wheels.get(i)?;
+                let radius = vehicle.config.wheels.get(i)?.radius;
+                let constants = mm2_vehicle::original::WheelConstants::of(wheel, radius, 19.6);
+                Some(native_particle_load_scale(
+                    w.suspension_force,
+                    wheel,
+                    constants.ks,
+                ))
+            });
+            let mut origin = w.contact_point;
+            let native_frame = native_rate_scale.and_then(|scale| {
+                let wheel = vehicle.config.original.as_ref()?.wheels.get(i)?;
+                let radius = vehicle.config.wheels.get(i)?.radius;
+                let omega = state.original.as_ref()?.wheels.get(i)?.omega;
+                let steering = input.map_or(0.0, |input| input.steering.clamp(-1.0, 1.0));
+                let steer = mm2_vehicle::original::wheel_steer(wheel, steering);
+                let right = transform.rotation * (Quat::from_rotation_y(-steer) * Vec3::X);
+                let normal = w.contact_normal.try_normalize()?;
+                let rear = right.cross(normal).try_normalize()?;
+                let lateral = normal.cross(rear);
+                // Retail's RotationRate is negative rolling forward; ours is
+                // positive. The emitter trails the contact by one radius.
+                origin += rear * radius * mm2_vehicle::original::sgn(omega);
+                Some(mm2_game::NativeParticleFrame {
+                    basis: Mat3::from_cols(lateral, normal, rear),
+                    velocity_scale: Vec3::new(
+                        w.vel_lat,
+                        omega.abs() * radius,
+                        omega * radius - w.vel_long,
+                    ),
+                    radius_scale: scale * wheel.width * 0.5,
+                })
+            });
             let emission = rig.draw(
                 i,
                 WheelDraw {
                     dt,
                     q,
+                    native_rate_scale,
+                    native_frame,
                     channels,
                     spec_of: &spec_of,
-                    origin: w.contact_point,
+                    origin,
                     normal: w.contact_normal,
                     live: live_now,
                     emitter: car,
                 },
             );
+            if w.surface_drag > 0.0 {
+                tracing::trace!(
+                    ?car,
+                    wheel = i,
+                    slip = q,
+                    ?native_rate_scale,
+                    ?native_frame,
+                    ?origin,
+                    puffs = emission.puffs.len(),
+                    "liquid wheel particles"
+                );
+            }
             live_now += emission.puffs.len();
             report.dropped += emission.dropped as u64;
             for puff in emission.puffs {
@@ -340,6 +396,21 @@ pub fn emit_wheel_fx(
             }
         }
         live.insert(car, live_now);
+    }
+}
+
+/// `vehWheelPtx` (`0x4d1ee0`): a wheel at its static load emits at half
+/// `InitialBlast` per second, rising to the full rate under compression.
+fn native_particle_load_scale(
+    load: f32,
+    wheel: &mm2_vehicle::config::OriginalWheel,
+    ks: f32,
+) -> f32 {
+    let reference = wheel.static_load.max(1.0);
+    if load < reference {
+        (load.max(0.0) / reference + 1.0) * 0.25
+    } else {
+        ((load - reference) / (ks * wheel.suspension_limit).max(1e-6) + 1.0).min(2.0) * 0.5
     }
 }
 

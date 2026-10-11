@@ -31,6 +31,126 @@ use mm2_game::{
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehiclePlugin, VehicleState};
 
+/// Original-content regression: the Hyde Park lake is an INST prop, whose
+/// bound names `water` independently of its render shaders. Exercise the actual
+/// imported Mini on that bound, then repeat with only fluid drag disabled.
+#[test]
+fn retail_hyde_park_water_slows_the_native_car_and_emits_splashes() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: Hyde Park water validation NOT run");
+        return;
+    };
+    let mut speeds = Vec::new();
+    for wet in [true, false] {
+        let mut vfs = Vfs::new();
+        mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+        let cfg = mm2_content::load_vehicle(&vfs, "vpcoop", 0).unwrap().config;
+        assert!(cfg.original.is_some());
+        let mut app = city_app_config(
+            vfs,
+            mm2_game::SessionConfig {
+                world: WorldMode::City {
+                    psdl: "city/london.psdl".into(),
+                },
+                ..default()
+            },
+        );
+        app.insert_resource(session::TunedVehicle(cfg));
+        app.insert_resource(Time::<Fixed>::from_hz(60.0));
+        app.insert_resource(Gravity(Vec3::NEG_Y * 19.6));
+        for _ in 0..60 {
+            app.update();
+            if playing(&mut app) {
+                break;
+            }
+        }
+        assert!(playing(&mut app));
+        let water = material_index(&mut app, "water");
+        let (lake, transform, drag) = app
+            .world_mut()
+            .query::<(Entity, &Name, &Transform, &mm2_vehicle::TireSurface)>()
+            .iter(app.world())
+            .find(|(_, name, _, _)| name.as_str().contains("kl_hydeparklake_l-collider"))
+            .map(|(entity, _, pose, tire)| (entity, *pose, tire.drag))
+            .expect("the placed lake retains its authored water bound");
+        assert_eq!(drag, 0.119);
+        assert_eq!(
+            app.world().get::<SurfaceMaterial>(lake),
+            Some(&SurfaceMaterial::Authored(water))
+        );
+        let channels = app
+            .world()
+            .resource::<mm2_content::SurfaceTables>()
+            .ptx_channels(SurfaceMaterial::Authored(water))
+            .unwrap();
+        assert_eq!(channels.index, [-1, 6]);
+        if !wet {
+            app.world_mut()
+                .get_mut::<mm2_vehicle::TireSurface>(lake)
+                .unwrap()
+                .drag = 0.0;
+        }
+        let car = app
+            .world_mut()
+            .query_filtered::<Entity, With<mm2_game::PlayerVehicle>>()
+            .single(app.world())
+            .unwrap();
+        let at = transform.transform_point(Vec3::new(60.0, 1.0, 110.0));
+        app.world_mut().entity_mut(car).insert((
+            Position(at),
+            Rotation(transform.rotation * Quat::from_rotation_y(0.64)),
+            Transform::from_translation(at)
+                .with_rotation(transform.rotation * Quat::from_rotation_y(0.64)),
+            LinearVelocity(Vec3::ZERO),
+            AngularVelocity(Vec3::ZERO),
+        ));
+        run(&mut app, 180);
+        app.world_mut()
+            .get_mut::<mm2_vehicle::VehicleInput>(car)
+            .unwrap()
+            .throttle = 1.0;
+        let mut contacts = 0;
+        let emitted_before = app.world().resource::<WheelFxReport>().emitted;
+        let mut splash_frames = 0;
+        for _ in 0..180 {
+            app.update();
+            splash_frames += app
+                .world_mut()
+                .query::<&WheelPuff>()
+                .iter(app.world())
+                .filter(|p| p.emitter == car && (16..=21).contains(&p.frame()))
+                .count();
+            for wheel in &app.world().get::<VehicleState>(car).unwrap().wheels {
+                if wheel.grounded && wheel.contact_entity == Some(lake) {
+                    assert!((wheel.surface_drag - if wet { 0.119 } else { 0.0 }).abs() < 1e-6);
+                    contacts += 1;
+                }
+            }
+        }
+        assert!(
+            contacts > 500,
+            "drive must remain on the lake: {contacts} wheel frames"
+        );
+        let speed = app.world().get::<LinearVelocity>(car).unwrap().0.length();
+        let emitted = app.world().resource::<WheelFxReport>().emitted - emitted_before;
+        if wet {
+            assert!(emitted > 0, "driving through shallow water must splash");
+            assert!(
+                splash_frames > 0,
+                "the authored splash atlas frames must be live"
+            );
+        }
+        eprintln!(
+            "Hyde Park Mini: wet={wet}, speed={speed:.3} m/s, water_contacts={contacts}, puffs={emitted}, pose={at:?}"
+        );
+        speeds.push(speed);
+    }
+    assert!(
+        speeds[0] < speeds[1] * 0.95,
+        "authored water drag must slow the car: {speeds:?}"
+    );
+}
+
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();

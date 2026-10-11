@@ -2688,6 +2688,7 @@ fn pkg_to_parts(
     PropModel {
         parts: out,
         collider: collision.into_collider(movable),
+        surface_colliders: Vec::new(),
         fragments,
     }
 }
@@ -2777,7 +2778,88 @@ fn adjust_material(
 struct PropModel {
     parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     collider: Option<Collider>,
+    surface_colliders: Vec<PropSurfaceCollider>,
     fragments: Vec<FragmentModel>,
+}
+
+/// Static liquid bounds carry material IDs independently of render textures.
+/// Hyde Park's lake, for example, names `water` on every bound polygon.
+struct PropSurfaceCollider {
+    collider: Collider,
+    surface: SurfaceMaterial,
+    tire: mm2_vehicle::TireSurface,
+    contact: Option<mm2_vehicle::OriginalContactMaterial>,
+    restitution: f32,
+}
+
+/// Restore liquid-bearing ASCII bounds. Other props keep the established PKG
+/// collision path until their bound variants have been audited. A valid bound
+/// replaces the entire render collider, split by material, so banks never gain
+/// water drag and no duplicate dry plane can hide the wet contact.
+fn liquid_bound_colliders(
+    bound: &mm2_formats::bnd::BndFile,
+    tables: &SurfaceTables,
+    offset: Vec3,
+) -> Option<Vec<PropSurfaceCollider>> {
+    let identities: Vec<_> = bound
+        .materials
+        .iter()
+        .map(|m| {
+            tables
+                .set
+                .index(&m.name)
+                .and_then(|i| u16::try_from(i).ok())
+                .map(SurfaceMaterial::Authored)
+                .unwrap_or_default()
+        })
+        .collect();
+    if !identities
+        .iter()
+        .any(|&s| tables.tire_surface_for(s).is_some_and(|t| t.drag > 0.0))
+        || bound.verts.iter().flatten().any(|v| !v.is_finite())
+    {
+        return None;
+    }
+    let positions: Vec<_> = bound.verts.iter().map(|&p| v3(p) + offset).collect();
+    let mut groups: BTreeMap<Option<u16>, Vec<[u32; 3]>> = BTreeMap::new();
+    for poly in &bound.polys {
+        let surface = *identities.get(poly.material as usize)?;
+        if !(3..=4).contains(&poly.indices.len())
+            || poly.indices.iter().any(|&i| i as usize >= positions.len())
+        {
+            return None;
+        }
+        let key = match surface {
+            SurfaceMaterial::Authored(i) => Some(i),
+            SurfaceMaterial::Unspecified => None,
+        };
+        let tris = groups.entry(key).or_default();
+        for i in 1..poly.indices.len() - 1 {
+            let mut tri = [poly.indices[0], poly.indices[i], poly.indices[i + 1]];
+            if MIRROR_Z {
+                tri.swap(1, 2);
+            }
+            tris.push(tri);
+        }
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    Some(
+        groups
+            .into_iter()
+            .map(|(index, tris)| {
+                let surface = index.map(SurfaceMaterial::Authored).unwrap_or_default();
+                PropSurfaceCollider {
+                    collider: Collider::trimesh(positions.clone(), tris),
+                    surface,
+                    tire: tables.tire_surface_for(surface).unwrap_or_default(),
+                    contact: tables.raw_contact_for(surface),
+                    restitution: tables.restitution_for(surface).unwrap_or_default(),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// How stamped prop content maps onto its placement point — the offset
@@ -2839,6 +2921,7 @@ impl PropOffset {
 /// on the offset class as well as the name.
 struct PropCache<'a> {
     vfs: &'a Vfs,
+    surfaces: Option<SurfaceTables>,
     meshes: &'a mut Assets<Mesh>,
     mats: MaterialCache<'a>,
     cache: HashMap<(String, u8, usize), Option<PropModel>>,
@@ -2897,12 +2980,13 @@ impl<'a> PropCache<'a> {
     fn build(&mut self, name: &str, offset: PropOffset, paint: usize) -> Option<PropModel> {
         let pkg = self.load_pkg(name)?;
         let movable = matches!(offset, PropOffset::Bound(_));
+        let static_bound = matches!(offset, PropOffset::Verbatim | PropOffset::Ground);
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
             PropOffset::Bound(v) | PropOffset::Pivot(v) => v,
             PropOffset::Ground => Vec3::from(stamp_content_offset(&pkg, None)),
         };
-        let model = pkg_to_parts(
+        let mut model = pkg_to_parts(
             &pkg,
             &mut self.mats,
             self.meshes,
@@ -2913,6 +2997,22 @@ impl<'a> PropCache<'a> {
         );
         if model.parts.is_empty() {
             return None;
+        }
+        if static_bound && let Some(tables) = &self.surfaces {
+            let path = format!("bound/{name}_bound.bnd");
+            if let Ok((bytes, _)) = self.vfs.read_path(&path) {
+                match std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| mm2_formats::bnd::BndFile::parse(text).ok())
+                    .and_then(|bound| liquid_bound_colliders(&bound, tables, offset))
+                {
+                    Some(colliders) => {
+                        model.collider = None;
+                        model.surface_colliders = colliders;
+                    }
+                    None => debug!(%path, "no usable liquid bound; keeping PKG collision"),
+                }
+            }
         }
         Some(model)
     }
@@ -2941,6 +3041,7 @@ impl<'a> MovableModels<'a> {
     ) -> Self {
         Self {
             cache: PropCache {
+                surfaces: None,
                 vfs,
                 meshes,
                 mats: MaterialCache::new(vfs, images, materials),
@@ -3110,6 +3211,23 @@ fn spawn_prop(
             transform,
             Name::new(format!("{name}-collider")),
         ));
+    }
+    for (i, col) in model.surface_colliders.iter().enumerate() {
+        let mut entity = commands.spawn((
+            CityEntity,
+            owner,
+            RigidBody::Static,
+            GameLayer::world(),
+            col.collider.clone(),
+            col.surface,
+            col.tire,
+            Restitution::new(col.restitution),
+            transform,
+            Name::new(format!("{name}-collider-m{i}")),
+        ));
+        if let Some(contact) = col.contact {
+            entity.insert(contact);
+        }
     }
 }
 
@@ -3500,6 +3618,9 @@ pub fn spawn_event_pathsets(
     // the time event setup runs; a second cache re-prepares only the
     // props the overlay actually names.
     let mut cache = PropCache {
+        surfaces: mm2_content::surface::load_surface_tables(vfs)
+            .ok()
+            .flatten(),
         vfs,
         meshes,
         mats: MaterialCache::new(vfs, images, materials),
@@ -3607,6 +3728,9 @@ pub fn spawn_parked_cars(
     report.file = Some(file);
 
     let mut cache = PropCache {
+        surfaces: mm2_content::surface::load_surface_tables(vfs)
+            .ok()
+            .flatten(),
         vfs,
         meshes,
         mats: MaterialCache::new(vfs, images, materials),
@@ -4160,6 +4284,7 @@ fn load_city_part(
     // by INST and by a pathset reuses the same prepared meshes,
     // materials and collider.
     let mut cache = PropCache {
+        surfaces: surfaces.clone(),
         vfs,
         meshes,
         mats,
@@ -4536,6 +4661,57 @@ const KINK_COS: f32 = 0.9994;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn liquid_bounds_keep_dry_banks_separate_from_water() {
+        use mm2_formats::{
+            bnd::BndFile,
+            materials::{MaterialMap, MaterialSet},
+        };
+        let tables = SurfaceTables {
+            set: MaterialSet::parse("mtl _default {\n friction: 0.9\n drag: 0\n}\nmtl water {\n friction: 0.68\n drag: 0.119\n ptxindex: -1 6\n ptxthreshold: 0 0\n}\n").unwrap(),
+            map: MaterialMap::parse("texture,physics\n").unwrap(),
+        };
+        let mut bound = BndFile::parse("version: 1.01\nverts: 8\nmaterials: 2\npolys: 2\nv -8 0 -4\nv -8 0 4\nv -2 0 4\nv -2 0 -4\nv 2 -0.5 -4\nv 2 -0.5 4\nv 8 -0.5 4\nv 8 -0.5 -4\nmtl default {\n friction: 0.5\n}\nmtl water {\n friction: 0.5\n}\nquad 0 1 2 3 0\nquad 4 5 6 7 1\n").unwrap();
+        let groups = liquid_bound_colliders(&bound, &tables, Vec3::Y * 2.0).unwrap();
+        assert_eq!(groups.len(), 2);
+        for (x, expected, height) in [
+            (-5.0, SurfaceMaterial::Unspecified, 2.0),
+            (5.0, SurfaceMaterial::Authored(1), 1.5),
+        ] {
+            let hits: Vec<_> = groups
+                .iter()
+                .filter_map(|g| {
+                    g.collider
+                        .cast_ray(
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::new(x, 5.0, 0.0),
+                            Vec3::NEG_Y,
+                            10.0,
+                            true,
+                        )
+                        .map(|hit| (g, hit))
+                })
+                .collect();
+            assert_eq!(hits.len(), 1, "no duplicate render plane or wet bank");
+            let (group, (distance, _)) = hits[0];
+            assert_eq!(group.surface, expected);
+            assert!((distance - (5.0 - height)).abs() < 1e-5);
+            if x > 0.0 {
+                assert_eq!(group.tire.drag, 0.119);
+                assert!((group.tire.grip - 0.68 / 0.9).abs() < 1e-5);
+                assert_eq!(tables.ptx_channels(group.surface).unwrap().index, [-1, 6]);
+            } else {
+                assert_eq!(group.tire.drag, 0.0);
+            }
+        }
+        bound.polys[1].material = 99;
+        assert!(liquid_bound_colliders(&bound, &tables, Vec3::ZERO).is_none());
+        bound.polys[1].material = 1;
+        bound.verts[0][0] = f32::NAN;
+        assert!(liquid_bound_colliders(&bound, &tables, Vec3::ZERO).is_none());
+    }
+
     #[test]
     fn non_finite_spawn_sources_are_skipped_and_counted() {
         let nan = Vec3::NAN;

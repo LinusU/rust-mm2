@@ -901,9 +901,9 @@ const WHEEL_PTX_DOMAIN: u64 = 0x7074_785f_7768_656c;
 
 /// Designed emission policy for wheel surface particles (DSN-62).
 /// The `ptxindex`/`ptxthreshold` pair and the `tune/effects/*` specs
-/// are authored data; what the original runtime fed `ptxthreshold` is
-/// unrecovered (UNK-23), so the gate quantity, the strict-`>`
-/// comparison, the pool bound and the atlas grid here are ours.
+/// are authored data. Native visual-slip gating, strict `>` and emitter
+/// means are recovered in research/shallow-water.md. The generic car
+/// proxy, pool bound and billboard integration remain designed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WheelPtxPolicy {
     /// Live-puff bound per vehicle — designed (F18-AC03's bounded
@@ -999,16 +999,34 @@ impl WheelChannels {
         origin: Vec3,
         normal: Vec3,
         emitter: Entity,
+        native_frame: Option<NativeParticleFrame>,
     ) -> WheelPuff {
         let normal = normal.try_normalize().unwrap_or(Vec3::Y);
         let frame = Quat::from_rotation_arc(Vec3::Y, normal);
+        let (origin, velocity) = if let Some(native) = native_frame {
+            (
+                origin + Vec3::Y * spec.radius * native.radius_scale,
+                native.basis * (spec.velocity * native.velocity_scale),
+            )
+        } else {
+            (origin, Vec3::ZERO)
+        };
         WheelPuff {
             emitter,
             position: origin + frame * self.jitter3(Vec3::ZERO, spec.position_var),
-            velocity: frame * self.jitter3(spec.velocity, spec.velocity_var),
+            velocity: if native_frame.is_some() {
+                velocity + frame * self.jitter3(Vec3::ZERO, spec.velocity_var)
+            } else {
+                frame * self.jitter3(spec.velocity, spec.velocity_var)
+            },
             age: 0.0,
             life: self.jitter(spec.life, spec.life_var).max(0.01),
-            radius: self.jitter(spec.radius, spec.radius_var).max(0.0),
+            radius: self
+                .jitter(
+                    spec.radius * native_frame.map_or(1.0, |f| f.radius_scale),
+                    spec.radius_var,
+                )
+                .max(0.0),
             d_radius: self.jitter(spec.d_radius, spec.d_radius_var),
             drag: self.jitter(spec.drag, spec.drag_var),
             gravity: spec.gravity,
@@ -1025,6 +1043,17 @@ impl WheelChannels {
     }
 }
 
+/// Native wheel emitter means (`vehWheelPtx`, `0x4d1f8a..0x4d20e2`).
+/// Columns are lateral, contact normal and rear directions. Authored
+/// velocity components scale with lateral speed, rolling speed and slip.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeParticleFrame {
+    pub basis: Mat3,
+    pub velocity_scale: Vec3,
+    /// `loadFactor * wheelWidth * 0.5` scales the authored Radius.
+    pub radius_scale: f32,
+}
+
 /// One step of input [`WheelPtx::draw`] consumes for a grounded wheel
 /// — grouped as a parameter object so the emission contract is a
 /// named shape rather than a nine-slot call.
@@ -1032,13 +1061,19 @@ pub struct WheelDraw<'a, 's> {
     /// Step length in seconds — a non-positive/non-finite `dt` is a
     /// no-op (pause-safe).
     pub dt: f32,
-    /// The designed gate quantity the authored `ptxthreshold`
-    /// compares against — the wheel's `tire_slippage` utilization
-    /// (0..1, the same measure skid audio consumes; UNK-23 stands for
-    /// the original quantity). Strict `>`: a threshold-0 channel
+    /// The gate quantity the authored `ptxthreshold` compares against:
+    /// recovered visual slip for native cars, the designed tire-utilization
+    /// proxy for generic cars. Strict `>`: a threshold-0 channel
     /// (retail `water` authors `0 0`) still needs nonzero tire work,
     /// so a parked wheel reads `q = 0` and stays dark.
     pub q: f32,
+    /// Native `vehWheelPtx` emission factor (`0x4d1ee0`): multiply
+    /// `InitialBlast` by this load-dependent factor as a rate per second.
+    /// `None` retains the generic car's edge-blast / SpewRate policy.
+    pub native_rate_scale: Option<f32>,
+    /// Recovered native emitter means; variance and integration retain
+    /// the port's deterministic particle policy.
+    pub native_frame: Option<NativeParticleFrame>,
     /// The `PtxChannels` the wheel's contact surface resolved to this
     /// frame (`None` = the surface table cannot answer — both slots
     /// dark, like an authored `-1 -1`).
@@ -1140,18 +1175,24 @@ impl WheelPtx {
                 continue;
             };
             let open = d.q > channels.threshold[slot];
-            if open && !ch.open[slot] {
+            if open && !ch.open[slot] && d.native_rate_scale.is_none() {
                 ch.blast[slot] = spec.initial_blast.max(0);
             }
             ch.open[slot] = open;
             if !open {
                 ch.held_for[slot] = 0.0;
-                ch.acc[slot] = 0.0;
+                if d.native_rate_scale.is_none() {
+                    ch.acc[slot] = 0.0;
+                }
                 ch.blast[slot] = 0;
                 continue;
             }
             ch.held_for[slot] += d.dt;
-            if spec.spew_rate > 0.0
+            if let Some(scale) = d.native_rate_scale {
+                if scale.is_finite() && scale > 0.0 {
+                    ch.acc[slot] += spec.initial_blast.max(0) as f32 * scale.min(1.0) * d.dt;
+                }
+            } else if spec.spew_rate > 0.0
                 && (spec.spew_time_limit <= 0.0 || ch.held_for[slot] <= spec.spew_time_limit)
             {
                 ch.acc[slot] += spec.spew_rate * d.dt;
@@ -1167,8 +1208,14 @@ impl WheelPtx {
             out.dropped = out.dropped.saturating_add(want - emit);
             room -= emit;
             for _ in 0..emit {
-                out.puffs
-                    .push(ch.puff(spec, &self.policy, d.origin, d.normal, d.emitter));
+                out.puffs.push(ch.puff(
+                    spec,
+                    &self.policy,
+                    d.origin,
+                    d.normal,
+                    d.emitter,
+                    d.native_frame,
+                ));
             }
         }
         out
