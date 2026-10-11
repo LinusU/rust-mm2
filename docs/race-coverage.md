@@ -992,6 +992,99 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   (c) opponent deep-course pace generally — no Circuit finish reached
   except london-0's four.
 
+## Evidence → F11 acceptance
+
+F11 (catalog and shared event runtime) has no matrix of its own: its
+criteria rest on the CLI audits against the retail install and on the
+runtime-slice tests that also underpin F13/F14. Levels follow
+`specs/QUALITY-GATES.md`: *code checks* / *synthetic* are the CI-visible
+test suites; *retail-data* is a local run against `$MM2_RETAIL`
+(`fnv1a64:e91e6cd4b2ae30d9`, run 2026-10-11 at commit `2ea8373`, plus
+the 2026-10-09 runs in `docs/coverage-audit.md` §2). **No rendered or
+playtest evidence exists for F11: no human has played a retail event
+through the catalog path.** Test paths below are relative to `crates/`
+(`mm2_app/tests/…`, `mm2_game/tests/…`) unless they start with `tools/`.
+
+- **F11-AC01** (all events listed with content/difficulty/status/failed
+  refs; empty catalogs fail strict) — *retail-data*.
+  `mm2-inspect events <install> [--strict]` lists 45 rows per city
+  (12 Checkpoint + 10 Blitz + 10 Circuit + 13 Crash Course) with
+  content tags, status, failed references and rewards; the retail
+  `--strict` run exits 0, an empty install `--strict` exits 2.
+  `mm2-inspect race-defs <install>` builds 64 definitions per city
+  (both difficulties), 0 failed; 26 Crash Course (row × difficulty)
+  cases are reported `unsupported` (F21 owns them). `mm2-inspect event
+  <install> --all` reports 90/90 rows `ready`. Synthetic:
+  `sweep_reports_every_cataloged_event`, `sweep_surfaces_a_record_failure`,
+  `sweep_empty_catalog_is_a_failure`, `crash_course_reports_unsupported_not_failed`
+  in `tools/mm2_inspect/src/event.rs`.
+- **F11-AC02** (high-speed, wrong-height, repeated-crossing, teleport
+  through the gameplay trigger path) — *synthetic*.
+  `mm2_game/tests/race.rs`: `swept_crossing_cannot_be_skipped_by_speed`,
+  `crossing_rejects_wrong_height`, `direction_flag_rejects_reverse_crossings`,
+  `break_segment_reanchors_after_teleport`. `mm2_app/tests/race.rs`
+  (through `advance_race`, the system gameplay runs):
+  `high_speed_crossing_cannot_be_skipped`,
+  `crossing_at_the_wrong_height_does_not_count`,
+  `repeated_crossing_counts_once`, `teleport_breaks_the_swept_segment`,
+  `vehicle_reset_breaks_the_swept_segment`,
+  `reset_while_paused_cannot_sweep_checkpoints`.
+- **F11-AC03** (countdown unlocks once; deterministic pause/restart; no
+  old timer survives) — *synthetic*. `mm2_app/tests/race.rs`:
+  `countdown_releases_control_exactly_once`,
+  `countdown_completes_while_session_already_playing`,
+  `pause_freezes_the_race`, `restart_removes_the_race_resource`,
+  `restart_from_results_rebegins_the_session`,
+  `quit_during_countdown_unloads_to_menu`;
+  `mm2_app/tests/session.rs` `restart_leaves_exactly_one_session`;
+  `mm2_app/tests/event.rs` `restart_rebuilds_the_event_session`;
+  `mm2_game/tests/session.rs` (lifecycle, generation overflow). The
+  25-cycle restart soak (`dup=0`) in the F13 mapping above is
+  *retail-data* evidence for the same restart path.
+- **F11-AC04** (results once per participant/generation, with
+  provenance) — *synthetic*. `mm2_app/tests/race.rs`:
+  `finish_records_one_result_with_provenance`,
+  `tied_finishes_record_separately`; `mm2_app/tests/results.rs`;
+  `mm2_game/tests/contracts.rs` `result_ids_are_unique_and_ledger_deduplicates`.
+- **F11-AC05** (event props and traffic overrides removed on unload,
+  shared city assets survive) — *synthetic*. Props:
+  `mm2_app/tests/event.rs` `event_pathset_overlay_spawns_session_owned_props`
+  and `restarting_the_event_respawns_its_overlay_once` (every overlay
+  entity is owned by its `SessionEntity`; restart leaves exactly one
+  generation of it). Traffic: `mm2_app/tests/traffic.rs`
+  `teardown_removes_traffic_and_restart_replans`,
+  `unloading_an_event_removes_its_aimap_exceptions_but_not_the_citys`,
+  `event_aimap_density_zero_authors_traffic_off`. Shared assets:
+  `mm2_game/tests/session.rs`
+  `session_entities_despawn_but_persistent_entities_survive`. The
+  overlay is the event's `.pathset` stamps; no other event-prop
+  override source is evidenced.
+- **F11-AC06** (a selected event inspected/loaded independent of UI,
+  dependencies validated) — *code checks + retail-data*.
+  `mm2-inspect event <install> --city <c> --event <table>:<row>` and
+  `--all`; tests in `tools/mm2_inspect/src/event.rs`
+  (`inspects_a_complete_event`, `incomplete_event_reports_but_fails_strict`,
+  `malformed_aimap_is_a_record_failure`,
+  `unresolved_wired_vehicle_is_reported`, `sweep_empty_catalog_is_a_failure`).
+  Retail single-event run, sf `circuit:1`: 21 records, `ready`, both
+  builds ok, wired vehicle ids all resolved, and the authored
+  unreferenced routes `circuit1-{a,p}-7.opp` surfaced as roster issues.
+  Loading through the session path is exercised by the F13/F14
+  runtime matrices (`mm2 --headless --event <e>`).
+
+Open legs, kept visible:
+
+- No human playthrough of any retail event (no rendered/playtest level).
+- `race-defs` reports 26 Crash Course cases `unsupported` per city
+  (F21 lesson path); they are in the denominator, not built.
+- `event <install> --all --strict` exits 2 on retail: 53 (london) and
+  43 (sf) strict failures, which are disclosed authored anomalies
+  (extra uncataloged stems, the `AmbDenisty` header typo, a header
+  missing its `Filename` column name), not parse failures. `events
+  --strict` itself exits 0 on retail.
+- "Ready" means dependencies resolve; it is not "playable and
+  verified" against original behaviour.
+
 ## F15-C retail opponent soak
 
 `crates/mm2_app/tests/opponents_retail.rs` (opt-in, `MM2_RETAIL`) runs
