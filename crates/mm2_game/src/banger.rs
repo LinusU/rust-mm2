@@ -114,9 +114,9 @@ pub struct BangerDefinition {
     /// `Elasticity` — collider restitution.
     pub elasticity: f32,
     /// `ImpulseLimit2` — authored activation threshold; the quantity it
-    /// is compared against is UNK-22, so [`Self::activates_on`] applies
-    /// the provisional estimate documented on the module (the striker's
-    /// kinetic energy on the prop path). `0` activates on any
+    /// is compared against is the squared contact impulse
+    /// ([`contact_impulse_squared`]); which body's `K` the original
+    /// uses is inferred (UNK-22). `0` activates on any
     /// approaching contact; ≈1e30 never activates.
     pub impulse_limit2: f32,
     /// `Size` — the authored bound box's full extents (metres); the
@@ -187,12 +187,13 @@ impl BangerDefinition {
         }
     }
 
-    /// Provisional activation rule (UNK-22): `estimate` is the
-    /// caller's impact measure — striker kinetic energy `½·m·v²` in
-    /// joules on the prop path (the authored limit ladder is quadratic
-    /// in speed; the vehicle breakaway rig keeps its own linear
-    /// reading under UNK-13); the banger activates when it exceeds
-    /// the authored limit. `0` (most retail props) activates on any
+    /// Activation rule: `estimate` is the caller's impact measure; the
+    /// banger activates when it strictly exceeds the authored limit.
+    /// The prop path passes [`contact_impulse_squared`] — the squared
+    /// impulse `|K⁻¹·v_rel|²` in (N·s)², the quantity `Midtown2.exe`
+    /// compares to `ImpulseLimit2` (OPR-1.3, docs/research/banger.md);
+    /// the vehicle breakaway rig keeps its own linear `m·v` reading
+    /// under UNK-13. `0` (most retail props) activates on any
     /// approaching contact; ≈1e30 (bridge gates, monuments) never
     /// activates.
     pub fn activates_on(&self, estimate: f32) -> bool {
@@ -317,6 +318,41 @@ impl Default for BangerPool {
     }
 }
 
+/// The squared impulse that cancels the relative contact-point
+/// velocity: `|x|²` with `x = K⁻¹·(−v_rel)` and
+/// `K = InvMass·I − [r]× InvInertia [r]×` at the contact point — the
+/// quantity `Midtown2.exe` (`0x46b7c0`) compares to `ImpulseLimit2`,
+/// in (N·s)². `inv_inertia` is the striker's world-space inverse
+/// inertia tensor, `r` the contact lever from its centre of mass.
+/// Which body's `K` the original reads is inferred (the striker's);
+/// pass `Mat3::ZERO` for a body without inertia and the quantity
+/// degrades to `(m·|v|)²`. A non-finite input or a singular `K`
+/// yields `None`, so the caller can diagnose it instead of gating on
+/// garbage.
+pub fn contact_impulse_squared(
+    v_rel: Vec3,
+    inv_mass: f32,
+    inv_inertia: Mat3,
+    r: Vec3,
+) -> Option<f32> {
+    if !(v_rel.is_finite() && inv_mass.is_finite() && inv_inertia.is_finite() && r.is_finite()) {
+        return None;
+    }
+    let skew = Mat3::from_cols(
+        Vec3::new(0.0, r.z, -r.y),
+        Vec3::new(-r.z, 0.0, r.x),
+        Vec3::new(r.y, -r.x, 0.0),
+    );
+    let k = Mat3::IDENTITY * inv_mass - skew * inv_inertia * skew;
+    let det = k.determinant();
+    if !det.is_finite() || det.abs() <= f32::MIN_POSITIVE {
+        return None;
+    }
+    let x = k.inverse() * -v_rel;
+    let sq = x.length_squared();
+    sq.is_finite().then_some(sq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +389,36 @@ mod tests {
         assert!(def.activates_on(30_000.0));
         // A resting overlap (no approach speed) does not activate.
         assert!(!def.activates_on(0.0));
+    }
+
+    #[test]
+    fn contact_impulse_without_inertia_is_mass_times_speed_squared() {
+        let sq =
+            contact_impulse_squared(Vec3::new(0.0, 0.0, -9.0), 1.0 / 1000.0, Mat3::ZERO, Vec3::X)
+                .unwrap();
+        assert!((sq - 81.0e6).abs() < 81.0e6 * 1e-4, "{sq}");
+        // The illustrative `Mass 1000 x 85342` prop: ~9.24 m/s head-on.
+        let def = BangerDefinition::from_record("sp_test_f", &record(1000.0, 1000.0 * 85342.0));
+        assert!(!def.activates_on(sq), "9 m/s stays under");
+        let fast =
+            contact_impulse_squared(Vec3::new(0.0, 0.0, -9.5), 1.0 / 1000.0, Mat3::ZERO, Vec3::X)
+                .unwrap();
+        assert!(def.activates_on(fast), "9.5 m/s crosses");
+    }
+
+    #[test]
+    fn contact_impulse_off_centre_lever_lowers_the_effective_mass() {
+        let inv_i = Mat3::IDENTITY * (1.0 / 500.0);
+        let v = Vec3::new(0.0, 0.0, -5.0);
+        let central = contact_impulse_squared(v, 0.001, inv_i, Vec3::ZERO).unwrap();
+        let off = contact_impulse_squared(v, 0.001, inv_i, Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        assert!(off < central, "{off} < {central}");
+    }
+
+    #[test]
+    fn contact_impulse_rejects_non_finite_and_singular() {
+        assert!(contact_impulse_squared(Vec3::NAN, 0.001, Mat3::ZERO, Vec3::X).is_none());
+        assert!(contact_impulse_squared(Vec3::X, 0.0, Mat3::ZERO, Vec3::X).is_none());
     }
 
     #[test]

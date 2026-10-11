@@ -348,16 +348,13 @@ fn a_monument_limit_never_activates() {
 
 #[test]
 fn a_midrange_limit_discriminates_the_impact() {
-    // Same striker both runs: estimate ≈ ½·1000·v² ≈ 150 kJ at the
-    // ~17 m/s the slide leaves. A limit above it leaves the prop
-    // dormant; below it activates.
+    // Same striker both runs: squared impulse |K⁻¹·v|² ≈ (1000·v)² ≈
+    // 1.8e8 (N·s)² at the speed the slide leaves. A limit above it
+    // leaves the prop dormant; below it activates.
     let dormant_limit = {
         let mut app = test_app_with(SessionAuthority::Local, 32);
-        let (banger, _) = spawn_banger(
-            &mut app,
-            Vec3::new(0.0, 0.5, 0.0),
-            banger_def("lim", 300_000.0),
-        );
+        let (banger, _) =
+            spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("lim", 1.0e9));
         spawn_striker(
             &mut app,
             Vec3::new(-6.0, 0.5, 0.0),
@@ -370,11 +367,7 @@ fn a_midrange_limit_discriminates_the_impact() {
     assert_eq!(dormant_limit, BangerPhase::Dormant);
 
     let mut app = test_app_with(SessionAuthority::Local, 32);
-    let (banger, _) = spawn_banger(
-        &mut app,
-        Vec3::new(0.0, 0.5, 0.0),
-        banger_def("lim", 100_000.0),
-    );
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("lim", 1.0e7));
     spawn_striker(
         &mut app,
         Vec3::new(-6.0, 0.5, 0.0),
@@ -396,19 +389,16 @@ fn a_midrange_limit_discriminates_the_impact() {
 
 #[test]
 fn an_authored_tree_limit_demands_speed_not_just_mass() {
-    // Operator report 4 item 3: retail authors `ImpulseLimit2 ≈ Mass ×
-    // 800` (sp_tree1_s: 2 000 000 on 1 000 kg), which a linear m·v
-    // estimate reads as a 2 000 m/s requirement for a 1 t striker —
-    // unreachable, so trees and poles never broke. The energy estimate
-    // puts the authored ladder back on the road: √(2·2e6/1e3) ≈ 63 m/s.
-    // The 20 m/s slide (~150 kJ) must leave it dormant; ~78 m/s
-    // (~3 MJ) must break it.
+    // The top retail rungs author `ImpulseLimit2 ≈ Mass × 85342`; the
+    // gate is the squared contact impulse (OPR-1.3), so a 1 t striker
+    // needs |K⁻¹·v| above √1e9 ≈ 31.6 kN·s: the 20 m/s slide must
+    // leave it dormant, 80 m/s must activate it.
     let dormant = {
         let mut app = test_app_with(SessionAuthority::Local, 32);
         let (banger, _) = spawn_banger(
             &mut app,
             Vec3::new(0.0, 0.5, 0.0),
-            banger_def("tree", 2_000_000.0),
+            banger_def("tree", 1.0e9),
         );
         spawn_striker(
             &mut app,
@@ -416,7 +406,7 @@ fn an_authored_tree_limit_demands_speed_not_just_mass() {
             Vec3::new(20.0, 0.0, 0.0),
         );
         let events = run(&mut app, FRAMES_PER_SECOND * 3);
-        assert!(events.is_empty(), "~150 kJ is sub-limit: {events:?}");
+        assert!(events.is_empty(), "20 m/s is sub-limit: {events:?}");
         app.world().get::<Banger>(banger).unwrap().phase
     };
     assert_eq!(dormant, BangerPhase::Dormant);
@@ -425,7 +415,7 @@ fn an_authored_tree_limit_demands_speed_not_just_mass() {
     let (banger, object) = spawn_banger(
         &mut app,
         Vec3::new(0.0, 0.5, 0.0),
-        banger_def("tree", 2_000_000.0),
+        banger_def("tree", 1.0e9),
     );
     spawn_striker(
         &mut app,
@@ -440,7 +430,7 @@ fn an_authored_tree_limit_demands_speed_not_just_mass() {
     assert_eq!(
         activations.len(),
         1,
-        "~3 MJ clears the authored tree limit: {events:?}"
+        "80 m/s clears the authored tree limit: {events:?}"
     );
     assert_eq!(activations[0].object, object);
     assert_eq!(
@@ -2142,5 +2132,71 @@ fn a_hypervelocity_striker_cannot_launch_a_prop_past_the_bound() {
     assert!(
         max_b_v <= MAX_BANGER_LINEAR_SPEED * 2.0,
         "transfer stayed bounded, got |v_b|={max_b_v}"
+    );
+}
+
+/// F04-C.5 / UNK-22 original-content check over every authored banger
+/// record: the squared-impulse gate (`|K⁻¹·v|² > ImpulseLimit2`, OPR-1.3)
+/// must put the retail ladder inside a drivable speed range, and the
+/// authored-immovable records out of reach. Skipped without `MM2_RETAIL`.
+#[test]
+fn retail_impulse_limit_ladder_is_reachable_by_a_one_tonne_striker() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; retail banger ladder NOT checked");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    let mut defs = mm2_app::banger::BangerDefs::new(&vfs);
+    let mut rows: Vec<(String, f32, f32, f32)> = Vec::new();
+    for path in vfs.list() {
+        let lower = path.to_ascii_lowercase();
+        let Some(name) = lower
+            .strip_prefix("tune/banger/")
+            .and_then(|n| n.strip_suffix(".dgbangerdata"))
+        else {
+            continue;
+        };
+        let Some(def) = defs.get(name) else { continue };
+        // Head-on speed at which a 1000 kg striker (no inertia: the
+        // lower bound of the effective mass) crosses the limit.
+        let need = def.impulse_limit2.sqrt() / 1000.0;
+        rows.push((name.to_string(), def.mass, def.impulse_limit2, need));
+    }
+    assert!(rows.len() > 100, "only {} records", rows.len());
+    assert_eq!(defs.failed, 0);
+    let mut reachable = 0;
+    let mut immovable = 0;
+    let mut slowest_reachable = 0.0f32;
+    for (name, mass, limit, need) in &rows {
+        if *limit >= 1e29 {
+            immovable += 1;
+            let def = defs.get(name).unwrap();
+            assert!(!def.activates_on(1.0e12), "{name}");
+        } else if *need <= 60.0 {
+            reachable += 1;
+            slowest_reachable = slowest_reachable.max(*need);
+            let sq = mm2_game::contact_impulse_squared(
+                Vec3::new((need * 1.01).max(0.1), 0.0, 0.0),
+                1.0e-3,
+                Mat3::ZERO,
+                Vec3::ZERO,
+            )
+            .unwrap();
+            assert!(
+                defs.get(name).unwrap().activates_on(sq),
+                "{name} ({mass} kg)"
+            );
+        } else {
+            eprintln!("out of reach at <=60 m/s: {name} limit {limit:.3e} needs {need:.1} m/s");
+        }
+    }
+    eprintln!(
+        "{} records: {reachable} reachable (slowest {slowest_reachable:.1} m/s), {immovable} immovable",
+        rows.len()
+    );
+    assert!(
+        reachable * 10 > rows.len() * 9,
+        "most of the ladder is reachable"
     );
 }

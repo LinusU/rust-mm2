@@ -59,8 +59,8 @@ use mm2_vehicle::{PreStepVelocity, StrikeBound};
 use tracing::{debug, warn};
 
 use crate::contracts::{
-    StruckMut, Transfer, deepest_contact, impact_energy, resolve_transfer, striker_correction,
-    write_striker_correction,
+    StruckMut, Transfer, deepest_contact, impact_impulse_squared, resolve_transfer,
+    striker_correction, write_striker_correction,
 };
 
 /// One authored `BREAK<NN>` piece of a breakable prop — the parts the
@@ -604,6 +604,7 @@ pub fn activate_bangers(
     mut bangers: Query<BangerMut>,
     pieces: Query<(&BangerPieces, &SessionEntity, &GlobalTransform)>,
     masses: Query<&ComputedMass>,
+    inertias: Query<(&ComputedAngularInertia, &Rotation)>,
     pre_step: Query<&PreStepVelocity>,
     mut writer: MessageWriter<BangerStateChanged>,
     mut commands: Commands,
@@ -654,7 +655,23 @@ pub fn activate_bangers(
             if severity <= 0.0 {
                 continue;
             }
-            let estimate = impact_energy(striker, severity, &masses);
+            // `deepest.normal` points striker → prop, so it is the
+            // approach direction; the manifold carries no tangential
+            // speed, so `v_rel` is the normal part only.
+            let striker_lever = if striker_side {
+                deepest.anchor1
+            } else {
+                deepest.anchor2
+            };
+            let Some(estimate) = impact_impulse_squared(
+                striker,
+                deepest.normal * severity,
+                striker_lever,
+                &masses,
+                &inertias,
+            ) else {
+                continue;
+            };
             if !banger.def.activates_on(estimate) {
                 continue;
             }
@@ -675,11 +692,7 @@ pub fn activate_bangers(
                 // `striker_side` records whether the striker is `c1`:
                 // the banger is collider1 on the first pass, collider2
                 // on the second.
-                striker_lever: if striker_side {
-                    deepest.anchor1
-                } else {
-                    deepest.anchor2
-                },
+                striker_lever,
             });
         }
     }
@@ -716,15 +729,21 @@ pub fn activate_bangers(
             if severity <= 0.0 {
                 continue;
             }
-            let estimate = impact_energy(entity, severity, &masses);
-            if !banger.def.activates_on(estimate) {
-                continue;
-            }
-            claimed.insert(hit);
             let dir = surface.try_normalize().unwrap_or(Vec3::X);
             // `Size` is the bound's full extents (verified): half its
             // largest axis reaches from the bound's centre to a face.
             let reach = banger.def.size.iter().fold(0.0f32, |m, h| m.max(h.abs())) * 0.5;
+            let point = centre - dir * reach;
+            let v_rel = surface.clamp_length_max(MAX_BANGER_LINEAR_SPEED);
+            let Some(estimate) =
+                impact_impulse_squared(entity, v_rel, point - position.0, &masses, &inertias)
+            else {
+                continue;
+            };
+            if !banger.def.activates_on(estimate) {
+                continue;
+            }
+            claimed.insert(hit);
             // A bound strike can coincide with a real world-collider
             // contact the contact pass scored below the authored limit:
             // fold the solver's actual response into the transfer so
@@ -743,7 +762,7 @@ pub fn activate_bangers(
                 severity,
                 estimate,
                 dir,
-                point: centre - dir * reach,
+                point,
                 striker: Some(entity),
                 restitution,
                 applied_impulse,

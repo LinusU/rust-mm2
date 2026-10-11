@@ -55,6 +55,7 @@ pub use audio::{
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerFragment, BangerPhase, BangerPool, BangerSite,
     BangerStateChanged, DEFAULT_ACTIVE_POOL, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,
+    contact_impulse_squared,
 };
 pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{

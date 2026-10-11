@@ -26,6 +26,7 @@ use mm2_game::{
 };
 use mm2_vehicle::surface::TireConditions;
 use mm2_vehicle::vehicle::{Vehicle, VehicleState};
+use tracing::warn;
 
 /// Impact reporting bookkeeping for [`collect_impacts`]. The dedup
 /// window, per-tick bound and the counters that make suppression visible
@@ -190,18 +191,44 @@ pub(crate) fn impulse_estimate(
     severity * striker_mass(striker, masses)
 }
 
-/// Kinetic energy the striker carries into a contact (joules):
-/// ½·m·v² — the provisional quantity banger activation compares to
-/// the authored `ImpulseLimit2` (UNK-22). A linear `m·v` estimate
-/// misreads the authored data: `ImpulseLimit2 ≈ Mass × 800` on nearly
-/// every retail prop (the exceptions scale the same way), which puts
-/// authored-breakable trees and poles 5–50× beyond any reachable
-/// impact (operator report 4 item 3). The speed-squared reading
-/// restores the authored ladder — meters and cones break at a crawl,
-/// poles and trees at speed, the authored-immovable records stay
-/// unreachable (docs/research/banger.md).
-pub(crate) fn impact_energy(striker: Entity, severity: f32, masses: &Query<&ComputedMass>) -> f32 {
-    0.5 * striker_mass(striker, masses) * severity * severity
+/// The squared contact impulse `|K⁻¹·v_rel|²` ((N·s)²) of a striker
+/// hitting a dormant prop — the quantity the original compares to
+/// `ImpulseLimit2` (OPR-1.3, docs/research/banger.md). `v_rel` is the
+/// striker's approach velocity at the contact point (the prop is at
+/// rest), `lever` the contact point relative to the striker's centre
+/// of mass. `K` is the *striker's* effective-mass matrix; that reading
+/// is inferred (UNK-22). A striker without resolved inertia degrades
+/// to `(m·|v|)²`; a non-finite or singular `K` is diagnosed and
+/// returns `None`.
+pub(crate) fn impact_impulse_squared(
+    striker: Entity,
+    v_rel: Vec3,
+    lever: Vec3,
+    masses: &Query<&ComputedMass>,
+    inertias: &Query<(&ComputedAngularInertia, &Rotation)>,
+) -> Option<f32> {
+    let inv_mass = 1.0 / striker_mass(striker, masses);
+    let inv_inertia = match inertias.get(striker) {
+        Ok((cai, rot)) => {
+            let inv = cai.rotated(rot.0).inverse();
+            Mat3::from_cols(
+                inv.mul_vec3(Vec3::X),
+                inv.mul_vec3(Vec3::Y),
+                inv.mul_vec3(Vec3::Z),
+            )
+        }
+        Err(_) => Mat3::ZERO,
+    };
+    let sq = mm2_game::contact_impulse_squared(v_rel, inv_mass, inv_inertia, lever);
+    if sq.is_none() {
+        warn!(
+            ?striker,
+            ?v_rel,
+            ?lever,
+            "banger gate: contact impulse is not finite; strike ignored"
+        );
+    }
+    sq
 }
 
 // ---------- post-solver momentum transfer ----------
