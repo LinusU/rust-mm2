@@ -667,6 +667,41 @@ at most 4 UI voices sound at once. Evidence: synthetic scripted
 navigation in `tests/menu.rs`, retail stem decode (`MM2_RETAIL`). Not
 captured audibly.
 
+## Family coverage and the soundscape capture (F08-C)
+
+`mm2-inspect audio <install>` prints an `== audio families ==` matrix
+(files / supported / unsupported / missing / failed per family). *Supported*
+means the file decodes or parses **and** a runtime consumer plays it;
+*unsupported* means it parses but nothing plays it. Retail, 2026-10-11:
+
+| family | files | supported | unsupported | missing | failed |
+|---|---|---|---|---|---|
+| waves (aud11/aud22) | 2503 | 2503 | 0 | 0 | 0 |
+| vehicle + object tables | 103 | 103 | 0 | 1 (`skidflagstone`) | 0 |
+| creature voices | 21 | 21 | 0 | 0 | 0 |
+| commentary cues (spchdata) | 526 | 525 | 1 | 90 clips | 0 |
+| music cue tables | 5 | 0 | 5 | 0 | 0 |
+| DirectMusic containers | 95 | 0 | 95 | 0 | 0 |
+
+The spchdata census enumerates every wave a usable row can draw
+(`add+1..=end`, named by the runtime's own `cue_wave_stem`; lesson tables
+in `ccl/`/`ccs/` author whole stems and take no speaker): 1905 drawable
+clips, 1815 shipped, 90 authored draws with no wave (the `RACELAPS01`
+rows, `cruisedamage`/`racedamage` ranges longer than the shipped takes, a
+few result/unlock rows). The one unsupported file is the nonconforming
+`ccl/cc_cpoint_indexinfo.csv` integer list. Missing draws are authored
+data, reported — never substituted. Music is parsed, not played:
+DirectMusic has no synthesizer, so both music rows count `unsupported`.
+
+`the_retail_soundscape_capture_separates_ambience_voice_ui_and_music`
+(`MM2_RETAIL`) renders one retail clip per category (`gulls1` ambience
+loop, an `al1` WEARAIN announcer cue, the menu confirm) through
+`mix_offline` at the production `voice_gain`, writes `f08-ambience.wav`,
+`f08-voice.wav`, `f08-ui.wav` and a `f08-soundscape.wav` timeline under
+`$CARGO_TARGET_DIR/captures/`, and checks that muting a bus silences only
+its category. It carries **no music track**: that half of F08-AC05 stays
+open. This is computed-mix evidence, not rodio and not a listen.
+
 ## Creature voice tables (`aud/creaturedata`, F08-B.4)
 
 `aud/spchdata/**` (526) parses — `## Speech cue tables`; only the

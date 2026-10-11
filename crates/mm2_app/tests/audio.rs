@@ -5742,3 +5742,172 @@ fn city_ambience_attenuates_with_distance_and_dies_with_the_session() {
         assert_eq!(ambience_volumes(&mut app).len(), 1);
     }
 }
+
+/// Original-content validation of F08-AC05 (opt-in: `MM2_RETAIL`): one
+/// retail clip per soundscape category — a city-ambience loop
+/// (`gulls1`, authored volume 0.91), an announcer cue (the `al1`
+/// WEARAIN draw `cue_wave_stem` names), a menu confirm (`UiCue`) —
+/// is rendered through `mix_offline` at the gain the production
+/// `voice_gain` puts on its bus. Each category is saved to its own
+/// WAV plus one timeline under `$CARGO_TARGET_DIR/captures/`, and
+/// muting a bus silences only its category. Music has no track: the
+/// DirectMusic renderer does not exist, so the bound music state is
+/// asserted unsupported and the capture carries no music — the
+/// legacy-music half of the AC stays explicitly incomplete. Evidence
+/// is the computed mix, not rodio and not a listen on a device.
+#[test]
+fn the_retail_soundscape_capture_separates_ambience_voice_ui_and_music() {
+    use mm2_app::music::{MusicAudio, UNSUPPORTED};
+    use mm2_app::ui_sound::UiCue;
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::{SessionMode, cue_wave_stem};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail soundscape capture NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves = Assets::<PcmAudio>::default();
+    let voice_stem = cue_wave_stem("al1", "WEARAIN", 1);
+    let ui_stem = UiCue::Confirm.stem().expect("confirm clip");
+    let mut clip = |stem: &str| {
+        let h = bank
+            .load(&vfs, &mut waves, stem)
+            .unwrap_or_else(|e| panic!("retail stem {stem}: {e}"));
+        waves.get(&h).unwrap().clone()
+    };
+    let (ambience, voice, ui) = (clip("gulls1"), clip(&voice_stem), clip(ui_stem));
+
+    const RATE: u32 = 22050;
+    // (category, kind, clip, authored volume, start second, looping)
+    let tracks = [
+        ("ambience", VoiceKind::Object, &ambience, 0.91, 0.0, true),
+        ("voice", VoiceKind::Commentary, &voice, 1.0, 1.0, false),
+        ("ui", VoiceKind::Ui, &ui, 1.0, 3.0, false),
+    ];
+    const SECS: f32 = 6.0;
+    let render = |levels: AudioLevels| -> Vec<(&str, Vec<f32>)> {
+        let settings = GraphicsSettings {
+            audio: levels,
+            ..GraphicsSettings::default()
+        };
+        tracks
+            .iter()
+            .map(|(name, kind, clip, volume, start, looping)| {
+                let gain = audio::voice_gain(Some(&settings), *kind) * volume;
+                let secs = if *looping { SECS } else { clip.duration() };
+                let mix = audio::mix_offline(
+                    &[audio::OfflineVoice {
+                        clip,
+                        volume: gain,
+                        speed: 1.0,
+                    }],
+                    RATE,
+                    secs,
+                );
+                let mut line = vec![0.0f32; (SECS * RATE as f32) as usize];
+                let at = (start * RATE as f32) as usize;
+                for (o, s) in line.iter_mut().skip(at).zip(&mix) {
+                    *o = *s;
+                }
+                (*name, line)
+            })
+            .collect()
+    };
+    let level = |lines: &[(&str, Vec<f32>)], name: &str| {
+        rms(&lines.iter().find(|(n, _)| *n == name).unwrap().1)
+    };
+
+    let full = render(AudioLevels::default());
+    for (name, line) in &full {
+        assert!(rms(line) > 0.001, "{name} track audible: {}", rms(line));
+    }
+    // The categories are distinguishable on the timeline: the one-shots
+    // sit in their own windows while the ambience loop runs throughout.
+    let window = |name: &str, from: f32, to: f32| {
+        let l = &full.iter().find(|(n, _)| *n == name).unwrap().1;
+        rms(&l[(from * RATE as f32) as usize..(to * RATE as f32) as usize])
+    };
+    assert!(window("ambience", 0.0, 1.0) > 0.001, "ambience from t=0");
+    assert!(window("voice", 0.0, 1.0) == 0.0, "no voice before its cue");
+    assert!(window("voice", 1.0, 1.5) > 0.001, "voice at its cue");
+    assert!(window("ui", 2.0, 3.0) == 0.0, "no UI before its cue");
+    assert!(window("ui", 3.0, 3.1) > 0.001, "UI at its cue");
+
+    // Muting one bus silences only its category.
+    for (muted, levels) in [
+        (
+            "voice",
+            AudioLevels {
+                commentary: 0,
+                ..AudioLevels::default()
+            },
+        ),
+        (
+            "ambience",
+            AudioLevels {
+                city: 0,
+                ..AudioLevels::default()
+            },
+        ),
+        (
+            "ui",
+            AudioLevels {
+                effects: 0,
+                ..AudioLevels::default()
+            },
+        ),
+    ] {
+        let lines = render(levels);
+        for (name, _) in &lines {
+            let (was, now) = (level(&full, name), level(&lines, name));
+            if *name == muted {
+                assert_eq!(now, 0.0, "{muted} bus muted silences {name}");
+            } else {
+                assert_eq!(now, was, "muting {muted} left {name} untouched");
+            }
+        }
+    }
+    // The music bus scales no category: muting it changes nothing.
+    let no_music = render(AudioLevels {
+        music: 0,
+        ..AudioLevels::default()
+    });
+    for (name, _) in &no_music {
+        assert_eq!(level(&no_music, name), level(&full, name));
+    }
+
+    // Music: bound by name, reported unsupported, nothing to capture.
+    assert!(MusicAudio::bind(Some("sf"), &SessionMode::Cruise).is_some());
+    assert!(UNSUPPORTED.contains("DirectMusic not decoded"));
+    eprintln!("music capture: NONE — {UNSUPPORTED}");
+
+    if let Ok(target) = std::env::var("CARGO_TARGET_DIR") {
+        let dir = Path::new(&target).join("captures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut timeline = vec![0.0f32; (SECS * RATE as f32) as usize];
+        for (name, line) in &full {
+            std::fs::write(
+                dir.join(format!("f08-{name}.wav")),
+                audio::encode_wav_mono16(line, RATE),
+            )
+            .unwrap();
+            for (t, s) in timeline.iter_mut().zip(line) {
+                *t += s;
+            }
+        }
+        std::fs::write(
+            dir.join("f08-soundscape.wav"),
+            audio::encode_wav_mono16(&timeline, RATE),
+        )
+        .unwrap();
+    }
+    eprintln!(
+        "retail soundscape rms: ambience {:.4} voice {:.4} ui {:.4}; music none",
+        level(&full, "ambience"),
+        level(&full, "voice"),
+        level(&full, "ui")
+    );
+}
