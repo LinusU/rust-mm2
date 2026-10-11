@@ -2418,9 +2418,10 @@ fn main() {
 /// such variable, so it asks CoreGraphics whether the session has an
 /// active display at all. A process with no connection to the window
 /// server — a GUI-less launch, a session parked at the login window or
-/// with no display attached, a sandbox — draws to none, and winit would
-/// panic inside window creation rather than report it. Windows names no
-/// display either; a windowless service session is out of scope here.
+/// with no display attached, a sandbox — draws to none; winit then cannot
+/// open a window and either aborts or never returns, so the run reports
+/// nothing. Windows names no display either; a windowless service session
+/// is out of scope here.
 fn display_available() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -2452,7 +2453,7 @@ fn no_display_detail() -> &'static str {
 ///
 /// It answers none in a session with no window server (a GUI-less launch,
 /// a locked/login-window session, a sandboxed process), which is exactly
-/// when winit's `create_window` fails. CoreGraphics is a system framework
+/// when winit cannot open a window. CoreGraphics is a system framework
 /// on every macOS, so this needs no crate; `kCGErrorSuccess` is 0.
 #[cfg(target_os = "macos")]
 fn macos_active_display() -> bool {

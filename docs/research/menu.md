@@ -85,11 +85,14 @@ route: it differs from a `--city … --frames 90 --screenshot` run only in
 the systems added to the same `App`, so the window creation is identical.
 The earlier "panics at window creation" report was a session with no
 window server — on macOS `display_available` was a no-op, so the run
-reached winit's `create_window`, which panics instead of reporting. It now
-asks CoreGraphics (`CGGetActiveDisplayList`) for an active display and a
-window-server-less run prints `status=unavailable` (exit 4); that is
-reproduced by running either capture under `sandbox-exec` with the window
-server denied (MENU-SCREENSHOT-PANIC, #1188).
+reached winit with no display it could draw on and never reported. It now
+asks CoreGraphics (`CGGetActiveDisplayList`) for an active display, and a
+window-server-less run prints `status=unavailable` (exit 4) instead. This
+is reproduced by running either capture under `sandbox-exec` with the
+window server denied (`com.apple.windowserver.active`): before the guard
+the run never returns from winit's event-loop/window setup, after it both
+a menu and a `--city sf --nav` capture print `status=unavailable` and exit
+4 (MENU-SCREENSHOT-PANIC, #1188).
 
 | AC | Evidence (`crates/mm2_app/tests/menu.rs` unless noted) | State |
 |---|---|---|
