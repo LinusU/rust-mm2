@@ -220,8 +220,20 @@ pub struct RamDrive;
 const RAM_STEER_GAIN: f32 = 2.0;
 
 /// Range (m) inside which [`ram_drive`] only steers once the target is
-/// within [`RAM_ALIGNED`] of the nose.
-const RAM_STANDOFF: f32 = 14.0;
+/// within [`RAM_ALIGNED`] of the nose. The car opens its range straight
+/// ahead first and only charges once the run-up has put the target on a
+/// line the lock can take (see [`ram_input`]).
+///
+/// Sized so that run-up closes *before* the return arc: a neighbour one
+/// grid seat aside starts at ~4 m, and at the dev car's lock circle a
+/// 14 m opening (the pre-60 Hz value) left the pursuit still cutting in
+/// when it reached the victim, so its nose crossed the second neighbour's
+/// lane and clipped that car instead of delivering a square hit
+/// (measured, NET-SHOVE-WEAK-RAM, 2026-10-11: a 14 m opening struck the
+/// farther seat obliquely and moved the intended one only ~0.4–1.5 m,
+/// while a 30 m opening converges onto the victim's line and moves it
+/// ~2.5 m with no contact on the second seat).
+const RAM_STANDOFF: f32 = 30.0;
 
 /// Pace (m/s) above which [`ram_drive`] lifts off the throttle: at the
 /// dev car's top speed its lock circle is too wide to return on.
@@ -236,6 +248,12 @@ const RAM_TURN_SPEED: f32 = 5.0;
 
 /// Bearing (rad) off the nose that still counts as on a charge line.
 const RAM_ALIGNED: f32 = 0.45;
+
+/// The other vehicles [`ram_drive`] may pursue: each one's entity (so the
+/// pursuit can latch a target that outlives a frame) and its pose.
+/// Factored out to keep the system's parameter list lint-clean.
+type RamTargets<'w, 's> =
+    Query<'w, 's, (Entity, &'static GlobalTransform), (With<Vehicle>, Without<PlayerVehicle>)>;
 
 /// The pursuit evidence driver (F25-C): full throttle, steering at the
 /// nearest other vehicle in the world — a real driven car-to-car
@@ -253,7 +271,7 @@ const RAM_ALIGNED: f32 = 0.45;
 /// not a gameplay feature. With no other vehicle it drives straight.
 pub fn ram_drive(
     mut me: Query<(&GlobalTransform, &LinearVelocity, &mut VehicleInput), With<PlayerVehicle>>,
-    others: Query<&GlobalTransform, (With<Vehicle>, Without<PlayerVehicle>)>,
+    others: RamTargets,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
     impacts: Option<Res<ImpactFilter>>,
@@ -275,22 +293,52 @@ pub fn ram_drive(
     let authority = session.authority_role().is_authority();
     let turn_pace = if authority { RAM_TURN_SPEED } else { RAM_SPEED };
     for (at, vel, mut vi) in &mut me {
+        let struck =
+            authority && strike.observe(vel.length(), impacts.as_ref().map_or(0, |i| i.emitted));
+        let from = at.translation();
+        // Commit to one target for the whole pursuit. Re-picking the
+        // *nearest* every frame lets two near-equidistant neighbours swap
+        // while the car opens its range and loops: measured
+        // (NET-SHOVE-WEAK-RAM, 2026-10-11) the host ram's pursuer flipped
+        // from the next grid seat to the second one part-way through its
+        // opening arc, so its strike parked on the farther car. The
+        // latched entity is held while it exists, so the approach law
+        // sees a fixed target; if the target despawns the next nearest is
+        // taken.
+        let target = if driving && !struck {
+            match strike.target.and_then(|e| others.get(e).ok()) {
+                Some((_, t)) => Some(t.translation()),
+                None => {
+                    let nearest = others.iter().min_by(|(_, a), (_, b)| {
+                        a.translation()
+                            .distance_squared(from)
+                            .total_cmp(&b.translation().distance_squared(from))
+                    });
+                    strike.target = nearest.map(|(e, _)| e);
+                    nearest.map(|(_, t)| t.translation())
+                }
+            }
+        } else {
+            None
+        };
+        // The run-up has pulled the range past the stand-off: from here
+        // the pursuit is allowed to turn onto the target (see
+        // [`ram_input`]).
+        if let Some(to) = target
+            && !strike.opened
+            && from.distance(to) > RAM_STANDOFF
+        {
+            strike.opened = true;
+        }
         *vi = if !driving {
             VehicleInput::default()
-        } else if authority
-            && strike.observe(vel.length(), impacts.as_ref().map_or(0, |i| i.emitted))
-        {
+        } else if struck {
             VehicleInput {
                 handbrake: 1.0,
                 ..default()
             }
         } else {
-            let from = at.translation();
-            let nearest = others.iter().map(|t| t.translation()).min_by(|a, b| {
-                a.distance_squared(from)
-                    .total_cmp(&b.distance_squared(from))
-            });
-            ram_input(at, vel.length(), nearest, turn_pace)
+            ram_input(at, vel.length(), target, turn_pace, strike.opened)
         };
     }
 }
@@ -299,14 +347,23 @@ pub fn ram_drive(
 /// its strike — the spawn landing happens at rest and must not park it.
 const RAM_LAUNCHED: f32 = 3.0;
 
-/// [`ram_drive`]'s per-session memory: has the car launched, and has it
-/// since struck something. Impacts are read off the contract pipeline's
-/// running count ([`ImpactFilter::emitted`]) against the count at launch.
+/// [`ram_drive`]'s per-session memory: has the car launched, has it
+/// since struck something, and which vehicle its pursuit is committed
+/// to. Impacts are read off the contract pipeline's running count
+/// ([`ImpactFilter::emitted`]) against the count at launch.
 #[derive(Debug, Default)]
 pub struct RamStrike {
     baseline: u64,
     launched: bool,
     struck: bool,
+    /// The entity the pursuit latched when it began (see [`ram_drive`]):
+    /// held while it exists so a near-equidistant neighbour cannot steal
+    /// the charge mid-approach.
+    pub target: Option<Entity>,
+    /// Whether the run-up has pulled the range past [`RAM_STANDOFF`]:
+    /// once true the pursuit steers onto the target instead of opening
+    /// the range (`ram_input`).
+    pub opened: bool,
 }
 
 impl RamStrike {
@@ -325,39 +382,45 @@ impl RamStrike {
 
 /// One frame of [`ram_drive`]'s law: the car at `at` moving `speed`
 /// m/s, pursuing `target` (none = drive straight), holding `turn_pace`
-/// while the target is off the nose.
+/// while the target is off the nose. `opened` says whether the run-up
+/// has already pulled the range out past [`RAM_STANDOFF`].
 pub fn ram_input(
     at: &GlobalTransform,
     speed: f32,
     target: Option<Vec3>,
     turn_pace: f32,
+    opened: bool,
 ) -> VehicleInput {
     let from = at.translation();
-    let steering = target.map_or(0.0, |to| {
-        // Forward is −Z at yaw 0 — the `Quat::from_rotation_y` frame
-        // `relative_bearing` is defined on.
+    // Forward is −Z at yaw 0 — the `Quat::from_rotation_y` frame
+    // `relative_bearing` is defined on.
+    let bearing = target.map(|to| {
         let fwd = at.rotation() * Vec3::NEG_Z;
         let yaw = (-fwd.x).atan2(-fwd.z);
-        let bearing = mm2_game::relative_bearing(yaw, from, to);
-        // A target close and off the nose cannot be turned onto — a
-        // car at full lock orbits a neighbour on the next grid seat
-        // without touching it — so open the range straight ahead first
-        // and charge once the run-up has put the target on a line the
-        // lock can take.
-        if from.distance(to) < RAM_STANDOFF && bearing.abs() > RAM_ALIGNED {
-            0.0
-        } else {
-            (bearing * RAM_STEER_GAIN).clamp(-1.0, 1.0)
-        }
+        mm2_game::relative_bearing(yaw, from, to)
     });
+    // Pulling the range out: a target close and off the nose cannot be
+    // turned onto — a car at full lock orbits a neighbour on the next
+    // grid seat without touching it — so drive straight until the run-up
+    // has put the target at a range the lock circle can take. Once that
+    // range is opened the pursuer keeps steering for the rest of the
+    // pursuit: re-zeroing the lock every time the target is near again
+    // parks the car in a stable orbit whose bearing never crosses
+    // [`RAM_ALIGNED`], so it never charges at all (measured,
+    // NET-SHOVE-WEAK-RAM: a latched single target orbited for the whole
+    // run).
+    let opening = match (target, bearing) {
+        (Some(to), Some(b)) => !opened && from.distance(to) < RAM_STANDOFF && b.abs() > RAM_ALIGNED,
+        _ => false,
+    };
+    let steering = match bearing {
+        Some(b) if !opening => (b * RAM_STEER_GAIN).clamp(-1.0, 1.0),
+        _ => 0.0,
+    };
     // Still turning onto the target: stay at the pace the lock circle
     // can take. On a charge line (or with nothing to chase) the full
     // pace is allowed.
-    let turning = target.is_some_and(|to| {
-        let fwd = at.rotation() * Vec3::NEG_Z;
-        let yaw = (-fwd.x).atan2(-fwd.z);
-        mm2_game::relative_bearing(yaw, from, to).abs() > RAM_ALIGNED
-    });
+    let turning = bearing.is_some_and(|b| b.abs() > RAM_ALIGNED);
     let pace = if turning { turn_pace } else { RAM_SPEED };
     VehicleInput {
         // Lifting off above the pace keeps the turning circle small

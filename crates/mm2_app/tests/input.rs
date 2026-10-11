@@ -800,7 +800,7 @@ mod ram {
     use super::*;
 
     fn input_at(speed: f32, target: Option<Vec3>) -> VehicleInput {
-        input::ram_input(&GlobalTransform::default(), speed, target, 5.0)
+        input::ram_input(&GlobalTransform::default(), speed, target, 5.0, false)
     }
 
     #[test]
@@ -828,6 +828,22 @@ mod ram {
     }
 
     #[test]
+    fn it_turns_onto_a_near_target_once_the_range_is_open() {
+        // The same 4 m neighbour that is left alone while the run-up is
+        // still opening: once `opened`, the pursuer must steer onto it.
+        // Re-zeroing the lock here is the stable orbit that never
+        // crosses `RAM_ALIGNED`, so it never charges at all.
+        let beside = input::ram_input(
+            &GlobalTransform::default(),
+            5.0,
+            Some(Vec3::new(4.0, 0.0, 0.0)),
+            5.0,
+            true,
+        );
+        assert!(beside.steering > 0.0, "{beside:?}");
+    }
+
+    #[test]
     fn it_lifts_off_above_its_pace_and_drives_straight_alone() {
         let fast = input_at(30.0, Some(Vec3::new(0.0, 0.0, -40.0)));
         assert_eq!(fast.throttle, 0.0);
@@ -849,6 +865,7 @@ mod ram {
             8.0,
             Some(Vec3::new(30.0, 0.0, -10.0)),
             11.0,
+            false,
         );
         assert_eq!(wide.throttle, 1.0, "{wide:?}");
     }
