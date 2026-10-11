@@ -36,8 +36,6 @@ use mm2_formats::music::{self, MusicTable};
 use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
 use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
-/// Everything the audit measures, kept separate from printing so tests
-/// can exercise it on synthetic installs.
 /// What the retail speech tables author under one section name.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SpeechSection {
@@ -60,6 +58,8 @@ fn speech_section_bound(name: &str) -> bool {
     ) || name.starts_with("RESULTS")
 }
 
+/// Everything the audit measures, kept separate from printing so tests
+/// can exercise it on synthetic installs.
 #[derive(Default)]
 pub struct AudioReport {
     /// `aud/**` files examined (directory index entries excluded).
