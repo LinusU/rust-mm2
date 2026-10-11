@@ -490,6 +490,7 @@ fn add_lobby_client_systems(app: &mut App) {
                 // F26-A: replicated world props — same wiring as the
                 // app.
                 crate::worldprops::apply_props.after(net::drive_lobby),
+                crate::worldprops::drive_prop_lerp,
                 // F26-A: replicated ambient cars — same wiring.
                 crate::worldtraffic::apply_traffic.after(net::drive_lobby),
                 // F26-A: the host's world clock — same wiring.

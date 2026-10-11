@@ -41,12 +41,23 @@
 //!   drops the rows counted as `mismatched` and applies none of them,
 //!   rather than guess which ordinals still line up.
 //!
+//! - **Smoothing (F26-A.4c).** The host publishes an active body every
+//!   [`PUBLISH_EVERY`] fixed steps, so a pose applied as received held
+//!   still for most render frames and then jumped a whole frame's
+//!   travel (measured on loopback: 90 of 107 render frames unchanged,
+//!   jumps of the full inter-frame distance). An active body therefore
+//!   carries a [`PropLerp`]: each row starts a blend from the pose
+//!   displayed to the pose the row asserts, taking as long as the
+//!   observed gap since the body's previous row — the same blend a
+//!   remote car gets ([`RemoteLerp`](crate::netdrive::RemoteLerp)),
+//!   one gap behind the wire. A correction past
+//!   [`CORRECTION_SNAP_DIST`] is a teleport and snaps.
+//!
 //! Not replicated, by decision: vehicle breakaway parts (they have
 //! their own wire path, `SnapEntry.breaks`), and a client's own contact
 //! with a prop it has not yet heard about (the predicted car meets the
-//! dormant collider; the host's truth lands a frame later). Poses are
-//! applied as received — no interpolation yet, so an active prop moves
-//! at the publish rate.
+//! dormant collider; the host's truth lands a frame later). Settled
+//! poses are applied as received.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -60,7 +71,9 @@ use mm2_net::{MAX_SNAP_PROPS, Message, SNAP_NO_FRAGMENT, SiteTable, SnapProp};
 
 use crate::banger::{BangerPieces, FragmentSpawn, shatter_placement, spawn_fragment};
 use crate::net::{HostLink, LobbyState};
-use crate::netdrive::{NetDriveReport, NetPlayer, RemotePick, RemoteSnaps, wire_quat};
+use crate::netdrive::{
+    BLEND_GAP, CORRECTION_SNAP_DIST, NetDriveReport, NetPlayer, RemotePick, RemoteSnaps, wire_quat,
+};
 use crate::relevancy::InterestSet;
 
 /// [`SnapProp::phase`]: a struck, live body.
@@ -713,12 +726,97 @@ pub struct PropIndex {
     fragments: HashMap<PropKey, Entity>,
 }
 
+/// Blend state on a client's active prop (F26-A.4c): the pose it
+/// displayed when the newest row arrived, the pose that row asserts,
+/// and the session-time interval to blend across — the observed gap
+/// since the body's previous row, like
+/// [`RemoteLerp`](crate::netdrive::RemoteLerp).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct PropLerp {
+    from_pos: Vec3,
+    from_rot: Quat,
+    to_pos: Vec3,
+    to_rot: Quat,
+    /// Session clock at the newest row's arrival.
+    start: f64,
+    /// Session clock to finish blending at.
+    end: f64,
+}
+
+impl PropLerp {
+    /// A blend at rest on `pos`/`rot`, as of `now`.
+    fn at(pos: Vec3, rot: Quat, now: f64) -> Self {
+        Self {
+            from_pos: pos,
+            from_rot: rot,
+            to_pos: pos,
+            to_rot: rot,
+            start: now,
+            end: now,
+        }
+    }
+
+    /// Start blending from the displayed pose to a newly asserted one.
+    /// A correction past [`CORRECTION_SNAP_DIST`] is a teleport:
+    /// returns `true` and leaves the blend at rest on the target.
+    fn retarget(&mut self, shown: (Vec3, Quat), to: (Vec3, Quat), now: f64) -> bool {
+        let gap = (now - self.start).clamp(*BLEND_GAP.start(), *BLEND_GAP.end());
+        let snap = to.0.distance(shown.0) > CORRECTION_SNAP_DIST;
+        self.from_pos = if snap { to.0 } else { shown.0 };
+        self.from_rot = if snap { to.1 } else { shown.1 };
+        self.to_pos = to.0;
+        self.to_rot = to.1;
+        self.start = now;
+        self.end = now + gap;
+        snap
+    }
+
+    /// The pose to display at `now`.
+    fn sample(&self, now: f64) -> (Vec3, Quat) {
+        let span = (self.end - self.start).max(f64::EPSILON);
+        let t = ((now - self.start) / span).clamp(0.0, 1.0) as f32;
+        (
+            self.from_pos.lerp(self.to_pos, t),
+            wire_quat(self.from_rot.slerp(self.to_rot, t).to_array()),
+        )
+    }
+}
+
+/// Client: carry each active prop's displayed pose along its
+/// [`PropLerp`] (F26-A.4c). Only an `Active` body moves here; a
+/// settled one is posed by its row and has no blend.
+pub fn drive_prop_lerp(
+    time: Res<Time>,
+    mut props: Query<(
+        &Banger,
+        &PropLerp,
+        &mut Position,
+        &mut Rotation,
+        &mut Transform,
+    )>,
+) {
+    let now = time.elapsed_secs_f64();
+    for (banger, lerp, mut pos, mut rot, mut transform) in &mut props {
+        if banger.phase != BangerPhase::Active {
+            continue;
+        }
+        let (to_pos, to_rot) = lerp.sample(now);
+        if pos.0 != to_pos || rot.0 != to_rot {
+            pos.0 = to_pos;
+            rot.0 = to_rot;
+            transform.translation = to_pos;
+            transform.rotation = to_rot;
+        }
+    }
+}
+
 /// The mutable pieces a replicated row writes.
 type PropBody = (
     &'static mut Banger,
     &'static mut Position,
     &'static mut Rotation,
     &'static mut Transform,
+    Option<&'static mut PropLerp>,
     &'static SessionEntity,
 );
 
@@ -728,6 +826,7 @@ type PropBody = (
 /// session that is gone drops them.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // Bevy system — the queries are the contract.
 pub fn apply_props(
+    time: Res<Time>,
     mut commands: Commands,
     mut snaps: ResMut<RemoteSnaps>,
     mut session: ResMut<Session>,
@@ -740,7 +839,7 @@ pub fn apply_props(
     snaps.props.local.begin(session.generation());
     for (entity, site) in &added {
         index.sites.insert(site.0, entity);
-        if let Ok((banger, _, _, transform, owner)) = bodies.as_readonly().get(entity)
+        if let Ok((banger, _, _, transform, _, owner)) = bodies.as_readonly().get(entity)
             && owner.0 == session.generation()
         {
             snaps
@@ -779,9 +878,11 @@ pub fn apply_props(
     }
     let owner = SessionEntity(session.generation());
     let wire = session.wire_generation();
+    let now = time.elapsed_secs_f64();
     for (row, stamp) in snaps.props.drain_for(wire) {
         let resolved = apply_row(
             &row,
+            now,
             &mut commands,
             &mut index,
             owner,
@@ -801,8 +902,10 @@ pub fn apply_props(
 
 /// Apply one row; `false` when it names nothing this process can
 /// resolve or says something unreadable.
+#[allow(clippy::too_many_arguments)] // Threads the apply system's borrows through one row.
 fn apply_row(
     row: &SnapProp,
+    now: f64,
     commands: &mut Commands,
     index: &mut PropIndex,
     owner: SessionEntity,
@@ -833,7 +936,7 @@ fn apply_row(
         return false;
     };
     if row.fragment == SNAP_NO_FRAGMENT {
-        return apply_body(parent, phase, pos, rot, tick, commands, bodies, true);
+        return apply_body(parent, phase, pos, rot, (tick, now), commands, bodies, true);
     }
     // A fragment is a body, never a shatter marker; and its row proves
     // the placement shattered even when the placement's own row was in
@@ -846,7 +949,7 @@ fn apply_row(
         BangerPhase::Broken,
         pos,
         rot,
-        tick,
+        (tick, now),
         commands,
         bodies,
         true,
@@ -858,7 +961,16 @@ fn apply_row(
         .copied()
         .filter(|e| live(bodies, *e))
     {
-        return apply_body(entity, phase, pos, rot, tick, commands, bodies, false);
+        return apply_body(
+            entity,
+            phase,
+            pos,
+            rot,
+            (tick, now),
+            commands,
+            bodies,
+            false,
+        );
     }
     let Ok(authored) = pieces.get(parent) else {
         return false;
@@ -888,30 +1000,33 @@ fn apply_row(
             name,
         },
     );
-    spawned.insert(if phase == BangerPhase::Active {
-        RigidBody::Kinematic
+    if phase == BangerPhase::Active {
+        spawned.insert((RigidBody::Kinematic, PropLerp::at(pos, rot, now)));
     } else {
-        RigidBody::Static
-    });
+        spawned.insert(RigidBody::Static);
+    }
     index.fragments.insert(key, spawned.id());
     true
 }
 
 /// Move one local body to the replicated `phase`/pose. Phases only move
 /// forward: a row older than the body's state resolves (it named a real
-/// body) without changing it.
+/// body) without changing it. `when` is the session tick and the session
+/// clock the row lands at; an active body's pose is blended
+/// ([`PropLerp`]) rather than snapped.
 #[allow(clippy::too_many_arguments)]
 fn apply_body(
     entity: Entity,
     phase: BangerPhase,
     pos: Vec3,
     rot: Quat,
-    tick: u64,
+    (tick, now): (u64, f64),
     commands: &mut Commands,
     bodies: &mut Query<PropBody>,
     placement: bool,
 ) -> bool {
-    let Ok((mut banger, mut position, mut rotation, mut transform, _)) = bodies.get_mut(entity)
+    let Ok((mut banger, mut position, mut rotation, mut transform, mut lerp, _)) =
+        bodies.get_mut(entity)
     else {
         return false;
     };
@@ -935,16 +1050,30 @@ fn apply_body(
         (BangerPhase::Dormant, BangerPhase::Active) => {
             banger.phase = BangerPhase::Active;
             banger.activated = Some(tick);
-            commands.entity(entity).insert(RigidBody::Kinematic);
+            // First sight snaps (below); the blend starts from there.
+            commands
+                .entity(entity)
+                .insert((RigidBody::Kinematic, PropLerp::at(pos, rot, now)));
         }
         (BangerPhase::Dormant | BangerPhase::Active, BangerPhase::Settled) => {
             banger.phase = BangerPhase::Settled;
             banger.activated = None;
-            commands.entity(entity).insert(RigidBody::Static);
+            commands
+                .entity(entity)
+                .insert(RigidBody::Static)
+                .remove::<PropLerp>();
+        }
+        // A live body's refresh blends from the displayed pose; only a
+        // teleport falls through to the snap below.
+        (BangerPhase::Active, BangerPhase::Active) => {
+            if let Some(lerp) = lerp.as_mut()
+                && !lerp.retarget((position.0, rotation.0), (pos, rot), now)
+            {
+                return true;
+            }
         }
         // Same phase: a pose refresh.
-        (BangerPhase::Active, BangerPhase::Active)
-        | (BangerPhase::Settled, BangerPhase::Settled) => {}
+        (BangerPhase::Settled, BangerPhase::Settled) => {}
     }
     // A resend of an unchanged settled pose must not churn change
     // detection (and Avian's transform sync) every cycle.
@@ -960,6 +1089,25 @@ fn apply_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prop_blend_spans_the_observed_gap_and_snaps_a_teleport() {
+        let mut lerp = PropLerp::at(Vec3::ZERO, Quat::IDENTITY, 1.0);
+        let shown = (Vec3::ZERO, Quat::IDENTITY);
+        let to = (Vec3::X, Quat::IDENTITY);
+        // The next row lands 0.1 s later: the blend takes 0.1 s.
+        assert!(!lerp.retarget(shown, to, 1.1));
+        assert_eq!(lerp.sample(1.1).0, Vec3::ZERO);
+        assert!((lerp.sample(1.15).0.x - 0.5).abs() < 1e-5);
+        assert_eq!(lerp.sample(1.3).0, Vec3::X);
+        // A correction past the snap bound is a teleport: no slide.
+        let far = (
+            Vec3::new(CORRECTION_SNAP_DIST + 1.0, 0.0, 0.0),
+            Quat::IDENTITY,
+        );
+        assert!(lerp.retarget(shown, far, 1.2));
+        assert_eq!(lerp.sample(1.2).0, far.0);
+    }
 
     fn table_of(props: &[(u32, f32, bool)]) -> BTreeMap<PropKey, (SnapProp, Vec3, bool)> {
         props

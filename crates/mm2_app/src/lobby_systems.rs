@@ -64,6 +64,7 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
             // F26-A: the host's knocked/broken/settled props
             // fold into the client's own stamped world.
             worldprops::apply_props.after(net::drive_lobby),
+            worldprops::drive_prop_lerp,
             // F26-A: the host's ambient cars — the copies a
             // `Remote` city Cruise session poses.
             worldtraffic::apply_traffic.after(net::drive_lobby),

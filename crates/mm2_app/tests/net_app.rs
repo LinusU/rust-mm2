@@ -206,6 +206,7 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 netdrive::drive_remote_lerp,
                 // F26-A: replicated world props — production wiring.
                 mm2_app::worldprops::apply_props.after(net::drive_lobby),
+                mm2_app::worldprops::drive_prop_lerp,
                 // F26-A: replicated ambient cars — production wiring.
                 mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
                 // F26-A: the host's world clock — production wiring.
@@ -11721,4 +11722,78 @@ fn run_drift_cell(name: &str, impair: Impair, seed: u64) {
         client.update();
         thread::sleep(Duration::from_millis(4));
     }
+}
+
+/// F26-A.4c: what an active prop looks like on a client between the
+/// host's frames. The host publishes an active body every other fixed
+/// step (30 Hz); the client renders faster, so a pose applied as
+/// received holds still for a render frame or two and then jumps by the
+/// whole inter-frame travel. The leg streams a prop moving 1 m per
+/// frame at the host's cadence, samples the client's displayed pose
+/// every update, and records the plateau/jump profile.
+#[test]
+fn an_active_prop_moves_smoothly_between_the_hosts_frames() {
+    use mm2_app::worldprops::PROP_ACTIVE;
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (host, mut app, generation) = playing_client(install.path());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let prop = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::ZERO, 0);
+    app.update();
+
+    const FRAMES: u32 = 24;
+    const HOST_GAP: Duration = Duration::from_millis(33);
+    const RENDER_GAP: Duration = Duration::from_millis(4);
+    let mut samples: Vec<f32> = Vec::new();
+    for n in 0..FRAMES {
+        host.ctl()
+            .broadcast(&props_frame(
+                local_table(&app),
+                generation,
+                10 + u64::from(n),
+                vec![prop_row(
+                    0,
+                    mm2_net::SNAP_NO_FRAGMENT,
+                    PROP_ACTIVE,
+                    [n as f32, 1.0, 0.0],
+                )],
+            ))
+            .unwrap();
+        let until = Instant::now() + HOST_GAP;
+        while Instant::now() < until {
+            app.update();
+            samples.push(prop_state(&app, prop).2.x);
+            thread::sleep(RENDER_GAP);
+        }
+    }
+    // Ignore the first frames (first sight snaps; the gap is unknown).
+    let deltas: Vec<f32> = samples
+        .windows(2)
+        .skip(samples.len() / 4)
+        .map(|w| w[1] - w[0])
+        .collect();
+    let held = deltas.iter().filter(|d| **d == 0.0).count();
+    let biggest = deltas.iter().cloned().fold(0.0_f32, f32::max);
+    // Measured before the blend: 90 of 107 render frames unchanged and
+    // every host frame landing as one whole 1.0 m jump. Blended, the
+    // body moves on (nearly) every render frame in small increments;
+    // the bounds leave room for a loaded runner's scheduling jitter.
+    assert!(
+        held * 4 < deltas.len(),
+        "the prop held still on {held} of {} render frames",
+        deltas.len()
+    );
+    assert!(
+        biggest < 0.5,
+        "a render frame jumped {biggest} m of the host's 1.0 m step"
+    );
+    assert!(
+        deltas.iter().all(|d| *d >= 0.0),
+        "a blend toward a forward target never moves backward"
+    );
 }

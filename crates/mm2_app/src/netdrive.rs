@@ -180,7 +180,12 @@ const SEAT_STAGE_GAP: f32 = 4.0;
 /// [`ResetEpoch`]/`SnapEntry::epoch` — the bound stays as the catch-all
 /// for teleports the epoch cannot describe (drift past the bound, a
 /// pose written by hand).
-const CORRECTION_SNAP_DIST: f32 = 20.0;
+pub(crate) const CORRECTION_SNAP_DIST: f32 = 20.0;
+
+/// Bounds on a blend's length, seconds: the observed gap between two
+/// arrivals, clamped so a stalled stream doesn't smear a jump and a
+/// fast one doesn't snap. Shared by every replicated pose blend.
+pub(crate) const BLEND_GAP: std::ops::RangeInclusive<f64> = 0.005..=0.5;
 
 /// Settled-divergence bound for the *own* seat (F25-C, designed): a
 /// predicted car that sits at rest more than this far from the
@@ -3302,7 +3307,7 @@ fn apply_snap_frame(
     // stalled stream doesn't smear a jump and a fast one doesn't snap.
     let interval = snaps
         .last_arrival
-        .map(|prev| (now - prev).clamp(0.005, 0.5))
+        .map(|prev| (now - prev).clamp(*BLEND_GAP.start(), *BLEND_GAP.end()))
         .unwrap_or(0.0);
     snaps.last_arrival = Some(now);
     // Owners whose epoch advanced this frame — the trailer rows snap on
