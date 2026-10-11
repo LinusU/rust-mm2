@@ -85,6 +85,29 @@ pub enum LeafPhase {
     Closing,
 }
 
+impl LeafPhase {
+    /// The phase's wire discriminant (protocol v26 `Leaves` rows).
+    pub fn to_wire(self) -> u8 {
+        match self {
+            Self::Resting => 0,
+            Self::Opening => 1,
+            Self::Raised => 2,
+            Self::Closing => 3,
+        }
+    }
+
+    /// The phase a wire discriminant names, `None` for an unknown one.
+    pub fn from_wire(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Resting,
+            1 => Self::Opening,
+            2 => Self::Raised,
+            3 => Self::Closing,
+            _ => return None,
+        })
+    }
+}
+
 /// One leaf's animation state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeafMotion {
@@ -112,6 +135,36 @@ impl LeafMotion {
                 0.0
             },
         }
+    }
+
+    /// A proximity leaf's state as a peer reported it, or `None` when
+    /// the numbers cannot be one the cycle reaches: a non-finite or
+    /// negative timer, a timer past the longest wait, an angle outside
+    /// `0..=OPEN_ANGLE`, or a phase that contradicts the angle
+    /// (resting or opening at full height, raised below it, and so on).
+    /// The values come off the wire, so they are diagnosed here rather
+    /// than trusted.
+    pub fn from_wire(phase: u8, timer: f32, angle: f32) -> Option<Self> {
+        let phase = LeafPhase::from_wire(phase)?;
+        let longest = CLOSED_WAIT.max(RAISED_HOLD);
+        if !timer.is_finite() || !(0.0..=longest).contains(&timer) {
+            return None;
+        }
+        if !angle.is_finite() || !(0.0..=OPEN_ANGLE).contains(&angle) {
+            return None;
+        }
+        let consistent = match phase {
+            LeafPhase::Resting => angle == 0.0,
+            LeafPhase::Raised => angle >= OPEN_ANGLE,
+            LeafPhase::Opening => angle < OPEN_ANGLE,
+            LeafPhase::Closing => angle > 0.0,
+        };
+        consistent.then_some(Self {
+            mode: DrawbridgeMode::Proximity,
+            phase,
+            timer,
+            angle,
+        })
     }
 
     /// Start a resting proximity leaf opening. Returns whether it
@@ -178,6 +231,31 @@ pub fn leaf_hinges(points: &[[f32; 3]]) -> Vec<([f32; 3], [f32; 3])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_state_round_trips_and_rejects_what_the_cycle_never_reaches() {
+        let mut leaf = LeafMotion::new(DrawbridgeMode::Proximity);
+        leaf.trigger();
+        for _ in 0..4000 {
+            let back = LeafMotion::from_wire(leaf.phase.to_wire(), leaf.timer, leaf.angle);
+            assert_eq!(back, Some(leaf));
+            leaf.step(0.05);
+        }
+        let bad = [
+            (4, 0.0, 0.0),
+            (0, f32::NAN, 0.0),
+            (0, -1.0, 0.0),
+            (2, 99.0, OPEN_ANGLE),
+            (1, 0.0, OPEN_ANGLE + 0.1),
+            (1, 0.0, f32::INFINITY),
+            (0, 0.0, 0.2),
+            (2, 0.0, 0.2),
+            (3, 0.0, 0.0),
+        ];
+        for (phase, timer, angle) in bad {
+            assert_eq!(LeafMotion::from_wire(phase, timer, angle), None);
+        }
+    }
 
     #[test]
     fn mode_prefixes_decode_case_insensitively() {
