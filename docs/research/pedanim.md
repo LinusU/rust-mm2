@@ -511,3 +511,27 @@ vehicle lanes stay refused),
 the rest of the original car-sensing rule (UNK-43 — the corridor
 geometry is still the designed constant-velocity test, DSN-89), pedestrian audio, and any
 human play-test judgement of the figures' feel (owner evidence).
+
+## Pedestrian audio (F19-B.9, evidence only)
+
+What is established (AUD-15): `Midtown2.exe` builds the names
+`%s_fpedvoice%s%d` / `%s_mpedvoice%s%d` under `aud\creaturedata` and
+reads `numfemalepedvoicefiles` / `nummalepedvoicefiles`; the retail
+`default_{f,m}pedvoice<N>.csv` tables each author a single
+`Min speed,Max speed,min time in range,max time out of range` band
+`0,500,0.01,0` of `*SCREAM*` samples. Retail pedestrians therefore have
+scream-class voices; no footstep or chatter table exists.
+
+What is not: which event plays them. The walker reaction word
+(0 walking / 1 wary / 2 diving, `0x54b9a0`) is the only car-driven
+state, but the caller of the voice loader and the meaning of "speed" in
+the band were not traced (no disassembler in the session; the exe
+strings alone cannot decide). Nothing is wired: the crowd stays silent
+rather than invent a trigger, and no duplicate-event machinery is needed
+until one is evidenced.
+
+Follow-up to close it: trace the xrefs of the `pedvoice` format strings
+(file offsets above, +0x400000 image base for virtual addresses) to the
+ped update loop, then bind the evidenced trigger through
+`crate::audio` one-shots deduplicated like `impact_voices`; or an OWNER
+retail play observation (dive in front of a car with the volume up).
