@@ -12,11 +12,12 @@
 //!   real streets and the peak simultaneous pursuer count never passed
 //!   the policy cap (the AC04 claim);
 //! - `pur=…,e<N>` / `…,t<N>` — the fleet's bounded reverse-and-turn
-//!   stuck recoveries and deliberate turn-arounds, each of which needs
-//!   at least its detection + manoeuvre window, so their total is
-//!   rate-bounded (the stuck-recovery leg);
+//!   stuck escapes (detection + both manoeuvre halves) and deliberate
+//!   turn-arounds (both halves, no detection), each bounded by its own
+//!   window so the total is rate-bounded (the stuck-recovery leg);
 //! - `vsk=<armed>/<detections>/<recovered>` — the whole-fleet stuck
-//!   pipeline resolved every detection it made, never looping.
+//!   pipeline never recovers more episodes than it detected, so no
+//!   detection loops.
 //!
 //! Each `--spawn` is a fixed pose ~24 m in front of an authored
 //! `[Police]` row, so the held driver pulls away with a cop already in
@@ -34,12 +35,16 @@ const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 /// contact, stand down and re-arm.
 const FRAMES: u64 = 3600;
 
-/// One bounded escape or turn-around needs at least its detection window
-/// plus both halves of the manoeuvre — the same 207-frame floor the
-/// synthetic long-chase test (`tests/police.rs`) sizes its per-cop bound
-/// with. A fleet total above `cops × (FRAMES / PER_MANOEUVRE + 1)` would
-/// mean a cop recovered faster than one manoeuvre can complete.
-const PER_MANOEUVRE: u64 = 207;
+/// A wedged cop can only escape again once it has sat still `STUCK_FRAMES`
+/// and then completed both halves of the reverse-and-turn manoeuvre — the
+/// same 207-frame floor (90 + 72 + 45) the synthetic long-chase test
+/// (`tests/police.rs`) sizes its per-cop bound with.
+const ESCAPE_WINDOW: u64 = 90 + 72 + 45;
+
+/// A deliberate turn-around needs only the two manoeuvre halves (the aim
+/// is already behind a slow car, so no stuck-detection window precedes
+/// it) — 117 frames between starts.
+const TURNAROUND_WINDOW: u64 = 72 + 45;
 
 /// `(city, --spawn)`. The spawn stands ~24 m in front of an authored
 /// cop (`vpcop 58.99 0 71.63` sf, `vpcop 752.31 0 96.48` london), facing
@@ -142,20 +147,27 @@ fn retail_cruise_keeps_pursuers_capped_and_cop_recovery_bounded_in_both_cities()
             "{city}: counts inconsistent with the chase state machine:\n{record}"
         );
 
-        // Cop stuck recovery stays bounded: each escape or turn-around
-        // needs a full manoeuvre window, so the fleet total is bounded by
-        // the cop count times how many windows fit in the run.
+        // Cop stuck recovery stays bounded: every escape needs the full
+        // detection + manoeuvre window and every turn-around the two
+        // manoeuvre halves, so each fleet total is bounded by the cop
+        // count times how many windows fit in the run. The two are
+        // bounded apart because their floors differ.
         let escapes = suffix(pur, 'e');
         let turnarounds = suffix(pur, 't');
-        let recovery_bound = authored * (FRAMES / PER_MANOEUVRE + 1);
+        let escape_bound = authored * (FRAMES / ESCAPE_WINDOW + 1);
         assert!(
-            escapes + turnarounds <= recovery_bound,
-            "{city}: {escapes} escapes + {turnarounds} turn-arounds over the \
-             {recovery_bound} their windows allow:\n{record}"
+            escapes <= escape_bound,
+            "{city}: {escapes} escapes over the {escape_bound} their windows allow:\n{record}"
+        );
+        let turnaround_bound = authored * (FRAMES / TURNAROUND_WINDOW + 1);
+        assert!(
+            turnarounds <= turnaround_bound,
+            "{city}: {turnarounds} turn-arounds over the {turnaround_bound} their windows \
+             allow:\n{record}"
         );
 
-        // The whole-fleet stuck pipeline resolved every detection it made.
-        // `vsk=<armed>a/<detections>d/<recovered>r`.
+        // The whole-fleet stuck pipeline never resolves more episodes than
+        // it detected, so no detection loops. `vsk=<armed>a/<detections>d/<recovered>r`.
         let vsk = field(&record, "vsk").unwrap_or_else(|| panic!("{city}: no vsk=:\n{record}"));
         let vsk: Vec<u64> = vsk
             .split('/')
