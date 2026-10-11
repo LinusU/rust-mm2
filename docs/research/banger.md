@@ -655,12 +655,11 @@ readers/writers besides the parser and writer (`0x440c21`,
   `ImpulseLimit2` is in (N·s)², like the `Vel2`/`AngVel2`/`ForceLimit2`
   ICS fields. When it is exceeded the routine also clamps `x` to
   magnitude `sqrt(limit)` before its friction-cone step.
-  *Inferred, not read:* `K` in the first pass is that of the *other*
-  body (the striker, the first body of the impact record), so for a
-  prop that is not yet attached the quantity is the striker's
-  effective mass times its approach velocity — independent of the
-  prop's own `Mass`; the clamped branch then adds the second body.
-  The caller visiting both argument orders is likewise unverified.
+  `K` in the first pass is that of the *other* body (the striker, the
+  first body of the impact record — read in #1180, see "Which body's
+  `K`" below), so the quantity is the striker's effective mass times
+  its approach velocity, independent of the prop's own `Mass`; the
+  clamped branch then adds the second body.
 - **What crossing it does.** Any impact over the limit calls the
   instance's vtable slot `+0x70`, which for the dormant class
   (`dgUnhitBangerInstance`) is `0x442000`. With `record.NumParts` (loop
@@ -675,14 +674,93 @@ readers/writers besides the parser and writer (`0x440c21`,
   that `NumParts` bounds the spawned fragments (it is the loop count),
   and that fragments spawn at the activation edge, not at a later
   threshold.
-- **Not recovered.** What a contact *below* the limit leaves behind:
-  the pair step attaches the banger's active entity before testing
-  (`0x469807`), and the non-exceeded branch (`0x469962`) calls slot
-  `+0x1c` of the attached object, which the `dgBangerActive` vtable
-  fills with a bare `ret` — so whether the prop is released again or
-  simply keeps the response the solver already gave it is *unknown*.
-  The `0x4400d0`/`0x440040` active update (sleep/`Timer`) was only
-  skimmed.
+- **Sub-limit contact (UNK-22 remainder, #1180; verified_original
+  unless marked).** The earlier note read slot `+0x1c` as a bare `ret`.
+  That is the *manager's* vtable (`0x5b03c4`, the ×32 pool object at
+  `[0x626610]`). The object the pair step holds is a pool *element*
+  (`0x318` bytes, vtable `0x5b0398`, built by the constructor at
+  `0x43fce0`), and its slot `+0x1c` is `0x440020`: **release**.
+  `0x440020` = `0x43ffe0` (unregister the instance from the sim
+  manager via `0x468850`, set `instance+8 |= 0x10`, clear
+  `instance+4`, null `element+0x2bc`) then `0x440340` (return the
+  element to the free end of the pool). So a hit below the limit
+  *releases the attachment it just made*. Moreover the whole
+  banger branch of `0x469610` (`test [B+8], 1` at `0x469906`) jumps
+  from the sub-limit/exceeded outcomes straight to `0x4699da`, past
+  the ordinary-response block (`0x468540` registration and the
+  per-impact `0x4714d0` call at `0x4699b0`) — **no impulse is applied
+  to either body by this step.** The attach (`0x43fdb0`) copies the
+  instance pose into the element's body and the release never writes
+  a pose back, and the active `Update` (`0x440040`) only runs on
+  elements that stay in the pool, so a sub-limit prop **keeps its
+  authored pose, stays the dormant class, and keeps `instance+8` bit 0**
+  — it is re-tested (attach, gate, release) on every later contact.
+  The flag, not the class pointer, selects the gate: `instance+8` bit 0
+  is cleared by both activation outcomes (`0x442062` fragment path,
+  `0x4424a2` `NumParts == 0` path), so an activated prop takes the
+  ordinary path at `0x469970` (response applied, `0x4714d0` per
+  impact) from its next step on. *Inferred, not read:* that the
+  striker is therefore unimpeded by a sub-limit hit — a different
+  pass (the type-3 branch at `0x46971d` → `0x475af0`, or per-vehicle
+  collision) may still push back; the pre-filter `0x4692d0` was not
+  read.
+- **Crossing the limit applies no impulse in that step either.**
+  `0x442000` ends with either a fragment loop and then slot `+0x1c`
+  (release) at `0x442456`, or, for `NumParts == 0`, hands the
+  attached element to a fresh hit-class instance (`0x4424f9`,
+  registered through `0x468710` with the striker as the third
+  argument) and flags the dormant instance `|= 0x10`. The striker's
+  first response arrives the following step, against the now-dynamic
+  prop.
+- **Which body's `K` (answered).** `0x46b7c0` is a method on the
+  `0x44`-byte impact record; its first pass builds `K` from the body
+  of the object at **record `+0x3c`** (`0x478cc0` on `[+0x3c]+0x24`,
+  zero matrix when that is null), and only the clamped branch adds
+  record `+0x40` (`0x46b99f`). In the pair step `+0x3c` is filled from
+  the **first** argument's body (`0x469853`: `[esi+0x14]`, record base
+  `+0x28`) and `+0x40` from the **second** (`0x4698f2`), and only the
+  second argument is tested for the unhit flag. So the first-pass `K`
+  is the striker's, the prop's body enters only when the limit is
+  already crossed. Both callers pass one order only, no swap:
+  `0x468bcb` is `(entry i, entry j>i)` in the mover-pair loop and
+  `0x468c1a` is `(entry i, entry from i's candidate list)`. A dormant
+  banger passed *first* skips the gate (its flag is tested as the
+  second argument only) and takes the ordinary path — *inferred:*
+  dormant bangers arrive as list entries, i.e. second, which is not
+  read.
+- **Active-entity lifetime (verified).** An element's `Timer` is
+  `element+0x314`: zeroed at attach (`0x43feec`), advanced by the
+  frame time (`0x5cd820`) at the end of `0x440040`. `0x4400d0`
+  (slot `+0x0c`) releases the element when `[+0x2b4] == 0` or the
+  body's Y (`+0x134`) is below **−100.0** (`0x5b03c0`, a bare float
+  stored right after the vtable); `0x440390` sweeps the pool with the
+  same two tests plus `instance+6 != 0`. `[+0x2b4]` is never written
+  by a direct-offset store in the image (it lives in the sub-object
+  initialised at `0x26c`): its meaning is not recovered.
+- **The despawn timer constants (verified writes, retail
+  consequence inferred).** Data-manager (`[0x626650]`) fields
+  `+0x2a8a0`/`+0x2a8a4`/`+0x2a8a8` are written in two places only:
+  the constructor (`0x4407d5..0x4407e9`: **3.0**, **1.5**, flag
+  **0**) and a mode setup at `0x412ca7..0x412cc3` (flag **0**,
+  **6.0** `0x40c00000`, **30000.0** `0x46ea6000`) that also sets
+  `|= 0x40` on `sp_barricadeconcr_f`/`sp_barricadeconcl_f`. The
+  consumer (`0x4403f0` loop) reads the flag first: with flag 0 — the
+  only value ever stored — it ignores both floats and dispatches on
+  the record's `+0x120` bits (`2` → run slots `+8`/`+0xc` each tick;
+  `0x40` → `0x468360(inst, 2, 0x1b)`; `0x10` → `(inst, 1, 0x1b)`;
+  `4` → `(inst, 1, 3)`; these are sim-entry mode words, meaning not
+  recovered). With the flag set it would compare the element's timer
+  with the first float (`≤ limit` → `0x468360(inst, 1, 3)` /
+  `0x1b` once past the second float; `>` → update + release test),
+  which with 6.0/30000.0 never selects `0x1b`. So **the timed despawn
+  is a dead branch in the retail image**; there is no "30 s / 6 s
+  prop lifetime" to port, and our "settles on sleep" policy is not
+  contradicted by it. Residual risk: stores through the
+  `+0x2a86c`-based sub-object pointer were not swept.
+- **Still not recovered:** the sim-entry mode words (`0x468360`
+  arguments) and the `+0x120` record field they key off; `[+0x2b4]`;
+  the `0x4692d0` pre-filter; whether a dormant prop's sub-limit
+  contact is answered by another pass.
 
 **Implemented (#1179).** `activate_bangers` now gates on this quantity
 (`mm2_game::contact_impulse_squared`, striker's `K` — the first-body
@@ -692,8 +770,11 @@ rungs now activate. Census (`retail_impulse_limit_ladder_is_reachable_by_a_one_t
 975 of 995 records reachable by a 1 t striker at ≤60 m/s (slowest 56.6),
 15 immovable, out of reach: `cp_chinagate_f`, `np_ghirardelli_f`,
 `va_cablecar_f`, `np_alcatraz_*`. `NumParts` > 0 now bounds the
-spawned fragments. Still open: what a sub-limit contact leaves behind,
-which body's `K` the original uses.
+spawned fragments. #1180 then recovered both open items (above): a
+sub-limit contact releases the attachment and applies no impulse, and
+the first-pass `K` is the striker's. Our `activate_bangers` keeps the
+solver's response on sub-limit contacts — a divergence now documented,
+not changed.
 
 Historical note (the gate before #1179): the `½·m·v²` stand-in is
 the wrong quantity — it is quadratic in speed, the original is
