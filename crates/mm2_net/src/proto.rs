@@ -78,8 +78,10 @@
 /// keeping the authoritative seat's pedal/gear rules aligned with its client.
 /// v25: authored axle anti-roll forces are included in retail vehicle
 /// prediction. A v24 peer would predict different roll and wheel contacts
-/// for the same assets, so reject it before entering a session.
-pub const PROTOCOL_VERSION: u16 = 25;
+/// for the same assets, so reject it before entering a session. v26:
+/// `Message::Leaves` — the authority's proximity drawbridge leaves,
+/// which open for whoever came near them on the host (F26-A.4).
+pub const PROTOCOL_VERSION: u16 = 26;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -110,6 +112,7 @@ const TAG_TRAFFIC: u8 = 0x11;
 const TAG_WORLD: u8 = 0x12;
 const TAG_CNR: u8 = 0x13;
 const TAG_KEEPALIVE: u8 = 0x14;
+const TAG_LEAVES: u8 = 0x15;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -513,6 +516,29 @@ pub const SNAP_NO_FRAGMENT: u8 = u8::MAX;
 /// unbounded tail.
 pub const MAX_SNAP_CARS: u8 = 64;
 
+/// Bound on one [`Message::Leaves`] frame's rows: a city authors a
+/// handful of bridge paths (two leaves each), so the bound is far above
+/// need while a hostile count still cannot claim an unbounded tail.
+pub const MAX_SNAP_LEAVES: u8 = 32;
+
+/// One proximity drawbridge leaf's replicated state inside a
+/// [`Message::Leaves`] frame (v26, F26-A.4). The leaf is named by
+/// `slot`, its index in the bridge file's deterministic leaf order,
+/// which every peer that loaded the same bridge pathset shares. `phase`
+/// is the consumer's phase discriminant, opaque to the wire like
+/// [`SnapProp::phase`]. *State*, not an event.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapLeaf {
+    /// The leaf's slot in the bridge file's leaf order.
+    pub slot: u16,
+    /// Opaque phase discriminant — the consumer names the phases.
+    pub phase: u8,
+    /// Seconds spent in the current resting/raised phase.
+    pub timer: f32,
+    /// Hinge angle, radians.
+    pub angle: f32,
+}
+
 /// One ambient car's replicated state inside a [`Message::Traffic`]
 /// frame (v19, F26-A). The car is named by `id`, an opaque key the
 /// host minted when it spawned the car (never an `ObjectId`, which
@@ -843,6 +869,21 @@ pub enum Message {
     /// liveness timeout as a lost host. A client that sends one is
     /// dropped, like any other host-only message.
     Keepalive,
+    /// Host → every client: the authority's proximity drawbridge leaves
+    /// (v26, F26-A.4) — a proximity leaf opens for whoever came near it
+    /// on the host, so its state is the host's to carry. `tick` is the
+    /// host's world tick at capture and orders frames per generation;
+    /// `generation` gates it like [`Message::Snap`]. Bounded by
+    /// [`MAX_SNAP_LEAVES`]. *State*: a lost frame self-corrects on the
+    /// next.
+    Leaves {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// The authority's world tick at capture.
+        tick: u64,
+        /// One row per proximity leaf.
+        rows: Vec<SnapLeaf>,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -895,6 +936,9 @@ pub enum ProtoError {
     /// standings.
     #[error("cops-and-robbers frame declares {0} seats, bound is {MAX_SNAP_CNR_SEATS}")]
     OversizeCnr(u8),
+    /// A leaves frame declared more than [`MAX_SNAP_LEAVES`] rows.
+    #[error("leaves frame declares {0} rows, bound is {MAX_SNAP_LEAVES}")]
+    OversizeLeaves(u8),
 }
 
 impl RejectCode {
@@ -1284,6 +1328,27 @@ impl Message {
                 }
             }
             Self::Keepalive => out.push(TAG_KEEPALIVE),
+            Self::Leaves {
+                generation,
+                tick,
+                rows,
+            } => {
+                out.push(TAG_LEAVES);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                if rows.len() > MAX_SNAP_LEAVES as usize {
+                    return Err(ProtoError::OversizeLeaves(
+                        rows.len().min(u8::MAX as usize) as u8
+                    ));
+                }
+                out.push(rows.len() as u8);
+                for row in rows {
+                    out.extend_from_slice(&row.slot.to_le_bytes());
+                    out.push(row.phase);
+                    out.extend_from_slice(&row.timer.to_le_bytes());
+                    out.extend_from_slice(&row.angle.to_le_bytes());
+                }
+            }
             Self::World { generation, ticks } => {
                 out.push(TAG_WORLD);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -1547,6 +1612,28 @@ impl Message {
                 }
             }
             TAG_KEEPALIVE => Self::Keepalive,
+            TAG_LEAVES => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let count = cur.u8()?;
+                if count > MAX_SNAP_LEAVES {
+                    return Err(ProtoError::OversizeLeaves(count));
+                }
+                let mut rows = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    rows.push(SnapLeaf {
+                        slot: cur.u16()?,
+                        phase: cur.u8()?,
+                        timer: cur.f32()?,
+                        angle: cur.f32()?,
+                    });
+                }
+                Self::Leaves {
+                    generation,
+                    tick,
+                    rows,
+                }
+            }
             TAG_WORLD => Self::World {
                 generation: cur.u64()?,
                 ticks: cur.u64()?,
@@ -2126,6 +2213,36 @@ mod tests {
         let mut padded = bytes;
         padded.push(0);
         assert!(Message::decode(&padded).is_err());
+    }
+
+    #[test]
+    fn leaves_frames_round_trip_and_are_bounded() {
+        let row = |i: u32| SnapLeaf {
+            slot: i as u16,
+            phase: (i % 4) as u8,
+            timer: i as f32 * 0.5,
+            angle: 0.25,
+        };
+        let frame = |n: u32| Message::Leaves {
+            generation: 7,
+            tick: 99,
+            rows: (0..n).map(row).collect(),
+        };
+        for n in [0, 1, MAX_SNAP_LEAVES as u32] {
+            let msg = frame(n);
+            assert_eq!(Message::decode(&msg.encode().unwrap()).unwrap(), msg);
+        }
+        assert_eq!(
+            frame(MAX_SNAP_LEAVES as u32 + 1).encode(),
+            Err(ProtoError::OversizeLeaves(MAX_SNAP_LEAVES + 1))
+        );
+        let mut wide = vec![TAG_LEAVES];
+        wide.extend_from_slice(&[0; 16]);
+        wide.push(MAX_SNAP_LEAVES + 1);
+        assert_eq!(
+            Message::decode(&wide),
+            Err(ProtoError::OversizeLeaves(MAX_SNAP_LEAVES + 1))
+        );
     }
 
     #[test]

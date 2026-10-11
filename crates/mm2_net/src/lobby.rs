@@ -2740,6 +2740,31 @@ mod tests {
         }
     }
 
+    /// F26-A.4: proximity drawbridge leaves flow host → client only — a
+    /// client that submits a frame is dropped, never absorbed.
+    #[test]
+    fn a_client_cannot_assert_drawbridge_leaves() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::Leaves {
+                generation: 1,
+                tick: 1,
+                rows: Vec::new(),
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
     /// F27-AC05: the Cops & Robbers match flows host → client only — a
     /// client that submits a frame (a pickup, a steal, a score) is
     /// dropped, never absorbed.
