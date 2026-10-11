@@ -4345,6 +4345,7 @@ fn lesson_driver() -> mm2_app::lesson::LessonDriver {
     let leg = LessonLeg {
         filename: "slalom".into(),
         objective: LessonObjective::Maneuver,
+        rule: Some(mm2_game::LegRule::GateRun),
         source: "crash3:slalom".into(),
         definition: RaceDefinition {
             checkpoints: vec![Checkpoint {

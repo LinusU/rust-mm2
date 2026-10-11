@@ -12,28 +12,32 @@
 //!
 //! What a leg's definition is — and is not:
 //!
-//! - **Gate sequence** (designed, `DSN-56`): row 0 is the start pose and
-//!   rows `1..` are the gates in authored order, the last being the
-//!   finish; one pass under [`CheckpointRule::Ordered`]. The retail files
-//!   are course paths (`corner.csv` 24 rows, `london/exam1_1.csv` 15) and the
-//!   two-row ones (`slalom`, `stop`, `follow`) reduce to "reach the far
-//!   pose". That the runtime *orders* the rows is an inference — nothing
-//!   recovered says so (UNK-35).
+//! - **Gate sequence** (`CC-8`, verified in the executable): row 0 is the
+//!   start pose — the course's passed counter starts at 1 for it — and
+//!   rows `1..` are the gates, the last being the finish. Every family
+//!   but jump runs them in authored order under
+//!   [`CheckpointRule::Ordered`]; a jump lesson takes its middle gates
+//!   in any order and the last row only once they are all hit
+//!   ([`CheckpointRule::AnyOrder`] with the last row as the separate
+//!   finish). The retail files are course paths (`corner.csv` 24 rows,
+//!   `london/exam1_1.csv` 15) and the two-row ones (`slalom`, `stop`,
+//!   `follow`) reduce to "reach the far pose".
 //! - **Timer** (inferred, `CC-7`): the sub-event's `TimeLimit` in seconds
 //!   (the Blitz unit, `BLZ-3`); `0` is untimed — the two retail `corner`
-//!   rows author it.
-//! - **Not the family rule.** The `Event` code's real behaviour — the
-//!   cornering speed in `tail[0]`, a follow lesson's distance to its lead
-//!   car, a stop's standstill, a jump's landing, a cop chase's outcome —
-//!   is unrecovered. [`LessonLeg::objective`] carries the inferred family
-//!   so a later evaluator can dispatch on it, but nothing here claims a
-//!   leg's gate run *is* the lesson's pass criterion.
+//!   rows author it. The executable never starts the timer for a follow
+//!   leg, so [`LegRule::ignores_time_limit`] families carry a limit the
+//!   rule does not read.
+//! - **The family rule** is [`LessonLeg::rule`] (`CC-9`): the gate run
+//!   plus whatever the family's handler adds — the cornering speed in
+//!   `tail[0]`, a follow lesson's distance to its lead car, a stop's
+//!   wrecked lead, a cop chase's pursuer check. The definition here is
+//!   only the course and the clock; `mm2_game::LegRule::evaluate` decides.
 //! - **No actors.** Lead cars and police come from the lesson's aimap
 //!   wiring ([`crate::AimapWiring`]); the definition's `opponents`/`cops`
 //!   stay at the authored `mmcrashdata` values (0 on every retail row).
 
 use mm2_formats::racefiles::RaceFileKind;
-use mm2_game::{CheckpointRule, Difficulty, RaceDefinition, RaceError};
+use mm2_game::{CheckpointRule, Difficulty, LegRule, RaceDefinition, RaceError};
 use thiserror::Error;
 
 use crate::crashcourse::{CrashLesson, LessonObjective, LessonSubEvent, LessonTableRole};
@@ -45,13 +49,18 @@ use crate::race_def::{RaceBuildError, checkpoint, event_params, start_slots, tim
 pub struct LessonLeg {
     /// The authored `Filename` stem (`slalom`, `exam1_2`).
     pub filename: String,
-    /// The inferred `Event`-code family — the dispatch key for the
-    /// family evaluators that do not exist yet (UNK-35).
+    /// The inferred `Event`-code family — `rule` is its recovered
+    /// pass/fail rule.
     pub objective: LessonObjective,
     /// `crash<N>:<line>` of the authored row, for diagnostics.
     pub source: String,
     /// The gate-sequence + timer definition (see the module docs).
     pub definition: RaceDefinition,
+    /// The family's pass/fail rule recovered from the executable
+    /// (`CC-9`); `None` for an `Event` code the executable handles but
+    /// no retail row uses (`1`, `6`) or does not handle at all — the
+    /// leg then runs the gate-run baseline alone.
+    pub rule: Option<LegRule>,
 }
 
 /// Why a lesson's legs cannot be built.
@@ -182,10 +191,11 @@ fn build_leg(
     // `mmcrashdata` block's `Ambient` is 0 on every retail row.
     let mut params = event.race_params(difficulty).clone();
     params.ambient = sub.amb_density;
+    let (checkpoints, finish, rule) = gates(sub.objective, rows).map_err(leg_err)?;
     let definition = RaceDefinition {
-        checkpoints: rows[1..].iter().map(checkpoint).collect(),
-        finish: None,
-        rule: CheckpointRule::Ordered,
+        checkpoints,
+        finish,
+        rule,
         laps: 1,
         time_limit_ticks: if sub.timed() {
             Some(time_limit_ticks(sub.time_limit).map_err(leg_err)?)
@@ -210,5 +220,68 @@ fn build_leg(
         objective: sub.objective,
         source: sub.source.clone(),
         definition,
+        rule: leg_rule(sub),
     })
+}
+
+/// The gate layout of a leg's waypoint rows (row 0 is the start pose).
+///
+/// Every family but jump runs the gates in authored order (`CC-8`: the
+/// executable's checkpoint mode 5 tests the *current* gate only, its
+/// passed counter starts at 1 for the start gate and the course
+/// completes at the row count). A jump lesson uses mode 4: gates may
+/// be taken in any order and the last row only completes the course
+/// once every other gate has been hit — [`CheckpointRule::AnyOrder`]
+/// with the last row as the separate finish.
+fn gates(
+    objective: LessonObjective,
+    rows: &[mm2_formats::waypoints::Waypoint],
+) -> Result<
+    (
+        Vec<mm2_game::Checkpoint>,
+        Option<mm2_game::Checkpoint>,
+        CheckpointRule,
+    ),
+    RaceBuildError,
+> {
+    if objective == LessonObjective::Jump {
+        // Start pose, at least one gate, the finish.
+        if rows.len() < 3 {
+            return Err(RaceBuildError::TooFewRows {
+                needed: 3,
+                found: rows.len(),
+            });
+        }
+        let (finish, gates) = rows[1..].split_last().expect("three rows checked above");
+        return Ok((
+            gates.iter().map(checkpoint).collect(),
+            Some(checkpoint(finish)),
+            CheckpointRule::AnyOrder,
+        ));
+    }
+    Ok((
+        rows[1..].iter().map(checkpoint).collect(),
+        None,
+        CheckpointRule::Ordered,
+    ))
+}
+
+/// The recovered rule of a sub-event's family. The corner family reads
+/// its minimum speed from `tail[0]` (`cornerspeed`/`Misc`); the other
+/// families take nothing from the row but their `Event` code.
+fn leg_rule(sub: &LessonSubEvent) -> Option<LegRule> {
+    match sub.objective {
+        LessonObjective::Jump
+        | LessonObjective::CrossTraffic
+        | LessonObjective::Maneuver
+        | LessonObjective::Map => Some(LegRule::GateRun),
+        LessonObjective::Follow => Some(LegRule::Follow),
+        LessonObjective::CopChase => Some(LegRule::CopChase),
+        LessonObjective::Corner => {
+            let tail = sub.extras.first().copied().unwrap_or(0);
+            Some(LegRule::corner(tail as f32))
+        }
+        LessonObjective::Stop => Some(LegRule::Stop),
+        LessonObjective::Unknown(_) => None,
+    }
 }

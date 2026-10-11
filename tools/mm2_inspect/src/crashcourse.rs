@@ -177,6 +177,19 @@ fn print_lesson(lesson: &CrashLesson) {
 /// printing each leg's gate/limit summary. Returns one failure per
 /// difficulty that does not build — a lesson with a broken leg is not
 /// playable, so `--strict` counts it.
+/// How a leg is decided, for the audit line: the recovered rule of its
+/// family, or the baseline alone when the executable's `Event` code has
+/// no retail row to read one from.
+fn rule_note(leg: &mm2_content::LessonLeg) -> String {
+    match leg.rule {
+        Some(mm2_game::LegRule::Corner { min_speed_mph }) => {
+            format!("corner rule, min {min_speed_mph:.0} mph")
+        }
+        Some(rule) => format!("{} rule", rule.label()),
+        None => format!("gate run only; {} rule unrecovered", leg.objective.label()),
+    }
+}
+
 fn print_legs(catalog: &EventCatalog, lesson: &CrashLesson) -> Vec<String> {
     let mut failures = Vec::new();
     for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
@@ -192,12 +205,12 @@ fn print_legs(catalog: &EventCatalog, lesson: &CrashLesson) -> Vec<String> {
                         })
                         .unwrap_or_else(|| "untimed".into());
                     println!(
-                        "      {:<20} {} gates, {limit}, amb {:.2}, start slot {} (gate run only; {} rule unrecovered)",
+                        "      {:<20} {} gates, {limit}, amb {:.2}, start slot {} ({})",
                         leg.filename,
                         d.checkpoints.len(),
                         d.params.densities.traffic,
                         d.start_slots.len(),
-                        leg.objective.label(),
+                        rule_note(leg),
                     );
                 }
             }
@@ -543,7 +556,8 @@ mod tests {
         assert_eq!(c.legs[0], Ok(1));
         assert_eq!(c.legs[1], Ok(1));
         assert_eq!(c.families.iter().collect::<Vec<_>>(), ["follow"]);
-        assert_eq!(c.rule, RuleEvidence::Unresolved);
+        // Follow: the rule is recovered, the session does not feed it yet.
+        assert_eq!(c.rule, RuleEvidence::SyntheticOnly);
         // The Amateur aimap wires the lead car, the Professional one none.
         assert_eq!(c.lead_cars, [1, 0]);
         assert_eq!(c.police, [0, 0]);

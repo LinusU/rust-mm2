@@ -39,6 +39,7 @@ fn leg(name: &str, at: Vec3, start: Vec3, yaw_deg: f32, limit: Option<u32>) -> L
     LessonLeg {
         filename: name.into(),
         objective: LessonObjective::Maneuver,
+        rule: Some(mm2_game::LegRule::GateRun),
         source: format!("crash0:{name}"),
         definition: RaceDefinition {
             checkpoints: vec![gate(at.x, at.z)],

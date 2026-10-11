@@ -176,24 +176,37 @@ impl RuleEvidence {
 }
 
 impl LessonObjective {
-    /// Evidence level of this family's pass/fail rule. **Every family
-    /// is `Unresolved` today**: no `Event`-code evaluator has been
-    /// written because no rule (cornering speed, follow distance, stop,
-    /// jump landing, cop-chase outcome, ...) has been recovered
-    /// (UNK-35). The match is exhaustive on purpose — landing the first
-    /// evaluator must change a named arm here, which is what moves the
-    /// coverage report.
+    /// Evidence level of this family's pass/fail rule (F21-C.2).
+    ///
+    /// The `Event` dispatch and every family handler were read from
+    /// `Midtown2.exe` (`CC-8`/`CC-9`, `docs/research/crashcourse.md`):
+    ///
+    /// - **Jump, cross-traffic, maneuver, map** are `OriginalVerified`:
+    ///   the executable's handlers add nothing to the shared skeleton
+    ///   (course complete clears, timer expiry or a wreck fails), which
+    ///   is what the leg definition and the gate-run baseline already
+    ///   run — the evaluator is [`mm2_game::LegRule::GateRun`] and the
+    ///   jump's any-order gate rule lives in the leg definition.
+    /// - **Follow, cop chase, corner, stop** are `SyntheticOnly`: the
+    ///   rule is recovered and its evaluator ([`mm2_game::LegRule`])
+    ///   is tested, but only against synthetic observations — the
+    ///   session does not feed it yet (lead-car distance, pursuer
+    ///   sight, player speed, lead damage), so a live lesson of these
+    ///   families still ends on the baseline.
+    /// - Codes the executable has no retail row for (`Unknown`)
+    ///   remain `Unresolved`.
+    ///
+    /// The match is exhaustive on purpose: a new family must name its
+    /// arm here, which is what moves the coverage report.
     pub fn rule_evidence(&self) -> RuleEvidence {
         match self {
-            Self::Jump
-            | Self::Follow
-            | Self::CopChase
-            | Self::Corner
-            | Self::CrossTraffic
-            | Self::Maneuver
-            | Self::Stop
-            | Self::Map
-            | Self::Unknown(_) => RuleEvidence::Unresolved,
+            Self::Jump | Self::CrossTraffic | Self::Maneuver | Self::Map => {
+                RuleEvidence::OriginalVerified
+            }
+            Self::Follow | Self::CopChase | Self::Corner | Self::Stop => {
+                RuleEvidence::SyntheticOnly
+            }
+            Self::Unknown(_) => RuleEvidence::Unresolved,
         }
     }
 }
@@ -744,10 +757,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_objective_family_claims_a_recovered_rule_yet() {
-        // UNK-35: when the first evaluator lands, this must change with
-        // it — the coverage report's original-verified count follows.
-        for code in [0, 2, 3, 4, 5, 7, 8, 9, 1, 6, 42] {
+    fn evidence_follows_what_the_executable_handlers_were_read_to_do() {
+        // F21-C.2: the skeleton-only families are verified, the
+        // lead-car/pursuer/speed families have a tested evaluator the
+        // session does not feed yet, and codes with no retail row stay
+        // unresolved.
+        for code in [0, 5, 7, 9] {
+            assert_eq!(
+                LessonObjective::from_code(code).rule_evidence(),
+                RuleEvidence::OriginalVerified,
+                "code {code}"
+            );
+        }
+        for code in [2, 3, 4, 8] {
+            assert_eq!(
+                LessonObjective::from_code(code).rule_evidence(),
+                RuleEvidence::SyntheticOnly,
+                "code {code}"
+            );
+        }
+        for code in [1, 6, 42] {
             assert_eq!(
                 LessonObjective::from_code(code).rule_evidence(),
                 RuleEvidence::Unresolved,

@@ -29,8 +29,10 @@
 //! not end the session; only the lesson's last clear or a failure does.
 //!
 //! The verdict is the gate-run baseline of [`LegReport::from_gate_run`]
-//! — what a cornering, follow, stop, jump or cop-chase leg additionally
-//! requires is `UNK-35`. The driver is session state: teardown removes it
+//! — the executable's whole rule for jump, cross-traffic, maneuver and
+//! map legs. What a cornering, follow, stop or cop-chase leg
+//! additionally requires is recovered (`CC-9`, `mm2_game::LegRule`) but
+//! not yet fed from the session. The driver is session state: teardown removes it
 //! with the [`RaceState`], and while it is present
 //! `record_session_results` keeps every leg's ledger entry off the
 //! profile (a leg clear is not an event finish) and credits the
@@ -291,6 +293,7 @@ mod tests {
         LessonLeg {
             filename: name.into(),
             objective: LessonObjective::Maneuver,
+            rule: Some(mm2_game::LegRule::GateRun),
             source: format!("crash0:{name}"),
             definition: RaceDefinition {
                 checkpoints: vec![Checkpoint {

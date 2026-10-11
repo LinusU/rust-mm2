@@ -55,7 +55,10 @@ fn install() -> tempfile::TempDir {
              midtrm1,0,1,2,0,0,0.5,0,0,0,1,0,3,1,0,0,0.5,0,0,0,1\n\
              lesson2,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n\
              lesson3,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n\
-             lesson4,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n"
+             lesson4,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n\
+             lesson5,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n\
+             lesson6,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n\
+             lesson7,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n"
         ),
     );
     lesson(
@@ -115,6 +118,46 @@ fn install() -> tempfile::TempDir {
         "nowhere,7,1,20,0,0,0,0,0,0\n",
         "nowhere,7,1,20,0,0,0,0,0,0\n",
     );
+    // crash5: a jump over a five-row course; crash6: a two-row jump
+    // course (no middle gate); crash7: follow, corner without a speed
+    // and stop legs for the rule decode.
+    lesson(
+        dir,
+        "crash5",
+        "hops,0,1,26,0,0,0,0,0,0\n",
+        "hops,0,1,25,0,0,0,0,0,0\n",
+    );
+    write(
+        dir,
+        "race/london/hops.csv",
+        &format!(
+            "{WP_HEADER}0,0,0,0,10,0,0,0,\n0,0,40,0,9,0,0,0,\n30,0,80,0,8,0,0,0,\n60,0,80,0,7,0,0,0,\n90,0,80,0,6,0,0,0,\n"
+        ),
+    );
+    lesson(
+        dir,
+        "crash6",
+        "short,0,1,26,0,0,0,0,0,0\n",
+        "short,0,1,26,0,0,0,0,0,0\n",
+    );
+    write(
+        dir,
+        "race/london/short.csv",
+        &format!("{WP_HEADER}0,0,0,0,10,0,0,0,\n0,0,40,0,9,0,0,0,\n"),
+    );
+    lesson(
+        dir,
+        "crash7",
+        "trail,2,1,36,0,0,0,1,0,0\ndefault,4,1,0,0,0,0,0,0,0\nbrake,8,1,50,0,0,0,1,0,0\nchase,3,1,60,0,0,0,0,0,0\nweird,6,1,60,0,0,0,0,0,0\n",
+        "trail,2,1,36,0,0,0,1,0,0\ndefault,4,1,0,0,0,0,0,0,0\nbrake,8,1,50,0,0,0,1,0,0\nchase,3,1,60,0,0,0,0,0,0\nweird,6,1,60,0,0,0,0,0,0\n",
+    );
+    for name in ["trail", "default", "brake", "chase", "weird"] {
+        write(
+            dir,
+            &format!("race/london/{name}.csv"),
+            &format!("{WP_HEADER}0,0,0,0,10,0,0,0,\n0,0,40,0,9,0,0,0,\n"),
+        );
+    }
     d
 }
 
@@ -280,4 +323,71 @@ fn a_zero_width_gate_is_rejected_by_the_shared_validation() {
         } => {}
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_jump_leg_takes_its_middle_gates_in_any_order_and_the_last_row_last() {
+    let d = install();
+    let (catalog, course) = scanned(d.path());
+    let legs = lesson_legs(&catalog, &course.lessons[5], Difficulty::Amateur).unwrap();
+    let def = &legs[0].definition;
+    assert_eq!(legs[0].objective, LessonObjective::Jump);
+    assert_eq!(def.rule, CheckpointRule::AnyOrder);
+    // Rows 1..=3 are the free gates, row 4 the separate finish.
+    let zs: Vec<f32> = def.checkpoints.iter().map(|c| c.center.z).collect();
+    assert_eq!(zs, [40.0, 80.0, 80.0]);
+    let finish = def.finish.as_ref().expect("the last row is the finish");
+    assert_eq!(finish.center.x, 90.0);
+    assert_eq!(def.time_limit_ticks, Some(26 * RACE_TICK_HZ));
+    assert_eq!(legs[0].rule, Some(mm2_game::LegRule::GateRun));
+}
+
+#[test]
+fn a_jump_course_without_a_middle_gate_is_a_named_error() {
+    let d = install();
+    let (catalog, course) = scanned(d.path());
+    let err = lesson_legs(&catalog, &course.lessons[6], Difficulty::Amateur).unwrap_err();
+    match err {
+        LessonBuildError::Leg { error, .. } => assert!(
+            matches!(
+                error,
+                RaceBuildError::TooFewRows {
+                    needed: 3,
+                    found: 2
+                }
+            ),
+            "{error:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn legs_carry_the_rule_of_their_family() {
+    use mm2_game::LegRule;
+    let d = install();
+    let (catalog, course) = scanned(d.path());
+    // The exam: a corner leg reads tail[0] = 40 mph, the maneuver leg
+    // is the bare gate run.
+    let exam = lesson_legs(&catalog, &course.lessons[1], Difficulty::Amateur).unwrap();
+    assert_eq!(exam[0].rule, Some(LegRule::corner(40.0)));
+    assert_eq!(exam[1].rule, Some(LegRule::GateRun));
+    // One row per remaining family; a corner row with no authored
+    // speed falls back to the executable's 50 mph.
+    let legs = lesson_legs(&catalog, &course.lessons[7], Difficulty::Amateur).unwrap();
+    let rules: Vec<_> = legs.iter().map(|l| l.rule).collect();
+    assert_eq!(
+        rules,
+        [
+            Some(LegRule::Follow),
+            Some(LegRule::Corner {
+                min_speed_mph: mm2_game::CORNER_DEFAULT_MIN_MPH
+            }),
+            Some(LegRule::Stop),
+            Some(LegRule::CopChase),
+            // Event 6 is handled by the executable but no retail row
+            // uses it: no recovered rule, so none is invented.
+            None,
+        ]
+    );
 }

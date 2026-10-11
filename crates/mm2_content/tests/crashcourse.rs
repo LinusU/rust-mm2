@@ -305,8 +305,20 @@ fn each_school_names_its_required_vehicle() {
     assert_eq!(mm2_content::required_vehicle(""), None);
 }
 
+/// The weakest evidence of any sub-event the lesson authors, taken
+/// straight from the parsed tables (not through `coverage()`).
+fn weakest_evidence(lesson: &mm2_content::CrashLesson) -> RuleEvidence {
+    lesson
+        .tables
+        .iter()
+        .flat_map(|t| &t.sub_events)
+        .map(|sub| sub.objective.rule_evidence())
+        .min()
+        .unwrap_or(RuleEvidence::Unresolved)
+}
+
 #[test]
-fn coverage_lists_every_lesson_and_claims_no_verified_rule() {
+fn coverage_lists_every_lesson_at_its_weakest_leg() {
     let d = synthetic_install();
     let (_, cc) = course(d.path());
     let cov = cc.coverage();
@@ -314,9 +326,11 @@ fn coverage_lists_every_lesson_and_claims_no_verified_rule() {
     assert!(!cov.lessons.is_empty());
     for (row, lesson) in cov.lessons.iter().zip(&cc.lessons) {
         assert_eq!(row.stem, lesson.stem);
-        assert_eq!(row.evidence, RuleEvidence::Unresolved, "{}", row.stem);
+        assert_eq!(row.evidence, weakest_evidence(lesson), "{}", row.stem);
     }
-    assert_eq!(cov.count(RuleEvidence::Unresolved), cov.lessons.len());
-    assert_eq!(cov.count(RuleEvidence::OriginalVerified), 0);
-    assert!(cov.render().contains("unresolved"));
+    let total = cov.count(RuleEvidence::Unresolved)
+        + cov.count(RuleEvidence::SyntheticOnly)
+        + cov.count(RuleEvidence::OriginalVerified);
+    assert_eq!(total, cov.lessons.len());
+    assert!(cov.render().contains("original-verified"));
 }

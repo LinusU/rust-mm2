@@ -720,6 +720,7 @@ fn lesson_driver(app: &App) -> mm2_app::lesson::LessonDriver {
     let legs = vec![mm2_content::LessonLeg {
         filename: "leg".into(),
         objective: mm2_content::LessonObjective::Maneuver,
+        rule: Some(mm2_game::LegRule::GateRun),
         source: "crash0:leg".into(),
         definition: app
             .world()
