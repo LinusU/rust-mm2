@@ -58,9 +58,10 @@ pub struct TrackCamSpec {
     /// `docs/research/camtrack.md`); the app does not bind the vertical
     /// clamp yet.
     pub min_max_on: Option<f32>,
-    /// `TrackBreak` — authored flag for the boom breaking loose on
-    /// hard manoeuvres; exact behaviour unrecovered (surfaced, not
-    /// consumed).
+    /// `TrackBreak` — 1: tracking breaks while the body's up axis has
+    /// `y < 0.35`; 2: always broken (`0x51dc50`, UNK-36). What the broken
+    /// state does to the eye lives in the unrecovered flag machine
+    /// (`0x190`/`0x194`/`0x198`).
     pub track_break: Option<f32>,
     /// `MinDist` — boom distance floor, metres. `0` on some records
     /// (e.g. the bus's near view).
@@ -116,6 +117,22 @@ pub struct TrackCamSpec {
     pub app_inc: Option<f32>,
     /// `AppDec`.
     pub app_dec: Option<f32>,
+    /// `ReverseOn` — 1: swing the camera round the aim point after the
+    /// car sits in reverse gear; -1: pin it round whenever the flag is
+    /// set; constructor default 1 (`0x51dc50`/`0x51e3e0`, UNK-36).
+    pub reverse_on: Option<f32>,
+    /// `RevOnApp` — rad/s the reverse swing ramps toward ±π.
+    pub rev_on_app: Option<f32>,
+    /// `RevOffApp` — rad/s the swing ramps back to 0 once out of reverse.
+    pub rev_off_app: Option<f32>,
+    /// `HillMin`/`HillMax`/`HillLerp` — ground-slope pitch bias shape
+    /// (`0x51dec0`). Parsed and validated; not bound (the sign and
+    /// rotation conventions of its consumer are unrecovered).
+    pub hill_min: Option<f32>,
+    /// `HillMax`.
+    pub hill_max: Option<f32>,
+    /// `HillLerp`.
+    pub hill_lerp: Option<f32>,
     /// Field names outside the consumed schema (the approach/dynamics
     /// cluster), kept for diagnosis — values stay in the record.
     pub extra_fields: Vec<String>,
@@ -267,6 +284,12 @@ impl TrackCamSpec {
             "MaxAppXZPos",
             "AppInc",
             "AppDec",
+            "ReverseOn",
+            "RevOnApp",
+            "RevOffApp",
+            "HillMin",
+            "HillMax",
+            "HillLerp",
         ];
         Ok(TrackCamSpec {
             type_tag: file.type_tag.clone(),
@@ -297,6 +320,12 @@ impl TrackCamSpec {
             max_app_xz_pos: scalar(root, "MaxAppXZPos"),
             app_inc: scalar(root, "AppInc"),
             app_dec: scalar(root, "AppDec"),
+            reverse_on: scalar(root, "ReverseOn"),
+            rev_on_app: scalar(root, "RevOnApp"),
+            rev_off_app: scalar(root, "RevOffApp"),
+            hill_min: scalar(root, "HillMin"),
+            hill_max: scalar(root, "HillMax"),
+            hill_lerp: scalar(root, "HillLerp"),
             extra_fields: root
                 .entries
                 .iter()
@@ -408,6 +437,26 @@ impl TrackCamSpec {
         self.collide_mode() != 0
     }
 
+    /// `ReverseOn` as the authored mode (constructor default 1 when
+    /// absent or unusable): 1 swings, -1 pins, anything else is off.
+    pub fn reverse_mode(&self) -> i32 {
+        match usable1(self.reverse_on) {
+            None => 1,
+            Some(v) if v == 1.0 => 1,
+            Some(v) if v == -1.0 => -1,
+            Some(_) => 0,
+        }
+    }
+
+    /// `TrackBreak` as the authored mode: 1, 2, or 0 for anything else.
+    pub fn track_break_mode(&self) -> u8 {
+        match usable1(self.track_break) {
+            Some(1.0) => 1,
+            Some(2.0) => 2,
+            _ => 0,
+        }
+    }
+
     /// `MinMaxOn` as an authored flag — same unusable-field rule as
     /// [`Self::collide_mode`]. What it gates in the original is the
     /// vertical eye clamp, not the distance clamp (UNK-36).
@@ -452,6 +501,12 @@ impl TrackCamSpec {
             ("MaxAppXZPos", self.max_app_xz_pos),
             ("AppInc", self.app_inc),
             ("AppDec", self.app_dec),
+            ("ReverseOn", self.reverse_on),
+            ("RevOnApp", self.rev_on_app),
+            ("RevOffApp", self.rev_off_app),
+            ("HillMin", self.hill_min),
+            ("HillMax", self.hill_max),
+            ("HillLerp", self.hill_lerp),
         ] {
             if let Some(v) = v {
                 issues.extend(scalar_issue(name, v));
@@ -502,9 +557,36 @@ mod tests {
             (Some(4.0), Some(0.7), Some(0.25))
         );
         assert!(s.approach_enabled() && s.app_app_enabled());
-        // The rest of the dynamics cluster stays verbatim in extras.
-        assert!(s.extra_fields.iter().any(|f| f == "ReverseOn"));
-        assert!(s.extra_fields.iter().any(|f| f == "HillLerp"));
+        assert_eq!(
+            (s.reverse_on, s.rev_on_app, s.rev_off_app),
+            (Some(1.0), Some(2.0), Some(4.0))
+        );
+        assert_eq!(
+            (s.hill_min, s.hill_max, s.hill_lerp),
+            (Some(-0.28), Some(0.28), Some(0.05))
+        );
+        assert_eq!((s.reverse_mode(), s.track_break_mode()), (1, 0));
+        // `RevDelay` has no reader in the retail camera: it stays in extras.
+        assert!(s.extra_fields.iter().any(|f| f == "RevDelay"));
+        assert!(!s.extra_fields.iter().any(|f| f == "ReverseOn"));
+    }
+
+    #[test]
+    fn reverse_and_track_break_modes_follow_the_constructor_defaults() {
+        let mode = |body: &str| {
+            let text = format!("type: a\ncamTrackCS {{\n  {body}\n}}\n");
+            TrackCamSpec::parse(&text).unwrap()
+        };
+        // Absent or unusable `ReverseOn` keeps the constructor default 1.
+        assert_eq!(mode("Offset 0 1 2").reverse_mode(), 1);
+        assert_eq!(mode("ReverseOn nan").reverse_mode(), 1);
+        assert_eq!(mode("ReverseOn -1").reverse_mode(), -1);
+        assert_eq!(mode("ReverseOn 0").reverse_mode(), 0);
+        assert_eq!(mode("ReverseOn 3").reverse_mode(), 0);
+        assert_eq!(mode("TrackBreak 1").track_break_mode(), 1);
+        assert_eq!(mode("TrackBreak 2").track_break_mode(), 2);
+        assert_eq!(mode("TrackBreak 7").track_break_mode(), 0);
+        assert_eq!(mode("Offset 0 1 2").track_break_mode(), 0);
     }
 
     #[test]
