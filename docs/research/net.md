@@ -1131,12 +1131,59 @@ claim.* v19 adds `Message::Traffic { generation, tick, roster, rows }`
 - **Not covered.** No interpolation beyond the velocity carry and the
   car's transform interpolation; no per-client relevancy (the host's
   population is bounded by its own interest union and the frame is
-  broadcast); traffic signal heads are not replicated (aspect is a pure
-  function of the host's clock); no measured impairment cell or
-  windowed/real-GPU leg for `Traffic`; a knocked wreck stays a
-  kinematic copy posed from the wire (the host's solver owns it); the
-  client's own contact with a copy is predicted against the copy's last
-  pose.
+  broadcast); no measured impairment cell or windowed/real-GPU leg for
+  `Traffic`; a knocked wreck stays a kinematic copy posed from the wire
+  (the host's solver owns it); the client's own contact with a copy is
+  predicted against the copy's last pose. Traffic signal heads are
+  replicated on their own frame — see § Traffic-signal replication
+  (v27, F26-A.4b) below.
+
+## Traffic-signal replication (protocol v27, F26-A.4b)
+
+*Implementation choice; no original-protocol claim.* v27 adds
+`Message::Signals { generation, tick, rows }` (tag 0x16, host → client
+only — a client that sends one is dropped `Malformed`, F26-AC04) with
+one `SnapSignal { junction, green }` row per light-controlled junction.
+
+- **Why.** A head's aspect is a pure function of the junction
+  controller's tick (`Junctions` in `mm2_game::traffic`), and only the
+  authority runs that controller, so a `Remote` client had no phase to
+  show and rendered nothing. The head *geometry* is deterministic scene
+  data both peers derive from the same `.bai`, so only the phase the
+  authority decides has to cross the wire.
+- **Publish.** `signalnet::publish_signals`, host only, during
+  `Countdown`/`Playing`/`Results`: at once for a change in any junction's
+  green road, otherwise once per `PUBLISH_EVERY_TICKS` = 120 of *world*
+  time (about a second, so a pause that stops the clock stops the
+  repeats). `green` is the junction's `green_road` (a BAI road index) or
+  `SIGNAL_NO_GREEN` during the all-red clearance. Bounded by
+  `MAX_SNAP_SIGNALS` = 512 rows (retail SF authors ~182 light junctions,
+  London ~218; measured over the shipped `.bai` files).
+- **Apply.** `signalnet::apply_signals`, client only, held through
+  `Loading`/`Paused`, dropped outside a live session. The stage keeps the
+  newest frame *per generation* (≤4): an older or equal tick is dropped
+  counted `stale`, another generation's frame is refused counted. A
+  frame's rows are looked up by junction; a light head at a junction the
+  host did not name keeps its aspect and counts `heads_unresolved`; the
+  aspect comes from `SignalAspect::of_phase`, the same mapping the
+  authority's `Junctions::signal_aspect` uses, so the two never diverge
+  (`of_phase_agrees_with_signal_aspect_for_every_head`).
+- **Spawn.** `traffic::spawn_client_signals` (through
+  `signalnet::load_signal_replica`) authors the same heads the authority
+  draws, from the same `.bai`, only for a `Remote` city session that
+  fields traffic (networked races field none, MP-4); a light member rests
+  red until the first frame lands. The `SignalReplica` resource dies with
+  the session like the traffic replica.
+- **Evidence.** In-process: `mm2_app` `tests/traffic.rs`
+  (`a_remote_client_renders_the_authored_signal_heads`,
+  `networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica`)
+  and the `signalnet` unit tests (stage per generation, stale/refused,
+  apply to member/non-member heads, another generation changes nothing);
+  `mm2_net` `proto`/`lobby` round-trip, bound and client-assertion-refused
+  tests; `mm2_game` `tests/traffic.rs`
+  (`of_phase_agrees_with_signal_aspect_for_every_head`). No two-process
+  or windowed leg yet; the phase's own timings are the designed F10
+  constants (UNK-12).
 
 ## World-clock replication (protocol v20, F26-A)
 
