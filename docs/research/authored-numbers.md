@@ -349,7 +349,7 @@ Resolved by task OPR-5.4; kept so the outcomes stay findable.
 `cells.len() < 5` at `:229` so the range cannot invert; `tex.rs` rejects a zero dimension
 at `:147` and enforces every mip's byte count via `r.bytes(byte_count)?` (no allocation
 amplification, no short decode buffer on the sized formats); `bnd.rs:292-307` validates
-every polygon vertex index; `pathset.rs:225-232`/`:302-310` and `lmap.rs:48-63` cap counts
+every polygon vertex index; `pathset.rs:225-232`/`:302-310` and `lmap.rs:86-103` cap counts
 before `with_capacity`; `sky.rs:39` requires exactly 4 tokens; `mtx.rs:48` checks
 `BYTE_LEN`; `hudmap.rs:95-104` (`tail`) rejects `values.len() < n`; `tune.rs:409`'s
 `line_end - 1` is only reached when `same_line` is non-empty; `ped.rs:1474` is an
