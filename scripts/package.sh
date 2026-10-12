@@ -13,21 +13,25 @@
 # `--layout` picks the install layouts to assemble; it defaults to `all`,
 # every layout this platform ships (`.app` is macOS-only):
 #
-#   flat    <out>/rust-mm2-<os>-<arch>/      the portable folder, plus a
-#           .tar.gz beside it: the binaries, assets/, README.md,
+#   flat    <out>/rust-mm2-<os>-<arch>/      the portable folder, plus an
+#           archive beside it: the binaries, assets/, README.md,
 #           LICENSE-MIT, LICENSE-APACHE, docs/
 #   app     <out>/rust-mm2.app/              a macOS bundle:
 #           Contents/MacOS/{mm2,...}, Contents/Resources/assets/,
-#           Contents/Resources/{README.md,LICENSE-*,docs/}, plus a .tar.gz
+#           Contents/Resources/{README.md,LICENSE-*,docs/}, plus an archive
 #   prefix  <out>/rust-mm2-<os>-<arch>-prefix/  a Unix prefix:
 #           bin/{mm2,...}, share/rust-mm2/assets/,
-#           share/doc/rust-mm2/{README.md,LICENSE-*,docs/}, plus a .tar.gz
+#           share/doc/rust-mm2/{README.md,LICENSE-*,docs/}, plus an archive
+#
+# The archive is a `.zip` on Windows (MSYS/Cygwin, where the binaries are
+# `*.exe`) and a `.tar.gz` everywhere else, so a Windows user gets the
+# format their Explorer opens. `zip`/`unzip` must be on PATH there.
 #
 # Every folder is checked with `scripts/check-package.sh` in its own
-# layout, and then so is its tarball *after extracting it into a scratch
+# layout, and then so is its archive *after extracting it into a scratch
 # directory*, because the archive is what gets distributed. Nothing is
 # read from an original installation, and nothing is overwritten: an
-# existing package folder or tarball is an error (exit 2), left for you to
+# existing package folder or archive is an error (exit 2), left for you to
 # look at and remove.
 #
 # `--forbid` is passed to the private-path scan.
@@ -55,7 +59,7 @@ while [ $# -gt 0 ]; do
         --forbid) [ $# -ge 2 ] || { echo "error: --forbid needs a value" >&2; exit 2; }; forbid="${forbid}--forbid
 $2
 "; shift 2 ;;
-        -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -65,11 +69,17 @@ if [ -z "$bin_dir" ]; then
     bin_dir=target/release
 fi
 
+# Windows (MSYS/Cygwin) names its binaries `*.exe`, has no exec bit and
+# gets a `.zip`; every other platform gets a `.tar.gz`. `uname -s` names
+# the exact Windows build (`MINGW64_NT-10.0-22631`), which is not what a
+# package should be called, so it collapses to `windows`.
 exe=
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) exe=.exe ;;
+archive=tar.gz
+os=$(uname -s)
+case "$os" in
+    MINGW*|MSYS*|CYGWIN*) exe=.exe; archive=zip; os=windows ;;
+    *) os=$(printf '%s' "$os" | tr '[:upper:]' '[:lower:]') ;;
 esac
-os=$(uname -s | tr '[:upper:]' '[:lower:]')
 name="rust-mm2-${os}-$(uname -m)"
 
 # Which layouts this run assembles. A macOS `.app` only means something on
@@ -97,25 +107,35 @@ for bin in mm2 mm2-host mm2-join mm2-inspect; do
 done
 
 flat_dir="$out/$name"
-flat_tar="$out/$name.tar.gz"
+flat_archive="$out/$name.$archive"
 app_dir="$out/rust-mm2.app"
-app_tar="$out/rust-mm2.app.tar.gz"
+app_archive="$out/rust-mm2.app.$archive"
 prefix_dir="$out/$name-prefix"
-prefix_tar="$out/$name-prefix.tar.gz"
+prefix_archive="$out/$name-prefix.$archive"
 
 mkdir -p "$out"
+out_abs=$(cd "$out" && pwd)
+
+if [ "$archive" = zip ]; then
+    for tool in zip unzip; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "error: $tool is not on PATH (needed to package for Windows)" >&2
+            exit 2
+        }
+    done
+fi
 
 # Nothing is ever overwritten: leaving one run's files under the next
-# run's name mixes them, so an existing folder or tarball stops the script
+# run's name mixes them, so an existing folder or archive stops the script
 # for the operator to look at.
 for want in $layouts; do
     case "$want" in
-        flat) existing_dir=$flat_dir existing_tar=$flat_tar ;;
-        app) existing_dir=$app_dir existing_tar=$app_tar ;;
-        prefix) existing_dir=$prefix_dir existing_tar=$prefix_tar ;;
+        flat) existing_dir=$flat_dir existing_archive=$flat_archive ;;
+        app) existing_dir=$app_dir existing_archive=$app_archive ;;
+        prefix) existing_dir=$prefix_dir existing_archive=$prefix_archive ;;
     esac
-    if [ -e "$existing_dir" ] || [ -e "$existing_tar" ]; then
-        echo "error: $existing_dir or $existing_tar already exists; remove it first" >&2
+    if [ -e "$existing_dir" ] || [ -e "$existing_archive" ]; then
+        echo "error: $existing_dir or $existing_archive already exists; remove it first" >&2
         exit 2
     fi
 done
@@ -176,24 +196,40 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/rust-mm2-package.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
 # Check the folder, archive it, then extract the archive and check that
-# too — the tarball is what gets distributed.
-publish() { # $1 = layout, $2 = folder, $3 = tarball, $4 = top-level name
+# too — the archive is what gets distributed.
+publish() { # $1 = layout, $2 = folder, $3 = archive, $4 = top-level name
     check "$1" "$2"
-    # macOS tar would add AppleDouble `._*` entries for extended attributes.
-    COPYFILE_DISABLE=1 tar -C "$out" -czf "$3" "$4"
     unpack="$scratch/$4"
-    rm -rf "$unpack"
-    mkdir -p "$unpack"
-    tar -C "$unpack" -xzf "$3"
-    [ -d "$unpack/$4" ] || { echo "error: the tarball does not unpack to $4/" >&2; exit 1; }
+    case "$archive" in
+        tar.gz)
+            # macOS tar would add AppleDouble `._*` entries for extended attributes.
+            COPYFILE_DISABLE=1 tar -C "$out" -czf "$3" "$4"
+            rm -rf "$unpack"
+            mkdir -p "$unpack"
+            tar -C "$unpack" -xzf "$3"
+            ;;
+        zip)
+            # `zip` records paths relative to the working directory, so it
+            # runs from `$out` with the archive named by its absolute path.
+            (cd "$out" && zip -qr "$out_abs/${3##*/}" "$4")
+            rm -rf "$unpack"
+            mkdir -p "$unpack"
+            unzip -q "$3" -d "$unpack"
+            ;;
+        *)
+            echo "error: unknown archive format $archive" >&2
+            exit 2
+            ;;
+    esac
+    [ -d "$unpack/$4" ] || { echo "error: the archive does not unpack to $4/" >&2; exit 1; }
     check "$1" "$unpack/$4"
     echo "packaged: $3"
 }
 
 for want in $layouts; do
     case "$want" in
-        flat) stage_flat; publish flat "$flat_dir" "$flat_tar" "$name" ;;
-        app) stage_app; publish app "$app_dir" "$app_tar" "rust-mm2.app" ;;
-        prefix) stage_prefix; publish prefix "$prefix_dir" "$prefix_tar" "$name-prefix" ;;
+        flat) stage_flat; publish flat "$flat_dir" "$flat_archive" "$name" ;;
+        app) stage_app; publish app "$app_dir" "$app_archive" "rust-mm2.app" ;;
+        prefix) stage_prefix; publish prefix "$prefix_dir" "$prefix_archive" "$name-prefix" ;;
     esac
 done

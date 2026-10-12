@@ -4,7 +4,8 @@ How to build rust-mm2 from a clean checkout, where it looks for files and
 where it writes them. Every claim below is either backed by something that
 runs in this repository or labelled *untested*. `scripts/package.sh`
 assembles the distributable install layouts — a portable folder, a macOS
-`.app` bundle and a Unix prefix; there is no installer or auto-updater.
+`.app` bundle and a Unix prefix, each with an archive beside it (a
+`.tar.gz`, or a `.zip` on Windows); there is no installer or auto-updater.
 
 ## Platforms
 
@@ -12,7 +13,7 @@ assembles the distributable install layouts — a portable folder, a macOS
 |---|---|---|
 | macOS, Apple Silicon (arm64) | The development machine: fmt/clippy/test gates, windowed Metal runs, `scripts/release-build.sh` | **tested** |
 | Linux, x86_64 | GitHub Actions `ubuntu-latest` runs fmt, clippy and the workspace tests (headless: no window, GPU or audio device) | build and tests **tested in CI only**; running the game windowed is *untested* |
-| Windows (MSVC) | The non-gating `build-check` job's `cargo check --workspace --all-targets`, green on `windows-latest` (commit `895e89a`); never built or run by a maintainer | compile check **tested in CI only**; building or running the game and the `%APPDATA%` user-data path are *untested* |
+| Windows (MSVC) | The non-gating `build-check` job's `cargo check --workspace --all-targets`, green on `windows-latest` (commit `895e89a`); never built or run by a maintainer. The Windows `.zip` layout is assembled and checked in `tests/package.rs` from fake `*.exe` binaries (see [Packaging](#packaging)) | compile check **tested in CI only**; building or running the game, `scripts/package.sh` itself and the `%APPDATA%` user-data path are *untested* |
 | macOS, Intel | nothing (the `build-check` job's `macos-latest` is an arm64 runner) | *untested* |
 | Linux, arm64 | nothing | *untested* |
 
@@ -127,18 +128,29 @@ install layouts and checks each one. `--layout` picks them; it defaults to
 
 | `--layout` | Produced (under `target/package/`) | Layout |
 |---|---|---|
-| `flat` | `rust-mm2-<os>-<arch>/` and `.tar.gz` | the four binaries, `assets/`, `README.md`, `LICENSE-MIT`, `LICENSE-APACHE` and `docs/` at the root |
-| `app` | `rust-mm2.app/` and `.tar.gz` | `Contents/MacOS/` binaries, `Contents/Resources/assets/`, `Contents/Resources/{README.md,LICENSE-*,docs/}` — macOS only |
-| `prefix` | `rust-mm2-<os>-<arch>-prefix/` and `.tar.gz` | `bin/` binaries, `share/rust-mm2/assets/`, `share/doc/rust-mm2/{README.md,LICENSE-*,docs/}` |
+| `flat` | `rust-mm2-<os>-<arch>/` and an archive | the four binaries, `assets/`, `README.md`, `LICENSE-MIT`, `LICENSE-APACHE` and `docs/` at the root |
+| `app` | `rust-mm2.app/` and an archive | `Contents/MacOS/` binaries, `Contents/Resources/assets/`, `Contents/Resources/{README.md,LICENSE-*,docs/}` — macOS only |
+| `prefix` | `rust-mm2-<os>-<arch>-prefix/` and an archive | `bin/` binaries, `share/rust-mm2/assets/`, `share/doc/rust-mm2/{README.md,LICENSE-*,docs/}` |
+
+The archive is a `.tar.gz` on macOS and Linux and a `.zip` on Windows
+(MSYS/Cygwin), so the artifact a Windows user downloads opens in Explorer
+with nothing installed. Windows is detected from `uname -s`
+(`MINGW*`/`MSYS*`/`CYGWIN*`), which also names the binaries `*.exe` and
+shortens the OS part of the artifact name to `windows`, so the portable
+artifact is `rust-mm2-windows-<arch>.zip` rather than the raw
+`MINGW64_NT-10.0-…` release string. `zip` and `unzip` must be on the PATH
+of the machine that assembles it. The staged folder is otherwise the
+same on every platform: only the binaries' names and the archive type
+change.
 
 Every layout carries the same files, in the place that layout — and the
 app's own asset search — expects them. `--layout app` is a usage error off
 macOS, where a bundle of foreign binaries means nothing; `all` skips it
 there. `scripts/check-package.sh --layout <flat|app|prefix> <dir>` judges
 a folder against that layout's allowlist; `scripts/package.sh` runs it on
-the staged folder, writes the tarball, **extracts the tarball into a
+the staged folder, writes the archive, **extracts the archive into a
 scratch directory and checks that too**, since the archive is what ships.
-It never overwrites: an existing folder or tarball is an error.
+It never overwrites: an existing folder or archive is an error.
 
 `scripts/check-package.sh [--layout <flat|app|prefix>] <dir>` is an
 allowlist, not a blocklist. A file the package is not meant to carry fails
@@ -164,8 +176,13 @@ The flat folder, the macOS `.app` (`Contents/MacOS/mm2` with
 `share/rust-mm2/assets`) layouts are each launched in
 `tests/package.rs` with the freshly built `mm2` copied into place and run
 from an unrelated directory, and the layouts `scripts/package.sh`
-assembles are checked there too. A Windows zip is not built yet (task
-#1368).
+assembles are checked there too. The Windows `.zip` is assembled and
+checked in the same file from fake `*.exe` binaries with a stub `uname`
+that puts the script on its Windows path — `rust-mm2-windows-<arch>.zip`,
+all four `*.exe`, both licenses, checked again after unzipping. That is
+the script's Windows branch and the checker's `.exe` allowlist; a real
+Windows build, a real `uname` and launching the `.exe` binaries on Windows
+are *untested*.
 
 ## Where the app finds files
 
@@ -303,8 +320,11 @@ The README documents the flags in context; `mm2 --help` lists them all.
 
 ## Not done yet
 
-- A Windows zip (`scripts/package.sh` builds the flat folder, the macOS
-  `.app` bundle and the Unix prefix; task #1368).
+- A Windows build and a launch of the Windows `.zip`: `scripts/package.sh`
+  takes its Windows branch (`*.exe`, `.zip`) under a stub `uname` in
+  `tests/package.rs`, but no maintainer machine or CI runner has run the
+  script with a real Windows `uname`, built the `.exe` binaries or opened
+  the zip.
 - A double-clickable `.app`: the bundle has the layout the app's asset
   search uses (`Contents/MacOS/mm2`, `Contents/Resources/assets`) but no
   `Contents/Info.plist`, so it is run from `Contents/MacOS/mm2` rather

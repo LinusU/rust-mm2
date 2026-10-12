@@ -11,7 +11,8 @@
 # defaults to `flat`:
 #
 #   flat    the four binaries, `assets/`, `README.md` and `docs/` at the
-#           root — the portable folder and tarball
+#           root — the portable folder and its archive (`.tar.gz`, or a
+#           `.zip` on Windows)
 #   app     a macOS bundle: binaries in `Contents/MacOS/`, assets in
 #           `Contents/Resources/assets/`, README, licenses and `docs/`
 #           under `Contents/Resources/`
@@ -58,7 +59,7 @@ $2
             shift 2
             ;;
         -h|--help)
-            sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)

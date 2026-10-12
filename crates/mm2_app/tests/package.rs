@@ -43,6 +43,34 @@ fn fake_bins(at: &Path) -> PathBuf {
     dir
 }
 
+/// The same, with the `.exe` names a Windows build produces.
+fn fake_exe_bins(at: &Path) -> PathBuf {
+    let dir = at.join("bins");
+    std::fs::create_dir_all(&dir).unwrap();
+    for bin in BINS {
+        std::fs::write(
+            dir.join(format!("{bin}.exe")),
+            format!("\0fake {bin}\0").as_bytes(),
+        )
+        .unwrap();
+    }
+    dir
+}
+
+/// A directory holding a stub `uname` that reports this machine as
+/// Windows (MSYS), so `scripts/package.sh` takes its Windows branch:
+/// `*.exe` binaries and a `.zip`. Prepended to `PATH`, it shadows the real
+/// `uname` for the script under test.
+fn windows_uname_dir(at: &Path) -> PathBuf {
+    let dir = at.join("stub-bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_exec(
+        &dir.join("uname"),
+        b"#!/bin/sh\ncase \"$1\" in -m) echo x86_64 ;; *) echo MINGW64_NT-10.0 ;; esac\n",
+    );
+    dir
+}
+
 fn check(dir: &Path, extra: &[&str]) -> Output {
     check_layout(dir, "flat", extra)
 }
@@ -411,6 +439,22 @@ fn package(args: &[&str]) -> Output {
         .expect("run sh")
 }
 
+/// `scripts/package.sh` under the stub `uname` in `uname_dir`, so the
+/// script sees a Windows host.
+fn package_as_windows(args: &[&str], uname_dir: &Path) -> Output {
+    let path = format!(
+        "{}:{}",
+        uname_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new("sh")
+        .arg(repo().join("scripts/package.sh"))
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .expect("run sh")
+}
+
 fn tar_listing(tarball: &Path) -> Vec<String> {
     let out = Command::new("tar")
         .arg("-tzf")
@@ -445,6 +489,46 @@ fn unpack(tarball: &Path, into: &Path) -> PathBuf {
         .arg(into)
         .arg("-xzf")
         .arg(tarball)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let entries: Vec<PathBuf> = std::fs::read_dir(into)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries.into_iter().next().unwrap()
+}
+
+/// The files a zip holds, as flat names under its single top-level entry.
+fn zip_listing(zip: &Path) -> Vec<String> {
+    let out = Command::new("unzip")
+        .arg("-Z1")
+        .arg(zip)
+        .output()
+        .expect("run unzip");
+    assert!(
+        out.status.success(),
+        "unzip -Z1 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.ends_with('/'))
+        .map(|l| l.split_once('/').map_or(l, |(_, rest)| rest).to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Extract `zip` into `into` and return its one top-level entry.
+fn unpack_zip(zip: &Path, into: &Path) -> PathBuf {
+    std::fs::create_dir_all(into).unwrap();
+    let status = Command::new("unzip")
+        .arg("-q")
+        .arg(zip)
+        .arg("-d")
+        .arg(into)
         .status()
         .unwrap();
     assert!(status.success());
@@ -625,6 +709,98 @@ fn the_prefix_install_is_assembled_checked_and_archived() {
     let root = unpack(&tarball_in(&out_dir), &tmp.path().join("unpack"));
     assert_eq!(root.file_name().unwrap(), prefix.file_name().unwrap());
     assert_eq!(code(&check_layout(&root, "prefix", &[])), 0);
+}
+
+/// A Windows run: the flat layout is a `.zip` named for Windows, it holds
+/// the four `.exe` binaries and both licenses, and the zip's own contents
+/// are checked after unzipping — the same path a real Windows host takes
+/// (`uname -s` = `MINGW64_NT-10.0`).
+#[test]
+fn a_windows_package_is_a_zip_of_dot_exe_binaries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_exe_bins(tmp.path());
+    let uname = windows_uname_dir(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let args = package_args("flat", &bins, &out_dir);
+    let out = package_as_windows(&args, &uname);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("packaged:"));
+
+    // The archive is a zip named for Windows, and no tarball is written.
+    let zip = out_dir.join("rust-mm2-windows-x86_64.zip");
+    assert!(zip.is_file(), "no Windows zip in {out_dir:?}");
+    let names: Vec<String> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.ends_with(".tar.gz")),
+        "a tarball was written for a Windows package: {names:?}"
+    );
+
+    // All four `.exe` binaries, both licenses and the usual content.
+    let mut expected: Vec<String> = BINS.iter().map(|b| format!("{b}.exe")).collect();
+    expected.extend(
+        [
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "README.md",
+            "assets/texture/dev_road.png",
+            "docs/building.md",
+            "docs/modding.md",
+        ]
+        .map(String::from),
+    );
+    expected.sort();
+    assert_eq!(zip_listing(&zip), expected);
+
+    // The zip unpacks to a flat `.exe` package the check accepts — that
+    // is the Windows flavour the allowlist has to judge, not the Unix one.
+    let root = unpack_zip(&zip, &tmp.path().join("unpack"));
+    assert_eq!(root.file_name().unwrap(), "rust-mm2-windows-x86_64");
+    assert_eq!(
+        code(&check(&root, &[])),
+        0,
+        "{}",
+        stderr(&check(&root, &[]))
+    );
+    assert!(root.join("mm2.exe").is_file());
+
+    // Nothing is overwritten on a second run.
+    let again = package_as_windows(&args, &uname);
+    assert_eq!(code(&again), 2, "{}", stderr(&again));
+    assert!(
+        stderr(&again).contains("already exists"),
+        "{}",
+        stderr(&again)
+    );
+}
+
+/// The default (`--layout all`) Windows run ships the flat and prefix
+/// layouts, both as zips.
+#[test]
+fn a_windows_default_run_assembles_only_zip_archives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_exe_bins(tmp.path());
+    let uname = windows_uname_dir(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let out = package_as_windows(&package_args_default(&bins, &out_dir), &uname);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let mut names: Vec<String> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "rust-mm2-windows-x86_64",
+            "rust-mm2-windows-x86_64-prefix",
+            "rust-mm2-windows-x86_64-prefix.zip",
+            "rust-mm2-windows-x86_64.zip",
+        ]
+    );
 }
 
 #[cfg(target_os = "macos")]
