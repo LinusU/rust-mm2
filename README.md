@@ -397,6 +397,12 @@ for the host process tests).
 unofficial, non-commercial reimplementation effort; it ships no copyrighted
 material and requires users to supply their own game data.
 
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option. The licence covers this project's own code and synthetic
+assets only, not the retail game data.
+
 Headless smoke reports also include `travel=<metres>`, `sim=<seconds>`,
 `resets=<count>`, `controls=<throttle steps>t/<brake steps>b/<steer steps>s`
 and `finite=<bool>`. Travel is planar solver displacement sampled at 60 Hz;
