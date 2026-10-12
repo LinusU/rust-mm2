@@ -2241,6 +2241,10 @@ struct SignalAxis {
     /// `x_axis` in either direction, i.e. across the road rather than
     /// along it.
     cross_road: bool,
+    /// Among the cross-road pair, `d` points toward the section `+x_axis`
+    /// rather than the opposite way. Both signs occur, so the census
+    /// keeps them apart rather than averaging a mixed sign away.
+    toward_plus_x: bool,
 }
 
 /// Tolerance, in degrees, for calling a signal axis "across the road".
@@ -2267,8 +2271,10 @@ fn classify_signal_axis(origin: [f32; 3], axis: [f32; 3], x_axis: [f32; 3]) -> O
         return None;
     }
     let xlen = (x_axis[0] * x_axis[0] + x_axis[1] * x_axis[1] + x_axis[2] * x_axis[2]).sqrt();
-    let cross_road = x_axis.iter().all(|v| v.is_finite()) && xlen > f32::EPSILON && {
-        let cos = (d[0] * x_axis[0] + d[1] * x_axis[1] + d[2] * x_axis[2]) / (len * xlen);
+    let x_finite = x_axis.iter().all(|v| v.is_finite()) && xlen > f32::EPSILON;
+    let dot = d[0] * x_axis[0] + d[1] * x_axis[1] + d[2] * x_axis[2];
+    let cross_road = x_finite && {
+        let cos = dot / (len * xlen);
         // Either sign of the section axis is "across the road".
         cos.abs().clamp(0.0, 1.0).acos().to_degrees() <= SIGNAL_AXIS_CROSS_TOL_DEG
     };
@@ -2276,6 +2282,7 @@ fn classify_signal_axis(origin: [f32; 3], axis: [f32; 3], x_axis: [f32; 3]) -> O
         unit: (len - 1.0).abs() <= 1e-3,
         horizontal: d[1].abs() <= f32::EPSILON,
         cross_road,
+        toward_plus_x: cross_road && dot > 0.0,
     })
 }
 
@@ -2288,6 +2295,9 @@ struct SignalAxisCensus {
     unit: usize,
     horizontal: usize,
     cross_road: usize,
+    /// Of the [`Self::cross_road`] pairs, how many point toward the
+    /// section `+x_axis`; the rest point the other way.
+    toward_plus_x: usize,
 }
 
 /// Classify every authored signal axis in `bai`. The end section's frame
@@ -2307,6 +2317,7 @@ fn signal_axis_census(bai: &Bai) -> SignalAxisCensus {
                 census.unit += usize::from(axis.unit);
                 census.horizontal += usize::from(axis.horizontal);
                 census.cross_road += usize::from(axis.cross_road);
+                census.toward_plus_x += usize::from(axis.toward_plus_x);
             }
         }
     }
@@ -2495,18 +2506,21 @@ fn bai(
         // `trafficLightAxis` convention (F10-B.7 evidence): the axis is
         // authored as `origin +` a horizontal unit vector across the
         // carriageway. Counts, not hidden: a zero-length axis is a
-        // direction-less authored pair.
+        // direction-less authored pair, and the two cross-road signs stay
+        // apart rather than cancelling.
         let axis = signal_axis_census(&bai);
         println!(
-            "      axis: {}/{} are `origin +` a horizontal unit vector; \
-             {} unit, {} horizontal, {} across the road \
-             (within {:.0}° of the end section x-axis)",
+            "      axis: {}/{} ends carry a direction (finite, nonzero origin, axis != origin); \
+             of those {} unit, {} horizontal, {} across the road \
+             (within {:.0}° of the end section x-axis: {} toward +x, {} toward -x)",
             axis.total,
             lit + lit_other,
             axis.unit,
             axis.horizontal,
             axis.cross_road,
             SIGNAL_AXIS_CROSS_TOL_DEG,
+            axis.toward_plus_x,
+            axis.cross_road - axis.toward_plus_x,
         );
 
         // Routable-arc coverage (F10-B.7): a lit end only surfaces on
@@ -5622,8 +5636,14 @@ mod tests {
                 unit: true,
                 horizontal: true,
                 cross_road: true,
+                toward_plus_x: true,
             }
         );
+        // The opposite sign of the same cross-road direction is recorded
+        // as such, not folded together with the +x case.
+        let against = classify_signal_axis(origin, [9.0, 3.0, -2.0], [1.0, 0.0, 0.0]).unwrap();
+        assert!(against.cross_road);
+        assert!(!against.toward_plus_x);
         // The opposite section-axis sign is still across the road.
         assert!(
             classify_signal_axis(origin, [9.0, 3.0, -2.0], [-1.0, 0.0, 0.0])
@@ -5718,6 +5738,7 @@ mod tests {
                 unit: 1,
                 horizontal: 1,
                 cross_road: 1,
+                toward_plus_x: 1,
             }
         );
     }

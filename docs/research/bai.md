@@ -139,18 +139,21 @@ carriageway**.
 
 - `‖axis − origin‖` is 1 within f32 noise (max |len − 1| 5.7e-5 London,
   8.9e-5 SF) and `axis.y == origin.y` on every end.
-- The vector is perpendicular to the section `tangent` and within 15° of
-  the end section's `x_axis` in either direction on **all 828** London
-  ends with a nonzero origin and **646 of SF's 650**; four SF ends author
-  `axis == origin`, a direction-less pair the census counts, not hides.
-  So the field is a cross-carriageway direction, not the head's facing
-  (which is along the travel tangent).
-- The **sign** is mixed (`+x` 415 / `−x` 413 London, `+x` 328 / `−x` 318
-  SF) and tracks neither the junction centre, the road centre nor the
-  end, so which kerb holds the pole and which way the head faces stay
-  unverified. The dev map `city/sfai.bai` authors 813 axes (813 unit,
-  811 horizontal, 796 within 15°) — 17 off-convention, reported by the
-  same census. `city/london_bak.bai`/`sf_bak.bai` match their live files.
+- The vector is within 15° of the end section's `x_axis` in either
+  direction on **all 828** London ends with a nonzero origin and **646 of
+  SF's 650**; four SF ends author `axis == origin`, a direction-less pair
+  the census counts, not hides. Section `x_axis` is the cross-road
+  direction (`tangent × up` on essentially every section, above), so the
+  field is a cross-carriageway direction, not the head's facing (which is
+  along the travel tangent).
+- The **sign** is mixed, and the census reports the two signs apart
+  (`axis:` line): `+x` 415 / `−x` 413 London, `+x` 328 / `−x` 318 SF — so
+  a mixed sign is averaged away nowhere. It tracks neither the junction
+  centre, the road centre nor the end, so which kerb holds the pole and
+  which way the head faces stay unverified. The dev map `city/sfai.bai`
+  authors 813 axes (813 unit, 811 horizontal, 796 within 15°, split
+  407/389) — 17 off-convention, reported by the same census.
+  `city/london_bak.bai`/`sf_bak.bai` match their live files.
 
 **The signal-unit geometry ships**, contrary to the earlier "textures
 only" reading. `Midtown2.exe` holds the two model-name strings
@@ -167,13 +170,14 @@ none. Five `.pkg`s resolve through the VFS
 `tune/banger/sp_traflit*.dgBangerData` record for each — the original
 signal heads are breakable props. Their PKG chunks carry the lamp states
 as authored geometry, not a recoloured material:
-`RED`/`YELLOW`/`GREENGLOWDAY_H`/`_NIGHT_H`, plus `WALK`/`NOWALK_DAY`/
-`NIGHT_H` on the dual. The runtime's unlit sphere at the anchor
+`{RED,YELLOW,GREEN}GLOW{DAY,NIGHT}_H` and
+`{WALK,NOWALK}_{DAY,NIGHT}_H`. The runtime's unlit sphere at the anchor
 (`mm2_app::traffic`) is therefore a placeholder for geometry that ships;
 which variant each head gets and how the pole/arm is placed remain
-unrecovered. The four `sp_traflit*` rows in `city/phys/props.pathset` are
-a demo layout (22–58 m from the nearest authored origin), not the
-placement source.
+unrecovered. The four `sp_traflit*` rows in `city/phys/props.pathset` (a
+dev set no session loads) are a demo layout — the nearest SF authored
+origin is 33 m away, the farthest 56 m (horizontal) — not the placement
+source.
 
 **No junction or spawn timing is authored.** Every BAI `RoadEnd.unknown1`
 is 0 (1080 London, 758 SF), the intersection record is only
