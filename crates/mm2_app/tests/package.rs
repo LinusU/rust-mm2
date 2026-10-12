@@ -653,8 +653,9 @@ fn the_app_bundle_is_assembled_checked_and_archived() {
         assert!(app.join(rel).is_file(), "missing {rel}");
     }
     assert_eq!(code(&check_layout(&app, "app", &[])), 0);
-    // The bundle is found by the app's own asset search (the binary here is
-    // the test build's copy, but the layout is the packaged one).
+    // The packaged asset is the repository's own, byte for byte. These
+    // binaries are fakes, so the launch half of AC04 — the app's own asset
+    // search finding this layout — is the real-binary test below.
     assert_eq!(
         std::fs::read(app.join("Contents/Resources/assets/texture/dev_road.png")).unwrap(),
         std::fs::read(repo().join("assets/texture/dev_road.png")).unwrap()
