@@ -1582,6 +1582,39 @@ fn a_missing_voice_table_stays_silent() {
 }
 
 #[test]
+fn a_malformed_voice_table_stays_silent_without_a_failure() {
+    // A table is present but its only row cannot be read (a non-numeric
+    // volume, so the parser keeps the diagnostic and no sample): the
+    // resource still loads — the file exists — and the transition
+    // degrades to authored silence. A bad authored row is never a
+    // fabricated sample and never counted as an audio failure.
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "aud/creaturedata/default_fpedvoice1.csv",
+        b"sample name,volume,,\r\nFSC1,not-a-number,,\r\n",
+    );
+    let mut app = ped_voice_app(d);
+    assert!(
+        app.world().get_resource::<PedVoiceAudio>().is_some(),
+        "the file resolves, so the session resource loads"
+    );
+    let walker = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    assert!(
+        ped_voices(&mut app).is_empty(),
+        "no usable sample → silence"
+    );
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.screams, r.scream_holds, r.voices, r.failed),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
 fn a_gender_without_a_table_stays_silent_while_the_other_sings() {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();

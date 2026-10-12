@@ -697,7 +697,11 @@ impl PedVoiceAudio {
     }
 
     /// Read and parse one voice table; `None` (with a warn) when the
-    /// logical path is absent or the grammar rejects it.
+    /// logical path is absent. A table that parses with recoverable
+    /// problems still loads — a bad row costs its own sample, never the
+    /// whole table — and the problems are named, the diagnostics-then-
+    /// `validate` surface the cue tables report: an authored row that
+    /// cannot be read is never silently dropped.
     fn load_table(vfs: &Vfs, path: &str) -> Option<VoiceTable> {
         let bytes = match vfs.read_logical(path) {
             Ok(b) => b,
@@ -706,7 +710,22 @@ impl PedVoiceAudio {
                 return None;
             }
         };
-        Some(VoiceTable::parse(&String::from_utf8_lossy(&bytes)))
+        let table = VoiceTable::parse(&String::from_utf8_lossy(&bytes));
+        let issues: Vec<_> = table
+            .diagnostics
+            .iter()
+            .cloned()
+            .chain(table.validate())
+            .collect();
+        if let Some(first) = issues.first() {
+            warn!(
+                "audio: {path}: {} walker voice table diagnostics (first: line {}: {})",
+                issues.len(),
+                first.line,
+                first.message
+            );
+        }
+        Some(table)
     }
 
     /// Pick a scream for a walker of the given voice: the gender's
