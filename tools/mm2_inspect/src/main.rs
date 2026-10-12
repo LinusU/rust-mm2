@@ -2288,7 +2288,7 @@ fn classify_signal_axis(origin: [f32; 3], axis: [f32; 3], x_axis: [f32; 3]) -> O
 
 /// Totals from [`classify_signal_axis`] over every authored signal pair
 /// in one BAI.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 struct SignalAxisCensus {
     /// Pairs with a direction: finite, nonzero origin, nonzero-length axis.
     total: usize,
@@ -2298,6 +2298,10 @@ struct SignalAxisCensus {
     /// Of the [`Self::cross_road`] pairs, how many point toward the
     /// section `+x_axis`; the rest point the other way.
     toward_plus_x: usize,
+    /// Largest `|‖d‖ − 1|` seen, so the doc's "unit within f32 noise"
+    /// claim is reproducible from the tool's own output rather than a
+    /// number measured once and quoted.
+    max_len_dev: f32,
 }
 
 /// Classify every authored signal axis in `bai`. The end section's frame
@@ -2310,14 +2314,21 @@ fn signal_axis_census(bai: &Bai) -> SignalAxisCensus {
             (&road.start, road.sections.first()),
         ] {
             let x_axis = section.map_or([0.0; 3], |s| s.x_axis);
-            if let Some(axis) =
-                classify_signal_axis(end.traffic_light_origin, end.traffic_light_axis, x_axis)
-            {
+            let (origin, axis) = (end.traffic_light_origin, end.traffic_light_axis);
+            if let Some(classified) = classify_signal_axis(origin, axis, x_axis) {
                 census.total += 1;
-                census.unit += usize::from(axis.unit);
-                census.horizontal += usize::from(axis.horizontal);
-                census.cross_road += usize::from(axis.cross_road);
-                census.toward_plus_x += usize::from(axis.toward_plus_x);
+                census.unit += usize::from(classified.unit);
+                census.horizontal += usize::from(classified.horizontal);
+                census.cross_road += usize::from(classified.cross_road);
+                census.toward_plus_x += usize::from(classified.toward_plus_x);
+                // `classify_signal_axis` already proved this length
+                // nonzero and finite; recompute only the deviation so the
+                // census struct stays plain booleans plus one number.
+                let len = ((axis[0] - origin[0]).powi(2)
+                    + (axis[1] - origin[1]).powi(2)
+                    + (axis[2] - origin[2]).powi(2))
+                .sqrt();
+                census.max_len_dev = census.max_len_dev.max((len - 1.0).abs());
             }
         }
     }
@@ -2512,7 +2523,8 @@ fn bai(
         println!(
             "      axis: {}/{} ends carry a direction (finite, nonzero origin, axis != origin); \
              of those {} unit, {} horizontal, {} across the road \
-             (within {:.0}° of the end section x-axis: {} toward +x, {} toward -x)",
+             (within {:.0}° of the end section x-axis: {} toward +x, {} toward -x; \
+             max |len-1| {:.1e})",
             axis.total,
             lit + lit_other,
             axis.unit,
@@ -2521,6 +2533,23 @@ fn bai(
             SIGNAL_AXIS_CROSS_TOL_DEG,
             axis.toward_plus_x,
             axis.cross_road - axis.toward_plus_x,
+            axis.max_len_dev,
+        );
+
+        // `RoadEnd.unknown1` is undocumented; a junction/spawn interval
+        // would be the field most likely to hold it. It is 0 on every
+        // retail end, so no authored timing lives here (F10-B.7) — the
+        // count is printed rather than asserted, like the axis census.
+        let ends = bai.roads.len() * 2;
+        let nonzero_unknown1 = bai
+            .roads
+            .iter()
+            .flat_map(|r| [&r.end, &r.start])
+            .filter(|e| e.unknown1 != 0)
+            .count();
+        println!(
+            "      ends: {ends} road ends, {nonzero_unknown1} with nonzero unknown1 \
+             (undocumented field; 0 on every retail end)"
         );
 
         // Routable-arc coverage (F10-B.7): a lit end only surfaces on
@@ -5739,6 +5768,7 @@ mod tests {
                 horizontal: 1,
                 cross_road: 1,
                 toward_plus_x: 1,
+                max_len_dev: 0.0,
             }
         );
     }
