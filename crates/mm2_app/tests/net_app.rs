@@ -10062,6 +10062,130 @@ fn a_late_joiner_lands_on_the_hosts_world_not_the_defaults() {
     assert_eq!(props.local_table().count as usize, host_props.len());
 }
 
+/// F26-A.4 (protocol v26) over a real loopback lobby: the host owns a
+/// proximity drawbridge leaf with a car at its hinge, the production
+/// `drive_drawbridges` opens it, `publish_leaves` sends the state as
+/// `Message::Leaves`, and a joined client — whose own cars are nowhere
+/// near, and which never triggers a leaf itself — lands the frame and
+/// finds its replica leaf opening. A timed leaf on the client is left
+/// to the clock. Synthetic leaves, not retail content (no retail
+/// bridge authors a proximity path, WLD-26).
+#[test]
+fn a_proximity_leaf_the_host_opened_opens_on_the_client() {
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+    use mm2_app::drawbridge::DrawbridgeLeaf;
+    use mm2_app::worldclock::{PUBLISH_EVERY_TICKS, WorldClock};
+    use mm2_game::drawbridge::{DrawbridgeMode, LeafMotion, LeafPhase};
+
+    fn spawn_leaf(app: &mut App, slot: u16, mode: DrawbridgeMode, hinge: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                DrawbridgeLeaf {
+                    motion: LeafMotion::new(mode),
+                    partner: None,
+                    hinge,
+                    base: Quat::IDENTITY,
+                    slot,
+                },
+                Position(hinge),
+                Rotation::default(),
+                LinearVelocity::default(),
+                AngularVelocity::default(),
+            ))
+            .id()
+    }
+    fn phase(app: &App, leaf: Entity) -> LeafPhase {
+        app.world()
+            .get::<DrawbridgeLeaf>(leaf)
+            .unwrap()
+            .motion
+            .phase
+    }
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host = host_app(host_vfs, link);
+    host.add_systems(
+        Update,
+        (
+            mm2_app::drawbridge::drive_drawbridges,
+            mm2_app::leafnet::publish_leaves.after(net::drive_host),
+        ),
+    );
+    host.insert_resource(WorldClock::default());
+    let hinge = Vec3::new(100.0, 0.0, 0.0);
+    let host_prox = spawn_leaf(&mut host, 0, DrawbridgeMode::Proximity, hinge);
+    let host_timed = spawn_leaf(&mut host, 1, DrawbridgeMode::Timed, hinge * 2.0);
+    host.world_mut().spawn((
+        mm2_game::Player {
+            id: mm2_game::PlayerId(7),
+            control: mm2_game::PlayerControl::Local,
+        },
+        Position(hinge),
+    ));
+    hosted_playing(&mut host);
+    host.update();
+    assert_eq!(phase(&host, host_prox), LeafPhase::Opening);
+
+    let client_link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "latecomer".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), client_link);
+    client.add_systems(
+        Update,
+        mm2_app::leafnet::apply_leaves.after(net::drive_lobby),
+    );
+    client.insert_resource(WorldClock::default());
+    let client_prox = spawn_leaf(&mut client, 0, DrawbridgeMode::Proximity, hinge);
+    let client_timed = spawn_leaf(&mut client, 1, DrawbridgeMode::Timed, hinge * 2.0);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    // The first frame went to no one; the host's cadence heals that.
+    // Step the host's clock a cadence at a time until the join lands
+    // and a frame follows, on a wall-clock deadline.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut begun = false;
+    while Instant::now() < deadline {
+        host.world_mut().resource_mut::<WorldClock>().ticks += PUBLISH_EVERY_TICKS;
+        host.update();
+        client.update();
+        if !begun && session_phase(&client) != SessionPhase::Menu {
+            let mut session = client.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            begun = true;
+        }
+        if phase(&client, client_prox) != LeafPhase::Resting {
+            break;
+        }
+        thread::sleep(Duration::from_millis(4));
+    }
+    assert_eq!(
+        phase(&client, client_prox),
+        LeafPhase::Opening,
+        "the host's open leaf never opened on the client"
+    );
+    assert_eq!(
+        phase(&client, client_timed),
+        LeafPhase::Resting,
+        "a timed leaf is the clock's, not the frame's"
+    );
+    assert_eq!(phase(&host, host_timed), LeafPhase::Resting);
+    let snaps = client.world().resource::<netdrive::RemoteSnaps>();
+    assert!(snaps.leaves().landed() >= 1);
+    assert_eq!(snaps.leaves().rows_applied(), 1);
+    assert_eq!(snaps.leaves().rows_refused(), 0);
+    assert_eq!(snaps.leaves().refused(), 0);
+}
+
 /// F26-AC02's restart leg for props: a rematch starts the world over.
 /// Round one breaks props on the host and the client converges; the
 /// round ends and the host starts round two, whose placements stamp
