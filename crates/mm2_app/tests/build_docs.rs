@@ -266,3 +266,89 @@ mod scanner {
         assert_eq!(code(&out), 1, "{}", String::from_utf8_lossy(&out.stderr));
     }
 }
+
+// The release-candidate evidence script runs a fixed command set against
+// a candidate and a baseline. Its argument handling is what keeps a
+// retail install usable, so a stub binary records how the script passed
+// `--mm2-path` and the test reads it back.
+#[cfg(unix)]
+mod release_candidate {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Output};
+
+    fn executable(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write stub");
+        let mut perms = std::fs::metadata(&path).expect("stat stub").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod stub");
+        path
+    }
+
+    fn run(args: &[&str], retail: Option<&str>) -> Output {
+        let mut command = Command::new("sh");
+        command
+            .arg(repo().join("scripts/check-release-candidate.sh"))
+            .args(args);
+        match retail {
+            Some(dir) => command.env("MM2_RETAIL", dir),
+            None => command.env_remove("MM2_RETAIL"),
+        };
+        command.output().expect("run sh")
+    }
+
+    fn code(out: &Output) -> i32 {
+        out.status.code().expect("exited")
+    }
+
+    #[test]
+    fn usage_errors_are_not_a_pass() {
+        assert_eq!(code(&run(&[], None)), 2, "no --bin");
+        assert_eq!(code(&run(&["--bogus"], None)), 2, "unknown option");
+        assert_eq!(code(&run(&["--bin"], None)), 2, "missing value");
+    }
+
+    #[test]
+    fn a_retail_path_with_spaces_reaches_the_binary_as_one_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("evidence");
+        // The stub prints a pass record whose `argv=` field joins its real
+        // arguments with `|`, so a path split at its spaces shows up as
+        // separate fields.
+        let stub = executable(
+            dir.path(),
+            "mm2",
+            "#!/bin/sh\nprintf 'smoke=headless-physics world=x status=pass argv=%s end\\n' \"$(printf '%s|' \"$@\")\"\n",
+        );
+        // A retail directory named like the game's own.
+        let retail = dir.path().join("Midtown Madness 2");
+        std::fs::create_dir(&retail).unwrap();
+        let out = run(
+            &[
+                "--bin",
+                stub.to_str().unwrap(),
+                "--baseline",
+                stub.to_str().unwrap(),
+                "--out",
+                evidence.to_str().unwrap(),
+            ],
+            Some(retail.to_str().unwrap()),
+        );
+        assert_eq!(
+            code(&out),
+            0,
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log =
+            std::fs::read_to_string(evidence.join("sf-cruise.mm2.log")).expect("sf-cruise log");
+        // One `--mm2-path` field carrying the whole path, not split at its
+        // spaces.
+        assert!(
+            log.contains(&format!("--mm2-path|{}|", retail.display())),
+            "the install path split: {log}"
+        );
+    }
+}

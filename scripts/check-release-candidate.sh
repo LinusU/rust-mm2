@@ -48,10 +48,12 @@ retail=${MM2_RETAIL:-}
 
 # One record per command: the last `smoke=` line on stdout/stderr, with
 # the terminal colour codes removed. A run that prints no record is an
-# error the caller must see.
+# error the caller must see. Arguments are passed as real arguments, so a
+# path with spaces survives.
 record() {
-    # shellcheck disable=SC2086 # the caller passes the argument word list
-    "$1" ${2} 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep '^smoke=' | tail -n 1
+    record_bin=$1
+    shift
+    "$record_bin" "$@" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep '^smoke=' | tail -n 1
 }
 
 pass=0
@@ -62,15 +64,18 @@ skipped=0
 run_case() {
     name=$1 needs_retail=$2 exe=$3
     shift 3
-    if [ "$needs_retail" = 1 ] && [ -z "$retail" ]; then
-        echo "== $name: skipped (MM2_RETAIL is not set)"
-        skipped=$((skipped + 1))
-        return
+    if [ "$needs_retail" = 1 ]; then
+        if [ -z "$retail" ]; then
+            echo "== $name: skipped (MM2_RETAIL is not set)"
+            skipped=$((skipped + 1))
+            return
+        fi
+        # `--mm2-path` and the install are two arguments whatever the
+        # path contains — a retail directory named "Midtown Madness 2"
+        # must not split at its spaces.
+        set -- --mm2-path "$retail" "$@"
     fi
-    args="--mm2-path $retail $*"
-    [ "$needs_retail" = 1 ] || args=$*
-    # shellcheck disable=SC2086 # `args` is a word list by construction
-    line=$(record "$exe" "$args") || true
+    line=$(record "$exe" "$@") || true
     if [ -z "$line" ]; then
         echo "== $name: FAIL (no smoke record)"
         fail=$((fail + 1))
@@ -82,7 +87,7 @@ run_case() {
         *) echo "== $name: FAIL ($line)"; fail=$((fail + 1)); return ;;
     esac
     if [ -n "$baseline" ]; then
-        base=$(record "$baseline" "$args") || true
+        base=$(record "$baseline" "$@") || true
         echo "$base" > "$out/$name.baseline.log"
         if [ "$line" != "$base" ]; then
             echo "== $name: DIFFER"
