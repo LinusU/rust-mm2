@@ -12,8 +12,9 @@ package needs.
 |---|---|---|
 | macOS, Apple Silicon (arm64) | The development machine: fmt/clippy/test gates, windowed Metal runs, `scripts/release-build.sh` | **tested** |
 | Linux, x86_64 | GitHub Actions `ubuntu-latest` runs fmt, clippy and the workspace tests (headless: no window, GPU or audio device) | build and tests **tested in CI only**; running the game windowed is *untested* |
-| Windows (MSVC) | A non-gating `cargo check` job in CI (`build-check`); never built or run by a maintainer | *untested* — the `%APPDATA%` user-data branch has not been compiled by the project |
-| macOS Intel, Linux arm64 | nothing | *untested* |
+| Windows (MSVC) | The non-gating `build-check` job's `cargo check --workspace --all-targets`, green on `windows-latest` (commit `895e89a`); never built or run by a maintainer | compile check **tested in CI only**; building or running the game and the `%APPDATA%` user-data path are *untested* |
+| macOS, Intel | nothing (the `build-check` job's `macos-latest` is an arm64 runner) | *untested* |
+| Linux, arm64 | nothing | *untested* |
 
 A hosted CI pass is a code check. It does not show that a window opens, a
 sound plays or an original installation loads — those need a person on the
@@ -96,11 +97,16 @@ scripts/scan-private-paths.sh --forbid /some/private/prefix path/to/binary
 ```
 
 Verified on macOS arm64 only (the build, the scan and a smoke run of the
-stripped `mm2` and `mm2-inspect`). The Linux `strip` branch and the
-Windows build are *untested*; on Windows the scan is the safeguard, not a
-guarantee. The release profile deliberately keeps symbol names so a
-profiler can read the binary (see the profiling section of the README);
-the script's output is the one to distribute.
+stripped `mm2` and `mm2-inspect`). The Linux `strip` branch — GNU
+`strip --strip-debug` over the four binaries, then the same scan — is
+*untested*: no maintainer machine runs it, and hosted CI's `test` job
+builds the debug profile rather than `scripts/release-build.sh`.
+Promoting it needs a CI job or a Linux machine that runs the script, and
+`.github/` is owner-controlled, so it is left to the owner (recorded on
+task #1328). The Windows build is *untested*; on Windows the scan is the
+safeguard, not a guarantee. The release profile deliberately keeps symbol
+names so a profiler can read the binary (see the profiling section of the
+README); the script's output is the one to distribute.
 
 What the artifact must not contain is a policy, not only a path check: no
 original archive or extracted asset, no profile, no screenshot or perf
@@ -191,8 +197,70 @@ tarball, run from `/`, passes `--headless --dev-world --bot --frames 300`
 with the same result (`status=pass travel=70.0m`) as the build-tree
 binary. Without `--bot` the headless smoke reports `status=fail ... car
 never drove` for both, because the default driver holds no input. That is
-the smoke's own verdict, not a packaging fault. This is a smoke of the
-package, not the game-rule test suite (F30-AC06 stays open).
+the smoke's own verdict, not a packaging fault.
+
+### Release-candidate acceptance (F30-AC06)
+
+The smoke above runs one command. `scripts/check-release-candidate.sh`
+runs a fixed set of the README's headless evidence commands and compares
+each one's `smoke=` record between a release candidate and a baseline
+build:
+
+```sh
+scripts/check-release-candidate.sh \
+    --bin target/package/rust-mm2-darwin-arm64/mm2 \
+    --baseline target/debug/mm2 [--out <dir>]
+```
+
+Two commands run on the dev world (no original data); four run on the
+retail cities and need `MM2_RETAIL`. A city command without the install
+is reported `skipped`, never counted as a pass. Every record must be
+byte-identical between the two binaries — status, world and every
+subsystem counter the record carries (collision, pedestrians, traffic,
+signals, movers, damage, race rules) — so an optimisation that changes
+scene content or a game rule fails the check.
+
+Verified 2026-10-12 on macOS arm64 (commit `895e89a`): the `mm2` inside
+the package `scripts/package.sh --out target/f30-rc` built (release
+profile, stripped, re-signed) and the unoptimized `target/debug/mm2`
+printed the same six records, byte for byte:
+
+| command | recorded evidence | record sha256 |
+|---|---|---|
+| `--dev-world --headless --frames 600` | `status=pass travel=158.4m` | `46519810…` |
+| `--dev-world --headless --bot --frames 600` | `status=pass travel=197.4m` | `63950dbd…` |
+| `--city sf --headless --frames 600` | `status=pass` + the full scene record (pvs/wtr/sig/peds/traf/movers/damage) | `353d0e0d…` |
+| `--city london --event blitz:0 --headless --frames 2400` | `status=pass phase=results outcome=timed-out` | `e3e4766a…` |
+| `--city london --event blitz:0 --headless --bot --frames 2400` | `status=pass outcome=finished place=1` | `0413e2f1…` |
+| `--city sf --event checkpoint:0 --headless --bot --frames 3000` | `status=pass cp=6/6 outcome=finished place=1` | `398d36d1…` |
+
+The commands are headless: they show the optimised binary loads and steps
+the same content and reaches the same race outcome, not that a scene's
+geometry or textures were re-inspected. A rendered release-candidate
+check (the `--cam` captures run on the package as on the dev build) is
+still open. The per-command logs and full shas are written under the
+`--out` directory (default `target/release-candidate/`, git-ignored).
+
+The packaged binary cannot run the in-process Rust integration tests:
+they link the game crates into the test process, not the shipped binary.
+The headless commands above are the part of that evidence the binary
+itself can produce. The in-process game-rule and scene tests can still be
+run against the optimised code by switching profile:
+
+```sh
+cargo test --release -p mm2_app --test app
+```
+
+Verified 2026-10-12 on macOS arm64 (commit `895e89a`): 1204 of the 1206
+app integration tests pass in the release profile. The two that do not
+are `nonfinite_ray::avian_asserts_a_finite_ray_origin` and
+`…an_infinite_ray_origin`, both `#[should_panic]` tests of Avian's
+`debug_assert!(origin.is_finite())`. The release profile has
+`debug-assertions = false`, so the assertion they pin is not compiled in
+and there is nothing to panic on: they are debug-build tests, not a scene
+or game-rule regression. Their siblings, the finite-ray case and
+`avian_shape_intersections_tolerate_a_non_finite_pose`, pass in both
+profiles.
 
 ## Entry points
 
@@ -210,10 +278,14 @@ The README documents the flags in context; `mm2 --help` lists them all.
 
 - The `.app` bundle, a prefix install and a Windows zip (only the Unix
   tarball is produced), and a `LICENSE` file to put in it.
-- The release-candidate checks that run the game-rule tests *on the
-  packaged binary* (F30-AC06): the package is checked for contents, not yet
-  exercised end to end.
-- A hosted CI job that runs `scripts/package.sh`, and passing
-  Windows/macOS jobs (the added `build-check` job has not run yet).
+- A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
+  runs the headless commands, not the `--cam` captures, so it shows the
+  optimised package loads the same content and reaches the same race
+  outcomes, not that a scene's geometry or textures still draw.
+- A hosted CI job that runs `scripts/package.sh`. The non-gating
+  `build-check` job is green on `macos-latest` and `windows-latest`
+  (commit `895e89a`), but it is a `cargo check`, not a package build or a
+  launch, and no CI job runs `scripts/release-build.sh` (so its Linux
+  `strip` branch stays untested).
 - Windowed runs on Linux and Windows; non-ASCII installation paths on
   every platform.

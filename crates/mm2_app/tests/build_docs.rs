@@ -110,6 +110,18 @@ fn the_doc_and_the_release_script_cover_every_binary() {
     assert_eq!(scanned, bins, "release-build.sh and the manifests disagree");
 }
 
+/// The release-candidate evidence script the packaging section tells you to
+/// run must exist under that name.
+#[test]
+fn the_doc_names_the_release_candidate_check() {
+    let script = "scripts/check-release-candidate.sh";
+    assert!(repo().join(script).is_file(), "{script} is missing");
+    assert!(
+        read("docs/building.md").contains(script),
+        "docs/building.md omits {script}"
+    );
+}
+
 #[test]
 fn the_package_scripts_and_the_doc_agree_on_the_binary_set() {
     let doc = read("docs/building.md");
