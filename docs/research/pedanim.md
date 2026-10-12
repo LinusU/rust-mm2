@@ -592,7 +592,8 @@ walker animation code: `0x54cd90` when the current animation is `BACKUP`
 branch before entering the animation at `0x5d7288` (name not decoded);
 and `0x54d8b0` twice immediately after choosing a dive animation
 (`ANTIC_LDIVE`/`ANTIC_RDIVE`/`WALK_LDIVE`/`WALK_RDIVE`). Two sites
-push 0 (`0x54ce12`, `0x54de04`'s decompile); the two dive sites push `EBX` (decompiled as 0, not traced further). So the retail
+push 0 (`0x54ce12`, `0x54de04`'s decompile); the two dive sites push `EBX`
+(decompiled as 0, not traced further). So the retail
 scream is tied to a walker starting a dive or backing away.
 
 What is not: the meaning of the `0,500` speed band (the decompiled loop
@@ -601,7 +602,7 @@ at the dive sites. Nothing is wired in the port yet: the crowd stays
 silent until a task keys a deduplicated one-shot to the dive/backup
 transitions, which must mark the sample choice as designed.
 
-Follow-up to close it (task #1345): find the caller of the emitter's
-activate slot `0x510980`, then bind the evidenced trigger through
-`crate::audio` one-shots deduplicated like `impact_voices`; or an OWNER
-retail play observation (dive in front of a car with the volume up).
+Follow-ups: task #1366 binds the evidenced trigger through `crate::audio`
+one-shots deduplicated like `impact_voices`; an OWNER retail play
+observation (dive in front of a car with the volume up) would settle the
+sample choice.
