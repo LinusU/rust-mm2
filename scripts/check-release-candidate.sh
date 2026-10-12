@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
         --bin) [ $# -ge 2 ] || { echo "error: --bin needs a value" >&2; exit 2; }; bin=$2; shift 2 ;;
         --baseline) [ $# -ge 2 ] || { echo "error: --baseline needs a value" >&2; exit 2; }; baseline=$2; shift 2 ;;
         --out) [ $# -ge 2 ] || { echo "error: --out needs a value" >&2; exit 2; }; out=$2; shift 2 ;;
-        -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown argument $1" >&2; exit 2 ;;
     esac
 done
