@@ -387,6 +387,43 @@ fn a_midrange_limit_discriminates_the_impact() {
     );
 }
 
+/// Retail pair step `0x469610` applies no impulse for a sub-limit
+/// contact (banger.md "Sub-limit contact"): the striker is unimpeded
+/// and the prop keeps its authored pose. The dormant prop is therefore
+/// a sensor, not a static wall.
+#[test]
+fn a_sub_limit_contact_applies_no_response_to_the_striker() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let origin = Vec3::new(0.0, 0.5, 0.0);
+    let (banger, _) = spawn_banger(&mut app, origin, banger_def("post", 1.0e9));
+    assert!(
+        app.world().get::<Sensor>(banger).is_some(),
+        "a dormant prop is a sensor"
+    );
+    let striker = spawn_striker(
+        &mut app,
+        Vec3::new(-6.0, 0.5, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+    );
+    let events = run(&mut app, FRAMES_PER_SECOND / 2);
+    assert!(events.is_empty(), "20 m/s is sub-limit: {events:?}");
+    let striker_x = app.world().get::<Position>(striker).unwrap().0.x;
+    assert!(
+        striker_x > 1.5,
+        "the striker drove through the dormant prop, got x = {striker_x}"
+    );
+    let velocity = app.world().get::<LinearVelocity>(striker).unwrap().0;
+    assert!(
+        velocity.x > 14.0,
+        "no impulse reached the striker: {velocity:?}"
+    );
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Dormant
+    );
+    assert_eq!(app.world().get::<Position>(banger).unwrap().0, origin);
+}
+
 #[test]
 fn an_authored_tree_limit_demands_speed_not_just_mass() {
     // The top retail rungs author `ImpulseLimit2 ≈ Mass × 85342`; the

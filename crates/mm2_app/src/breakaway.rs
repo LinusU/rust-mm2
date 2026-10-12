@@ -227,6 +227,8 @@ pub(crate) fn spawn_break_fragment(
                 part,
             },
         ))
+        // Born `Active`, so solid: only a dormant prop is a sensor.
+        .remove::<Sensor>()
         .id();
     // The fragment's visuals are the part's own mesh children,
     // re-spawned under the new body.

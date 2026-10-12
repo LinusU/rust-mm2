@@ -699,11 +699,19 @@ readers/writers besides the parser and writer (`0x440c21`,
   is cleared by both activation outcomes (`0x442062` fragment path,
   `0x4424a2` `NumParts == 0` path), so an activated prop takes the
   ordinary path at `0x469970` (response applied, `0x4714d0` per
-  impact) from its next step on. *Inferred, not read:* that the
-  striker is therefore unimpeded by a sub-limit hit — a different
-  pass (the type-3 branch at `0x46971d` → `0x475af0`, or per-vehicle
-  collision) may still push back; the pre-filter `0x4692d0` was not
-  read.
+  impact) from its next step on. No other pass answers
+  the hit (read in #1343, verified_original for the pair step): the
+  pre-filter `0x4692d0` returns a bool and writes only locals (it is the
+  bound/speed test ahead of the narrow phase, called from `0x468bb3`
+  and `0x4695ac`); the type-3 branch (`cmp [edi+8], 3` at `0x46971d` →
+  `0x475af0`) and the general branch (`0x474a60`) are both *detection*
+  routines that fill the impact records (`0x65c9c8`, capped at 0xc8 /
+  0x64) and return the count, and neither reaches `0x4714d0`, whose
+  only callers are `0x4699b6` (the ordinary block this branch skips),
+  `0x469e5b`, `0x471aa0`-region and `0x472780`-region functions outside
+  the pair step. So the striker is unimpeded by a sub-limit hit as far
+  as `CollideInstances` goes. *Not read:* per-vehicle collision outside
+  the pair step (wheel/ground probes against props).
 - **Crossing the limit applies no impulse in that step either.**
   `0x442000` ends with either a fragment loop and then slot `+0x1c`
   (release) at `0x442456`, or, for `NumParts == 0`, hands the
@@ -759,8 +767,8 @@ readers/writers besides the parser and writer (`0x440c21`,
   `+0x2a86c`-based sub-object pointer were not swept.
 - **Still not recovered:** the sim-entry mode words (`0x468360`
   arguments) and the `+0x120` record field they key off; `[+0x2b4]`;
-  the `0x4692d0` pre-filter; whether a dormant prop's sub-limit
-  contact is answered by another pass.
+  the `0x4692d0` pre-filter's exact bound test (its result is known not
+  to apply a response).
 
 **Implemented (#1179).** `activate_bangers` now gates on this quantity
 (`mm2_game::contact_impulse_squared`, striker's `K` — the first-body
@@ -772,9 +780,12 @@ rungs now activate. Census (`retail_impulse_limit_ladder_is_reachable_by_a_one_t
 `va_cablecar_f`, `np_alcatraz_*`. `NumParts` > 0 now bounds the
 spawned fragments. #1180 then recovered both open items (above): a
 sub-limit contact releases the attachment and applies no impulse, and
-the first-pass `K` is the striker's. Our `activate_bangers` keeps the
-solver's response on sub-limit contacts — a divergence now documented,
-not changed.
+the first-pass `K` is the striker's. #1343 aligned the port: a
+dormant banger carries Avian's `Sensor`, so a sub-limit contact (and the
+activating one) gets no solver response and the striker is unimpeded;
+the activation edge removes `Sensor` as the body goes dynamic. The
+activating contact's reduced-mass transfer charged to the striker
+remains the F04-C.4 design choice (UNK-22).
 
 Historical note (the gate before #1179): the `½·m·v²` stand-in is
 the wrong quantity — it is quadratic in speed, the original is

@@ -204,6 +204,15 @@ pub fn banger_bundle(
         banger,
         (
             RigidBody::Static,
+            // A dormant prop is a sensor: the retail pair step
+            // (`0x469610`) applies no impulse to either body for a
+            // sub-limit contact, nor for the activating one
+            // (banger.md "Sub-limit contact"), so the solver must not
+            // push the striker back. Avian still builds the manifold
+            // and emits `CollisionStart`, which is all the gate needs.
+            // Every transition out of `Dormant` removes the marker,
+            // and a body spawned past `Dormant` never carries it.
+            Sensor,
             collider,
             // Authored physicals ride the dormant collider already:
             // they shape resting contact the same way and the
@@ -436,6 +445,9 @@ pub(crate) fn spawn_fragment<'a>(
         spawn.name,
     ));
     fragment.insert(tag);
+    if spawn.phase != BangerPhase::Dormant {
+        fragment.remove::<Sensor>();
+    }
     let id = fragment.id();
     for (mesh, material) in &piece.parts {
         let part = commands
@@ -885,7 +897,10 @@ pub fn activate_bangers(
         );
         banger.phase = BangerPhase::Active;
         banger.activated = Some(tick);
-        commands.entity(a.entity).insert(RigidBody::Dynamic);
+        commands
+            .entity(a.entity)
+            .insert(RigidBody::Dynamic)
+            .remove::<Sensor>();
         writer.write(BangerStateChanged {
             object: a.object,
             generation,
