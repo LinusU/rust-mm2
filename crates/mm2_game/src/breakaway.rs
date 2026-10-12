@@ -4,32 +4,34 @@
 //! vehicle's own PKG are the intact representation, and each is bound
 //! to a `tune/banger/<id>_break<NN>.dgbangerdata` fragment record —
 //! the same `<base>_break<N>` naming the prop-side audit resolves
-//! (REC-1, WLD-15). The record carries the part's authored detach
-//! threshold (`ImpulseLimit2`) and fragment physicals (mass, friction,
-//! elasticity) — original data.
+//! (REC-1, WLD-15). The record carries fragment physicals (mass,
+//! friction, elasticity) and an authored `ImpulseLimit2` — original
+//! data — though the latter does not gate detachment (see below).
 //!
-//! What the original compares `ImpulseLimit2` against is unverified
-//! for vehicles as it is for props (UNK-22), and whether the original
-//! detaches on impact severity or on accumulated damage is unrecovered
-//! (UNK-13). The authored data pins the unit down hard, though: on
-//! every retail vehicle fragment record `ImpulseLimit2` is `Mass ×
-//! constant` — ≈31.25 m/s (70 mph) on ordinary panels, ≈2500 m/s
-//! (effectively never) on heavy rigs like vpftruck's anchors. The
-//! implemented reading is therefore the one the authored values are
-//! shaped for (DSN-21): a part detaches when the impact's approach
-//! speed delivers more than its authored limit measured against the
-//! part's *own* mass — `severity × part_mass > ImpulseLimit2`, so
-//! `limit / mass` reads directly as the authored detach speed. A part
-//! never detaches on a damage-tier crossing. Repairing the rig (the
-//! disabled outcome's reset) re-attaches every part and retires the
-//! spawned fragments; a plain reset or stuck recovery does not repair,
-//! so detached parts stay off.
+//! Detachment is impact-driven, not damage-driven, and the gate is
+//! recovered from the retail binary (REC-2): an impact whose delivered
+//! impulse reaches a manager-wide `10000` kg·m/s takes **one** part —
+//! the attached part whose anchor is nearest the contact point. A
+//! part's authored `ImpulseLimit2` does not gate detachment at all; it
+//! only governs the *spawned fragment's* later collisions through the
+//! ordinary banger gate (OPR-1.3). The authored `ImpactThreshold` sits
+//! below `10000` on every retail record (1500, or 100 on `vpcaddie`),
+//! so the recovered leaf's `impulse > ImpactThreshold` precondition is
+//! already satisfied whenever the manager gate trips. The impulse
+//! compared is the same estimate [`crate::VehicleDamage`] accumulates —
+//! approach speed × the other participant's mass (the struck car's own
+//! mass for a wall hit) — which REC-3 measures as the original's unit,
+//! kg·m/s, though a lower bound for the same wall hit. A part never
+//! detaches on a damage-tier crossing. Repairing the rig (the disabled
+//! outcome's reset) re-attaches every part and retires the spawned
+//! fragments; a plain reset or stuck recovery does not repair, so
+//! detached parts stay off.
 //!
 //! Lifecycle per part:
 //!
 //! ```text
 //!   Attached (rides the rig, intact chunk rendered)
-//!     ── delivered impulse > authored ImpulseLimit2 ──▶
+//!     ── delivered impulse reaches the manager-wide 10000 ──▶
 //!   Detached (chunk hidden, fragment body spawned once)
 //!     ── the authority repairs the rig ──▶
 //!   Attached (fragment despawned, chunk shown)
@@ -51,8 +53,10 @@ use crate::ids::ObjectId;
 /// distilled `<id>_<stem>` fragment record. The record's `CG`/`Size`
 /// conventions differ from standalone props on retail (car-space
 /// anchors vs bound-box centres — the two are not reconciled), so the
-/// runtime consumes the record's physicals and threshold only; the
-/// fragment's pose comes from the detached geometry itself (DSN-21).
+/// runtime consumes the record's physicals for the spawned fragment and
+/// the fragment's pose from the detached geometry itself. The record's
+/// `ImpulseLimit2` is *not* consulted for detachment — the recovered
+/// gate is manager-wide (REC-2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BreakPartSpec {
     /// Model part stem, lowercase — matches `VehicleModel.parts`
@@ -102,24 +106,50 @@ impl VehicleBreaks {
         }
     }
 
-    /// Indices of attached parts whose authored `ImpulseLimit2` the
-    /// approach speed exceeds — `approach_speed × part_mass` is the
-    /// impulse the hit delivers to the part, and `limit / mass` is
-    /// ≈31.25 m/s (or ≈2500, "never") on every retail record (DSN-21,
-    /// UNK-22). Non-finite or non-positive speeds detach nothing: a
-    /// resting contact is not a detach event.
-    pub fn detachable(&self, approach_speed: f32) -> Vec<usize> {
-        if !approach_speed.is_finite() || approach_speed <= 0.0 {
-            return Vec::new();
+    /// The recovered manager-wide detach gate (REC-2): an impact whose
+    /// delivered impulse reaches this many kg·m/s detaches one part.
+    /// The original's `vehCarDamage` break manager is constructed with a
+    /// single `10000.0` (`0x4d8581`) and nothing rewrites it for a car,
+    /// so it is a constant for the whole rig. A part's authored
+    /// `ImpulseLimit2` never gates detachment. Authored `ImpactThreshold`
+    /// is below it on every retail record (1500, or 100 on `vpcaddie`),
+    /// so the recovered leaf's `impulse > ImpactThreshold` precondition
+    /// is subsumed.
+    pub const DETACH_IMPULSE: f32 = 10_000.0;
+
+    /// Whether an impact of `impulse` kg·m/s — the same estimate
+    /// [`crate::VehicleDamage`] accumulates, approach speed × the other
+    /// participant's mass — is strong enough to take a part and one is
+    /// still attached. Non-finite or negative impulses are rejected: a
+    /// junk delivery is never a detach.
+    pub fn detaches_on(&self, impulse: f32) -> bool {
+        impulse.is_finite()
+            && impulse >= Self::DETACH_IMPULSE
+            && self.parts.iter().any(|p| p.attached)
+    }
+
+    /// The attached part nearest `contact` — the recovered rule's
+    /// smallest-squared-distance scan over attached parts (REC-2); the
+    /// original detaches exactly this one part per qualifying impact.
+    /// `anchors` yields `(part index, anchor)` in the same space as
+    /// `contact`; a part with no anchor (no render node) or a non-finite
+    /// one is simply absent and can never be chosen. `None` on a
+    /// non-finite contact, on an out-of-range index or when no attached
+    /// part is a candidate; ties keep the lowest index.
+    pub fn nearest_attached(
+        &self,
+        contact: Vec3,
+        anchors: impl IntoIterator<Item = (usize, Vec3)>,
+    ) -> Option<usize> {
+        if !contact.is_finite() {
+            return None;
         }
-        self.parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.attached && p.spec.def.activates_on(approach_speed * p.spec.def.mass)
-            })
+        anchors
+            .into_iter()
+            .filter(|(i, a)| self.parts.get(*i).is_some_and(|p| p.attached) && a.is_finite())
+            .map(|(i, a)| (i, (a - contact).length_squared()))
+            .min_by(|x, y| x.1.total_cmp(&y.1))
             .map(|(i, _)| i)
-            .collect()
     }
 
     /// Mark a part detached and record the fragment body it spawned
@@ -193,8 +223,8 @@ pub struct PartDetached {
     /// The fragment body's minted identity — `None` when the part
     /// detached without spawning a body (pool bound).
     pub fragment: Option<ObjectId>,
-    /// The impulse the hit delivered to the part — `approach_speed ×
-    /// part_mass` — that exceeded the authored limit (the DSN-21
-    /// reading of UNK-22's quantity).
+    /// The impact's delivered impulse — approach speed × the other
+    /// participant's mass, in kg·m/s — that reached the manager-wide
+    /// gate (REC-2/REC-3). Not the part's `ImpulseLimit2`.
     pub estimate: f32,
 }

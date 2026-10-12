@@ -94,25 +94,14 @@ impl DamageReport {
     }
 }
 
-/// The finite positive mass of an entity, or `None` — the same filter
-/// [`crate::contracts::impulse_estimate`] applies so an unresolvable
-/// mass degrades to a light touch, not a hidden force.
-fn mass_of(masses: &Query<&ComputedMass>, entity: Entity) -> Option<f32> {
-    masses
-        .get(entity)
-        .ok()
-        .map(|m| m.value())
-        .filter(|m| m.is_finite() && *m > 0.0)
-}
-
 /// Fixed-step: accumulate the deduplicated impact stream into each
 /// participant's authored [`VehicleDamage`], emitting one
 /// [`DamageEvent`] per accepted application.
 ///
 /// Per impact, each participant's delivered impulse is
-/// `severity × other_mass` — for a wall hit the striker is the car
-/// itself, so its own mass stands in; a missing mass anywhere degrades
-/// to 1 kg (a touch, not a phantom wreck). Participants without a
+/// [`crate::contracts::delivered_impulse`] — `severity × other_mass`,
+/// with the car's own mass standing in when the other side is the
+/// static world or has no resolvable mass. Participants without a
 /// [`VehicleDamage`] component — anything with no authored
 /// `vehcardamage`, props, ambient cars — are skipped, so authored
 /// absence stays undamageable rather than fabricating a spec.
@@ -166,12 +155,13 @@ pub fn apply_impact_damage(
             let Ok(mut damage) = damaged.get_mut(entity) else {
                 continue;
             };
-            let mass = resolved[1 - side]
-                .1
-                .and_then(|other| mass_of(&masses, other))
-                .or_else(|| mass_of(&masses, entity))
-                .unwrap_or(1.0);
-            let verdict = damage.apply(event.id, event.severity * mass);
+            let impulse = crate::contracts::delivered_impulse(
+                event.severity,
+                entity,
+                resolved[1 - side].1,
+                &masses,
+            );
+            let verdict = damage.apply(event.id, impulse);
             match verdict {
                 DamageVerdict::Rejected => report.rejected += 1,
                 DamageVerdict::Duplicate => report.duplicate += 1,
@@ -186,7 +176,7 @@ pub fn apply_impact_damage(
                         generation,
                         tick,
                         impact: event.id,
-                        severity: event.severity * mass,
+                        severity: impulse,
                         total: damage.total(),
                         tier,
                     });

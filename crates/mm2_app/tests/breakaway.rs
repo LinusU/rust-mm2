@@ -1,10 +1,12 @@
 //! F05-B.3 integration: authored breakaway parts read the real
-//! deduplicated impact stream, detach once when the delivered impulse
-//! estimate exceeds the part's own `ImpulseLimit2`, spawn a pooled
-//! fragment body, hide the intact render node, and come back with the
-//! disabled outcome's repair. A predicted session drains the stream
-//! without touching a rig (detach truth belongs to the authority),
-//! while authoredless cars and stale generations stay bolted together.
+//! deduplicated impact stream and detach — one part per qualifying
+//! impact, the attached part nearest the contact point — when the
+//! delivered impulse reaches the recovered manager-wide gate (REC-2),
+//! spawn a pooled fragment body, hide the intact render node, and come
+//! back with the disabled outcome's repair. A predicted session drains
+//! the stream without touching a rig (detach truth belongs to the
+//! authority), while authoredless cars and stale generations stay
+//! bolted together.
 
 use std::time::Duration;
 
@@ -25,8 +27,9 @@ use mm2_game::{
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 /// `ImpulseLimit2 = mass × detach_speed` on the authored records
-/// (≈31.25 or ≈2500 m/s retail) — the test part reads as a 5 m/s
-/// threshold so ordinary severities discriminate.
+/// (≈31.25 or ≈2500 m/s retail) — fragment data under the recovered
+/// rule, which never gates detachment on it. Kept so the fragment
+/// physicals read like the real records.
 const PART_MASS: f32 = 100.0;
 const LIMIT: f32 = 500.0;
 const DAMAGE_SPEC: DamageSpec = DamageSpec {
@@ -35,6 +38,16 @@ const DAMAGE_SPEC: DamageSpec = DamageSpec {
     max_damage: 321_300.0,
     regenerate_rate: 0.0,
 };
+/// The dev car's authored mass (`VehicleConfig::default`) — a wall
+/// hit's delivered impulse is `severity × 1300`, so the recovered
+/// manager gate (10 000 kg·m/s) sits at ≈7.7 m/s of approach speed.
+const CAR_MASS: f32 = 1300.0;
+/// A wall-hit approach speed comfortably over the gate (9 × 1300 =
+/// 11 700 kg·m/s).
+const OVER: f32 = 9.0;
+/// Under the gate but over `ImpactThreshold` (5 × 1300 = 6 500) — the
+/// hit damages the car yet takes no part.
+const UNDER: f32 = 5.0;
 const SPAWN: Vec3 = Vec3::new(0.0, 1.5, 0.0);
 const SPAWN_YAW: f32 = 0.25;
 
@@ -207,8 +220,16 @@ fn break_app_as(
 }
 
 /// Deliver one synthetic impact into the session's stream, stamped
-/// with the live generation/tick like `collect_impacts` writes.
+/// with the live generation/tick like `collect_impacts` writes. The
+/// contact point is the world origin — fine for a one-part rig or when
+/// proximity does not matter.
 fn write_impact(app: &mut App, id: u64, a: ObjectId, b: ObjectId, severity: f32) {
+    write_impact_at(app, id, a, b, Vec3::ZERO, severity);
+}
+
+/// [`write_impact`] with an explicit contact point — the nearest-part
+/// scan (REC-2) keys on it.
+fn write_impact_at(app: &mut App, id: u64, a: ObjectId, b: ObjectId, point: Vec3, severity: f32) {
     let (generation, tick) = {
         let session = app.world().resource::<Session>();
         (session.generation(), session.tick())
@@ -220,11 +241,30 @@ fn write_impact(app: &mut App, id: u64, a: ObjectId, b: ObjectId, severity: f32)
             generation,
             tick,
             participants: (a, b),
-            point: Vec3::ZERO,
+            point,
             normal: Vec3::Y,
             severity,
             surface: SurfaceState::default(),
         });
+}
+
+/// A break node's anchor in the world — the car's live physics pose
+/// times the node's stored local transform, the exact quantity
+/// `detach_breaks` scans (REC-2). Read it *after* settling so a test's
+/// contact point is scoped to the pose the system will use.
+fn anchor(app: &App, car: Entity, node: Entity) -> Vec3 {
+    let pos = app
+        .world()
+        .get::<Position>(car)
+        .map(|p| p.0)
+        .unwrap_or(Vec3::ZERO);
+    let rot = app
+        .world()
+        .get::<Rotation>(car)
+        .map(|r| r.0)
+        .unwrap_or(Quat::IDENTITY);
+    let local = app.world().get::<BreakPartVisual>(node).unwrap().local;
+    pos + rot * local.translation
 }
 
 fn drain_parts(app: &mut App) -> Vec<PartDetached> {
@@ -251,8 +291,9 @@ fn a_panel_detaches_once_and_its_node_hides() {
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool::default(),
     );
-    // approach 6.0 m/s > 500/100 = 5 m/s — over the authored limit.
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    // 9 m/s against the world: 9 × 1300 = 11 700 kg·m/s, over the
+    // manager gate (REC-2).
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     app.update();
 
     assert_eq!(report(&app).detached, 1);
@@ -269,6 +310,9 @@ fn a_panel_detaches_once_and_its_node_hides() {
     assert_eq!(events[0].object, object);
     assert_eq!(events[0].part, "break0");
     assert!(events[0].fragment.is_some());
+    // The reported estimate is the impact impulse that tripped the
+    // gate, not the part's authored limit.
+    assert!((events[0].estimate - OVER * CAR_MASS).abs() < 1.0);
     // The spawned fragment is a pooled active dynamic body marked
     // with where it came from.
     let fragment = app
@@ -285,7 +329,7 @@ fn a_panel_detaches_once_and_its_node_hides() {
 
     // A second hit never detaches the same part again — the bounded
     // stream is structural (F05-AC06).
-    write_impact(&mut app, 2, object, ObjectId::WORLD, 20.0);
+    write_impact(&mut app, 2, object, ObjectId::WORLD, OVER * 2.0);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 1);
     assert!(drain_parts(&mut app).is_empty());
@@ -322,7 +366,7 @@ fn mesh_children_respawn_under_the_fragment() {
         .id();
     app.world_mut().entity_mut(nodes[0]).add_child(panel_child);
 
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     app.update();
     assert_eq!(report(&app).detached, 1);
 
@@ -358,14 +402,15 @@ fn mesh_children_respawn_under_the_fragment() {
 }
 
 #[test]
-fn below_the_authored_limit_the_panel_stays() {
+fn below_the_manager_gate_the_panel_stays() {
     let (mut app, _car, object, nodes) = break_app(
         vec![part("break0", LIMIT)],
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool::default(),
     );
-    // approach 3.0 m/s < 5 m/s — under the authored limit.
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 3.0);
+    // 5 m/s against the world: 6 500 kg·m/s, under the manager gate (and
+    // well over the authored `ImpulseLimit2` reading the old gate used).
+    write_impact(&mut app, 1, object, ObjectId::WORLD, UNDER);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 0);
     assert_eq!(
@@ -376,32 +421,78 @@ fn below_the_authored_limit_the_panel_stays() {
 }
 
 #[test]
-fn each_part_weighs_its_own_limit() {
-    let (mut app, _car, object, nodes) = break_app(
-        vec![part("break0", LIMIT), part("break1", LIMIT * 10.0)],
+fn the_dev_car_resolves_the_mass_the_gate_arithmetic_assumes() {
+    // The constants above derive their impulses from `CAR_MASS`; pin it
+    // to the live body so a changed dev car fails here, loudly, rather
+    // than silently shifting what `OVER`/`UNDER` mean.
+    let (app, car, _object, _nodes) = break_app(
+        vec![part("break0", LIMIT)],
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool::default(),
     );
-    // 6 m/s exceeds break0's 5 m/s threshold but not break1's 50.
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
-    run(&mut app, 3);
-    assert_eq!(report(&app).detached, 1);
+    let mass = app.world().get::<ComputedMass>(car).map(|m| m.value());
+    assert_eq!(mass, Some(CAR_MASS));
+}
+
+#[test]
+fn one_qualifying_impact_takes_one_panel_the_nearest() {
+    let (mut app, car, object, nodes) = break_app(
+        vec![part("break0", LIMIT), part("break1", LIMIT)],
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+    );
+    // A contact by the second part's anchor: it is the one that leaves,
+    // even though both parts are equally detachable (REC-2).
+    let near = anchor(&app, car, nodes[1]);
+    write_impact_at(&mut app, 1, object, ObjectId::WORLD, near, OVER);
+    app.update();
+    assert_eq!(report(&app).detached, 1, "one part per impact");
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[0]).unwrap(),
+        Visibility::Visible
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[1]).unwrap(),
+        Visibility::Hidden
+    );
+    let events = drain_parts(&mut app);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].part, "break1");
+
+    // The next qualifying impact takes the remaining attached part.
+    let near = anchor(&app, car, nodes[0]);
+    write_impact_at(&mut app, 2, object, ObjectId::WORLD, near, OVER);
+    app.update();
+    assert_eq!(report(&app).detached, 2);
     assert_eq!(
         *app.world().get::<Visibility>(nodes[0]).unwrap(),
         Visibility::Hidden
     );
-    assert_eq!(
-        *app.world().get::<Visibility>(nodes[1]).unwrap(),
-        Visibility::Visible,
-        "the heavier part rides out the same hit"
+}
+
+#[test]
+fn the_nearest_part_detaches_whatever_its_authored_limit() {
+    // The part nearest the contact authors an effectively infinite
+    // `ImpulseLimit2`; the far part authors a tiny one. The recovered
+    // rule takes the nearest *regardless* — the authored limit is not
+    // consulted (the old per-part gate would have taken the far one).
+    let (mut app, car, object, nodes) = break_app(
+        vec![part("break0", 1.0), part("break1", 1_000_000_000.0)],
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
     );
-    // A harder hit takes the second panel too.
-    write_impact(&mut app, 2, object, ObjectId::WORLD, 60.0);
+    let near = anchor(&app, car, nodes[1]);
+    write_impact_at(&mut app, 1, object, ObjectId::WORLD, near, OVER);
     run(&mut app, 3);
-    assert_eq!(report(&app).detached, 2);
+    assert_eq!(report(&app).detached, 1);
     assert_eq!(
         *app.world().get::<Visibility>(nodes[1]).unwrap(),
-        Visibility::Hidden
+        Visibility::Hidden,
+        "the nearest part leaves despite its huge authored limit"
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[0]).unwrap(),
+        Visibility::Visible
     );
 }
 
@@ -412,7 +503,7 @@ fn repair_restores_the_rig_and_retires_the_fragment() {
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool::default(),
     );
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 1);
 
@@ -454,7 +545,7 @@ fn a_reset_without_repair_keeps_the_parts_off() {
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool::default(),
     );
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 1);
 
@@ -582,7 +673,7 @@ fn a_pool_bound_part_still_leaves_the_rig() {
         Vec3::new(0.0, 1.2, 0.0),
         BangerPool { max_active: 0 },
     );
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     app.update();
     assert_eq!(report(&app).detached, 1);
     assert_eq!(
@@ -669,12 +760,117 @@ fn a_part_with_no_render_node_cannot_detach() {
         app.world_mut().entity_mut(e).despawn();
     }
 
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 0);
     assert!(
         app.world().get::<VehicleBreaks>(car).unwrap().parts[0].attached,
         "no node, no detach — the inconsistency stays visible in the rig"
+    );
+}
+
+/// F05-B.3 / REC-2 / DSN-21 original-content check: the authored
+/// vehicle fragment ladder is `ImpulseLimit2 = fragment mass × a
+/// per-part detach speed` (≈31.25 m/s on the reachable panels), which
+/// the retired DSN-21 gate read per part. The recovered rule never
+/// consults it — one part leaves when the impact's delivered impulse
+/// reaches the manager-wide `10000` kg·m/s, and the nearest authored
+/// anchor wins. This loads the real `vpcoop` rig, pins that every
+/// authored limit is ignored, and that the retail anchors are the
+/// scan's inputs. Skipped without the operator's install
+/// (`MM2_RETAIL=<dir>`).
+#[test]
+fn retail_breakaway_gate_is_manager_wide_not_per_part() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; retail breakaway gate NOT checked");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
+        .expect("the install mounts");
+    let Ok(def) = mm2_content::load_vehicle(&vfs, "vpcoop", 0) else {
+        eprintln!("vpcoop not in the install; skipping the retail breakaway check");
+        return;
+    };
+    assert!(
+        def.breaks.len() >= 2,
+        "vpcoop authors multiple break parts, got {}",
+        def.breaks.len()
+    );
+    let specs: Vec<BreakPartSpec> = def
+        .breaks
+        .iter()
+        .map(|b| BreakPartSpec {
+            name: b.name.clone(),
+            def: b.def.clone(),
+        })
+        .collect();
+
+    // Every authored `ImpulseLimit2` sits below the recovered manager
+    // gate (the whole retail vehicle ladder does: ≈31.25 m/s panels,
+    // the ≈2500 m/s "never detach" class on other cars). A single-part
+    // rig flips at exactly `DETACH_IMPULSE` whatever its authored limit
+    // — and does *not* flip on that limit, which is the DSN-21 reading
+    // this change retires.
+    for spec in &specs {
+        let limit = spec.def.impulse_limit2;
+        assert!(
+            limit < VehicleBreaks::DETACH_IMPULSE,
+            "{} authors ImpulseLimit2={limit} at/over the manager gate",
+            spec.def.name
+        );
+        let rig = VehicleBreaks::new(vec![spec.clone()]);
+        assert!(
+            !rig.detaches_on(limit),
+            "{} still detaches on its authored ImpulseLimit2 ({limit})",
+            spec.def.name
+        );
+        assert!(!rig.detaches_on(VehicleBreaks::DETACH_IMPULSE - 1.0));
+        assert!(rig.detaches_on(VehicleBreaks::DETACH_IMPULSE));
+    }
+
+    // The nearest authored anchor wins. `BreakPartVisual.local` is the
+    // model part's `origin` (`car_visual` breaks), so the retail model
+    // origins are exactly the scan's inputs.
+    let anchor_of = |name: &str| -> Vec3 {
+        def.model
+            .parts
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.origin)
+            .map(Vec3::from)
+            .unwrap_or(Vec3::ZERO)
+    };
+    let anchors: Vec<(usize, Vec3)> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i, anchor_of(&s.name)))
+        .collect();
+    let rig = VehicleBreaks::new(specs.clone());
+    for (i, anchor) in &anchors {
+        let pick = rig
+            .nearest_attached(*anchor, anchors.iter().copied())
+            .expect("an attached part is nearest");
+        assert!(
+            (anchors[pick].1 - *anchor).length() < 1.0e-3,
+            "a contact on part {i}'s anchor {} chose part {pick} anchored {:.3} m away",
+            anchor,
+            (anchors[pick].1 - *anchor).length(),
+        );
+    }
+
+    // The calibration the constants imply: the authored panels needed
+    // their per-part ≈31.25 m/s, the recovered manager gate is a far
+    // lower speed for the same car.
+    let mass = def.config.mass;
+    let authored_speed = specs
+        .iter()
+        .map(|s| s.def.impulse_limit2 / s.def.mass)
+        .fold(0.0f32, f32::max);
+    eprintln!(
+        "vpcoop: {} parts, mass {mass:.0} kg; authored panels ≈{authored_speed:.1} m/s, recovered gate {:.1} m/s",
+        specs.len(),
+        VehicleBreaks::DETACH_IMPULSE / mass,
     );
 }
 
@@ -699,7 +895,7 @@ fn detached_panels_stay_hidden_across_cockpit_cycles() {
     app.add_systems(Update, mm2_app::dash::sync_dash_visibility);
 
     // break0 detaches in default Chase.
-    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
     app.update();
     assert_eq!(report(&app).detached, 1);
     run(&mut app, 3);

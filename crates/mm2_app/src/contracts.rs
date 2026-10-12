@@ -167,16 +167,43 @@ pub(crate) fn deepest_contact(
     })
 }
 
+/// The finite positive mass of an entity, or `None`. The filter every
+/// impulse estimate applies, so an unresolvable mass degrades to a light
+/// touch, not a hidden force.
+pub(crate) fn resolved_mass(masses: &Query<&ComputedMass>, entity: Entity) -> Option<f32> {
+    masses
+        .get(entity)
+        .ok()
+        .map(|m| m.value())
+        .filter(|m| m.is_finite() && *m > 0.0)
+}
+
 /// The striker's resolved mass for an impact estimate: the authored
 /// `ComputedMass`, else a 1 kg fallback — a light touch, not a hidden
 /// force.
 fn striker_mass(striker: Entity, masses: &Query<&ComputedMass>) -> f32 {
-    masses
-        .get(striker)
-        .map(|m| m.value())
-        .ok()
-        .filter(|m| m.is_finite() && *m > 0.0)
-        .unwrap_or(1.0)
+    resolved_mass(masses, striker).unwrap_or(1.0)
+}
+
+/// The impulse one participant takes from an impact (kg·m/s): approach
+/// speed × the other participant's mass, with the struck entity's own
+/// mass standing in when the other side is the static world or has no
+/// resolvable mass, and a 1 kg touch when neither resolves. This is the
+/// single quantity the damage accumulator
+/// ([`crate::damage::apply_impact_damage`]) sums and the break manager's
+/// gate ([`crate::breakaway::detach_breaks`]) compares to the recovered
+/// `10000` (REC-2/REC-3) — the original feeds one impact record to both.
+pub(crate) fn delivered_impulse(
+    severity: f32,
+    own: Entity,
+    other: Option<Entity>,
+    masses: &Query<&ComputedMass>,
+) -> f32 {
+    let mass = other
+        .and_then(|e| resolved_mass(masses, e))
+        .or_else(|| resolved_mass(masses, own))
+        .unwrap_or(1.0);
+    severity * mass
 }
 
 /// Estimated impulse of a contact on a struck entity (kg·m/s):

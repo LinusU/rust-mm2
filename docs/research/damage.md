@@ -265,24 +265,27 @@ the conversion warnings.
 
 `mm2_app::breakaway::detach_breaks` (FixedLast, authority +
 `Playing` gated, drains stale input) reads the same deduplicated
-`ImpactEvent` stream: each attached part whose `severity ×
-part_mass` exceeds its authored `ImpulseLimit2` detaches — the
-`limit / mass` reading the authored data is shaped for (DSN-21;
-~31.25 m/s panels, ~2500 m/s never-detach anchors on retail). The
-part's `BreakPartVisual` node hides and a fragment body spawns at
-the detached mesh's pose (`car_pose × node_local`, read off the
-physics pose so a never-propagated `GlobalTransform` cannot lag the
-impact): convex hull over the part's own baked verts, the record's
-mass/friction/elasticity, the car's velocity at the part centroid
-plus the `dir × severity` kick and spin the prop fragments use.
-Fragments claim `BangerPool` slots like prop debris — a part leaves
-the rig even when the pool bound denies a body (`fragment: None` on
-the event). One bounded `PartDetached` fires per part per
-attachment (`VehicleBreaks::detach` refuses a second detach —
-F05-AC06); the record's `CG`/`Size` anchors are *not* consumed (they
-mix car-space and ~zero conventions on vehicle fragments — UNK-13),
-the fragment's `CenterOfMass` is the hull's measured centroid.
-Remote rigs are skipped (F25+).
+`ImpactEvent` stream and computes the same delivered impulse the damage
+accumulator reads — approach speed × the other participant's mass, the
+car's own mass for a wall hit (`mm2_app::contracts::delivered_impulse`)
+— then applies the recovered gate (REC-2/DSN-21): an impulse reaching
+the manager-wide `10000` kg·m/s detaches exactly **one** part, the
+attached part whose render-node anchor is nearest the contact point
+(`VehicleBreaks::nearest_attached`). A part's authored `ImpulseLimit2`
+is never consulted on this path. The part's `BreakPartVisual` node hides
+and a fragment body spawns at the detached mesh's pose (`car_pose ×
+node_local`, read off the physics pose so a never-propagated
+`GlobalTransform` cannot lag the impact): convex hull over the part's
+own baked verts, the record's mass/friction/elasticity, the car's
+velocity at the part centroid plus the `dir × severity` kick and spin
+the prop fragments use. Fragments claim `BangerPool` slots like prop
+debris — a part leaves the rig even when the pool bound denies a body
+(`fragment: None` on the event). One bounded `PartDetached` fires per
+part per attachment (`VehicleBreaks::detach` refuses a second detach —
+F05-AC06); the record's `CG`/`Size` anchors are *not* consumed (they mix
+car-space and ~zero conventions on vehicle fragments — UNK-13), the
+fragment's `CenterOfMass` is the hull's measured centroid. Remote rigs
+are skipped (F25+).
 
 `resolve_disabled` calls `restore_rig` wherever it calls
 `damage.reset()` — Cruise's FreeReset, Circuit's PenaltyReset and the
@@ -296,11 +299,14 @@ Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`): sf/london
 `--frames 600` scripted cruises on the default vpbug record all
 pre-existing counters bit-identical and no `brk=` field — vpbug
 authors no break parts (measured absence, correct). A 1200-frame sf
-cruise on vpcoop (6 authored parts at ~31.25 m/s) recorded
-`impacts=27 dmg=6a/0d/0r vsk=9a/0d/0r` and still no `brk=` — the
-scripted driver's contact approach speeds never reach the authored
-~70 mph detach speed, which is the behaviour the authored
-thresholds encode.
+cruise on vpcoop (6 authored parts, 800 kg, peak 30.6 m/s) recorded
+`impacts=158 dmg=1a/0d/0r vsk=2a/2d/2r` and still no `brk=`: the
+scripted contacts never deliver the recovered manager gate
+(`10000` kg·m/s ≈ 12.5 m/s of approach for this car), so the rig stays
+whole. A wall hit of the same car at ≥12.5 m/s sheds the nearest panel
+— `tests/breakaway.rs` exercises that path directly, and its
+`MM2_RETAIL` leg pins the real vpcoop rig (every authored limit
+ignored, the gate a constant) against the retail install.
 
 ## Runtime gyro maneuvers (F05-B.4)
 
@@ -353,8 +359,8 @@ endpoint ~1 m with every smoke counter identical — the authored record
 subtly changing slide dynamics is the feature, not drift.
 
 Not yet implemented: visual tiers (smoke pivots land in F05-B.6,
-`TextelDamageRadius` decals remain), damage-driven detachment if the
-original ever uses it (UNK-13),
+`TextelDamageRadius` decals remain), damage-driven wheel/hub loss at
+`MaxDamage` (the damage-driven half of REC-2, UNK-13),
 replication. (C&R healing is driven by `cnr_host_step` at a designed
 rate; see DMG-4.)
 
@@ -730,11 +736,17 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
 
 **Consequences for the port.** Breakaway detachment is *not*
 damage-driven, so there is no accumulated-damage detach to implement.
-The shipped DSN-21 gate (`severity × part_mass > ImpulseLimit2`, every
-part tested independently) departs from the recovered rule; replacing it
-needs the retail per-car masses and restitutions (the unit itself is
-measured above: kg·m/s). Wheel/hub loss at `MaxDamage` is a damage-driven
-behaviour the port does not have yet. Both are filed as follow-up tasks.
+The implemented gate (DSN-21) follows the recovered rule: one nearest
+part when the delivered impulse reaches a manager-wide `10000`, on the
+accumulator's own `severity × other_mass` estimate
+(`mm2_app::contracts::delivered_impulse`) — kg·m/s in kind, a lower
+bound for a wall hit. The remaining gap is magnitude: per-car retail
+masses and restitutions are unmeasured, so `10000` is applied as a
+disclosed unit match rather than a per-car calibration; and the
+recovered `1.25×` per-other-body re-offer gate is folded into the
+upstream `ImpactDedup` pair window rather than modelled. Wheel/hub loss
+at `MaxDamage` is a damage-driven behaviour the port does not have yet,
+and is filed as a follow-up task.
 
 ## Open questions
 
@@ -768,11 +780,11 @@ behaviour the port does not have yet. Both are filed as follow-up tasks.
 - (Answered 2026-10-11, see § Original breakaway rule: impact-driven,
   nearest part, manager-wide impulse; wheels/hubs damage-driven at
   `MaxDamage`.) Which parts detach at which damage level; whether break detachment
-  is damage-driven or impact-driven (the implemented reading is
-  impact-driven against `severity × part_mass`, DSN-21 — the authored
-  `ImpulseLimit2 = Mass × {31.25, 2500}` structure supports a
-  speed-threshold semantic but the original's comparison is
-  unrecovered); fragment-vs-intact rig swap rules (intact-hide +
+  is damage-driven or impact-driven (recovered impact-driven; the port
+  now detaches the nearest attached part on the manager-wide delivered
+  impulse — REC-2, DSN-21 — with the authored
+  `ImpulseLimit2 = Mass × {31.25, 2500}` ladder being fragment data, not
+  the gate); fragment-vs-intact rig swap rules (intact-hide +
   spawned-fragment is implemented; whether the original swaps a
   damaged variant model is unrecovered).
 - `DoublePivot` semantics beyond the implemented emit-all-pivots

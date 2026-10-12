@@ -2,19 +2,23 @@
 //! inventory meets Avian and the session lifecycle.
 //!
 //! [`detach_breaks`] consumes the same deduplicated [`ImpactEvent`]
-//! stream the damage accumulator reads. Each attached part detaches
-//! when the impact's approach speed delivers more than its authored
-//! `ImpulseLimit2` measured against the part's own mass — the reading
-//! the authored values are shaped for: `limit / mass` is ≈31.25 m/s
-//! (~70 mph) on ordinary panels and ≈2500 m/s (never) on the heavy
-//! rigs' anchors (DSN-21; what the original compares the limit against
-//! stays UNK-22, and whether detachment is impact- or damage-driven
-//! stays UNK-13). A detaching part's intact render node hides and a
-//! fragment body spawns at the detached mesh's pose — convex hull
-//! over the part's own verts, the record's physicals, the car's
-//! velocity at the part plus the impact kick and spin, pooled like
-//! prop debris through the shared [`BangerPool`]. One bounded
-//! [`PartDetached`] fires per part per attachment.
+//! stream the damage accumulator reads, and computes the same delivered
+//! impulse for each participant — approach speed × the other side's
+//! mass, the struck car's own mass for a wall hit
+//! ([`crate::contracts::delivered_impulse`]). The gate is recovered from
+//! the retail binary (REC-2): when that impulse reaches a manager-wide
+//! `10000` kg·m/s, exactly **one** part leaves the rig — the attached
+//! part whose anchor is nearest the contact point — and the part's
+//! authored `ImpulseLimit2` is never consulted. The reading this
+//! replaces tested every part independently against `severity ×
+//! part_mass > ImpulseLimit2` — the designed DSN-21 departure the
+//! recovered rule retires; `docs/original-rules.md` carries the
+//! recovery. A detaching part's intact render node hides and
+//! a fragment body spawns at the detached mesh's pose — convex hull over
+//! the part's own verts, the record's physicals, the car's velocity at
+//! the part plus the impact kick and spin, pooled like prop debris
+//! through the shared [`BangerPool`]. One bounded [`PartDetached`] fires
+//! per part per attachment.
 //!
 //! [`restore_rig`] is the repair side: the disabled outcome calls it
 //! where it calls `damage.reset()`, so a repaired wreck gets its
@@ -43,6 +47,7 @@ use mm2_game::{
 };
 
 use crate::banger::{BangerMut, banger_bundle, claim_slot};
+use crate::contracts::delivered_impulse;
 
 /// Per-session evidence counters for the breakaway pipeline — the
 /// `brk=` field of the headless smoke record. Session-scoped like
@@ -248,17 +253,18 @@ pub(crate) fn spawn_break_fragment(
     Some((fragment, object))
 }
 
-/// Fixed-step: detach authored breakaway parts whose `ImpulseLimit2`
-/// an impact's delivered impulse exceeds. Runs after
-/// `apply_impact_damage` — a wrecking blow can shed a panel the same
-/// tick it disables the car, and `resolve_disabled`'s repair puts it
-/// back in the same pass.
+/// Fixed-step: detach the one part nearest the contact point when an
+/// impact's delivered impulse reaches the recovered manager-wide gate
+/// (REC-2). Runs after `apply_impact_damage` — a wrecking blow can shed
+/// a panel the same tick it disables the car, and `resolve_disabled`'s
+/// repair puts it back in the same pass.
 #[allow(clippy::too_many_arguments)] // Bevy system: the detach decision, the fragment spawn and the pool all need their own handles
 pub fn detach_breaks(
     mut reader: MessageReader<ImpactEvent>,
     mut session: ResMut<Session>,
     pool: Res<BangerPool>,
     identities: Query<(Entity, &ObjectIdentity, Option<&SessionEntity>)>,
+    masses: Query<&ComputedMass>,
     // Disjoint from `bangers` below: a vehicle is never a Banger, and
     // `BangerMut` takes `&mut LinearVelocity`/`&mut AngularVelocity`.
     motions: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity), Without<Banger>>,
@@ -321,13 +327,47 @@ pub fn detach_breaks(
             let Ok(mut rig) = rigs.get_mut(entity) else {
                 continue;
             };
-            // The part's own record decides: `limit / mass` is the
-            // authored detach speed (≈31.25 or ≈2500 m/s on retail).
-            let detachable = rig.detachable(event.severity);
-            if detachable.is_empty() {
+            // The recovered gate (REC-2): the same delivered impulse the
+            // damage accumulator reads — approach speed × the other
+            // side's mass, the car's own mass for a wall hit. The part's
+            // authored `ImpulseLimit2` is not consulted.
+            let impulse = delivered_impulse(
+                event.severity,
+                entity,
+                resolved[1 - side].1.map(|(other, _)| other),
+                &masses,
+            );
+            if !rig.detaches_on(impulse) {
                 continue;
             }
             let Some(owner) = owner else {
+                continue;
+            };
+            let (car_pos, car_rot, car_lv, car_av) = motions
+                .get(entity)
+                .map(|(p, r, l, a)| (p.0, r.0, l.0, a.0))
+                .unwrap_or((Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO));
+            // The attached part nearest the contact point — REC-2's
+            // smallest-squared-distance scan. A rig part whose render
+            // node is missing has no anchor and can never be chosen, so
+            // an assembly inconsistency stays visible in the rig.
+            let anchors = rig.parts.iter().enumerate().filter_map(|(i, p)| {
+                visuals
+                    .iter()
+                    .find(|(_, bpv, _, child)| child.parent() == entity && bpv.part == p.spec.name)
+                    .map(|(_, bpv, _, _)| (i, car_pos + car_rot * bpv.local.translation))
+            });
+            let Some(i) = rig.nearest_attached(event.point, anchors) else {
+                continue;
+            };
+            // The part's render node: hidden on detach, shown on repair.
+            let Some(node) = visuals
+                .iter()
+                .find(|(_, bpv, _, child)| {
+                    child.parent() == entity && bpv.part == rig.parts[i].spec.name
+                })
+                .map(|(e, _, _, _)| e)
+            else {
                 continue;
             };
             // The kick points the way the striker travelled into this
@@ -337,54 +377,35 @@ pub fn detach_breaks(
             } else {
                 event.normal
             };
-            let (car_pos, car_rot, car_lv, car_av) = motions
-                .get(entity)
-                .map(|(p, r, l, a)| (p.0, r.0, l.0, a.0))
-                .unwrap_or((Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO));
-            for i in detachable {
-                // The part's render node: hidden on detach, shown on
-                // repair. A rig part with no node cannot detach — the
-                // spec was built from the same model the visuals were,
-                // so a miss is an assembly inconsistency, not data.
-                let Some(node) = visuals
-                    .iter()
-                    .find(|(_, bpv, _, child)| {
-                        child.parent() == entity && bpv.part == rig.parts[i].spec.name
-                    })
-                    .map(|(e, _, _, _)| e)
-                else {
-                    continue;
-                };
-                let spec = rig.parts[i].spec.clone();
-                let spawned = spawn_break_fragment(
-                    node,
-                    entity,
-                    i,
-                    &spec,
-                    (car_pos, car_rot),
-                    (car_lv, car_av),
-                    Some((dir, event.point, event.severity)),
-                    owner,
-                    &mut occupied,
-                    &mut session,
-                    &pool,
-                    &mut bangers,
-                    &mut banger_writer,
-                    &mut visuals,
-                    &render_parts,
-                    &mut commands,
-                );
-                if rig.detach(i, spawned.map(|(e, _)| e)) {
-                    report.detached += 1;
-                    writer.write(PartDetached {
-                        object,
-                        generation,
-                        tick,
-                        part: spec.name,
-                        fragment: spawned.map(|(_, o)| o),
-                        estimate: event.severity * spec.def.mass,
-                    });
-                }
+            let spec = rig.parts[i].spec.clone();
+            let spawned = spawn_break_fragment(
+                node,
+                entity,
+                i,
+                &spec,
+                (car_pos, car_rot),
+                (car_lv, car_av),
+                Some((dir, event.point, event.severity)),
+                owner,
+                &mut occupied,
+                &mut session,
+                &pool,
+                &mut bangers,
+                &mut banger_writer,
+                &mut visuals,
+                &render_parts,
+                &mut commands,
+            );
+            if rig.detach(i, spawned.map(|(e, _)| e)) {
+                report.detached += 1;
+                writer.write(PartDetached {
+                    object,
+                    generation,
+                    tick,
+                    part: spec.name,
+                    fragment: spawned.map(|(_, o)| o),
+                    estimate: impulse,
+                });
             }
         }
     }
