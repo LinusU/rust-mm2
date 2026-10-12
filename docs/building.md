@@ -305,6 +305,10 @@ The README documents the flags in context; `mm2 --help` lists them all.
 
 - A Windows zip (`scripts/package.sh` builds the flat folder, the macOS
   `.app` bundle and the Unix prefix; task #1368).
+- A double-clickable `.app`: the bundle has the layout the app's asset
+  search uses (`Contents/MacOS/mm2`, `Contents/Resources/assets`) but no
+  `Contents/Info.plist`, so it is run from `Contents/MacOS/mm2` rather
+  than opened by Finder, and it is not signed or notarized (task #1375).
 - A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
   runs the headless commands, not the `--cam` captures, so it shows the
   optimised package loads the same content and reaches the same race
