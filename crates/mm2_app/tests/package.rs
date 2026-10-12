@@ -44,27 +44,67 @@ fn fake_bins(at: &Path) -> PathBuf {
 }
 
 fn check(dir: &Path, extra: &[&str]) -> Output {
+    check_layout(dir, "flat", extra)
+}
+
+fn check_layout(dir: &Path, layout: &str, extra: &[&str]) -> Output {
     Command::new("sh")
         .arg(repo().join("scripts/check-package.sh"))
+        .args(["--layout", layout])
         .args(extra)
         .arg(dir)
         .output()
         .expect("run sh")
 }
 
-/// A folder `check-package.sh` accepts.
-fn good_package(at: &Path) -> PathBuf {
-    let dir = at.join("pkg");
-    std::fs::create_dir_all(dir.join("assets/texture")).unwrap();
-    std::fs::create_dir_all(dir.join("docs")).unwrap();
-    for bin in BINS {
-        write_exec(&dir.join(bin), b"\0fake\0");
+/// Where a layout keeps its binaries, assets and README/docs.
+fn layout_dirs(layout: &str) -> (&'static str, &'static str, &'static str) {
+    match layout {
+        "app" => (
+            "Contents/MacOS/",
+            "Contents/Resources/assets",
+            "Contents/Resources",
+        ),
+        "prefix" => ("bin/", "share/rust-mm2/assets", "share/doc/rust-mm2"),
+        _ => ("", "assets", ""),
     }
-    std::fs::write(dir.join("README.md"), "readme").unwrap();
-    std::fs::write(dir.join("docs/building.md"), "doc").unwrap();
-    std::fs::write(dir.join("assets/texture/dev_road.png"), b"png").unwrap();
-    assert_eq!(code(&check(&dir, &[])), 0, "fixture must be clean");
+}
+
+/// A folder `check-package.sh` accepts, in `layout`.
+fn good_layout_package(at: &Path, layout: &str) -> PathBuf {
+    let (bin_prefix, asset_dir, doc_prefix) = layout_dirs(layout);
+    let dir = at.join("pkg");
+    let docs = if doc_prefix.is_empty() {
+        dir.join("docs")
+    } else {
+        dir.join(doc_prefix).join("docs")
+    };
+    std::fs::create_dir_all(dir.join(asset_dir).join("texture")).unwrap();
+    std::fs::create_dir_all(&docs).unwrap();
+    for bin in BINS {
+        let path = dir.join(format!("{bin_prefix}{bin}"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_exec(&path, b"\0fake\0");
+    }
+    let readme = if doc_prefix.is_empty() {
+        dir.join("README.md")
+    } else {
+        dir.join(doc_prefix).join("README.md")
+    };
+    std::fs::write(readme, "readme").unwrap();
+    std::fs::write(docs.join("building.md"), "doc").unwrap();
+    std::fs::write(dir.join(asset_dir).join("texture/dev_road.png"), b"png").unwrap();
+    assert_eq!(
+        code(&check_layout(&dir, layout, &[])),
+        0,
+        "fixture must be clean"
+    );
     dir
+}
+
+/// The flat fixture, kept for the tests that predate the layouts.
+fn good_package(at: &Path) -> PathBuf {
+    good_layout_package(at, "flat")
 }
 
 /// The fixture plus one extra file, which must fail naming `needle`.
@@ -75,6 +115,23 @@ fn assert_rejected_with(rel: &str, bytes: &[u8], needle: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, bytes).unwrap();
     let out = check(&dir, &[]);
+    assert_eq!(code(&out), 1, "{rel}: {}", stderr(&out));
+    assert!(stderr(&out).contains(needle), "{rel}: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains(rel),
+        "{rel} not named: {}",
+        stderr(&out)
+    );
+}
+
+/// The same, in `layout`: `rel` is the file's real path in that layout.
+fn assert_layout_rejected_with(layout: &str, rel: &str, bytes: &[u8], needle: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = good_layout_package(tmp.path(), layout);
+    let path = dir.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    let out = check_layout(&dir, layout, &[]);
     assert_eq!(code(&out), 1, "{rel}: {}", stderr(&out));
     assert!(stderr(&out).contains(needle), "{rel}: {}", stderr(&out));
     assert!(
@@ -242,6 +299,110 @@ fn usage_errors_are_not_a_pass() {
     assert_eq!(run(&[tmp.path().to_str().unwrap()]), 1, "empty package");
 }
 
+#[test]
+fn each_layout_is_checked_where_its_files_belong() {
+    for layout in ["flat", "app", "prefix"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = good_layout_package(tmp.path(), layout);
+        assert_eq!(
+            code(&check_layout(&dir, layout, &[])),
+            0,
+            "{layout} fixture must be clean"
+        );
+        // The same folder judged as another layout is not that layout:
+        // its binaries, assets and README are somewhere else.
+        for other in ["flat", "app", "prefix"] {
+            if other == layout {
+                continue;
+            }
+            let out = check_layout(&dir, other, &[]);
+            assert_eq!(code(&out), 1, "{layout} as {other}: {}", stderr(&out));
+            assert!(
+                stderr(&out).contains("missing"),
+                "{layout} as {other} should miss files: {}",
+                stderr(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unknown_layout_is_a_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = good_package(tmp.path());
+    assert_eq!(code(&check_layout(&dir, "bogus", &[])), 2);
+    assert_eq!(
+        code(&check_layout(&dir, "flat", &["--layout"])),
+        2,
+        "no value"
+    );
+}
+
+#[test]
+fn a_stray_or_wrong_type_file_is_named_by_its_real_path_in_a_layout() {
+    // A file the bundle was never meant to carry fails whatever its depth,
+    // and the message says where it really is.
+    assert_layout_rejected_with(
+        "app",
+        "Contents/Info.plist",
+        b"plist",
+        "not on the allowlist",
+    );
+    assert_layout_rejected_with(
+        "app",
+        "Contents/Resources/assets/texture/car.dds",
+        b"x",
+        "asset type not on the allowlist",
+    );
+    assert_layout_rejected_with(
+        "prefix",
+        "share/doc/rust-mm2/notes.txt",
+        b"x",
+        "not on the allowlist",
+    );
+    assert_layout_rejected_with(
+        "prefix",
+        "share/rust-mm2/assets/car.dds",
+        b"x",
+        "asset type not on the allowlist",
+    );
+}
+
+#[test]
+fn a_layout_missing_one_of_its_own_places_fails() {
+    for (layout, gone, needle) in [
+        ("app", "Contents/MacOS/mm2", "missing binary: mm2"),
+        (
+            "app",
+            "Contents/Resources/assets/texture/dev_road.png",
+            "missing Contents/Resources/assets/texture/dev_road.png",
+        ),
+        ("app", "Contents/Resources/README.md", "missing README.md"),
+        ("prefix", "bin/mm2-join", "missing binary: mm2-join"),
+        (
+            "prefix",
+            "share/rust-mm2/assets/texture/dev_road.png",
+            "missing share/rust-mm2/assets/texture/dev_road.png",
+        ),
+        (
+            "prefix",
+            "share/doc/rust-mm2/README.md",
+            "missing README.md",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = good_layout_package(tmp.path(), layout);
+        std::fs::remove_file(dir.join(gone)).unwrap();
+        let out = check_layout(&dir, layout, &[]);
+        assert_eq!(code(&out), 1, "{layout} {gone}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains(needle),
+            "{layout} {gone}: {}",
+            stderr(&out)
+        );
+    }
+}
+
 fn package(args: &[&str]) -> Output {
     Command::new("sh")
         .arg(repo().join("scripts/package.sh"))
@@ -276,7 +437,49 @@ fn tarball_in(out: &Path) -> PathBuf {
     found.into_iter().next().unwrap()
 }
 
-fn package_args<'a>(bins: &'a Path, out: &'a Path) -> [&'a str; 4] {
+/// Extract `tarball` into `into` and return its one top-level entry.
+fn unpack(tarball: &Path, into: &Path) -> PathBuf {
+    std::fs::create_dir_all(into).unwrap();
+    let status = Command::new("tar")
+        .arg("-C")
+        .arg(into)
+        .arg("-xzf")
+        .arg(tarball)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let entries: Vec<PathBuf> = std::fs::read_dir(into)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries.into_iter().next().unwrap()
+}
+
+/// The one directory a `--layout`-specific run staged in `out`.
+fn only_dir(out: &Path) -> PathBuf {
+    let dirs: Vec<PathBuf> = std::fs::read_dir(out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    dirs.into_iter().next().unwrap()
+}
+
+fn package_args<'a>(layout: &'a str, bins: &'a Path, out: &'a Path) -> [&'a str; 6] {
+    [
+        "--layout",
+        layout,
+        "--bin-dir",
+        bins.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]
+}
+
+/// The default invocation, without a `--layout` flag (which means `all`).
+fn package_args_default<'a>(bins: &'a Path, out: &'a Path) -> [&'a str; 4] {
     [
         "--bin-dir",
         bins.to_str().unwrap(),
@@ -290,7 +493,7 @@ fn the_package_script_ships_the_program_assets_and_docs_and_nothing_else() {
     let tmp = tempfile::tempdir().unwrap();
     let bins = fake_bins(tmp.path());
     let out_dir = tmp.path().join("out");
-    let out = package(&package_args(&bins, &out_dir));
+    let out = package(&package_args("flat", &bins, &out_dir));
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert!(String::from_utf8_lossy(&out.stdout).contains("packaged:"));
     let mut expected: Vec<String> = BINS.iter().map(|b| b.to_string()).collect();
@@ -324,7 +527,7 @@ fn the_tarball_unpacks_to_a_package_the_check_accepts() {
     let tmp = tempfile::tempdir().unwrap();
     let bins = fake_bins(tmp.path());
     let out_dir = tmp.path().join("out");
-    let out = package(&package_args(&bins, &out_dir));
+    let out = package(&package_args("flat", &bins, &out_dir));
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let unpack = tmp.path().join("unpack");
     std::fs::create_dir(&unpack).unwrap();
@@ -351,7 +554,7 @@ fn a_binary_with_the_builders_path_stops_the_package_before_any_tarball() {
     let bins = fake_bins(tmp.path());
     write_exec(&bins.join("mm2"), b"\0/Users/secretname/.cargo/x.rs\0");
     let out_dir = tmp.path().join("out");
-    let mut args = package_args(&bins, &out_dir).to_vec();
+    let mut args = package_args("flat", &bins, &out_dir).to_vec();
     args.extend(["--forbid", "/Users/secretname"]);
     let out = package(&args);
     assert_ne!(code(&out), 0);
@@ -371,7 +574,7 @@ fn the_package_script_refuses_to_overwrite_and_to_run_without_all_binaries() {
     let tmp = tempfile::tempdir().unwrap();
     let bins = fake_bins(tmp.path());
     let out_dir = tmp.path().join("out");
-    let args = package_args(&bins, &out_dir);
+    let args = package_args("flat", &bins, &out_dir);
     assert_eq!(code(&package(&args)), 0);
     let tarball = tarball_in(&out_dir);
     let before = std::fs::read(&tarball).unwrap();
@@ -382,10 +585,118 @@ fn the_package_script_refuses_to_overwrite_and_to_run_without_all_binaries() {
 
     std::fs::remove_file(bins.join("mm2-join")).unwrap();
     let other = tmp.path().join("other");
-    let out = package(&package_args(&bins, &other));
+    let out = package(&package_args("flat", &bins, &other));
     assert_eq!(code(&out), 2);
     assert!(stderr(&out).contains("mm2-join"), "{}", stderr(&out));
     assert!(!other.exists(), "a partial package was left behind");
+}
+
+#[test]
+fn the_prefix_install_is_assembled_checked_and_archived() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_bins(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let out = package(&package_args("prefix", &bins, &out_dir));
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("packaged:"));
+
+    let prefix = only_dir(&out_dir);
+    for rel in [
+        "bin/mm2",
+        "bin/mm2-host",
+        "bin/mm2-join",
+        "bin/mm2-inspect",
+        "share/rust-mm2/assets/texture/dev_road.png",
+        "share/doc/rust-mm2/README.md",
+        "share/doc/rust-mm2/LICENSE-MIT",
+        "share/doc/rust-mm2/LICENSE-APACHE",
+        "share/doc/rust-mm2/docs/building.md",
+        "share/doc/rust-mm2/docs/modding.md",
+    ] {
+        assert!(prefix.join(rel).is_file(), "missing {rel}");
+    }
+    assert_eq!(code(&check_layout(&prefix, "prefix", &[])), 0);
+    // The asset is the repository's own, byte for byte.
+    assert_eq!(
+        std::fs::read(prefix.join("share/rust-mm2/assets/texture/dev_road.png")).unwrap(),
+        std::fs::read(repo().join("assets/texture/dev_road.png")).unwrap()
+    );
+    // The tarball unpacks to the same tree and is checked in place.
+    let root = unpack(&tarball_in(&out_dir), &tmp.path().join("unpack"));
+    assert_eq!(root.file_name().unwrap(), prefix.file_name().unwrap());
+    assert_eq!(code(&check_layout(&root, "prefix", &[])), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_app_bundle_is_assembled_checked_and_archived() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_bins(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let out = package(&package_args("app", &bins, &out_dir));
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("packaged:"));
+
+    let app = out_dir.join("rust-mm2.app");
+    for rel in [
+        "Contents/MacOS/mm2",
+        "Contents/MacOS/mm2-host",
+        "Contents/MacOS/mm2-join",
+        "Contents/MacOS/mm2-inspect",
+        "Contents/Resources/assets/texture/dev_road.png",
+        "Contents/Resources/README.md",
+        "Contents/Resources/LICENSE-MIT",
+        "Contents/Resources/LICENSE-APACHE",
+        "Contents/Resources/docs/building.md",
+        "Contents/Resources/docs/modding.md",
+    ] {
+        assert!(app.join(rel).is_file(), "missing {rel}");
+    }
+    assert_eq!(code(&check_layout(&app, "app", &[])), 0);
+    // The bundle is found by the app's own asset search (the binary here is
+    // the test build's copy, but the layout is the packaged one).
+    assert_eq!(
+        std::fs::read(app.join("Contents/Resources/assets/texture/dev_road.png")).unwrap(),
+        std::fs::read(repo().join("assets/texture/dev_road.png")).unwrap()
+    );
+    let tarball = out_dir.join("rust-mm2.app.tar.gz");
+    assert!(tarball.is_file(), "no bundle archive");
+    let root = unpack(&tarball, &tmp.path().join("unpack"));
+    assert_eq!(root.file_name().unwrap(), "rust-mm2.app");
+    assert_eq!(code(&check_layout(&root, "app", &[])), 0);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_app_layout_is_refused_off_macos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_bins(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let out = package(&package_args("app", &bins, &out_dir));
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(stderr(&out).contains("macOS-only"), "{}", stderr(&out));
+}
+
+#[test]
+fn the_default_layout_assembles_every_layout_this_platform_ships() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bins = fake_bins(tmp.path());
+    let out_dir = tmp.path().join("out");
+    let out = package(&package_args_default(&bins, &out_dir));
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let names: Vec<String> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let count = |matches: &dyn Fn(&str) -> bool| names.iter().filter(|n| matches(n)).count();
+    let is_app = |n: &str| n == "rust-mm2.app" || n == "rust-mm2.app.tar.gz";
+    let macos = usize::from(cfg!(target_os = "macos"));
+    assert_eq!(count(&is_app), 2 * macos, "bundle: {names:?}");
+    let prefix = |n: &str| n.ends_with("-prefix") || n.ends_with("-prefix.tar.gz");
+    assert_eq!(count(&prefix), 2, "prefix: {names:?}");
+    // Plus the flat folder and tarball, which carry neither marker.
+    assert_eq!(names.len(), 4 + 2 * macos, "{names:?}");
 }
 
 // ---- the relocated layouts, launched for real ----

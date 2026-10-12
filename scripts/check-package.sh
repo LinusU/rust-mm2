@@ -3,15 +3,27 @@
 # something it needs (F30 requirement 6: clean artifacts without original
 # content, private paths, saves or captures).
 #
-#   scripts/check-package.sh [--forbid <text>]... <package-dir>
+#   scripts/check-package.sh [--layout <flat|app|prefix>] [--forbid <text>]... <package-dir>
 #
 # The folder is judged against an allowlist, not a blocklist: a file the
 # package is not meant to carry fails even if nobody thought to forbid it.
-# Allowed:
+# `--layout` tells the check which install layout the folder is; it
+# defaults to `flat`:
+#
+#   flat    the four binaries, `assets/`, `README.md` and `docs/` at the
+#           root — the portable folder and tarball
+#   app     a macOS bundle: binaries in `Contents/MacOS/`, assets in
+#           `Contents/Resources/assets/`, README, licenses and `docs/`
+#           under `Contents/Resources/`
+#   prefix  a Unix prefix: binaries in `bin/`, assets in
+#           `share/rust-mm2/assets/`, README, licenses and `docs/` under
+#           `share/doc/rust-mm2/`
+#
+# Allowed in every layout:
 #
 #   mm2, mm2-host, mm2-join, mm2-inspect   (all four, all `.exe` or none)
 #   README.md, LICENSE*                    (README.md is required)
-#   docs/<name>.md
+#   docs/<name>.md                         (one level, `.md` only)
 #   assets/**.{png,tga,ktx2,ogg,wav,txt}   (assets/texture/dev_road.png is
 #                                           required; each file < 8 MiB)
 #
@@ -30,8 +42,14 @@ set -f # the newline-split lists below must never glob
 here=$(cd "$(dirname "$0")" && pwd)
 scan_args=
 dir=
+layout=flat
 while [ $# -gt 0 ]; do
     case "$1" in
+        --layout)
+            [ $# -ge 2 ] || { echo "error: --layout needs a value" >&2; exit 2; }
+            layout=$2
+            shift 2
+            ;;
         --forbid)
             [ $# -ge 2 ] || { echo "error: --forbid needs a value" >&2; exit 2; }
             scan_args="${scan_args}--forbid
@@ -40,7 +58,7 @@ $2
             shift 2
             ;;
         -h|--help)
-            sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -60,6 +78,32 @@ if [ -z "$dir" ] || [ ! -d "$dir" ]; then
     exit 2
 fi
 dir=${dir%/}
+
+# Where each layout keeps the binaries, the assets and the README/docs.
+# The file loop below translates a real path to the flat one so the same
+# allowlist covers every layout; the messages name the real path.
+case "$layout" in
+    flat)
+        bin_prefix=
+        asset_dir=assets
+        doc_prefix=
+        ;;
+    app)
+        bin_prefix=Contents/MacOS/
+        asset_dir=Contents/Resources/assets
+        doc_prefix=Contents/Resources/
+        ;;
+    prefix)
+        bin_prefix=bin/
+        asset_dir=share/rust-mm2/assets
+        doc_prefix=share/doc/rust-mm2/
+        ;;
+    *)
+        echo "error: unknown layout $layout (flat, app or prefix)" >&2
+        exit 2
+        ;;
+esac
+
 max_asset_bytes=8388608
 
 problems=0
@@ -87,10 +131,28 @@ plain_count=0
 for path in $files; do
     count=$((count + 1))
     rel=${path#"$dir"/}
-    base=${rel##*/}
-    case "$rel" in
+    # Translate the layout back to the flat path the allowlist speaks.
+    logical=$rel
+    case "$layout" in
+        app)
+            case "$rel" in
+                Contents/MacOS/*) logical=${rel#Contents/MacOS/} ;;
+                Contents/Resources/assets/*) logical=assets/${rel#Contents/Resources/assets/} ;;
+                Contents/Resources/*) logical=${rel#Contents/Resources/} ;;
+            esac
+            ;;
+        prefix)
+            case "$rel" in
+                bin/*) logical=${rel#bin/} ;;
+                share/rust-mm2/assets/*) logical=assets/${rel#share/rust-mm2/assets/} ;;
+                share/doc/rust-mm2/*) logical=${rel#share/doc/rust-mm2/} ;;
+            esac
+            ;;
+    esac
+    case "$logical" in
         driver-*|*/driver-*) problem "profile or settings: $rel"; continue ;;
     esac
+    base=${logical##*/}
     case "$base" in
         *.ar) problem "original game archive: $rel"; continue ;;
         settings.json) problem "profile or settings: $rel"; continue ;;
@@ -98,12 +160,12 @@ for path in $files; do
         *.log) problem "log file: $rel"; continue ;;
         .env*|*.pem|*.key) problem "credential-shaped file: $rel"; continue ;;
     esac
-    case "$rel" in
+    case "$logical" in
         mm2|mm2-host|mm2-join|mm2-inspect) plain_count=$((plain_count + 1)) ;;
         mm2.exe|mm2-host.exe|mm2-join.exe|mm2-inspect.exe) exe_count=$((exe_count + 1)) ;;
         README.md|LICENSE|LICENSE-*|LICENSE.*) ;;
         docs/*.md)
-            case "${rel#docs/}" in
+            case "${logical#docs/}" in
                 */*) problem "not on the allowlist: $rel" ;;
             esac
             ;;
@@ -133,14 +195,14 @@ else
     suffix=
 fi
 for bin in mm2 mm2-host mm2-join mm2-inspect; do
-    if [ ! -f "$dir/$bin$suffix" ]; then
+    if [ ! -f "$dir/$bin_prefix$bin$suffix" ]; then
         problem "missing binary: $bin$suffix"
-    elif [ -z "$suffix" ] && [ ! -x "$dir/$bin" ]; then
+    elif [ -z "$suffix" ] && [ ! -x "$dir/$bin_prefix$bin" ]; then
         problem "binary is not executable: $bin"
     fi
 done
-[ -f "$dir/README.md" ] || problem "missing README.md"
-[ -f "$dir/assets/texture/dev_road.png" ] || problem "missing assets/texture/dev_road.png"
+[ -f "$dir/${doc_prefix}README.md" ] || problem "missing README.md"
+[ -f "$dir/$asset_dir/texture/dev_road.png" ] || problem "missing $asset_dir/texture/dev_road.png"
 
 if [ "$count" -gt 0 ]; then
     # Scan whatever there is, so a private path is reported alongside the
