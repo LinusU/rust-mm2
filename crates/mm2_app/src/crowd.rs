@@ -425,7 +425,14 @@ pub fn react_pedestrians(
     session: Res<Session>,
     crowd: Option<ResMut<PedCrowd>>,
     cars: Query<(&Position, &LinearVelocity, &Vehicle)>,
-    mut walkers: Query<(&PedWalk, &mut PedReact, &mut PedActor, &mut Transform)>,
+    mut walkers: Query<(
+        Entity,
+        &PedWalk,
+        &mut PedReact,
+        &mut PedActor,
+        &mut Transform,
+    )>,
+    mut screams: MessageWriter<crate::audio::PedScream>,
 ) {
     if !session.is_playing() {
         return;
@@ -449,7 +456,7 @@ pub fn react_pedestrians(
             half_width: vehicle.config.chassis_size[0] * 0.5,
         })
         .collect();
-    for (walk, mut react, mut actor, mut at) in &mut walkers {
+    for (walker, walk, mut react, mut actor, mut at) in &mut walkers {
         if !actor.reacts() {
             continue;
         }
@@ -463,6 +470,11 @@ pub fn react_pedestrians(
             Phase::Diving | Phase::Rejoining => None,
         };
         let side = threat.map_or(DiveSide::Right, |t| DiveSide::toward(right, t.away));
+        // F19-B.9/AUD-15: the walker's own voice, keyed on its archetype
+        // stem — retail picks the female/male loader from a byte on the
+        // walker (designed mapping).
+        let female = actor.female_voice();
+        let position = at.translation;
         match react
             .reaction
             .decide(actor.state(), threat.as_ref(), side, dt, &policy)
@@ -471,6 +483,13 @@ pub fn react_pedestrians(
             Order::Alert => {
                 actor.request("ANTIC");
                 crowd.alerts += 1;
+                // The port's back-away decision: retail's wary handler
+                // reaches the `BACKUP` scream (designed mapping).
+                screams.write(crate::audio::PedScream {
+                    walker,
+                    position,
+                    female,
+                });
             }
             Order::Dive(side) => {
                 let state = if actor.state().contains("ANTIC") {
@@ -484,6 +503,13 @@ pub fn react_pedestrians(
                 react.lateral = 0.0;
                 react.row_end = 0.0;
                 crowd.dives += 1;
+                // The port's dive selection: retail screams when it
+                // picks a dive animation (designed mapping).
+                screams.write(crate::audio::PedScream {
+                    walker,
+                    position,
+                    female,
+                });
             }
             Order::Resume => {
                 actor.request("WALK");

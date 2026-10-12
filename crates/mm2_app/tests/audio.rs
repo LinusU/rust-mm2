@@ -18,9 +18,10 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::audio::{
     self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, CommentaryAudio,
-    CommentaryVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio,
-    SkidContact, SurfaceAudio, SurfaceContact, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind,
-    WaveBank, WeatherAudio, WeatherRole, WeatherVoice, decode_wave,
+    CommentaryVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio, PedScream,
+    PedVoiceAudio, Siren, SirenAudio, SkidContact, SurfaceAudio, SurfaceContact, SurfaceRig,
+    SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, WeatherAudio, WeatherRole, WeatherVoice,
+    decode_wave, pedestrian_voices,
 };
 use mm2_app::settings::{AudioLevels, GraphicsSettings};
 use mm2_assets::Vfs;
@@ -1346,6 +1347,350 @@ fn the_scrape_window_does_not_outlive_the_session() {
         (2, 2, 0),
         "the old session's hold never reaches the new one"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F19-B.9/AUD-15: walker dive/back-away transitions → deduplicated
+// scream one-shots. The session `PedVoiceAudio` holds the female/male
+// `default_{f,m}pedvoice1.csv` tables; a transition writes a `PedScream`
+// and `pedestrian_voices` voices it once per walker's own clip window —
+// a second trigger inside that window is held, never stacked (F19 req 5).
+// ---------------------------------------------------------------------------
+
+/// A fixture install: two female screams at distinct sample rates, one
+/// male scream at a third, plus the authored `default_{f,m}pedvoice1.csv`
+/// tables that name them. Both female clips run a full second (60 ticks),
+/// long enough for the dedup window to outrun a re-trigger; the male clip
+/// is one tick long so `MSC1`'s 48 kHz rate is unmistakable.
+fn pedvoice_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "aud/aud22/creature3d/fsc1.22k.wav",
+        &pcm_wav(22050, 22_050),
+    );
+    write(
+        d,
+        "aud/aud22/creature3d/fsc2.22k.wav",
+        &pcm_wav(11025, 11_025),
+    );
+    write(d, "aud/aud22/creature3d/msc1.22k.wav", &pcm_wav(48000, 480));
+    write(
+        d,
+        "aud/creaturedata/default_fpedvoice1.csv",
+        b"Min speed,Max speed,min time in range,max time out of range\r\n0,500,0,0\r\nsample name,volume,,\r\nFSC1,0.8,,\r\nFSC2,0.8,,\r\n",
+    );
+    write(
+        d,
+        "aud/creaturedata/default_mpedvoice1.csv",
+        b"Min speed,Max speed,min time in range,max time out of range\r\n0,500,0,0\r\nsample name,volume,,\r\nMSC1,0.5,,\r\n",
+    );
+    tmp
+}
+
+/// The audio slice of the production app for walker screams: a `Playing`
+/// session, the mounted fixture VFS, the session `WaveBank` +
+/// `PedVoiceAudio` (loaded through the production path), and
+/// `pedestrian_voices` on Update like the live schedules wire it.
+fn ped_voice_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    let generation = session.generation();
+    // Production inserts the resource only when a gender's table loads —
+    // both absent leaves none and degrades to silence.
+    let table = PedVoiceAudio::load(&vfs, generation);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_message::<PedScream>()
+        .add_systems(Update, pedestrian_voices);
+    if let Some(table) = table {
+        app.insert_resource(table);
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// One walker's transition, as `react_pedestrians` writes it.
+fn write_scream(app: &mut App, walker: Entity, female: bool, position: Vec3) {
+    app.world_mut().write_message(PedScream {
+        walker,
+        position,
+        female,
+    });
+}
+
+/// `(sample_rate, spatial, translation, volume)` for every live walker
+/// voice, lowest rate first.
+fn ped_voices(app: &mut App) -> Vec<(u32, bool, Vec3, f32)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(
+        &AudioVoice,
+        &AudioPlayer<PcmAudio>,
+        &PlaybackSettings,
+        &Transform,
+    )>();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .filter(|v| v.0.kind == VoiceKind::PedVoice)
+        .map(|(_, p, s, t)| {
+            let rate = world
+                .resource::<Assets<PcmAudio>>()
+                .get(&p.0)
+                .unwrap()
+                .sample_rate
+                .get();
+            (rate, s.spatial, t.translation, s.volume.to_linear())
+        })
+        .collect();
+    out.sort_by_key(|(rate, _, _, _)| *rate);
+    out
+}
+
+#[test]
+fn a_dive_scream_voices_the_authored_sample_and_holds_the_next() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let walker = app.world_mut().spawn_empty().id();
+    let position = Vec3::new(4.0, 0.0, -7.0);
+    write_scream(&mut app, walker, true, position);
+    app.update();
+
+    let voices = ped_voices(&mut app);
+    assert_eq!(voices.len(), 1, "one authored scream: {voices:?}");
+    assert!(
+        matches!(voices[0].0, 22050 | 11025),
+        "the female table picked a female clip: {voices:?}"
+    );
+    assert!(voices[0].1, "a walker's scream is spatial for everyone");
+    assert_eq!(voices[0].2, position);
+    assert_eq!(voices[0].3, 0.8, "the authored row's volume");
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.screams, r.scream_holds, r.voices), (1, 0, 1));
+
+    // The back-away that escalated to the dive calls again: the second
+    // transition inside the one-second clip is held, not stacked.
+    write_scream(&mut app, walker, true, position);
+    app.update();
+    assert_eq!(ped_voices(&mut app).len(), 1);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.screams, r.scream_holds),
+        (1, 1),
+        "the walker's own clip window paces its repeats"
+    );
+
+    // Past the clip the same walker sounds again — paced, not silenced.
+    tick(&mut app, 60);
+    write_scream(&mut app, walker, true, position);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.screams, r.scream_holds), (2, 1));
+    assert_eq!(ped_voices(&mut app).len(), 2);
+}
+
+#[test]
+fn one_walkers_clip_window_never_holds_another_walker() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let a = app.world_mut().spawn_empty().id();
+    let b = app.world_mut().spawn_empty().id();
+    // Two different walkers diving in the same tick each sound.
+    write_scream(&mut app, a, true, Vec3::X);
+    write_scream(&mut app, b, true, Vec3::Z);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.screams, r.scream_holds, r.voices), (2, 0, 2));
+    assert_eq!(ped_voices(&mut app).len(), 2);
+}
+
+#[test]
+fn each_gender_screams_from_its_own_authored_table() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let woman = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, woman, true, Vec3::ZERO);
+    app.update();
+    let female = ped_voices(&mut app);
+    assert_eq!(female.len(), 1);
+    assert!(
+        matches!(female[0].0, 22050 | 11025),
+        "the female table's own clips: {female:?}"
+    );
+
+    let man = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, man, false, Vec3::ZERO);
+    app.update();
+    let male = ped_voices(&mut app)
+        .into_iter()
+        .find(|v| v.0 == 48000)
+        .expect("the male table's clip");
+    assert_eq!(male.3, 0.5, "the authored male volume");
+}
+
+#[test]
+fn the_draw_skips_the_walkers_previous_scream() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    // Two different walkers, one transition each: with two authored
+    // female clips the second draw must avoid the first's sample (the
+    // retail `DAT_006b0558` "skip the last" behavior, designed).
+    let a = app.world_mut().spawn_empty().id();
+    let b = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, a, true, Vec3::ZERO);
+    app.update();
+    write_scream(&mut app, b, true, Vec3::ZERO);
+    app.update();
+    let rates: Vec<u32> = ped_voices(&mut app).iter().map(|v| v.0).collect();
+    assert_eq!(rates.len(), 2);
+    assert_ne!(
+        rates[0], rates[1],
+        "the second pick skipped the first's sample: {rates:?}"
+    );
+}
+
+#[test]
+fn a_missing_voice_table_stays_silent() {
+    // Waves only — no voice table at all: the resource never loads and
+    // the transition degrades to silence, never a fabricated sample.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = ped_voice_app(tmp.path());
+    assert!(app.world().get_resource::<PedVoiceAudio>().is_none());
+    let walker = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    assert!(ped_voices(&mut app).is_empty());
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.screams, r.scream_holds, r.voices, r.failed),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn a_gender_without_a_table_stays_silent_while_the_other_sings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "aud/aud22/creature3d/fsc1.22k.wav", &pcm_wav(22050, 220));
+    write(
+        d,
+        "aud/creaturedata/default_fpedvoice1.csv",
+        b"Min speed,Max speed,min time in range,max time out of range\r\n0,500,0,0\r\nsample name,volume,,\r\nFSC1,0.8,,\r\n",
+    );
+    let mut app = ped_voice_app(d);
+    // No male table: a male-voiced walker stays silent, never borrowing
+    // the female voice.
+    let man = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, man, false, Vec3::ZERO);
+    app.update();
+    assert!(ped_voices(&mut app).is_empty(), "no male table → silence");
+    assert_eq!(app.world().resource::<AudioReport>().screams, 0);
+
+    let woman = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, woman, true, Vec3::ZERO);
+    app.update();
+    assert_eq!(
+        ped_voices(&mut app).len(),
+        1,
+        "the female table still sings"
+    );
+}
+
+#[test]
+fn the_walker_voice_bound_caps_a_crowd() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    // Forty walkers diving in one tick: the live-voice bound holds the
+    // mixer at MAX_PED_VOICES and counts the rest dropped, never
+    // stacking a square's worth of screams.
+    for i in 0..40u64 {
+        let walker = app.world_mut().spawn_empty().id();
+        write_scream(&mut app, walker, true, Vec3::new(i as f32, 0.0, 0.0));
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.screams, 16, "MAX_PED_VOICES bounds the crowd");
+    assert_eq!(r.dropped, 24);
+    assert_eq!(r.scream_holds, 0, "distinct walkers are not holds");
+    assert_eq!(ped_voices(&mut app).len(), 16);
+}
+
+#[test]
+fn a_paused_session_does_not_voice_a_scream() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let walker = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    assert!(ped_voices(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().screams, 0);
+}
+
+#[test]
+fn the_scream_window_does_not_outlive_the_session() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let walker = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    assert_eq!(ped_voices(&mut app).len(), 1);
+
+    // The next session restarts the clock at 0 — a hold minted at the
+    // old session's tick would silence a recycled walker's first scream,
+    // so the watch adopts the new generation and drops it.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Unloading).unwrap();
+        session.transition(SessionPhase::Menu).unwrap();
+        session.begin(SessionConfig::default()).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        assert_eq!(session.tick(), 0, "the restarted clock starts over");
+    }
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.screams, r.scream_holds),
+        (2, 0),
+        "the old session's hold never reaches the new one"
+    );
+}
+
+#[test]
+fn teardown_sweeps_walker_screams_with_the_session() {
+    let dir = pedvoice_dir();
+    let mut app = ped_voice_app(dir.path());
+    let walker = app.world_mut().spawn_empty().id();
+    write_scream(&mut app, walker, true, Vec3::ZERO);
+    app.update();
+    assert_eq!(ped_voices(&mut app).len(), 1);
+
+    // The production teardown sweeps `SessionEntity` roots on Unloading —
+    // the free-standing voice is one (AC06's restart leg).
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert!(ped_voices(&mut app).is_empty());
 }
 
 // ---------------------------------------------------------------------------

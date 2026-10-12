@@ -334,6 +334,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::wheel_fx::WheelFx>();
             commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::audio::ImpactAudio>();
+            commands.remove_resource::<crate::audio::PedVoiceAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
             commands.remove_resource::<crate::audio::SirenAudio>();
             commands.remove_resource::<crate::police::PoliceFleet>();
@@ -1253,6 +1254,14 @@ pub fn load_session_world(
     // every process the way the wire-seeded smoke/spark/texel rigs do
     // (the local id counter can diverge across processes).
     if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.wire_generation()) {
+        commands.insert_resource(table);
+    }
+    // F19-B.9/AUD-15: the walker scream tables — the female and male
+    // `default_{f,m}pedvoice` files the exe name under `aud\creaturedata`.
+    // Same absence policy as the other authored records: a gender whose
+    // table does not resolve stays silent; both missing yields no
+    // resource, never a fabricated voice.
+    if let Some(table) = crate::audio::PedVoiceAudio::load(&vfs.0, session.wire_generation()) {
         commands.insert_resource(table);
     }
     // F07-B.4/B.8: the authored surface table — the player-side

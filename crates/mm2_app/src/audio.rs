@@ -157,6 +157,7 @@ use avian3d::prelude::{ComputedMass, LinearVelocity, Mass, SpatialQuery};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_sample_sentinel};
+use mm2_formats::creaturedata::{VoiceSample, VoiceTable};
 use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
@@ -210,6 +211,28 @@ const MAX_IMPACT_VOICES: usize = 12;
 /// than for minutes (designed bound; the clips themselves set the
 /// real window).
 const MAX_SCRAPE_WINDOW_TICKS: u64 = 5 * RACE_TICK_HZ as u64;
+/// Live walker scream voices the mixer will hold at once — a square
+/// full of walkers diving at one car is counted and dropped rather
+/// than stacking voices (F19 req 5's no-duplicate-events requirement;
+/// designed bound).
+const MAX_PED_VOICES: usize = 16;
+/// Longest a walker may be held by its own scream window (F19-B.9) —
+/// 3 s at the session's 60 Hz step, above every retail scream clip, so
+/// a malformed mod wave quiets one walker for a bounded moment rather
+/// than indefinitely (designed bound; the clip itself sets the real
+/// window).
+const MAX_PED_VOICE_WINDOW_TICKS: u64 = 3 * RACE_TICK_HZ as u64;
+/// The walker voice tables the session reads (AUD-15): the female and
+/// male `default_{f,m}pedvoice` files the exe's `%s_fpedvoice%s%d` /
+/// `%s_mpedvoice%s%d` strings name under `aud\creaturedata`. The
+/// retail file is `default` plus a rolling counter (`0x50fa90`); the
+/// counter's rule is unrecovered, so the port binds the base file of
+/// each gender (designed choice — the numbered-file choice stays
+/// unrecovered, AUD-15). Either table may be absent: a gender that
+/// resolves nothing stays silent rather than borrowing the other's
+/// voice.
+const PED_VOICE_FEMALE: &str = "aud/creaturedata/default_fpedvoice1.csv";
+const PED_VOICE_MALE: &str = "aud/creaturedata/default_mpedvoice1.csv";
 /// The impact table the session reads: the player-side
 /// `default_impacts.csv` — the local listener's authored mix
 /// (designed choice: the opponent file authors the same categories
@@ -620,6 +643,109 @@ impl ImpactAudio {
                 None
             }
         }
+    }
+}
+
+/// Session-scoped walker voice tables + selection stream (F19-B.9,
+/// AUD-15): the parsed female and male `default_{f,m}pedvoice1.csv`
+/// tables the exe's `%s_fpedvoice%s%d`/`%s_mpedvoice%s%d` strings name,
+/// plus the seeded draw [`pedestrian_voices`] picks a scream from and
+/// the single "previous pick" the retail draw (`DAT_006b0558`) skips.
+/// Inserted by `load_session_world` when at least one gender's table
+/// resolves and parses — a missing or malformed table leaves that
+/// gender silent (warned once, never fabricated), the same absence
+/// policy every authored record applies. The draw is seeded per
+/// session generation so a replayed session repeats the same picks.
+///
+/// What is designed, not recovered (AUD-15): the meaning of the
+/// authored `0,500` speed band (the trigger is the walker's own
+/// transition, so the band is taken as always covering), the
+/// numbered-file choice (the base file of each gender is bound) and
+/// "avoid the previous pick" (a single global last sample is skipped
+/// when the table authors another). The sample volume is the authored
+/// row's.
+#[derive(Resource)]
+pub struct PedVoiceAudio {
+    /// The female table (`default_fpedvoice1.csv`), when it resolved.
+    female: Option<VoiceTable>,
+    /// The male table (`default_mpedvoice1.csv`), when it resolved.
+    male: Option<VoiceTable>,
+    /// Deterministic draw stream for the sample pick.
+    rng: NavRng,
+    /// The last sample picked, skipped by the next pick when the table
+    /// authors another — the retail `DAT_006b0558` behavior (designed).
+    last: Option<String>,
+}
+
+impl PedVoiceAudio {
+    /// Resolve and parse both gender tables through the VFS; `None`
+    /// (with a warn per failure) only when neither resolves — one
+    /// gender's absence is ordinary, both missing is no walker voice.
+    pub fn load(vfs: &Vfs, generation: u64) -> Option<Self> {
+        let female = Self::load_table(vfs, PED_VOICE_FEMALE);
+        let male = Self::load_table(vfs, PED_VOICE_MALE);
+        if female.is_none() && male.is_none() {
+            warn!("audio: no walker voice table resolved — pedestrians stay silent");
+            return None;
+        }
+        Some(Self {
+            female,
+            male,
+            rng: NavRng::new(generation.wrapping_add(0x5045_4456)),
+            last: None,
+        })
+    }
+
+    /// Read and parse one voice table; `None` (with a warn) when the
+    /// logical path is absent or the grammar rejects it.
+    fn load_table(vfs: &Vfs, path: &str) -> Option<VoiceTable> {
+        let bytes = match vfs.read_logical(path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("audio: {path}: {e}");
+                return None;
+            }
+        };
+        Some(VoiceTable::parse(&String::from_utf8_lossy(&bytes)))
+    }
+
+    /// Pick a scream for a walker of the given voice: the gender's
+    /// table, every authored sample (retail authors one speed band),
+    /// skipping [`Self::last`] when another sample exists. `None` when
+    /// that gender's table is absent or authors no samples.
+    fn pick(&mut self, female: bool) -> Option<(String, f32)> {
+        let Self {
+            female: f_table,
+            male: m_table,
+            rng,
+            last,
+        } = self;
+        let table = if female {
+            f_table.as_ref()?
+        } else {
+            m_table.as_ref()?
+        };
+        let samples: Vec<&VoiceSample> = table
+            .speed_bands
+            .iter()
+            .flat_map(|b| b.samples.iter())
+            .collect();
+        if samples.is_empty() {
+            return None;
+        }
+        let candidates: Vec<&VoiceSample> = samples
+            .iter()
+            .copied()
+            .filter(|s| Some(s.name.as_str()) != last.as_deref())
+            .collect();
+        let pool = if candidates.is_empty() {
+            samples
+        } else {
+            candidates
+        };
+        let sample = *rng.pick(&pool)?;
+        *last = Some(sample.name.clone());
+        Some((sample.name.clone(), sample.volume))
     }
 }
 
@@ -1199,6 +1325,9 @@ pub enum VoiceKind {
     /// drawbridge, ferry or Underground sound
     /// (`crate::object_sound`).
     Object,
+    /// One `default_{f,m}pedvoice` scream a walker's dive/back-away
+    /// transition spawned (F19-B.9, AUD-15).
+    PedVoice,
     /// One menu focus-move/confirm clip (`crate::ui_sound`).
     Ui,
 }
@@ -1221,6 +1350,7 @@ impl VoiceKind {
             | Self::Clutch
             | Self::AmbientEngine
             | Self::Siren
+            | Self::PedVoice
             // No UI bus on the Options screen: menu clips ride Effects.
             | Self::Ui => AudioBus::Effects,
         }
@@ -1638,6 +1768,14 @@ pub struct AudioReport {
     /// Object-sound voices spawned this session — a subset of
     /// `voices` (drawbridges, ferries, the Underground).
     pub objects: u64,
+    /// Walker scream voices spawned this session — a subset of
+    /// `voices` (F19-B.9, AUD-15).
+    pub screams: u64,
+    /// Walker scream requests a walker's own clip window held back so
+    /// a dive and the back-away that escalated to it do not stack
+    /// (F19-B.9). Never counted without a voice behind it — the window
+    /// only closes a walker that already sounded.
+    pub scream_holds: u64,
     /// Diagnostics from commentary cue tables this session: parse
     /// diagnostics plus `CueTable::validate` findings (the
     /// `AnnouncerIndex` ones stay log-only). Rows with a problem are
@@ -1674,6 +1812,8 @@ impl AudioReport {
             + self.suppressed
             + self.race_cues
             + self.objects
+            + self.screams
+            + self.scream_holds
             + self.cue_issues
             > 0
     }
@@ -2431,6 +2571,161 @@ pub fn impact_voices(
             ImpactPair::Replicated(impact.entity),
             &mut live,
         );
+    }
+}
+
+/// One walker's own scream window — the clip it just spawned is still
+/// playing, so a second trigger (the back-away that escalated to a dive
+/// calls both) does not stack over the first. Walker entity → the tick
+/// its scream clip finishes; `held` prunes closed windows, so the map
+/// only ever holds live clips. Session-scoped like [`ScrapeWatch`]: a
+/// new generation clears it, so a recycled walker entity cannot inherit
+/// a hold.
+#[derive(Default)]
+pub struct ScreamWatch {
+    generation: u64,
+    holds: HashMap<Entity, u64>,
+}
+
+impl ScreamWatch {
+    fn sync(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.holds.clear();
+        }
+    }
+
+    /// Whether `walker`'s last scream clip is still playing at `tick` —
+    /// also prunes every closed window.
+    fn held(&mut self, walker: Entity, tick: u64) -> bool {
+        self.holds.retain(|_, until| *until > tick);
+        self.holds.get(&walker).is_some_and(|until| tick < *until)
+    }
+
+    fn hold(&mut self, walker: Entity, tick: u64, clip_ticks: u64) {
+        let until = tick.saturating_add(clip_ticks.clamp(1, MAX_PED_VOICE_WINDOW_TICKS));
+        self.holds.insert(walker, until);
+    }
+}
+
+/// A walker's dive or back-away transition: [`crate::crowd::react_pedestrians`]
+/// writes one when the authored reaction state changes, and
+/// [`pedestrian_voices`] turns it into a scream. `female` selects the
+/// walker's voice — retail picks the `%s_fpedvoice`/`%s_mpedvoice`
+/// loader from a byte on the walker, read here from the archetype stem
+/// (designed mapping, AUD-15); `position` is where the figure stood.
+#[derive(Message)]
+pub struct PedScream {
+    /// The reacting walker.
+    pub walker: Entity,
+    /// Where the scream sounds (the walker's world position).
+    pub position: Vec3,
+    /// Whether the walker's voice is the female table.
+    pub female: bool,
+}
+
+/// Walker dive/back-away transitions → deduplicated one-shot screams
+/// (F19-B.9, AUD-15). Retail starts the scream from the walker
+/// animation-transition code, not the reaction word: the `BACKUP`
+/// transition (`0x54cd90`, reached from the wary handler `0x54d0e0`)
+/// and twice when the dive function `0x54d8b0` selects a dive
+/// animation. The port models no backing-away clip, so the trigger
+/// keys on the reaction *decisions* the port does have — entering the
+/// wary/back-away phase and entering a dive — through the
+/// [`PedScream`] stream [`crate::crowd::react_pedestrians`] writes.
+///
+/// What is designed, not recovered (AUD-15): the trigger mapping (retail
+/// screams on the `BACKUP` clip and the dive selection; the port's wary
+/// stop is the nearest analogue of the back-away), the `0,500` band's
+/// meaning (taken as always covering), the numbered-file choice (the
+/// base file per gender), the sample draw (a seeded pick that skips the
+/// previous sample, `DAT_006b0558`) and the volume (the authored row's).
+/// Nothing here claims original semantics for the unrecovered parts.
+///
+/// The voice is a spatial one-shot at the walker for everyone; a walker
+/// in its own last scream's window is held and counted in
+/// [`AudioReport::scream_holds`] instead of stacking a second voice
+/// (F19 req 5). Live voices are bounded by [`MAX_PED_VOICES`]; a stale
+/// generation is skipped and, while not `Playing`, the stream is drained
+/// so a buffered dive never flushes sound into a pause or the next
+/// session (the `impact_voices` contract).
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn pedestrian_voices(
+    mut commands: Commands,
+    mut reader: MessageReader<PedScream>,
+    session: Res<Session>,
+    table: Option<ResMut<PedVoiceAudio>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    voices: Query<&AudioVoice>,
+    mut watch: Local<ScreamWatch>,
+) {
+    if !session.is_playing() {
+        reader.read().for_each(drop);
+        return;
+    }
+    let generation = session.generation();
+    let tick = session.tick();
+    watch.sync(generation);
+    let (Some(mut table), Some(vfs), Some(mut bank)) = (table, vfs, bank) else {
+        // No authored walker voice (or no session world): the stream is
+        // still consumed — an absent record degrades to silence rather
+        // than fabricating a sample.
+        reader.read().for_each(drop);
+        return;
+    };
+    let table = &mut *table;
+    let watch = &mut *watch;
+    let mut live = voices
+        .iter()
+        .filter(|v| v.kind == VoiceKind::PedVoice)
+        .count();
+    for scream in reader.read() {
+        if watch.held(scream.walker, tick) {
+            report.scream_holds += 1;
+            continue;
+        }
+        let Some((name, volume)) = table.pick(scream.female) else {
+            // That gender's table resolved nothing — authored silence.
+            continue;
+        };
+        if live >= MAX_PED_VOICES {
+            report.dropped += 1;
+            continue;
+        }
+        match bank.load(&vfs.0, &mut waves, &name) {
+            Ok(handle) => {
+                let clip_ticks = waves
+                    .get(&handle)
+                    .map(|clip| (clip.duration() * RACE_TICK_HZ as f32).ceil() as u64)
+                    .unwrap_or(1);
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::PedVoice,
+                    },
+                    SessionEntity(generation),
+                    Transform::from_translation(scream.position),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Despawn,
+                        volume: Volume::Linear(authored_volume(volume)),
+                        spatial: true,
+                        spatial_scale: Some(SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.screams += 1;
+                live += 1;
+                watch.hold(scream.walker, tick, clip_ticks);
+            }
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
     }
 }
 

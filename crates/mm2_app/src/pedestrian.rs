@@ -224,6 +224,15 @@ impl PedActor {
         self.shape.reacts
     }
 
+    /// Whether the figure screams with the female voice table (F19-B.9,
+    /// AUD-15). Retail picks the `%s_fpedvoice`/`%s_mpedvoice` loader
+    /// from a byte on the walker; the port reads the archetype stem
+    /// (`pedmodel_woman`/`pedmodel_womanw` are the female rigs) — a
+    /// designed mapping for the unrecovered retail byte.
+    pub fn female_voice(&self) -> bool {
+        self.shape.archetype.stem.contains("woman")
+    }
+
     /// Lateral dive travel of the current state's window at the
     /// animator's cursor and at the window's end (csv sign, `+` = the
     /// figure's left); `None` in a state that authors none

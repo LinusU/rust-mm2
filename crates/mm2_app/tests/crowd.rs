@@ -148,6 +148,7 @@ fn app_as(dir: &Path, seed: u64, density: Option<f32>, authority: SessionAuthori
         )))
         .insert_resource(playing(seed, authority))
         .insert_resource(mount(dir))
+        .add_message::<mm2_app::audio::PedScream>()
         .add_systems(
             Update,
             (
@@ -508,6 +509,52 @@ fn a_car_bearing_down_makes_a_walker_look_dive_clear_and_walk_back() {
     let found = walkers(&mut app);
     assert!(found.iter().all(|(t, _)| t.is_finite()));
     assert_eq!(actors(&mut app), found.len(), "no actor leaked");
+}
+
+/// F19-B.9/AUD-15: the reaction *decisions* are what write the walker
+/// scream stream — the wary/back-away entry and the dive selection, and
+/// nothing else. Every scream coincides with a `Wary`/`Diving` phase and
+/// the counts match the crowd's own alert/dive tallies one for one.
+#[test]
+fn a_wary_or_diving_walker_writes_a_scream_per_transition() {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), 7, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_car(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -40.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let (mut alerts, mut dives) = (0u64, 0u64);
+    for _ in 0..240 {
+        step_car(&mut app, car);
+        app.update();
+        let msgs = app
+            .world()
+            .resource::<Messages<mm2_app::audio::PedScream>>();
+        for s in msgs.iter_current_update_messages() {
+            // The synthetic install ships only `pedmodel_man`, whose stem
+            // carries no "woman": the male voice table.
+            assert!(!s.female, "pedmodel_man reads the male voice table");
+            assert!(s.position.is_finite(), "a real walker position");
+            match phase(&app, s.walker) {
+                Phase::Wary => alerts += 1,
+                Phase::Diving => dives += 1,
+                other => panic!("a scream outside a dive/back-away: {other:?}"),
+            }
+        }
+    }
+    let crowd = app.world().resource::<PedCrowd>();
+    assert_eq!(alerts, crowd.alerts, "one scream per back-away decision");
+    assert_eq!(dives, crowd.dives, "one scream per dive decision");
+    assert!(
+        alerts >= 1 && dives >= 1,
+        "the car made it react: {} alert(s), {} dive(s)",
+        crowd.alerts,
+        crowd.dives
+    );
 }
 
 #[test]

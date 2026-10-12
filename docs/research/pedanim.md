@@ -618,11 +618,21 @@ scream is tied to a walker starting a dive or backing away.
 
 What is not: the meaning of the `0,500` speed band (the decompiled loop
 does not read `arg`), the numbered-file choice, and the `EBX` argument
-at the dive sites. Nothing is wired in the port yet: the crowd stays
-silent until a task keys a deduplicated one-shot to the dive/backup
-transitions, which must mark the sample choice as designed.
+at the dive sites.
 
-Follow-ups: task #1366 binds the evidenced trigger through `crate::audio`
-one-shots deduplicated like `impact_voices`; an OWNER retail play
-observation (dive in front of a car with the volume up) would settle the
-sample choice.
+The port binding (F19-B.9, #1366; DSN-109) keys a deduplicated one-shot
+to the evidenced transitions and marks every unrecovered part as
+designed: `crate::audio::pedestrian_voices` voices a `PedScream` that
+`crate::crowd::react_pedestrians` writes on `Order::Alert` (the port's
+wary/back-away stop, the nearest analogue of retail's `BACKUP`) and
+`Order::Dive`, from the base `default_{f,m}pedvoice1.csv` tables (the
+numbered-file choice stays unrecovered), with the archetype stem
+(`...woman...`) picking the gender (retail's walker byte is unrecovered),
+a seeded `NavRng` draw over every authored sample that skips the previous
+pick (the `DAT_006b0558` behaviour), the authored row volume, and the
+`0,500` band taken as always covering. A per-walker clip window paces
+repeats (the dedup) and the live voices are bounded.
+
+Still open: an OWNER retail play observation (dive in front of a car with
+the volume up) would settle which sample a real dive draws, and whether
+the sound manager ever drops the start (`DAT_006b0474+0x25`).

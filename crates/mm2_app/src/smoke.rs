@@ -595,6 +595,8 @@ fn run_headless(
         .init_resource::<crate::speech::SpeechArbiter>()
         .init_resource::<Assets<crate::audio::PcmAudio>>()
         .add_message::<crate::audio::HornRequest>()
+        // F19-B.9/AUD-15: the walker scream stream.
+        .add_message::<crate::audio::PedScream>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -942,6 +944,17 @@ fn run_headless(
                 pedestrian::animate_pedestrians,
             )
                 .chain(),
+        )
+        // F19-B.9/AUD-15: walker dive/back-away transitions →
+        // deduplicated scream one-shots — the record's `aud=` P/p fields
+        // read them headless. Own slot (the main tuple is at the arity
+        // limit); after the crowd's react system so the same update
+        // voices the transition it made.
+        .add_systems(
+            Update,
+            crate::audio::pedestrian_voices
+                .after(session::drive_session)
+                .after(crowd::react_pedestrians),
         )
         // F25-B: towed trailers reseat off the `ResetVehicle` stream —
         // after every writer, before the apply; own slot, the main
@@ -2410,6 +2423,19 @@ fn run_headless(
             } else {
                 String::new()
             };
+            // F19-B.9: walker scream one-shots spawned (`P`) and the
+            // walker's own clip window that held a repeat (`+p`) — the
+            // same activity-gated append.
+            let screams = if r.screams > 0 {
+                format!("/{}P", r.screams)
+            } else {
+                String::new()
+            };
+            let scream_holds = if r.scream_holds > 0 {
+                format!("+{}p", r.scream_holds)
+            } else {
+                String::new()
+            };
             // F07-B.10: impact re-triggers the scrape window held —
             // appended only when nonzero, so a record with no scrape
             // stays bit-identical to pre-B.10.
@@ -2439,7 +2465,7 @@ fn run_headless(
                 }
             );
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{scrapes}{dropped}{failed}{cue_issues}{speech}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{screams}{race_cues}{scrapes}{scream_holds}{dropped}{failed}{cue_issues}{speech}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

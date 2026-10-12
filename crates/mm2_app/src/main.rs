@@ -1663,6 +1663,9 @@ fn main() {
     .init_resource::<audio::AudioReport>()
     .init_resource::<mm2_app::speech::SpeechArbiter>()
     .add_message::<audio::HornRequest>()
+    // F19-B.9/AUD-15: the walker scream stream `react_pedestrians`
+    // writes and `pedestrian_voices` voices.
+    .add_message::<audio::PedScream>()
     .add_audio_source::<audio::PcmAudio>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
@@ -2130,6 +2133,13 @@ fn main() {
             // F07-B.5: committed gear/direction changes → authored
             // clutch one-shots — the same despawn ordering.
             audio::clutch_voices.after(session::drive_session),
+            // F19-B.9/AUD-15: walker dive/back-away transitions →
+            // deduplicated scream one-shots. After the crowd's react
+            // system so the same update voices the transition it made,
+            // and after `drive_session` for the usual despawn ordering.
+            audio::pedestrian_voices
+                .after(session::drive_session)
+                .after(crowd::react_pedestrians),
             // F07-B.4: wheel contact → skid/rolling loop voices — the
             // same despawn ordering for the same reason. The
             // `apply_snapshots` edge voices a replicated `SurfaceContact`
