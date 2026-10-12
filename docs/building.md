@@ -251,8 +251,9 @@ run against the optimised code by switching profile:
 cargo test --release -p mm2_app --test app
 ```
 
-Verified 2026-10-12 on macOS arm64 (commit `895e89a`): 1204 of the 1206
-app integration tests pass in the release profile. The two that do not
+Verified 2026-10-12 on macOS arm64 (the app crates are `895e89a`):
+1204 of the 1206 app integration tests — including the `build_docs` pin
+this change adds — pass in the release profile. The two that do not
 are `nonfinite_ray::avian_asserts_a_finite_ray_origin` and
 `…an_infinite_ray_origin`, both `#[should_panic]` tests of Avian's
 `debug_assert!(origin.is_finite())`. The release profile has
