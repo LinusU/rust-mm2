@@ -120,6 +120,20 @@ You never need to know which archive or physical file shipped the original.
 - **City data**: `city/*.psdl`, `*.inst` can be overridden with the same
   format.
 
+- **Menu art**: the two menu backdrops (`city-night`, `london-night`) are
+  self-authored PNGs embedded in the executable, not retail images. A mod's
+  `menu/city-night.png` / `menu/london-night.png` replaces the embedded art
+  through the VFS (`mm2_app::menu::menu_art_image`); removing the mod
+  restores it. A selected override that does not decode is logged as an
+  error and the menu shows no backdrop — the embedded art does not stand in.
+  `menu/` is not a gameplay prefix, so the swap is cosmetic.
+- **Localization (`mmlang.dll`)**: deliberately not a mod surface. The
+  original's strings are PE resources in a native DLL, not VFS data, and the
+  spec forbids native plugins. The engine keeps its own labels (the
+  `mmlang.dll` wording is only a reference for naming), so there is nothing
+  for a mod to override. A mod-supplied string table would be a new designed
+  format and is not planned.
+
 Anything without a dedicated importer yet still resolves correctly through
 the VFS — the limitation is on the import side, not resolution.
 
