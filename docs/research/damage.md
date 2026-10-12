@@ -355,8 +355,8 @@ subtly changing slide dynamics is the feature, not drift.
 Not yet implemented: visual tiers (smoke pivots land in F05-B.6,
 `TextelDamageRadius` decals remain), damage-driven detachment if the
 original ever uses it (UNK-13),
-C&R healing (DMG-4's `RegenerateRate` channel exists, no mode drives
-it), replication.
+replication. (C&R healing is driven by `cnr_host_step` at a designed
+rate; see DMG-4.)
 
 ## Water / out-of-bounds recovery (F05-B.5, designed — DSN-23)
 

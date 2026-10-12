@@ -424,6 +424,26 @@ impl VehicleDamage {
         self.state.tick(dt, &self.spec);
     }
 
+    /// Heal the mode's way (DMG-4, Cops & Robbers): the authored
+    /// `RegenerateRate` when a record carries one, otherwise the whole
+    /// bound over `seconds_to_full` (the caller's designed rate — every
+    /// retail record authors 0). Never below 0 damage; non-finite or
+    /// non-positive `dt`/`seconds_to_full` heal nothing. Mode policy
+    /// (who may heal) is the caller's.
+    pub fn heal(&mut self, dt: f32, seconds_to_full: f32) {
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        let rate = if self.spec.regenerate_rate > 0.0 {
+            self.spec.regenerate_rate
+        } else if seconds_to_full.is_finite() && seconds_to_full > 0.0 {
+            self.spec.max_damage.max(0.0) / seconds_to_full
+        } else {
+            return;
+        };
+        self.state.total = (self.state.total - rate * dt).max(0.0);
+    }
+
     /// Write the authority's replicated damage onto this copy (F25-B):
     /// `damaged_fraction` is the wire's `total / max_damage` quantized
     /// to `u8` units — `0.0` intact, `1.0` at the destruction bound.

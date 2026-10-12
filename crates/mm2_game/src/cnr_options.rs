@@ -156,6 +156,13 @@ pub const PICKUP_RADIUS_M: f32 = 5.0;
 /// policy*; nothing of the original's behaviour is recovered.
 pub const DROP_LOCKOUT_SECONDS: f32 = 1.0;
 
+/// Seconds a fully-damaged non-carrier takes to heal completely in
+/// Cops & Robbers (DMG-4/CNR-4). *Designed*: the help text says damaged
+/// vehicles not carrying gold heal over time, but no rate is recovered
+/// and every retail `RegenerateRate` is 0; a record that authors a
+/// positive `RegenerateRate` overrides this.
+pub const HEAL_SECONDS_TO_FULL: f32 = 30.0;
+
 /// The host's Cops & Robbers choices: the three fields the original
 /// packs into one settings word (`0x5014c1`, CNR-7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -51,6 +51,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
+use mm2_game::cnr_options::HEAL_SECONDS_TO_FULL;
 use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId,
@@ -280,7 +281,7 @@ type StepCar<'a> = (
     &'a Player,
     Option<&'a NetPlayer>,
     &'a Position,
-    Option<&'a VehicleDamage>,
+    Option<&'a mut VehicleDamage>,
 );
 
 /// What [`reconcile_gold_load`] reads and writes on each car.
@@ -306,7 +307,7 @@ pub fn cnr_host_step(
     session: Res<Session>,
     host: Option<ResMut<CnrHost>>,
     floor: Option<Res<WorldFloor>>,
-    cars: Query<StepCar>,
+    mut cars: Query<StepCar>,
     mut impacts: MessageReader<ImpactEvent>,
     mut out: MessageWriter<CnrEvent>,
 ) {
@@ -333,10 +334,22 @@ pub fn cnr_host_step(
     let mut present: BTreeSet<PlayerId> = BTreeSet::new();
     let mut who: HashMap<ObjectId, PlayerId> = HashMap::new();
     let mut wrecked: BTreeSet<PlayerId> = BTreeSet::new();
-    for (identity, player, net, position, damage) in &cars {
+    let carrier_now = game.carrier();
+    for (identity, player, net, position, mut damage) in &mut cars {
         let id = participant_id(player, net);
         if !connected.contains(&id) {
             continue;
+        }
+        // DMG-4: every damaged car not carrying the gold heals
+        // (authority only; clients see the total through replication).
+        // A wreck does not: disabled is resolved by the session's
+        // disabled-vehicle policy, and healing it here would undo the
+        // wreck's drop and lockout within a step.
+        if carrier_now != Some(id)
+            && let Some(d) = damage.as_deref_mut()
+            && d.condition() != DamageTier::Disabled
+        {
+            d.heal(1.0 / RACE_TICK_HZ as f32, HEAL_SECONDS_TO_FULL);
         }
         present.insert(id);
         who.insert(identity.0, id);
@@ -347,7 +360,10 @@ pub fn cnr_host_step(
             continue;
         }
         at.insert(id, position.0);
-        if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
+        if damage
+            .as_deref()
+            .is_some_and(|d| d.condition() == DamageTier::Disabled)
+        {
             wrecked.insert(id);
         }
     }
@@ -1008,6 +1024,42 @@ mod tests {
         // Still sitting on the gold, still wrecked: locked out.
         r.step();
         assert_eq!(r.game().carrier(), None);
+    }
+
+    #[test]
+    fn non_carriers_heal_and_the_carrier_does_not() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.game().carrier(), Some(A));
+        for car in [r.a, r.b] {
+            let mut damage = VehicleDamage::new(mm2_game::DamageSpec {
+                impact_threshold: 1500.0,
+                med_damage: 150_000.0,
+                max_damage: 321_300.0,
+                regenerate_rate: 0.0,
+            });
+            damage.apply(mm2_game::ImpactId(1), 100_000.0);
+            r.app.world_mut().entity_mut(car).insert(damage);
+        }
+        let total = |r: &Rig, e: Entity| r.app.world().get::<VehicleDamage>(e).unwrap().total();
+        let (a0, b0) = (total(&r, r.a), total(&r, r.b));
+        for _ in 0..RACE_TICK_HZ {
+            r.step();
+        }
+        assert_eq!(r.game().carrier(), Some(A));
+        assert_eq!(total(&r, r.a), a0, "the carrier must not heal");
+        let healed = b0 - total(&r, r.b);
+        let expected = 321_300.0 / HEAL_SECONDS_TO_FULL;
+        assert!(
+            (healed - expected).abs() < expected * 0.01,
+            "healed {healed}, expected about {expected}"
+        );
+        for _ in 0..(RACE_TICK_HZ * 60) {
+            r.step();
+        }
+        assert_eq!(total(&r, r.b), 0.0, "healing stops at intact");
     }
 
     #[test]
