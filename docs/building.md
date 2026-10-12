@@ -2,9 +2,9 @@
 
 How to build rust-mm2 from a clean checkout, where it looks for files and
 where it writes them. Every claim below is either backed by something that
-runs in this repository or labelled *untested*; there is no packaging
-step yet (no installer, `.app` builder or archive), only the pieces a
-package needs.
+runs in this repository or labelled *untested*. `scripts/package.sh`
+assembles the distributable install layouts — a portable folder, a macOS
+`.app` bundle and a Unix prefix; there is no installer or auto-updater.
 
 ## Platforms
 
@@ -116,29 +116,43 @@ files; `retail/` and `screenshots/` are git-ignored.
 ## Packaging
 
 ```sh
-scripts/package.sh                      # release build, then package
-scripts/package.sh --bin-dir <dir>      # package binaries you already built
+scripts/package.sh                          # release build, then every layout
+scripts/package.sh --layout app             # only the macOS .app bundle
+scripts/package.sh --bin-dir <dir>          # package binaries you already built
 ```
 
-`scripts/package.sh` runs `scripts/release-build.sh`, then assembles
-`target/package/rust-mm2-<os>-<arch>/` — the four binaries, the
-repository's synthetic `assets/`, `README.md`, `LICENSE-MIT`,
-`LICENSE-APACHE` and `docs/building.md` + `docs/modding.md` — and a
-`.tar.gz` beside it. It checks the folder with
-`scripts/check-package.sh`, writes the tarball, **extracts the tarball into
-a scratch directory and checks that too**, since the archive is what
-ships. It never overwrites: an existing folder or tarball is an error.
+`scripts/package.sh` runs `scripts/release-build.sh`, then assembles the
+install layouts and checks each one. `--layout` picks them; it defaults to
+`all`, every layout the platform ships:
 
-`scripts/check-package.sh <dir>` is an allowlist, not a blocklist. A file
-the package is not meant to carry fails even if nobody thought to forbid
-it; the mistakes worth naming (an original `*.ar` archive, a `driver-*`
-profile or `settings.json`, a `*.csv`/`*.report.json` perf capture, a
-`*.log`, `.env`/`*.pem`/`*.key`) get their own message. Symlinks fail
-(they can point out of the package), assets must be of a known type and
-under 8 MiB, all four binaries (all `.exe` or none) and
-`assets/texture/dev_road.png` must be present, and every file goes through
-`scripts/scan-private-paths.sh`. Every problem is listed, not only the
-first. Run it on any folder you are about to hand to someone.
+| `--layout` | Produced (under `target/package/`) | Layout |
+|---|---|---|
+| `flat` | `rust-mm2-<os>-<arch>/` and `.tar.gz` | the four binaries, `assets/`, `README.md`, `LICENSE-MIT`, `LICENSE-APACHE` and `docs/` at the root |
+| `app` | `rust-mm2.app/` and `.tar.gz` | `Contents/MacOS/` binaries, `Contents/Resources/assets/`, `Contents/Resources/{README.md,LICENSE-*,docs/}` — macOS only |
+| `prefix` | `rust-mm2-<os>-<arch>-prefix/` and `.tar.gz` | `bin/` binaries, `share/rust-mm2/assets/`, `share/doc/rust-mm2/{README.md,LICENSE-*,docs/}` |
+
+Every layout carries the same files, in the place that layout — and the
+app's own asset search — expects them. `--layout app` is a usage error off
+macOS, where a bundle of foreign binaries means nothing; `all` skips it
+there. `scripts/check-package.sh --layout <flat|app|prefix> <dir>` judges
+a folder against that layout's allowlist; `scripts/package.sh` runs it on
+the staged folder, writes the tarball, **extracts the tarball into a
+scratch directory and checks that too**, since the archive is what ships.
+It never overwrites: an existing folder or tarball is an error.
+
+`scripts/check-package.sh [--layout <flat|app|prefix>] <dir>` is an
+allowlist, not a blocklist. A file the package is not meant to carry fails
+even if nobody thought to forbid it; the mistakes worth naming (an
+original `*.ar` archive, a `driver-*` profile or `settings.json`, a
+`*.csv`/`*.report.json` perf capture, a `*.log`, `.env`/`*.pem`/`*.key`)
+get their own message. The allowlist paths are translated from the layout,
+so `Contents/Resources/assets/car.dds` and `share/rust-mm2/assets/car.dds`
+fail like `assets/car.dds` would while the message names the real file.
+Symlinks fail (they can point out of the package), assets must be of a
+known type and under 8 MiB, all four binaries (all `.exe` or none) and the
+layout's `texture/dev_road.png` and `README.md` must be present, and every
+file goes through `scripts/scan-private-paths.sh`. Every problem is listed,
+not only the first. Run it on any folder you are about to hand to someone.
 
 A package carries `LICENSE-MIT` and `LICENSE-APACHE` (the repository is
 `MIT OR Apache-2.0`; the retail game data is not covered by either and is
@@ -149,8 +163,9 @@ The flat folder, the macOS `.app` (`Contents/MacOS/mm2` with
 `Contents/Resources/assets`) and the Unix prefix (`bin/mm2` with
 `share/rust-mm2/assets`) layouts are each launched in
 `tests/package.rs` with the freshly built `mm2` copied into place and run
-from an unrelated directory. Only the flat tarball is produced; nothing
-yet assembles the `.app` bundle or a prefix install, or a Windows zip.
+from an unrelated directory, and the layouts `scripts/package.sh`
+assembles are checked there too. A Windows zip is not built yet (task
+#1368).
 
 ## Where the app finds files
 
@@ -168,8 +183,8 @@ these that holds `texture/dev_road.png` wins:
 So a portable build is the binary with the repository's `assets/` folder
 beside it, and it works when launched from any directory. No path is
 compiled in. The lookup is unit-tested and process-tested
-(`tests/app_assets.rs`, `tests/package.rs`); the `.app` and prefix layouts
-are launched from a copied binary, but nothing builds those packages yet.
+(`tests/app_assets.rs`, `tests/package.rs`); `scripts/package.sh`
+assembles the `.app` and prefix layouts and checks them in place.
 
 **The original game** is never bundled and never modified. Point at a
 retail installation with `--mm2-path "/path/to/Midtown Madness 2"` (the
@@ -279,8 +294,8 @@ The README documents the flags in context; `mm2 --help` lists them all.
 
 ## Not done yet
 
-- The `.app` bundle, a prefix install and a Windows zip (only the Unix
-  tarball is produced).
+- A Windows zip (`scripts/package.sh` builds the flat folder, the macOS
+  `.app` bundle and the Unix prefix; task #1368).
 - A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
   runs the headless commands, not the `--cam` captures, so it shows the
   optimised package loads the same content and reaches the same race
