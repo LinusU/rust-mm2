@@ -357,26 +357,23 @@ pub fn menu_present(
     }
 
     if g.state.art == Handle::default() {
-        if let Ok(image) = Image::from_buffer(
+        let art = menu_art_image(
+            &vfs.0,
+            "city-night",
             include_bytes!("../assets/menu/city-night.png"),
-            ImageType::Extension("png"),
-            CompressedImageFormats::all(),
-            true,
-            ImageSampler::Default,
-            RenderAssetUsages::default(),
-        ) {
-            g.state.art = g.images.add(image);
-        }
-
-        if let Ok(image) = Image::from_buffer(
+        );
+        let london = menu_art_image(
+            &vfs.0,
+            "london-night",
             include_bytes!("../assets/menu/london-night.png"),
-            ImageType::Extension("png"),
-            CompressedImageFormats::all(),
-            true,
-            ImageSampler::Default,
-            RenderAssetUsages::default(),
-        ) {
-            g.state.london = g.images.add(image);
+        );
+        match art {
+            Ok(image) => g.state.art = g.images.add(image),
+            Err(reason) => tracing::error!("menu art city-night: {reason}"),
+        }
+        match london {
+            Ok(image) => g.state.london = g.images.add(image),
+            Err(reason) => tracing::error!("menu art london-night: {reason}"),
         }
         g.state.target = g.images.add(Image::new_target_texture(
             960,
@@ -471,6 +468,27 @@ pub fn menu_present(
             }
             draw_navigation(parent, &shell.screen);
         });
+}
+
+/// Decode the menu backdrop `name`: a mod's `menu/<name>.png` when one is
+/// mounted, the embedded self-authored art otherwise (F29). A selected
+/// override that cannot be read or decoded is an error — the embedded art
+/// must not stand in for it.
+pub fn menu_art_image(vfs: &Vfs, name: &str, embedded: &[u8]) -> Result<Image, String> {
+    let logical = format!("menu/{name}.png");
+    let bytes = match vfs.resolve(&logical) {
+        Some(found) => vfs.read(&found).map_err(|e| format!("{logical}: {e}"))?,
+        None => embedded.to_vec(),
+    };
+    Image::from_buffer(
+        &bytes,
+        ImageType::Extension("png"),
+        CompressedImageFormats::all(),
+        true,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .map_err(|e| format!("{logical} does not decode as a PNG: {e}"))
 }
 
 fn backdrop(parent: &mut ChildSpawnerCommands, art: Handle<Image>) {

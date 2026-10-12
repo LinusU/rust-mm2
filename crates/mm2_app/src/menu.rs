@@ -3661,7 +3661,7 @@ fn screen_title(screen: &Screen) -> String {
 
 #[path = "menu_graphics.rs"]
 mod graphics;
-pub use graphics::{MenuPreviewCapture, menu_present, menu_preview_motion};
+pub use graphics::{MenuPreviewCapture, menu_art_image, menu_present, menu_preview_motion};
 
 #[cfg(test)]
 mod step_tests {

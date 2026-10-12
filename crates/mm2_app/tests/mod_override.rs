@@ -1204,3 +1204,48 @@ fn a_mod_conflict_reads_the_same_in_the_game_log_and_the_server_startup() {
     let server = host.stderr_containing(EXPECTED, WAIT);
     assert!(server.contains(EXPECTED), "server startup:\n{server}");
 }
+
+/// Menu art (F29-AC01/02/04/05): a mod's `menu/<name>.png` replaces the
+/// embedded backdrop, removing it restores the embedded art, a malformed
+/// override is an error rather than the embedded art, and the swap is
+/// cosmetic to the gameplay fingerprint.
+#[test]
+fn a_mod_replaces_menu_art_and_a_malformed_one_is_refused() {
+    use mm2_app::menu::menu_art_image;
+
+    let f = fixture();
+    let root = f._tmp.path();
+    let city = include_bytes!("../assets/menu/city-night.png");
+    let london = include_bytes!("../assets/menu/london-night.png");
+    let mut plain = Vfs::new();
+    plain.mount_dir(&f.base, 0).unwrap();
+    let stock = menu_art_image(&plain, "city-night", city).expect("embedded art decodes");
+
+    let art = root.join("menuart");
+    manifest(&art, "menuart");
+    write(&art, "menu/city-night.png", MOD_TEXTURE);
+    let replaced = mounted(&f.base, &art);
+    let modded = menu_art_image(&replaced, "city-night", city).expect("mod art decodes");
+    assert_ne!(
+        (modded.width(), modded.height()),
+        (stock.width(), stock.height()),
+        "the mod's PNG replaces the embedded art"
+    );
+    let bystander = menu_art_image(&replaced, "london-night", london).unwrap();
+    let london_stock = menu_art_image(&plain, "london-night", london).unwrap();
+    assert_eq!(bystander.data, london_stock.data, "unrelated art unchanged");
+
+    let reverted = menu_art_image(&plain, "city-night", city).unwrap();
+    assert_eq!(reverted.data, stock.data, "no mod: the embedded art");
+
+    let bad = broken_mod(root, "badart", "menu/city-night.png", b"not a png at all");
+    let err = menu_art_image(&mounted(&f.base, &bad), "city-night", city)
+        .expect_err("a malformed override is refused");
+    assert!(err.contains("menu/city-night.png"), "{err}");
+
+    assert_eq!(
+        observe(&f.base, &[&art]).fingerprint,
+        observe(&f.base, &[]).fingerprint,
+        "menu art is cosmetic"
+    );
+}
