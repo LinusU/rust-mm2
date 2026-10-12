@@ -13,7 +13,7 @@
 #   <out>/rust-mm2-<os>-<arch>/        (default <out>: target/package)
 #       mm2 mm2-host mm2-join mm2-inspect   (.exe on Windows)
 #       assets/                        the project's own synthetic assets
-#       docs/building.md docs/modding.md, README.md
+#       docs/building.md docs/modding.md, README.md, LICENSE-MIT, LICENSE-APACHE
 #
 # and `<out>/rust-mm2-<os>-<arch>.tar.gz` beside it. The folder is
 # checked with `scripts/check-package.sh`, and then so is the tarball
@@ -75,7 +75,7 @@ for bin in mm2 mm2-host mm2-join mm2-inspect; do
     cp "$bin_dir/$bin$exe" "$stage/"
 done
 cp -R assets "$stage/assets"
-cp README.md "$stage/"
+cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
 cp docs/building.md docs/modding.md "$stage/docs/"
 # A stray editor/OS file in the source assets must not ride along.
 find "$stage" -name .DS_Store -type f -exec rm {} +

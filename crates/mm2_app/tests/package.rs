@@ -296,6 +296,8 @@ fn the_package_script_ships_the_program_assets_and_docs_and_nothing_else() {
     let mut expected: Vec<String> = BINS.iter().map(|b| b.to_string()).collect();
     expected.extend(
         [
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
             "README.md",
             "assets/texture/dev_road.png",
             "docs/building.md",

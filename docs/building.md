@@ -139,8 +139,9 @@ under 8 MiB, all four binaries (all `.exe` or none) and
 `scripts/scan-private-paths.sh`. Every problem is listed, not only the
 first. Run it on any folder you are about to hand to someone.
 
-A package carries no `LICENSE` file because the repository has none yet;
-the check accepts one when it appears. It carries no original content by
+A package carries `LICENSE-MIT` and `LICENSE-APACHE` (the repository is
+`MIT OR Apache-2.0`; the retail game data is not covered by either and is
+never packaged). It carries no original content by
 construction: nothing in the script reads an install.
 
 The flat folder, the macOS `.app` (`Contents/MacOS/mm2` with
@@ -278,7 +279,7 @@ The README documents the flags in context; `mm2 --help` lists them all.
 ## Not done yet
 
 - The `.app` bundle, a prefix install and a Windows zip (only the Unix
-  tarball is produced), and a `LICENSE` file to put in it.
+  tarball is produced).
 - A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
   runs the headless commands, not the `--cam` captures, so it shows the
   optimised package loads the same content and reaches the same race
