@@ -122,8 +122,9 @@ scripts/package.sh --bin-dir <dir>      # package binaries you already built
 
 `scripts/package.sh` runs `scripts/release-build.sh`, then assembles
 `target/package/rust-mm2-<os>-<arch>/` — the four binaries, the
-repository's synthetic `assets/`, `README.md` and `docs/building.md` +
-`docs/modding.md` — and a `.tar.gz` beside it. It checks the folder with
+repository's synthetic `assets/`, `README.md`, `LICENSE-MIT`,
+`LICENSE-APACHE` and `docs/building.md` + `docs/modding.md` — and a
+`.tar.gz` beside it. It checks the folder with
 `scripts/check-package.sh`, writes the tarball, **extracts the tarball into
 a scratch directory and checks that too**, since the archive is what
 ships. It never overwrites: an existing folder or tarball is an error.
