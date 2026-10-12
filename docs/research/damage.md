@@ -669,24 +669,80 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
   the episode done. The model reset `0x4cdfe0` clears the flag and restores
   the full mask (`0xffffffff`). *Unknown:* what `+0x24c` is (it is also
   compared with 10 and 15 on the impact path); `MedDamage` is not read here.
-- **Not recovered.** The unit of the impact record's `+0x34` (it is the
-  quantity added to damage, so the same scale as `MaxDamage`/`ImpactThreshold`,
-  but our `severity` estimate is not shown to equal it — hence whether
-  10000 is reachable at the same speeds as in the original); whether
-  `0x4cb130` is fed once per contact or once per frame of contact.
+- **The unit of `+0x34` (measured 2026-10-12).** The impact record is a
+  12-slot table inside `vehCarDamage` (slots at `this+0x44`, stride
+  `0x40`, key = the other body). It is written by the car's collision
+  callback `0x4caee0` (registered by the ctor path at `0x4ca7f6` as
+  `0x4cb340`, which resolves "the other body" from the contact pair's
+  `+0x3c/+0x40` and passes the contact). The callback computes
+  `impulse = |v| × share` and stores it in slot `+0x34`:
+  - `v` is the vector behind `contact[0]`: the per-contact **impulse
+    vector** the contact solver hands to each body's callback
+    (`0x46b610` → body vtable `+0xc`). `0x46b7c0` builds it as
+    `J = (1 + e) · K⁻¹ · (−v_rel)` (`e` = contact `+0x38`; `K` the
+    effective-mass matrix at the contact point — `0x478cc0` adds each
+    body's `+0x10` on the diagonal, i.e. the inverse-mass term, to the
+    rotational part), clamps the tangential part to
+    `contact +0x34 × normal impulse` (Coulomb friction), and scales by
+    `1/n` for an `n`-contact manifold. This is the same `x = K⁻¹(−v_rel)`
+    that OPR-1.3 recovered for the banger gate, so `J` is a real
+    **impulse: mass × velocity, kg·m/s (≡ N·s)** — not a velocity, an
+    energy or a force.
+  - `share` is `1.0` against the world (static bodies carry no mass
+    block) and `m_other / (m_other + m_self)` (physics block `+0x0c` of
+    each body) against a dynamic body. A virtual hook at vtable `+0x34`
+    (`0x4cb640`) multiplies by a constant `1.0` — the slot is an
+    override point that `vehCarDamage` leaves neutral.
+  - **Per-contact bookkeeping.** A slot is re-armed only when the new
+    impulse exceeds `1.25 ×` the slot's last value (`0x5b1c70`); that is
+    the only case that calls the leaf `0x4cb130` and so can reach the
+    break manager. Any other contact above `ImpactThreshold` for the same
+    other body adds its impulse to the damage accumulator directly
+    (`0x4cb013` → `0x4caeb0`) without offering it to the break manager.
+    The slot also carries a `0.2` (`0x5cde50`) re-arm time; its expiry
+    path was not traced. So the callback runs every solver step a
+    contact persists, and the table — not the callback — is what stops a
+    sustained push counting every frame.
+  - **Comparability.** `MaxDamage`, `ImpactThreshold`, the accumulator
+    and the manager's `10000.0` are therefore all kg·m/s on one scale
+    (the retail `MaxDamage` tracking vehicle mass fits: it is a mass ×
+    speed budget). Our `severity` (`ImpactEvent`, pre-solver approach
+    speed, m/s) multiplied by a mass — what `apply_impact_damage` feeds
+    `DamageState` and DSN-21 compares — is the same unit, so
+    **the authored numbers are directly comparable in kind**, and the
+    designed estimate is a *lower bound* of the original's quantity for
+    the same hit: it lacks the `(1 + e)` restitution factor, uses the
+    striker's full mass instead of the effective (reduced) mass with
+    its `share` weighting, and ignores the rotational terms of `K`
+    (which only lower the effective mass). For a wall hit the original
+    is `≈ (1 + e) · m_eff · v_n` against ours `m · v_n`. For two cars it is
+    `≈ (1 + e) · μ · v_n · m_other/(m_self+m_other)` with `μ = m₁m₂/(m₁+m₂)`
+    against ours `m_other · v_n` — about `(1+e)/4` for equal masses, so
+    car-on-car damage is overstated by the designed policy and
+    wall damage slightly understated. Magnitudes are **not** yet measured
+    against retail masses and restitutions: `e` per surface pair and
+    each car's physics-block mass were not read here (the install is
+    packed; use `mm2-inspect`), so no numeric "10000 is reached at
+    X m/s" claim is made. For any one vehicle the wall-hit speed that
+    reaches 10000 is `10000 / ((1+e) · m_eff)`.
+  - **Still open.** Whether the slot expiry (0.2 s) re-arms the leaf
+    during a sustained push, the effective value of `e` per retail
+    surface pair, and what `vehCarSim +0x24c` is.
 
 **Consequences for the port.** Breakaway detachment is *not*
 damage-driven, so there is no accumulated-damage detach to implement.
 The shipped DSN-21 gate (`severity × part_mass > ImpulseLimit2`, every
 part tested independently) departs from the recovered rule; replacing it
-needs the impulse unit first. Wheel/hub loss at `MaxDamage` is a damage-driven
+needs the retail per-car masses and restitutions (the unit itself is
+measured above: kg·m/s). Wheel/hub loss at `MaxDamage` is a damage-driven
 behaviour the port does not have yet. Both are filed as follow-up tasks.
 
 ## Open questions
 
-- The original accumulation model: what quantity `MaxDamage`
-  integrates (impact impulse? energy? a contact callback count?) and
-  whether `ImpactThreshold` compares the same unit — UNK-13.
+- (Answered 2026-10-12, see § Original breakaway rule: `MaxDamage` integrates the
+  solved contact impulse in kg·m/s, and `ImpactThreshold` compares the same
+  quantity.) What remains is the per-car calibration of our `severity ×
+  mass` estimate against it — UNK-13.
 - Whether `MedDamage` gates visual state, impairment or both. Both
   implemented legs key on it as designed policy (smoke DSN-24,
   impairment DSN-25); MM2Hook's `mm2.ini` option
