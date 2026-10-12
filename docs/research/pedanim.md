@@ -384,12 +384,54 @@ walker side: nothing in the code reads a contact.
   frame delta and, past a per-state threshold, enters the next state
   (`0x57b2d0`). It drives the csv chain, not rigid-body ragdolls.
 - The walker instance (constructor `0x551b50`, vtable `0x5b490c`,
-  size 0x3c) is a level-instance object. Not traced: whether the
-  vehicle collision broad phase ever visits it. That half, and any play
-  observation, stay open (original-rules PED-2 / UNK-15).
+  size 0x3c) is a level-instance object, and the vehicle broad phase
+  **does not filter it out** (traced 2026-10-12, task #1302):
+  - `0x6b1f60` is not an instance list; every use (`0x53d3b4`,
+    `0x54aa36`, `0x54ba40`, ...) reads the player vehicle's position
+    through `[0x6b1f60]+0x14 -> +0xb8 -> +0x90`. The list the broad phase
+    walks is the per-room instance list of the level object at
+    `0x654d7c` (head `[room entry+4]`, next `[inst+0x10]`, previous
+    `[inst+0xc]`, room `[inst+6]`), maintained by `MoveToRoom` `0x465470`.
+  - The walker is put in it: the walker actor update `0x54b9a0` calls
+    `0x465470` for its sub-instance (`0x54b9f9`, `0x54bf30`, vtable
+    `0x5b52f0`, built by `0x57b300`), and the actor's room sync at
+    `0x5516c2..0x5516ea` and the walker slot `0x552d40` (+0x28) call it for
+    the `0x5b490c` instance itself (`0x5516ea`, `0x552d63`).
+  - Per frame `dgPhysManager` (`0x468850` family) calls
+    `GatherCollidables` `0x4694d0` (at `0x468ac3`) for each declared
+    mover. `DeclareMover` is `0x468360`; its third argument is the mover's
+    flag word (`[entry+0x8c]`), `0x1b` for every vehicle call site (player
+    `0x41419b`, `0x53d43e`, `0x53df70`, `0x54aae1`, ...). The gather
+    keeps an instance when (`flags & 0x18` and vtable slot +0x50 is true)
+    or (`flags & 0x2` and slot +0x54 is true), then a sphere test
+    `0x4692d0` (vtable +0x4 centre, +0x18 radius) and a cap of 32.
+  - The base slots are `0x43fc30` (`[inst+8] bit 4`) and `0x43fc40`
+    (`[inst+9] bit 0`); the base constructor `0x4631e0` sets the word at
+    +8 to `0x0200`, so a plain instance passes neither. **The walker
+    constructor sets `or byte [this+8], 0xd8` (`0x551d01`), which turns
+    bit 4 on, and it inherits `0x43fc30`**: with a vehicle flag word of
+    `0x1b` the walker passes the filter. By contrast the `0x5b52f0`
+    sub-instance overrides slot +0x50 with `0x57b500` (`xor al,al`) and has
+    `[+8]=0x0200`, so it never passes.
+  - Narrow phase `0x469610(mover, other)` takes each side's vtable +0x64
+    (walker: `0x552d00`, which returns `[0x553d40(this)+0xb8]`, a field of
+    the ped record in the table at `[0x6b218c]`) and, if either is null,
+    reports `CollideInstances: Attempting to collide instances without
+    bounds` and returns. Whether that field is non-null at run time is not
+    decidable from the static code. A successful narrow phase sets
+    `[other+9] |= 0x80` when either side is the player mover
+    (`0x4697d6`, `0x4697e1`); the only reader of that bit
+    (`0x55b154`) is vehicle code, nothing in the walker code reads it.
+  So the static answer is: the broad phase can pair a car with a walker
+  instance; whether the narrow phase yields a contact, and what the
+  response is, is not shown and there is still no walker-side state for
+  being struck. Open: OWNER play observation, and a runtime check of
+  `[0x553d40(walker)+0xb8]` (original-rules PED-2 / UNK-15).
 
-Conclusion: no physical car-walker interaction is evidenced; the
-no-collider policy stands (DSN-89).
+Conclusion: no walker-side reaction to a contact is evidenced, but the
+car-side broad phase does not exclude walkers (above), so *retail cars
+may collide with walkers* is no longer inferred away. The no-collider
+policy (DSN-89) is a design choice pending the open play observation.
 
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
