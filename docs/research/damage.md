@@ -705,8 +705,7 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
     sustained push counting every frame.
   - **Comparability.** `MaxDamage`, `ImpactThreshold`, the accumulator
     and the manager's `10000.0` are therefore all kg·m/s on one scale
-    (the retail `MaxDamage` tracking vehicle mass fits: it is a mass ×
-    speed budget). Our `severity` (`ImpactEvent`, pre-solver approach
+    (that `MaxDamage` scales with vehicle mass was not checked). Our `severity` (`ImpactEvent`, pre-solver approach
     speed, m/s) multiplied by a mass — what `apply_impact_damage` feeds
     `DamageState` and DSN-21 compares — is the same unit, so
     **the authored numbers are directly comparable in kind**, and the
