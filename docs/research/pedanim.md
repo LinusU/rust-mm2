@@ -414,24 +414,44 @@ walker side: nothing in the code reads a contact.
     sub-instance overrides slot +0x50 with `0x57b500` (`xor al,al`) and has
     `[+8]=0x0200`, so it never passes.
   - Narrow phase `0x469610(mover, other)` takes each side's vtable +0x64
-    (walker: `0x552d00`, which returns `[0x553d40(this)+0xb8]`, a field of
-    the ped record in the table at `[0x6b218c]`) and, if either is null,
-    reports `CollideInstances: Attempting to collide instances without
-    bounds` and returns. Whether that field is non-null at run time is not
-    decidable from the static code. A successful narrow phase sets
-    `[other+9] |= 0x80` when either side is the player mover
-    (`0x4697d6`, `0x4697e1`); the only reader of that bit
-    (`0x55b154`) is vehicle code, nothing in the walker code reads it.
-  So the static answer is: the broad phase can pair a car with a walker
-  instance; whether the narrow phase yields a contact, and what the
-  response is, is not shown and there is still no walker-side state for
-  being struck. Open: OWNER play observation, and a runtime check of
-  `[0x553d40(walker)+0xb8]` (original-rules PED-2 / UNK-15).
+    (walker: `0x552d00`, which returns `[0x553d40(this)+0xb8]`; `0x553d40`
+    indexes the `aiVehicleManager`'s per-model records at
+    `[0x6b218c] + 0x18 + idx*0xbc`, `idx` = the walker instance's byte +5)
+    and, if either is null, reports `CollideInstances: Attempting to
+    collide instances without bounds` (`0x5c5eb4`, branch `0x469a0b`) and
+    returns. **The walker's field is non-null** (traced 2026-10-12, task
+    #1354): the model record's +0xb8 is written exactly once, in the
+    get-or-create `0x553d60` (after the record's `[+0x28]` = `0x4a1110`
+    loads the model's data file), by `0x553f3e`, storing a freshly
+    constructed 0x318-byte bounds object (`0x5770e0` new + `0x46a260`
+    ctor, vtable `0x5b0d98`); the record destructor (`0x554160`/`0x4a0cf0`),
+    the record's own methods (all reads), the manager reset loop `0x553fa0`
+    and the manager methods never clear it. A load failure blacklists the
+    name and returns 0, leaving the walker's +5 = 0 → record 0 (created by
+    the first successful load), also non-null in any scene with a vehicle
+    model. So the narrow phase is not short-circuited on the walker side and
+    yields a contact when the car and walker shapes overlap. A successful
+    narrow phase sets `[other+9] |= 0x80` when either side is the player
+    mover (`0x4697d6`, `0x4697e1`); the only reader (`0x55b154`) is vehicle
+    code and turns it into a car field (`+0x153c` = 2.0 vs 1.0), nothing in
+    the walker code reads it.
+  So the static answer is: the broad phase pairs a car with a walker
+  instance and the narrow phase is live (its bounds guard resolves
+  non-null), so retail cars collide with pedestrians when the shapes
+  overlap. What is still not shown is the *response*: there is no
+  walker-side state for being struck, no hit/splat/score string and no
+  animation change, so a contact does not knock the walker down in the
+  retail code — only the car reacts. Open: OWNER play observation (drive
+  into a walker in a Cruise city and describe blocking, knock-down, sound,
+  score). The port's no-collider policy (DSN-89) is a designed departure;
+  follow-up implementation task #1378 bounds the fix by F19 req 4.
 
 Conclusion: no walker-side reaction to a contact is evidenced, but the
-car-side broad phase does not exclude walkers (above), so *retail cars
-may collide with walkers* is no longer inferred away. The no-collider
-policy (DSN-89) is a design choice pending the open play observation.
+car-side broad phase does not exclude walkers and the walker's narrow-phase
+bounds guard resolves non-null (above), so retail cars do collide with
+pedestrians when the shapes overlap. The no-collider policy (DSN-89) is a
+designed departure, pending implementation per F19 req 4 (#1378) and the
+open play observation.
 
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
