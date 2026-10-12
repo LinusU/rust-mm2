@@ -774,6 +774,12 @@ fn race_order_key(generation: u64, row: &SnapRace) -> Option<(u64, u8, u64)> {
 }
 
 impl RemoteSnaps {
+    /// Replicated impact rows still waiting for `apply_snapshots`
+    /// (bounded by `MAX_PENDING_IMPACTS`); the perf soak samples it.
+    pub fn pending_impacts(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Queue a received snapshot frame. Pose state is latest-wins on
     /// `(generation, tick)`: an incoming frame at or behind the staged
     /// or last-applied watermark is stale — it drops counted (a dup or

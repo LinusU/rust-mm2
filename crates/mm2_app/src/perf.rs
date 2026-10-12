@@ -68,9 +68,11 @@ use avian3d::dynamics::solver::SolverDiagnostics;
 use bevy::ecs::entity::Entities;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
-use mm2_game::Mm2Vfs;
+use mm2_game::{Mm2Vfs, Session, SessionPhase};
 
 use crate::audio::AudioVoice;
+use crate::netdrive::RemoteSnaps;
+use crate::speech::SpeechArbiter;
 use serde_json::{Value, json};
 
 /// Schema tag of the JSON report; bump when a field changes meaning.
@@ -146,6 +148,10 @@ const ENTITY_SAMPLE_EVERY: u64 = 30;
 const SOAK_ENTITY_SLACK_FLOOR: u32 = 32;
 const SOAK_ENTITY_SLACK_PERMILLE: u32 = 10;
 const SOAK_VOICE_SLACK: u32 = 8;
+/// Queue depth (waiting speech lines plus replicated impact rows not yet
+/// applied). Both queues have hard caps far above this; the slack only
+/// absorbs a burst landing in one window and not the other.
+const SOAK_QUEUE_SLACK: u32 = 16;
 
 /// A window needs at least this many samples before its peak says
 /// anything; a shorter run is `inconclusive`, never `pass`.
@@ -221,6 +227,7 @@ impl Growth {
 struct Soak {
     entities: Growth,
     voices: Growth,
+    queues: Growth,
     overload: Verdict,
     overall: Verdict,
 }
@@ -237,12 +244,17 @@ impl Soak {
             SOAK_VOICE_SLACK,
             0,
         );
+        let queues = Growth::of(
+            &rows.iter().map(|r| r.queues).collect::<Vec<_>>(),
+            SOAK_QUEUE_SLACK,
+            0,
+        );
         let overload = if rows.iter().any(|r| !r.clamped.is_zero()) {
             Verdict::Fail
         } else {
             Verdict::Pass
         };
-        let all = [entities.verdict, voices.verdict, overload];
+        let all = [entities.verdict, voices.verdict, queues.verdict, overload];
         let overall = if all.contains(&Verdict::Fail) {
             Verdict::Fail
         } else if all.contains(&Verdict::Inconclusive) {
@@ -253,6 +265,7 @@ impl Soak {
         Self {
             entities,
             voices,
+            queues,
             overload,
             overall,
         }
@@ -263,6 +276,7 @@ impl Soak {
             "verdict": self.overall.name(),
             "entities": self.entities.json(),
             "voices": self.voices.json(),
+            "queues": self.queues.json(),
             "overload": { "verdict": self.overload.name() },
             "min_samples_per_window": SOAK_MIN_SAMPLES_PER_WINDOW,
         })
@@ -271,7 +285,8 @@ impl Soak {
     fn line(&self) -> String {
         format!(
             "perf: soak {} | entities: middle-third peak {} last-third peak {} (slack {}) {} \
-             | voices: {} -> {} (slack {}) {} | overload {}",
+             | voices: {} -> {} (slack {}) {} \
+             | queues: {} -> {} (slack {}) {} | overload {}",
             self.overall.name(),
             self.entities.middle_peak,
             self.entities.tail_peak,
@@ -281,6 +296,10 @@ impl Soak {
             self.voices.tail_peak,
             self.voices.slack,
             self.voices.verdict.name(),
+            self.queues.middle_peak,
+            self.queues.tail_peak,
+            self.queues.slack,
+            self.queues.verdict.name(),
             self.overload.name(),
         )
     }
@@ -306,6 +325,8 @@ struct Row {
     entities: u32,
     /// Live audio voices (`AudioVoice` entities) at the same sample.
     voices: u32,
+    /// Queue depth at the same sample ([`sample_queues`]).
+    queues: u32,
     /// Wall time beyond the virtual clock's `max_delta` that the frame
     /// discarded instead of simulating (zero for a frame within the cap).
     clamped: Duration,
@@ -352,6 +373,10 @@ struct Stats {
     voices_first: u32,
     voices_max: u32,
     voices_last: u32,
+    /// Speech and impact queue depth, same three readings.
+    queues_first: u32,
+    queues_max: u32,
+    queues_last: u32,
     /// Frames that exceeded the virtual cap, the game time they discarded
     /// in total and in the single worst frame (ms), and the most fixed
     /// steps any one frame ran to catch up.
@@ -371,6 +396,10 @@ struct PerfLog {
     frame: u64,
     /// `First` of the frame in flight; `None` before the first frame.
     frame_start: Option<Instant>,
+    /// A session exists but has not reached its countdown or play yet
+    /// (a lobby wait, a load): frames are not recorded until it does, so a
+    /// soak window never holds a parked menu's near-empty world.
+    awaiting_session: bool,
     fixed_start: Option<Instant>,
     fixed: Duration,
     /// `Last` of the frame in flight.
@@ -382,6 +411,7 @@ struct PerfLog {
     contacts: u32,
     entities: u32,
     voices: u32,
+    queues: u32,
     /// The in-flight frame's discarded wall time, read from the clocks at
     /// `Last` and folded into its row when the next frame begins.
     clamped: Duration,
@@ -404,6 +434,7 @@ impl PerfLog {
             rows: Vec::new(),
             frame: 0,
             frame_start: None,
+            awaiting_session: false,
             fixed_start: None,
             fixed: Duration::ZERO,
             main_end: None,
@@ -414,6 +445,7 @@ impl PerfLog {
             contacts: 0,
             entities: 0,
             voices: 0,
+            queues: 0,
             clamped: Duration::ZERO,
             max_delta: None,
         }
@@ -421,7 +453,9 @@ impl PerfLog {
 
     /// Close the frame that just ended at `now` and open the next one.
     fn begin_frame(&mut self, now: Instant) {
-        if let (Some(start), Some(main_end)) = (self.frame_start, self.main_end) {
+        if self.awaiting_session {
+            self.frame = 0;
+        } else if let (Some(start), Some(main_end)) = (self.frame_start, self.main_end) {
             let total = now - start;
             let main = main_end - start;
             self.rows.push(Row {
@@ -437,6 +471,7 @@ impl PerfLog {
                 contacts: self.contacts,
                 entities: self.entities,
                 voices: self.voices,
+                queues: self.queues,
                 clamped: self.clamped,
             });
         }
@@ -503,6 +538,9 @@ impl PerfLog {
             voices_first: rows[0].voices,
             voices_max: rows.iter().map(|r| r.voices).max().unwrap_or(0),
             voices_last: rows[rows.len() - 1].voices,
+            queues_first: rows[0].queues,
+            queues_max: rows.iter().map(|r| r.queues).max().unwrap_or(0),
+            queues_last: rows[rows.len() - 1].queues,
             clamped_frames: rows.iter().filter(|r| !r.clamped.is_zero()).count(),
             clamped_total: rows.iter().map(|r| ms(r.clamped)).sum(),
             clamped_worst: stage_max(|r| r.clamped),
@@ -532,7 +570,7 @@ impl PerfLog {
              | avian ms per fixed step: broad {sb:.2} narrow {sn:.2} solver {ss:.2} \
              | fixed steps per frame {spf:.2} | max contacts {mc} \
              | live entities first {ef} last {el} max {em} \
-             | live voices first {vf} last {vl} max {vm}\n\
+             | live voices first {vf} last {vl} max {vm} | queue depth first {qf} last {ql} max {qm}\n\
              perf: overload: {cf} frames over the {cap} virtual cap discarded {ct:.1} ms of \
              game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}\n{soak}",
             n = st.frames,
@@ -566,6 +604,9 @@ impl PerfLog {
             vf = st.voices_first,
             vl = st.voices_last,
             vm = st.voices_max,
+            qf = st.queues_first,
+            ql = st.queues_last,
+            qm = st.queues_max,
             cf = st.clamped_frames,
             cap = self
                 .max_delta
@@ -640,6 +681,12 @@ impl PerfLog {
                     "first": st.entities_first,
                     "last": st.entities_last,
                     "max": st.entities_max,
+                },
+                "live_queues": {
+                    "sample_every_frames": ENTITY_SAMPLE_EVERY,
+                    "first": st.queues_first,
+                    "last": st.queues_last,
+                    "max": st.queues_max,
                 },
                 "live_voices": {
                     "sample_every_frames": ENTITY_SAMPLE_EVERY,
@@ -717,13 +764,13 @@ impl PerfLog {
         let mut out = BufWriter::new(File::create(&self.path)?);
         writeln!(
             out,
-            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices,clamped_ms"
+            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices,queues,clamped_ms"
         )?;
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         for r in &self.rows {
             writeln!(
                 out,
-                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{},{:.3}",
+                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{},{},{:.3}",
                 r.frame,
                 ms(r.total),
                 ms(r.fixed),
@@ -736,6 +783,7 @@ impl PerfLog {
                 r.contacts,
                 r.entities,
                 r.voices,
+                r.queues,
                 ms(r.clamped)
             )?;
         }
@@ -756,6 +804,23 @@ impl Drop for PerfLog {
             Err(e) => warn!(error = %e, "perf report not written"),
         }
         println!("{}", self.summary());
+    }
+}
+
+/// Open recording once the session reaches its countdown or play.
+fn session_gate(session: Option<Res<Session>>, mut log: ResMut<PerfLog>) {
+    if log.awaiting_session
+        && session.is_some_and(|s| {
+            matches!(
+                s.phase(),
+                SessionPhase::Countdown
+                    | SessionPhase::Playing
+                    | SessionPhase::Paused
+                    | SessionPhase::Results
+            )
+        })
+    {
+        log.awaiting_session = false;
     }
 }
 
@@ -816,6 +881,24 @@ fn sample_entities(entities: &Entities, mut log: ResMut<PerfLog>) {
 fn sample_voices(voices: Query<(), With<AudioVoice>>, mut log: ResMut<PerfLog>) {
     if log.frame.is_multiple_of(ENTITY_SAMPLE_EVERY) {
         log.voices = voices.iter().count() as u32;
+    }
+}
+
+/// Count queued work on the same cadence: speech lines waiting for the
+/// floor plus replicated impact rows awaiting `apply_snapshots`. Both are
+/// capped (`MAX_QUEUED_LINES`, `MAX_PENDING_IMPACTS`); the soak judges
+/// whether the depth still climbs, so a stalled drain shows before the
+/// cap hides it. A resource that is absent (no network, no speech) reads
+/// zero.
+fn sample_queues(
+    speech: Option<Res<SpeechArbiter>>,
+    snaps: Option<Res<RemoteSnaps>>,
+    mut log: ResMut<PerfLog>,
+) {
+    if log.frame.is_multiple_of(ENTITY_SAMPLE_EVERY) {
+        let speech = speech.map_or(0, |s| s.queued());
+        let impacts = snaps.map_or(0, |s| s.pending_impacts());
+        log.queues = (speech + impacts) as u32;
     }
 }
 
@@ -887,6 +970,7 @@ fn capture_adapter(info: Option<Res<RenderAdapterInfo>>, mut log: ResMut<PerfLog
 pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
     use bevy::app::RunFixedMainLoopSystems::{AfterFixedMainLoop, BeforeFixedMainLoop};
     let mut log = PerfLog::new(path, context);
+    log.awaiting_session = app.world().contains_resource::<Session>();
     log.content = app
         .world()
         .get_resource::<Mm2Vfs>()
@@ -900,7 +984,16 @@ pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
         .add_systems(RunFixedMainLoop, fixed_loop_end.in_set(AfterFixedMainLoop))
         .add_systems(FixedFirst, fixed_step)
         .add_systems(FixedLast, fixed_step_physics)
-        .add_systems(Update, (capture_adapter, sample_entities, sample_voices))
+        .add_systems(
+            Update,
+            (
+                session_gate,
+                capture_adapter,
+                sample_entities,
+                sample_voices,
+                sample_queues,
+            ),
+        )
         .add_systems(Last, frame_main_end);
 }
 
@@ -922,6 +1015,7 @@ mod tests {
             contacts: 0,
             entities: 0,
             voices: 0,
+            queues: 0,
             clamped: Duration::ZERO,
         }
     }
@@ -947,6 +1041,28 @@ mod tests {
         assert!(s.contains("hitches (>1.5x median): 2 (2.0%)"), "{s}");
         assert!(s.contains("frames with >1 fixed step: 1"), "{s}");
         assert!(s.contains("max 40.00"), "{s}");
+    }
+
+    #[test]
+    fn frames_before_the_session_counts_down_are_not_recorded() {
+        let mut log = PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_gate_test.csv"),
+            RunContext::default(),
+        );
+        log.awaiting_session = true;
+        let t0 = Instant::now();
+        for i in 0..4 {
+            log.main_end = Some(t0 + Duration::from_millis(16 * i + 10));
+            log.begin_frame(t0 + Duration::from_millis(16 * i));
+        }
+        assert!(log.rows.is_empty(), "a lobby wait must not fill the log");
+        assert_eq!(log.frame, 1, "the frame counter restarts at the gate");
+        log.awaiting_session = false;
+        for i in 4..7 {
+            log.main_end = Some(t0 + Duration::from_millis(16 * i + 10));
+            log.begin_frame(t0 + Duration::from_millis(16 * i));
+        }
+        assert_eq!(log.rows.len(), 3);
     }
 
     #[test]
@@ -1150,6 +1266,31 @@ mod tests {
             log.rows.push(r);
         }
         log
+    }
+
+    #[test]
+    fn a_queue_that_keeps_deepening_fails_the_soak_and_a_bounded_one_passes() {
+        let queued = |measured: usize, depth: fn(usize) -> u32| {
+            let mut log = soak_log(measured, |_| (1_000, 10));
+            for (i, r) in log.rows.iter_mut().enumerate().skip(WARMUP_FRAMES) {
+                r.queues = depth(i - WARMUP_FRAMES);
+            }
+            log
+        };
+        let steady = queued(900, |i| 3 + (i as u32 % 4));
+        let soak = steady.stats().unwrap().soak;
+        assert_eq!(soak.queues.verdict, Verdict::Pass, "{}", soak.line());
+        assert_eq!(soak.overall, Verdict::Pass);
+        let backlog = queued(900, |i| i as u32 / 10);
+        let soak = backlog.stats().unwrap().soak;
+        assert_eq!(soak.queues.verdict, Verdict::Fail);
+        assert_eq!(soak.entities.verdict, Verdict::Pass);
+        assert_eq!(soak.overall, Verdict::Fail);
+        assert_eq!(
+            backlog.report()["timings"]["soak"]["queues"]["verdict"],
+            "fail"
+        );
+        assert_eq!(backlog.report()["timings"]["live_queues"]["max"], 89);
     }
 
     #[test]
