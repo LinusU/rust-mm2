@@ -164,8 +164,10 @@ stage_prefix() {
 check() { # $1 = layout, $2 = folder
     IFS='
 '
+    set -f
     # shellcheck disable=SC2046,SC2086 # newline-separated by construction
-    set -f; set -- --layout "$1" $forbid "$2"; set +f
+    set -- --layout "$1" $forbid "$2"
+    set +f
     unset IFS
     sh scripts/check-package.sh "$@"
 }
