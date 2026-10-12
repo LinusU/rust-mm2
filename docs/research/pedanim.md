@@ -578,13 +578,28 @@ reaction (1 wary / 2 diving) path calls an audio routine. The file-name
 suffix is built by `0x50fa90` from a rolling counter. The counts
 (`numfemalepedvoicefiles`, `nummalepedvoicefiles`) are read in `0x412730`.
 
-What is not: which event starts the sample (the emitter's activate slot
-`0x510980` is reached virtually). The walker reaction word
-(0 walking / 1 wary / 2 diving, `0x54b9a0`) is the only car-driven
-state, but it never reaches an audio routine, and the meaning of "speed" in
-the band is unrecovered. Nothing is wired: the crowd stays silent
-rather than invent a trigger, and no duplicate-event machinery is needed
-until one is evidenced.
+Activation (F19 #1345, same Ghidra method): the sample is started by the
+emitter method `0x510cd0(arg)`, not by slot 3. It checks the table index
+(emitter+0x64), calls `0x512370` (which, when the sound manager's enabled
+flag at `DAT_006b0474+0x25` is set and emitter+0x44 is -1, takes an
+instance index via `0x512210` -> `0x50f6c0` and calls the virtual activate
+slot `0x510980`), then `0x5128e0(arg)` which walks the table's bands with
+the in-range test `0x514f30` and picks a sample with `0x514c90` (random
+draw that skips the previous pick, `DAT_006b0558`). `0x510cd0` has four
+call sites, all with `this = walker+0xc0` (`LEA ECX,[ESI+0xc0]`), all in
+walker animation code: `0x54cd90` when the current animation is `BACKUP`
+(`DAT_006b20a0`, then sets `BACKUP_WALK`); `0x54d8b0` in the away-facing
+branch before entering the animation at `0x5d7288` (name not decoded);
+and `0x54d8b0` twice immediately after choosing a dive animation
+(`ANTIC_LDIVE`/`ANTIC_RDIVE`/`WALK_LDIVE`/`WALK_RDIVE`). Two sites
+push 0 (`0x54ce12`, `0x54de04`'s decompile); the two dive sites push `EBX` (decompiled as 0, not traced further). So the retail
+scream is tied to a walker starting a dive or backing away.
+
+What is not: the meaning of the `0,500` speed band (the decompiled loop
+does not read `arg`), the numbered-file choice, and the `EBX` argument
+at the dive sites. Nothing is wired in the port yet: the crowd stays
+silent until a task keys a deduplicated one-shot to the dive/backup
+transitions, which must mark the sample choice as designed.
 
 Follow-up to close it (task #1345): find the caller of the emitter's
 activate slot `0x510980`, then bind the evidenced trigger through
