@@ -71,6 +71,42 @@ fixed-step time is in other systems" figure was largely contention, not a
 property of the engine. Evidence level: original-content, rendered, local;
 free-roam only (no race, no networked session), so F30-AC02 stays open.
 
+## Populated soak: race and loopback network (F30-AC02)
+
+```sh
+MM2_RETAIL=<original install> scripts/soak.sh [out-dir] [frames]   # default 3000
+```
+
+Runs a bot-driven SF `checkpoint:0` race, then a loopback `--host` plus
+`--join --ready` pair on the same event (each process under `timeout`, killed
+by PID on exit), and exits non-zero unless every report's `timings.soak`
+verdict is `pass` over a populated run (at least half the requested frames
+measured and a peak of 10,000 entities, so a parked lobby cannot pass).
+
+Budgets (declared in `perf.rs`, echoed in each report): the last third's
+peak of live entities, audio voices and queue depth (waiting speech lines
+plus replicated impact rows not yet applied) must not exceed the middle
+third's by more than the slack (entities: 32 or 1% of the peak; voices 8;
+queues 16), and the virtual clock may discard no game time. The recorder now
+opens only when the session reaches its countdown, so a lobby wait or a load
+is not in any window. A leak slower than the slack per third is invisible
+to a run this short.
+
+Recorded run (2026-10-12, Apple M1, release, 3000 frames, shared machine,
+commit `a21df6d` plus this change): race **pass**; network host **pass**;
+network client **fail on overload only** (one 1135 ms render-stage stall,
+906 ms of game time discarded; entities, voices and queues passed). The
+stall did not recur in the host process and is unexplained: it is recorded,
+not waved through. Entities were flat (race 41,820 to 42,444, host 40,715 to
+40,729, client 40,847 to 40,796), voices peaked at 38/17/17 and queue depth
+never exceeded 1. A 600-frame race run failed the voice check (25 to 34)
+because the ambient voices were still filling; at 3000 frames it passed.
+
+Evidence level: original-content, rendered, local, one machine, one event
+and one car. The network leg is a two-process loopback, not a LAN; the host
+and client each ran a bot. F30-AC02 is advanced, not closed: a longer run,
+more events and cities, and an explanation of the client stall remain open.
+
 ## What it shows (first run)
 
 - Entity and voice counts are flat in both scenes over 1380 measured
@@ -97,5 +133,5 @@ free-roam only (no race, no networked session), so F30-AC02 stays open.
 - A baseline on an idle machine, and a scene set that includes a race and
   a networked session (this run covers free-roam SF and London only).
 - Draw calls, GPU memory, allocations and network bandwidth columns.
-- AC02's populated race/network soak, and the unresolved ~+60 entities per
+- AC02's longer and wider soaks (see above), and the unresolved ~+60 entities per
   600 frames wander seen in the longer SF run noted in the soak history.

@@ -291,7 +291,9 @@ and the gameplay-byte hash with its file/byte counts) and mounted mods,
 the scene and settings the run named, and the post-warm-up percentile
 timings, plus the live entity and audio-voice counts (sampled every 30
 frames; a soak that leaks shows `last` climbing past `first`; the CSV
-carries both as `entities` and `voices`). A field the process could not
+carries both as `entities` and `voices`, and the queue depth as `queues`;
+`scripts/soak.sh` runs a race and a loopback host/client pair and fails on
+any soak verdict, see docs/performance.md). A field the process could not
 observe is `null`.
 
 Overload is reported rather than felt. Bevy caps the virtual clock at
