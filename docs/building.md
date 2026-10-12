@@ -216,6 +216,15 @@ binary. Without `--bot` the headless smoke reports `status=fail ... car
 never drove` for both, because the default driver holds no input. That is
 the smoke's own verdict, not a packaging fault.
 
+Verified 2026-10-12 on macOS arm64 (commit `ca3511f`): `scripts/package.sh
+--out target/f30-layouts` (a release build, `--layout all`) assembled and
+checked all three layouts — the flat folder, `rust-mm2.app` and the prefix
+— each `package clean: 10 files` for the folder and for its extracted
+tarball. The `mm2` inside `rust-mm2.app/Contents/MacOS` and inside
+`…/rust-mm2-darwin-arm64-prefix/bin`, run from `/`, each log `mounted app
+assets` at its own bundle/prefix path and pass `--headless --dev-world
+--bot --frames 300` with `status=pass travel=70.0m`.
+
 ### Release-candidate acceptance (F30-AC06)
 
 The smoke above runs one command. `scripts/check-release-candidate.sh`
