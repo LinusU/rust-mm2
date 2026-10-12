@@ -1,0 +1,19 @@
+# Ambient traffic (F10) coverage matrix
+
+Maps each `F10-AC01`..`F10-AC06` (`specs/F10-ambient-traffic.md`) to the
+test or run that evidences it and the evidence level reached
+(`specs/QUALITY-GATES.md`: code checks, synthetic integration,
+original-content validation, rendered/audio/playtest). No AC is closed
+by this document; "open" lists what is still missing.
+
+Retail legs were run with `MM2_RETAIL` set on 2026-10-12 against the
+read-only install; CI has no retail data, so they skip there.
+
+| AC | Evidence | Level reached | Open |
+|----|----------|---------------|------|
+| AC01 | `mm2-inspect traffic <install>`: london 12 distinct rostered `va_*` types, sf 11, every one with tune/PKG/BND resolved; `mm2_app` `traffic_retail` soak spawns cars in both cities (`sp=21` london, `sp=102` sf in 3600 frames). Direction: `mm2_game` `cursor_faces_the_authored_travel_direction`, `mm2_app` `cars_drive_the_network_and_dead_ends_recycle` (synthetic). | Original-content validation (roster, assets, spawning); synthetic for direction | Direction and visible type variety on the real city is not measured or seen: `OWNER:` follow-up. |
+| AC02 | `mm2_app/tests/traffic.rs`: `a_stop_sign_serialises_competing_approaches_in_arrival_order`, `a_traffic_light_admits_only_the_green_member_road`, `a_red_window_holds_the_approach_until_its_road_greens`, `ambient_cars_queue_behind_a_blocker`, `a_participant_in_the_box_yields_the_green_approach`, `a_penned_car_is_recycled_after_the_stuck_window`, `a_signal_wait_shorter_than_the_window_never_recovers`; `mm2_game/tests/traffic.rs` junction-rule tests. | Synthetic integration | Signal/right-of-way fidelity to the original is unverified (UNK-12). |
+| AC03 | `a_hard_hit_hands_the_follower_to_dynamics`, `a_light_striker_shares_the_exchange_not_its_speed`, `a_participant_striker_takes_damage_and_names_the_class`, the same-tick pileup tests (`a_same_tick_*`, `one_striker_pays_both_cars_it_flips`). Retail soaks report `kn=`/`kns=` and stay `finite=true`. | Synthetic integration; finite check on retail | Player-hit feel against the real cars is a manual playtest. |
+| AC04 | `respawns_reject_space_a_live_car_occupies`, `respawns_reject_space_a_participant_occupies`, `an_occupied_exit_lane_holds_the_transfer_at_the_lane_end`, `a_remote_players_bubble_holds_traffic_the_local_player_left`, `respawns_draw_inside_a_remote_players_band`, `a_parked_participant_holds_traffic_and_clearing_releases_it`; planner tests in `mm2_game/tests/traffic.rs`. | Synthetic integration | None known. |
+| AC05 | `mm2_app/tests/traffic_retail.rs` (`retail_soak_keeps_traffic_finite_and_bounded_in_both_cities`): 3600 frames each city, `finite=true`, `traf=16/16` (active <= target), `stuck=0`, `crx` reported (london 74, sf 42). | Original-content validation | One fixed seed, 60 s per city; longer or multi-seed runs are `scripts/soak.sh` territory. |
+| AC06 | Density: `event_aimap_density_zero_authors_traffic_off`, `unloading_an_event_removes_its_aimap_exceptions_but_not_the_citys`. Speed: `event_aimap_speed_limit_sets_the_spawned_cars_target_speed` (added with this document), `speed_limit_resolution_prefers_exception_then_default_then_base`. Restart: `teardown_removes_traffic_and_restart_replans`, now asserting the restart reproduces the same seeded population. | Synthetic integration | Retail events carrying a `[Speed Limit]` / density were not run end to end (101 event aimaps audited by `mm2-inspect traffic`). |
