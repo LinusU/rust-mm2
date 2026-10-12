@@ -522,7 +522,22 @@ reads `numfemalepedvoicefiles` / `nummalepedvoicefiles`; the retail
 `0,500,0.01,0` of `*SCREAM*` samples. Retail pedestrians therefore have
 scream-class voices; no footstep or chatter table exists.
 
-What is not: which event plays them. The walker reaction word
+Ghidra trace (F19 #1320, `Midtown2.exe` VAs): the `pedvoice` format
+strings are used only by `0x53cd70` (female, `%s_fpedvoice%s%d` /
+`%s_fpedvoice%s`) and `0x53cde0` (male). Each has a single caller, the
+walker constructor `0x54b0b0`, which picks the male or female loader from
+the byte at walker+0x1a and loads the `default` table into an audio
+emitter embedded at walker+0xc0 (position pointer walker+0x60, near/far
+0 and 40.0 m, `+0x100 = 8`). The loader `0x510d00` registers the table in
+a global table array and stores its index at emitter+0x64. The walker
+update `0x54b9a0` touches the emitter once per frame, through virtual slot
+3 (`0x510930`), which only releases a finished sample instance; no
+reaction (1 wary / 2 diving) path calls an audio routine. The file-name
+suffix is built by `0x50fa90` from a rolling counter. The counts
+(`numfemalepedvoicefiles`, `nummalepedvoicefiles`) are read in `0x412730`.
+
+What is not: which event starts the sample (the emitter's activate slot
+`0x510980` is reached virtually). The walker reaction word
 (0 walking / 1 wary / 2 diving, `0x54b9a0`) is the only car-driven
 state, but the caller of the voice loader and the meaning of "speed" in
 the band were not traced (no disassembler in the session; the exe
