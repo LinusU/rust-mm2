@@ -1275,6 +1275,47 @@ fn event_aimap_density_zero_authors_traffic_off() {
     );
 }
 
+/// F10-AC06 speed leg: an event aimap's `[Speed Limit]` becomes every
+/// spawned car's target speed, where the same city without the
+/// override cruises at its authored road speeds.
+#[test]
+fn event_aimap_speed_limit_sets_the_spawned_cars_target_speed() {
+    let targets = |aimap: Option<&str>| -> Vec<f32> {
+        let (tmp, config) = event_install();
+        if let Some(aimap) = aimap {
+            write(tmp.path(), "race/testcity/race0.aimap", aimap);
+        }
+        let mut app = test_app(config, vfs_of(tmp.path()));
+        assert!(
+            run_until(&mut app, 30, |a| {
+                matches!(
+                    a.world().resource::<Session>().phase(),
+                    SessionPhase::Playing | SessionPhase::Countdown
+                )
+            }),
+            "event session never left Loading"
+        );
+        let cars: Vec<f32> = app
+            .world_mut()
+            .query::<&AmbientCar>()
+            .iter(app.world())
+            .map(|c| c.target_speed)
+            .collect();
+        assert!(!cars.is_empty(), "the event spawned no traffic");
+        cars
+    };
+    let limited = targets(Some("[Density]\n0.5\n\n[Speed Limit]\n7\n"));
+    assert!(
+        limited.iter().all(|&s| s == 7.0),
+        "every car takes the event limit: {limited:?}"
+    );
+    let authored = targets(Some("[Density]\n0.5\n"));
+    assert!(
+        authored.iter().all(|&s| s != 7.0),
+        "without the override cars keep the authored road speed: {authored:?}"
+    );
+}
+
 /// Session teardown removes the resource and every car — a restart
 /// replans under the same seed rather than leaking the old population.
 #[test]
@@ -1285,7 +1326,13 @@ fn teardown_removes_traffic_and_restart_replans() {
         a,
         SessionPhase::Playing
     )));
-    assert!(!ambient_cars(&mut app).is_empty());
+    let sorted = |app: &mut App| -> Vec<Vec3> {
+        let mut v: Vec<Vec3> = ambient_cars(app).iter().map(|(_, p)| *p).collect();
+        v.sort_by_key(|p| p.to_array().map(|c| c.to_bits()));
+        v
+    };
+    let before = sorted(&mut app);
+    assert!(!before.is_empty());
 
     app.world_mut().resource_mut::<SessionControl>().quit = true;
     assert!(
@@ -1305,12 +1352,8 @@ fn teardown_removes_traffic_and_restart_replans() {
         a,
         SessionPhase::Playing
     )));
-    let first: Vec<Vec3> = {
-        let mut v: Vec<Vec3> = ambient_cars(&mut app).iter().map(|(_, p)| *p).collect();
-        v.sort_by_key(|p| p.to_array().map(|c| c.to_bits()));
-        v
-    };
-    assert!(!first.is_empty(), "restart replanned the population");
+    let first = sorted(&mut app);
+    assert_eq!(first, before, "restart replans the same seeded population");
 }
 
 /// F11-AC05 (aimap half): an event's traffic exceptions live in the
