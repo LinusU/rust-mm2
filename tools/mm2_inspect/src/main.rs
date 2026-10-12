@@ -2225,6 +2225,94 @@ fn damage(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// How one authored `trafficLightOrigin`/`trafficLightAxis` pair is
+/// shaped, per the convention measured on both retail cities
+/// (2026-10-12, F10-B.7 evidence): the axis is stored as
+/// `origin + d`, where `d` is a horizontal **unit** vector across the
+/// carriageway — parallel to the end section's `x_axis`, not along the
+/// travel tangent. See `docs/research/bai.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SignalAxis {
+    /// `‖axis − origin‖ == 1` within f32 noise.
+    unit: bool,
+    /// `axis.y == origin.y` — the axis lies in a horizontal plane.
+    horizontal: bool,
+    /// `d` is within [`SIGNAL_AXIS_CROSS_TOL_DEG`] of the end section's
+    /// `x_axis` in either direction, i.e. across the road rather than
+    /// along it.
+    cross_road: bool,
+}
+
+/// Tolerance, in degrees, for calling a signal axis "across the road".
+const SIGNAL_AXIS_CROSS_TOL_DEG: f32 = 15.0;
+
+/// Classify one authored signal pair against its end section's `x_axis`.
+/// `None` when the pair is non-finite, the origin is zero (no light is
+/// drawn), or the axis has no length (`axis == origin` — authored on
+/// four SF ends, counted not hidden).
+fn classify_signal_axis(origin: [f32; 3], axis: [f32; 3], x_axis: [f32; 3]) -> Option<SignalAxis> {
+    if !origin.iter().chain(axis.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    if origin.iter().all(|v| *v == 0.0) {
+        return None;
+    }
+    let d = [
+        axis[0] - origin[0],
+        axis[1] - origin[1],
+        axis[2] - origin[2],
+    ];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len <= f32::EPSILON {
+        return None;
+    }
+    let xlen = (x_axis[0] * x_axis[0] + x_axis[1] * x_axis[1] + x_axis[2] * x_axis[2]).sqrt();
+    let cross_road = x_axis.iter().all(|v| v.is_finite()) && xlen > f32::EPSILON && {
+        let cos = (d[0] * x_axis[0] + d[1] * x_axis[1] + d[2] * x_axis[2]) / (len * xlen);
+        // Either sign of the section axis is "across the road".
+        cos.abs().clamp(0.0, 1.0).acos().to_degrees() <= SIGNAL_AXIS_CROSS_TOL_DEG
+    };
+    Some(SignalAxis {
+        unit: (len - 1.0).abs() <= 1e-3,
+        horizontal: d[1].abs() <= f32::EPSILON,
+        cross_road,
+    })
+}
+
+/// Totals from [`classify_signal_axis`] over every authored signal pair
+/// in one BAI.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SignalAxisCensus {
+    /// Pairs with a direction: finite, nonzero origin, nonzero-length axis.
+    total: usize,
+    unit: usize,
+    horizontal: usize,
+    cross_road: usize,
+}
+
+/// Classify every authored signal axis in `bai`. The end section's frame
+/// is the last section for `Road::end` and the first for `Road::start`.
+fn signal_axis_census(bai: &Bai) -> SignalAxisCensus {
+    let mut census = SignalAxisCensus::default();
+    for road in &bai.roads {
+        for (end, section) in [
+            (&road.end, road.sections.last()),
+            (&road.start, road.sections.first()),
+        ] {
+            let x_axis = section.map_or([0.0; 3], |s| s.x_axis);
+            if let Some(axis) =
+                classify_signal_axis(end.traffic_light_origin, end.traffic_light_axis, x_axis)
+            {
+                census.total += 1;
+                census.unit += usize::from(axis.unit);
+                census.horizontal += usize::from(axis.horizontal);
+                census.cross_road += usize::from(axis.cross_road);
+            }
+        }
+    }
+    census
+}
+
 /// Ambient-navigation audit (F09-A): every discovered `city/*.bai` is
 /// parsed through `mm2_formats::bai`, internal cross-references are
 /// validated by `Bai::validate`, and — when a same-stem `city/<stem>.psdl`
@@ -2403,6 +2491,23 @@ fn bai(
                 o[0], o[1], o[2], c[0], c[1], c[2]
             );
         }
+
+        // `trafficLightAxis` convention (F10-B.7 evidence): the axis is
+        // authored as `origin +` a horizontal unit vector across the
+        // carriageway. Counts, not hidden: a zero-length axis is a
+        // direction-less authored pair.
+        let axis = signal_axis_census(&bai);
+        println!(
+            "      axis: {}/{} are `origin +` a horizontal unit vector; \
+             {} unit, {} horizontal, {} across the road \
+             (within {:.0}° of the end section x-axis)",
+            axis.total,
+            lit + lit_other,
+            axis.unit,
+            axis.horizontal,
+            axis.cross_road,
+            SIGNAL_AXIS_CROSS_TOL_DEG,
+        );
 
         // Routable-arc coverage (F10-B.7): a lit end only surfaces on
         // the nav graph as an arc's `exit_light` when the direction
@@ -5497,4 +5602,123 @@ fn attach(r: &mm2_assets::Resolved, e: FormatError) -> String {
             .map(|o| format!("offset {o:#x}"))
             .unwrap_or_else(|| "loose".to_string())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The measured `trafficLightAxis` convention: the axis is the origin
+    /// plus a horizontal unit vector across the road (parallel to the end
+    /// section's `x_axis`), and a degenerate pair has no direction.
+    #[test]
+    fn signal_axis_is_a_cross_road_unit_vector_from_the_origin() {
+        let origin = [10.0, 3.0, -2.0];
+        // Across the road, +x direction, unit length.
+        let across = classify_signal_axis(origin, [11.0, 3.0, -2.0], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            across,
+            SignalAxis {
+                unit: true,
+                horizontal: true,
+                cross_road: true,
+            }
+        );
+        // The opposite section-axis sign is still across the road.
+        assert!(
+            classify_signal_axis(origin, [9.0, 3.0, -2.0], [-1.0, 0.0, 0.0])
+                .unwrap()
+                .cross_road
+        );
+        // Along the travel tangent is not across the road.
+        assert!(
+            !classify_signal_axis(origin, [10.0, 3.0, -1.0], [1.0, 0.0, 0.0])
+                .unwrap()
+                .cross_road
+        );
+        // A tilted axis is neither horizontal nor unit.
+        let tilted = classify_signal_axis(origin, [11.0, 4.0, -2.0], [1.0, 0.0, 0.0]).unwrap();
+        assert!(!tilted.horizontal);
+        assert!(!tilted.unit);
+        // A zero origin means no light is authored.
+        assert!(classify_signal_axis([0.0; 3], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]).is_none());
+        // `axis == origin` carries no direction.
+        assert!(classify_signal_axis(origin, origin, [1.0, 0.0, 0.0]).is_none());
+    }
+
+    /// The census skips direction-less pairs rather than counting them as
+    /// unit vectors.
+    #[test]
+    fn signal_axis_census_skips_direction_less_pairs() {
+        use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide};
+
+        fn side() -> RoadSide {
+            RoadSide {
+                lane_count: 0,
+                tram_count: 0,
+                train_count: 0,
+                sidewalk_count: 0,
+                ambient_types: 0,
+                lane_distances: Vec::new(),
+                edge_distances: Vec::new(),
+                misc: [0; 40],
+                lane_vertices: Vec::new(),
+                tram_vertices: Vec::new(),
+                train_vertices: Vec::new(),
+                sidewalk_inner: Vec::new(),
+                sidewalk_outer: Vec::new(),
+            }
+        }
+        fn section() -> RoadSection {
+            RoadSection {
+                distance: 0.0,
+                origin: [0.0, 0.0, 0.0],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 1.0, 0.0],
+                z_axis: [0.0, 0.0, 1.0],
+                tangent: [0.0, 0.0, 1.0],
+            }
+        }
+        fn end(origin: [f32; 3], axis: [f32; 3]) -> RoadEnd {
+            RoadEnd {
+                intersection: 0,
+                fill0: 0xcdcd,
+                vehicle_rule_code: 1,
+                unknown1: 0,
+                intersection_road_index: 0,
+                traffic_light_origin: origin,
+                traffic_light_axis: axis,
+            }
+        }
+        let road = Road {
+            id: 0,
+            flags: 0,
+            rooms: Vec::new(),
+            half_width: 5.0,
+            base_speed: 10.0,
+            right: side(),
+            left: side(),
+            sections: vec![section(), section()],
+            end: end([10.0, 0.0, 0.0], [11.0, 0.0, 0.0]),
+            start: end([0.0; 3], [1.0, 0.0, 0.0]),
+        };
+        let bai = Bai {
+            roads: vec![road],
+            intersections: Vec::<Intersection>::new(),
+            culling: Culling {
+                large: Vec::new(),
+                small: Vec::new(),
+            },
+        };
+        let census = signal_axis_census(&bai);
+        assert_eq!(
+            census,
+            SignalAxisCensus {
+                total: 1,
+                unit: 1,
+                horizontal: 1,
+                cross_road: 1,
+            }
+        );
+    }
 }
