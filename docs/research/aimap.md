@@ -74,7 +74,11 @@ meaning is separate (ledger MP-9).
       `Aimap::subway`, defined by no retail file.
   - **Free-form** — `[Traffic Lights]`: one line of two model names
     (`sp_traflitsingle_ped_l sp_traflitsingle_ped_l`), `city/london.
-    aimap` only. Shape unverified, preserved raw.
+    aimap` only. Read as the map's single/dual signal-unit model
+    override: `Midtown2.exe` carries the defaults
+    `sp_traflitsingle_f`/`sp_traflitdual_f`, with the section string
+    beside them (`docs/research/bai.md`, WLD-35). No consumer yet;
+    preserved raw.
 - Sections this parser does not know are preserved verbatim in
   `Aimap::unknown_sections` and reported by `validate()` — none exist
   on retail (commented-out `[Subway]`/`[Ped Pool]` in london.aimap are
@@ -107,9 +111,10 @@ meaning is separate (ledger MP-9).
   reference's published table, corroborated by mm2hook's recovered
   `RegisterRoute` flag-argument order and defaults (see below);
   original-executable verification of the *runtime semantics* is still
-  open (UNK-11). Police tail columns,
-  `[Traffic Lights]` shape, `[Hookmen]` rows: **unknown**, preserved
-  raw.
+  open (UNK-11). Police tail columns and
+  `[Hookmen]` rows: **unknown**, preserved raw; `[Traffic Lights]`
+  names the map's single/dual signal-unit models (exe-verified defaults,
+  `docs/research/bai.md`).
 - Runtime semantics (how the original consumes speed limits, density
   picks, spawns, drive-on-left): **unverified** — ledger UNK-12.
 

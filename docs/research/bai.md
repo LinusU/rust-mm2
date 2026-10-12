@@ -80,9 +80,10 @@ occupies each room.
   lit ends are the *downstream* end of a routable vehicle arc: 96 /
   166 sit on one-way upstream ends and 32 / 222 on roads with no
   vehicle arcs at all — so arc-only traversal misses roughly half of
-  London's authored heads. `trafficLightAxis` convention and the
-  original's signal-unit draw/state semantics remain unverified
-  (UNK-12); the runtime preserves the pair verbatim.
+  London's authored heads. `trafficLightAxis` is the cross-road unit
+  vector described under *Traffic-signal units and the axis convention*
+  below; the runtime preserves the pair verbatim, and the original's
+  signal-unit draw/state semantics remain unverified (UNK-12).
 - `london_sup.bai`/`sf_sup.bai` share the `CAI1` magic but do not fit
   this layout under either field reading — reported `unsupported`; their
   record structure is uninvestigated.
@@ -127,6 +128,60 @@ convention above, though the lane curves' own per-curve storage order is
 likewise an authoring artefact. `Bai::tram_curve` therefore orients a
 tram curve by geometry (first vertex nearer the section the leg starts
 from) rather than trusting side or storage order.
+
+## Traffic-signal units and the axis convention (F10-B.7 evidence, 2026-10-12)
+
+The authored `trafficLightOrigin`/`trafficLightAxis` pair was previously
+read as an anchor plus an unexplained orientation. `mm2-inspect bai`
+(`axis:` line) measures the convention on retail: the stored axis is
+`trafficLightOrigin` **plus a horizontal unit vector across the
+carriageway**.
+
+- `‖axis − origin‖` is 1 within f32 noise (max |len − 1| 5.7e-5 London,
+  8.9e-5 SF) and `axis.y == origin.y` on every end.
+- The vector is perpendicular to the section `tangent` and within 15° of
+  the end section's `x_axis` in either direction on **all 828** London
+  ends with a nonzero origin and **646 of SF's 650**; four SF ends author
+  `axis == origin`, a direction-less pair the census counts, not hides.
+  So the field is a cross-carriageway direction, not the head's facing
+  (which is along the travel tangent).
+- The **sign** is mixed (`+x` 415 / `−x` 413 London, `+x` 328 / `−x` 318
+  SF) and tracks neither the junction centre, the road centre nor the
+  end, so which kerb holds the pole and which way the head faces stay
+  unverified. The dev map `city/sfai.bai` authors 813 axes (813 unit,
+  811 horizontal, 796 within 15°) — 17 off-convention, reported by the
+  same census. `city/london_bak.bai`/`sf_bak.bai` match their live files.
+
+**The signal-unit geometry ships**, contrary to the earlier "textures
+only" reading. `Midtown2.exe` holds the two model-name strings
+`sp_traflitsingle_f` (single) and `sp_traflitdual_f` (dual) twice
+(0x5c503c/0x5c5050 and 0x5d79a8/0x5d79bc), beside the `[Traffic Lights]`
+section string (0x5d7a9c, image base 0x400000) — read as that section's
+single/dual defaults. Their one-line
+aimap section `<single> <dual>` overrides them per map:
+`city/london.aimap` sets both to `sp_traflitsingle_ped_l`, SF authors
+none. Five `.pkg`s resolve through the VFS
+(`geometry/sp_traflitsingle_{f,l,corner_l,ped_l}.pkg`,
+`geometry/sp_traflitdual_f.pkg`), with bounds for the two defaults
+(`bound/sp_traflit{single_f,dual_f}_BOUND.bnd`) and a
+`tune/banger/sp_traflit*.dgBangerData` record for each — the original
+signal heads are breakable props. Their PKG chunks carry the lamp states
+as authored geometry, not a recoloured material:
+`RED`/`YELLOW`/`GREENGLOWDAY_H`/`_NIGHT_H`, plus `WALK`/`NOWALK_DAY`/
+`NIGHT_H` on the dual. The runtime's unlit sphere at the anchor
+(`mm2_app::traffic`) is therefore a placeholder for geometry that ships;
+which variant each head gets and how the pole/arm is placed remain
+unrecovered. The four `sp_traflit*` rows in `city/phys/props.pathset` are
+a demo layout (22–58 m from the nearest authored origin), not the
+placement source.
+
+**No junction or spawn timing is authored.** Every BAI `RoadEnd.unknown1`
+is 0 (1080 London, 758 SF), the intersection record is only
+`id`/`room`/`centre`/counterclockwise road list, and no `.aimap` section
+holds a phase or interval; the culling lists select *which* roads are
+simulated per room, not *when*. The original's phase length, all-red
+clearance, stop dwell and spawn ring are executable-only and stay
+unverified (UNK-12).
 
 ## Lane direction and the navigation graph (F09-B.1)
 
