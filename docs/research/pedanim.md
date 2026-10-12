@@ -539,14 +539,12 @@ suffix is built by `0x50fa90` from a rolling counter. The counts
 What is not: which event starts the sample (the emitter's activate slot
 `0x510980` is reached virtually). The walker reaction word
 (0 walking / 1 wary / 2 diving, `0x54b9a0`) is the only car-driven
-state, but the caller of the voice loader and the meaning of "speed" in
-the band were not traced (no disassembler in the session; the exe
-strings alone cannot decide). Nothing is wired: the crowd stays silent
+state, but it never reaches an audio routine, and the meaning of "speed" in
+the band is unrecovered. Nothing is wired: the crowd stays silent
 rather than invent a trigger, and no duplicate-event machinery is needed
 until one is evidenced.
 
-Follow-up to close it: trace the xrefs of the `pedvoice` format strings
-(file offsets above, +0x400000 image base for virtual addresses) to the
-ped update loop, then bind the evidenced trigger through
+Follow-up to close it (task #1345): find the caller of the emitter's
+activate slot `0x510980`, then bind the evidenced trigger through
 `crate::audio` one-shots deduplicated like `impact_voices`; or an OWNER
 retail play observation (dive in front of a car with the volume up).
