@@ -6,8 +6,10 @@
 #
 # Writes one `<city>-<table>-<row>-<a|p>.txt` smoke record per race under
 # <out-dir>, then prints the totals: opponents finished / fielded and
-# re-anchor teleports, per difficulty. Copy the binary somewhere stable
-# first — rebuilding under a running sweep mixes two builds.
+# re-anchor teleports, per difficulty. A race runs until its field has
+# finished or [frames] (default 21600, six minutes) are up. Copy the
+# binary somewhere stable first — rebuilding under a running sweep mixes
+# two builds.
 set -eu
 bin=$1
 out=$2
@@ -27,7 +29,8 @@ done | xargs -P "$jobs" -L 1 sh -c '
     pro=""
     [ "$2" = p ] && pro="--pro"
     "$MM2_BIN" --mm2-path "$MM2_RETAIL" --city "$0" --event "$1" $pro \
-        --headless --parked --no-profile --frames "$MM2_FRAMES" 2>/dev/null \
+        --headless --parked --no-profile --until-opponents \
+        --frames "$MM2_FRAMES" 2>/dev/null \
         | grep "^smoke=" > "$MM2_OUT/$name.txt" || echo "smoke=missing" > "$MM2_OUT/$name.txt"
 '
 for diff in a p; do

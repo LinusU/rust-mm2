@@ -429,6 +429,12 @@ struct Cli {
     #[arg(long, value_name = "tick", requires = "headless")]
     until_snap_tick: Option<u64>,
 
+    /// End a `--headless` run once every fielded opponent has finished
+    /// or timed out — a race record that ends with its field instead of
+    /// running out `--frames`. The record prints `stop=opponents`.
+    #[arg(long, requires = "headless")]
+    until_opponents: bool,
+
     /// Wall-clock bound, in seconds, on a `--headless` run's
     /// `--until-*` condition: the run ends when it passes, whether or
     /// not the condition came. The record prints `stop=deadline`.
@@ -1419,6 +1425,7 @@ fn main() {
                 peer_left: cli.until_peer_left,
                 peer_left_after_impacts: cli.with_impacts,
                 snap_tick: cli.until_snap_tick,
+                opponents_done: cli.until_opponents,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
         };
@@ -1431,9 +1438,9 @@ fn main() {
         } else if let Some(link) = host_link.take() {
             smoke::headless_host(link, vfs, car, &vehicle, budget, driver, active_profile)
         } else {
-            // The stop conditions watch the wire; a lone process has none,
-            // and `headless_smoke` runs exactly `--frames` updates.
-            if budget.stop.is_armed() {
+            // Most stop conditions watch the wire; a lone process has
+            // none, and may only stop early on what it can see itself.
+            if budget.stop.needs_wire() {
                 println!(
                     "{}",
                     record(
@@ -1446,12 +1453,12 @@ fn main() {
                 );
                 std::process::exit(smoke::SmokeStatus::Fail.exit_code());
             }
-            smoke::headless_smoke(
+            smoke::headless_smoke_until(
                 &session_config,
                 vfs,
                 car,
                 &vehicle,
-                budget.frames,
+                budget,
                 driver,
                 active_profile,
             )

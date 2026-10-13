@@ -194,18 +194,34 @@ pub struct StopWhen {
     /// the applied wire tick puts every process's record at the same
     /// point of the authority's sim, whatever its local step rate.
     pub snap_tick: Option<u64>,
+    /// Stop once every fielded opponent has resolved — finished or
+    /// timed out. Armed by the first opponent appearing; a race record
+    /// then ends when the field does instead of running out its frames.
+    pub opponents_done: bool,
     /// Stop once this much wall-clock time has passed since the first
     /// update — the bound on a condition that never comes.
     pub deadline: Option<Duration>,
 }
 
 impl StopWhen {
+    /// Whether a condition is armed that only a networked run can
+    /// meet — one that watches the wire, or the deadline that bounds
+    /// such a wait.
+    pub fn needs_wire(&self) -> bool {
+        Self {
+            opponents_done: false,
+            ..*self
+        }
+        .is_armed()
+    }
+
     /// Whether any condition is armed.
     pub fn is_armed(&self) -> bool {
         self.impacts_applied.is_some()
             || self.resets_observed.is_some()
             || self.repaired.is_some()
             || self.peer_left
+            || self.opponents_done
             || self.snap_tick.is_some()
             || self.deadline.is_some()
     }
@@ -238,6 +254,7 @@ enum StopReason {
     Repaired,
     PeerLeft,
     SnapTick,
+    Opponents,
     Deadline,
 }
 
@@ -249,6 +266,7 @@ impl StopReason {
             Self::Repaired => "repaired",
             Self::PeerLeft => "peer-left",
             Self::SnapTick => "snap-tick",
+            Self::Opponents => "opponents",
             Self::Deadline => "deadline",
         }
     }
@@ -312,6 +330,23 @@ impl StopWatch {
         {
             return Some(StopReason::SnapTick);
         }
+        if self.stop.opponents_done {
+            let mut field = world
+                .iter_entities()
+                .filter(|e| e.contains::<opponents::OpponentDriver>())
+                .filter_map(|e| e.get::<mm2_game::RaceProgress>())
+                .peekable();
+            if field.peek().is_some()
+                && field.all(|p| {
+                    !matches!(
+                        p.state,
+                        ParticipantState::AwaitingStart | ParticipantState::Racing
+                    )
+                })
+            {
+                return Some(StopReason::Opponents);
+            }
+        }
         match self.stop.deadline {
             Some(limit) if self.started.elapsed() >= limit => Some(StopReason::Deadline),
             _ => None,
@@ -349,12 +384,36 @@ pub fn headless_smoke(
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
+    headless_smoke_until(
+        config,
+        vfs,
+        car,
+        vehicle_config,
+        RunBudget::frames(frames),
+        driver,
+        profile,
+    )
+}
+
+/// [`headless_smoke`] with an early stop: a single-process run may end
+/// before its frame budget on a condition it can see for itself
+/// ([`StopWhen::needs_wire`] says which cannot) — its opponents having
+/// all finished, for one.
+pub fn headless_smoke_until(
+    config: &SessionConfig,
+    vfs: Vfs,
+    car: session::SelectedCar,
+    vehicle_config: &VehicleConfig,
+    budget: RunBudget,
+    driver: Driver,
+    profile: Option<crate::profile::ActiveProfile>,
+) -> SmokeRecord {
     run_headless(
         RunSource::Session(config),
         vfs,
         car,
         vehicle_config,
-        RunBudget::frames(frames),
+        budget,
         driver,
         profile,
     )
@@ -3023,6 +3082,84 @@ mod tests {
             .resource_mut::<crate::netdrive::RemoteSnaps>()
             .set_applied(1, 10);
         assert_eq!(watch.fired(&world), Some(StopReason::SnapTick));
+    }
+
+    #[test]
+    fn a_stop_on_the_opponents_waits_for_the_whole_field() {
+        let stop = StopWhen {
+            opponents_done: true,
+            ..default()
+        };
+        // The one condition a lone process can see for itself.
+        assert!(stop.is_armed());
+        assert!(!stop.needs_wire());
+        assert!(
+            StopWhen {
+                deadline: Some(Duration::ZERO),
+                ..stop
+            }
+            .needs_wire()
+        );
+        let definition = mm2_game::RaceDefinition {
+            checkpoints: vec![],
+            finish: None,
+            rule: mm2_game::CheckpointRule::AnyOrder,
+            laps: 0,
+            time_limit_ticks: None,
+            params: mm2_game::EventParams::default(),
+            countdown_ticks: 1,
+            start_slots: vec![],
+        };
+        let driver = |index| opponents::OpponentDriver {
+            index,
+            spec: mm2_game::OpponentSpec {
+                vehicle: "vpbug".into(),
+                params: vec![],
+                route: None,
+            },
+            route: None,
+            throttle_cap: 1.0,
+            next: 0,
+            stuck_pos: Vec3::ZERO,
+            stuck_frames: 0,
+            stuck_peak: 0,
+            reanchors: 0,
+            stats: default(),
+            neural: None,
+        };
+        let mut watch = StopWatch::new(stop);
+        let mut world = World::new();
+        // No field is not a finished field: a session without
+        // opponents runs its frame budget.
+        assert_eq!(watch.fired(&world), None);
+        let cars: Vec<Entity> = (0..2)
+            .map(|i| {
+                world
+                    .spawn((driver(i), mm2_game::RaceProgress::new(&definition)))
+                    .id()
+            })
+            .collect();
+        assert_eq!(watch.fired(&world), None);
+        let end = |world: &mut World, car: Entity, state| {
+            world
+                .get_mut::<mm2_game::RaceProgress>(car)
+                .expect("spawned with progress")
+                .state = state;
+        };
+        let finished = |participant| ParticipantState::Finished {
+            race_ticks: 600,
+            result: ResultId {
+                generation: 1,
+                participant: PlayerId(participant),
+                event: None,
+                sequence: 0,
+            },
+        };
+        end(&mut world, cars[0], finished(1));
+        end(&mut world, cars[1], ParticipantState::Racing);
+        assert_eq!(watch.fired(&world), None);
+        end(&mut world, cars[1], finished(2));
+        assert_eq!(watch.fired(&world), Some(StopReason::Opponents));
     }
 
     #[test]
