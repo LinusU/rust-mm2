@@ -138,5 +138,5 @@ residue that is **not** explained, and is left open:
    unexplained (single authored point; see above).
 
 Resolving 1 and 3 needs the building meshes' lowest local Y against the
-fan slope over the footprint; The audit's `sunk` counter is a measured finding,
+fan slope over the footprint. The audit's `sunk` counter is a measured finding,
 not a failure (`--strict` ignores it).
