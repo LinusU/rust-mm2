@@ -1,12 +1,11 @@
-//! Opponent racing line (F15): where along its route an opponent is,
-//! where it should aim, and how fast it may be going to make the
-//! corners ahead.
+//! A scripted racing line: where along a route a car is, where it
+//! should aim, and how fast it may be going to make the corners ahead.
 //!
-//! The opponent driver used to chase the next raw `.opp` anchor. Those
-//! sit 40–200 m apart, so a corner only came into view inside the
-//! 14 m reach radius — about half a second at racing speed, against
-//! the ~70 m a car needs to brake for it. Everything here instead
-//! works on the polyline itself:
+//! This is the conventional controller the scripted evidence driver
+//! ([`crate::scripted`], `--bot`) follows a route with, and whose
+//! pursuit steering the police chase ([`crate::police`]) shares. Race
+//! opponents are driven by the neural driver instead
+//! ([`crate::neural`]).
 //!
 //! - [`RouteCursor`] projects the car onto the leg it is chasing, so
 //!   distances are measured *along the line* rather than from wherever
@@ -22,8 +21,7 @@
 //!
 //! The car's limits come from its own handling ([`CarLimits::of`]), so
 //! a bus and a GTR plan different corner speeds on the same street.
-//! All of this is designed policy (DSN-66): the original opponent
-//! controller is unrecovered (UNK-11).
+//! All of this is designed policy (DSN-66).
 
 use bevy::math::Vec3;
 use mm2_game::OpponentRoute;
@@ -507,95 +505,6 @@ pub fn steer_toward(bearing: f32, aim_dist: f32, speed: f32, limits: &CarLimits)
     steering_response(shaped, 1.0 / limits.response_curve)
 }
 
-/// Feeler angles (rad) off the nose, each side: a long narrow pair that
-/// sees a wall the line runs toward, and a short wide pair that sees
-/// one the car is brushing.
-const FEELERS: [(f32, f32, f32); 2] = [
-    // (angle, base length m, extra length per m/s)
-    (0.3, 6.0, 0.6),
-    (0.8, 3.0, 0.15),
-];
-/// Longest any feeler reaches (m).
-const FEELER_MAX: f32 = 30.0;
-/// Steering correction at a feeler's root — a wall touching the nose
-/// adds this much opposite lock on top of the pursuit's own.
-const WALL_GAIN: f32 = 0.8;
-/// Hits whose surface normal points more upward than this are ground —
-/// a road climbing ahead, a ramp, a kerb top — not a wall.
-const WALL_NORMAL_Y: f32 = 0.6;
-
-/// What the feelers found: a steering correction away from walls and
-/// which side is more open.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct WallSense {
-    /// Steering to add (positive right), already signed away from the
-    /// closer wall.
-    pub steer: f32,
-    /// How close a wall sits on the left (0 clear … 1 touching).
-    pub left: f32,
-    /// How close a wall sits on the right.
-    pub right: f32,
-}
-
-impl WallSense {
-    /// The side (±1, positive right) with more room, or `None` when
-    /// neither side sees a wall.
-    pub fn open_side(&self) -> Option<f32> {
-        if self.left == 0.0 && self.right == 0.0 {
-            None
-        } else if self.left > self.right {
-            Some(1.0)
-        } else {
-            Some(-1.0)
-        }
-    }
-}
-
-/// Probe static walls around the nose of a car heading `fwd` (XZ) at
-/// `speed` and steer away from them (DSN-66). `probe(dir, len)` casts a
-/// horizontal ray and returns the hit distance and surface normal;
-/// ground-facing hits are ignored. Each side's closeness is the worst
-/// of its feelers, weighted by how much of the feeler the wall leaves,
-/// squared so a distant wall nudges and a near one shoves.
-pub fn sense_walls(
-    fwd: Vec3,
-    speed: f32,
-    probe: impl Fn(Vec3, f32) -> Option<(f32, Vec3)>,
-) -> WallSense {
-    let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-    if flat == Vec3::ZERO {
-        return WallSense::default();
-    }
-    let mut sense = WallSense::default();
-    for (angle, base, per_speed) in FEELERS {
-        let len = (base + per_speed * speed.max(0.0)).min(FEELER_MAX);
-        // Positive yaw turns right: right = (-fwd.z, 0, fwd.x).
-        for side in [-1.0f32, 1.0] {
-            let a = angle * side;
-            let dir = Vec3::new(
-                flat.x * a.cos() - flat.z * a.sin(),
-                0.0,
-                flat.z * a.cos() + flat.x * a.sin(),
-            );
-            let Some((dist, normal)) = probe(dir, len) else {
-                continue;
-            };
-            if normal.y > WALL_NORMAL_Y {
-                continue;
-            }
-            let close = (1.0 - dist / len).clamp(0.0, 1.0).powi(2);
-            let slot = if side < 0.0 {
-                &mut sense.left
-            } else {
-                &mut sense.right
-            };
-            *slot = slot.max(close);
-        }
-    }
-    sense.steer = (sense.left - sense.right) * WALL_GAIN;
-    sense
-}
-
 fn leg_count(n: usize, closed: bool) -> usize {
     if closed { n } else { n - 1 }
 }
@@ -786,22 +695,5 @@ mod tests {
         assert!(steer_toward(0.2, 20.0, 25.0, &l) > right);
         // A nearer aim at the same bearing is a tighter arc.
         assert!(steer_toward(0.2, 10.0, 10.0, &l) > right);
-    }
-
-    /// A wall close on the left steers right and marks the right as the
-    /// open side; ground-facing hits are not walls.
-    #[test]
-    fn feelers_steer_away_from_a_wall() {
-        let fwd = Vec3::NEG_Z;
-        // Right = (-fwd.z, 0, fwd.x) = +X, so a left feeler points -X.
-        let left_wall = |dir: Vec3, _len: f32| (dir.x < 0.0).then_some((2.0, Vec3::X));
-        let s = sense_walls(fwd, 10.0, left_wall);
-        assert!(s.left > 0.0 && s.right == 0.0, "{s:?}");
-        assert!(s.steer > 0.0, "steers right, away: {s:?}");
-        assert_eq!(s.open_side(), Some(1.0));
-
-        let ground = |_: Vec3, _: f32| Some((2.0, Vec3::Y));
-        assert_eq!(sense_walls(fwd, 10.0, ground), WallSense::default());
-        assert_eq!(WallSense::default().open_side(), None);
     }
 }

@@ -17,9 +17,7 @@ use mm2_app::race::{
     CheckpointMarker, LessonSetup, advance_race, reanchor_teleported_participants,
     spawn_checkpoint_markers,
 };
-use mm2_app::racing_line::{CORNER_BRAKE_DEFAULT, CarLimits};
 use mm2_app::results::{ResultsMenu, ResultsUi, results_present};
-use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_content::{LessonLeg, LessonObjective};
 use mm2_game::{
     Checkpoint, CheckpointRule, DamageSpec, EventKey, EventTableKind, LegFailure, LegRule,
@@ -633,26 +631,12 @@ fn opponent_driver(route: Option<OpponentRoute>, next: usize) -> OpponentDriver 
             route: None,
         },
         route,
-        tuning: ScriptedTuning::DEFAULT,
-        avoid_players: false,
-        avoid_opponents: false,
-        look_ahead: 75.0,
+        throttle_cap: 1.0,
         next,
-        recovery: ScriptedBot::default(),
-        pass_entity: None,
-        pass_side: 0.0,
-        clear_frames: 0,
-        stall_frames: 0,
-        stall_pos: Vec3::ZERO,
-        pass_ban: None,
         stuck_pos: Vec3::ZERO,
         stuck_frames: 0,
         stuck_peak: 0,
         reanchors: 0,
-        catch_up_policy: mm2_game::CatchUpPolicy::default(),
-        catch_up: 0.0,
-        limits: CarLimits::of(&VehicleConfig::default(), None),
-        corner_brake: CORNER_BRAKE_DEFAULT,
         stats: DriveStats::default(),
         neural: None,
     }

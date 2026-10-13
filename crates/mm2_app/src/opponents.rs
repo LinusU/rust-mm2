@@ -1,9 +1,8 @@
-//! Race opponents (F15-A.2): the authored `[Opponent]` lineup spawned
-//! as real simulated participants, each driving its own authored `.opp`
-//! route through the same [`VehicleInput`] → physics → `advance_race`
-//! path the player's controls feed.
-//!
-//! Two deliberate separations:
+//! Race opponents (F15): the authored `[Opponent]` lineup spawned as
+//! real simulated participants, each driven along its own authored
+//! `.opp` route by the neural driver ([`crate::neural`]) through the
+//! same [`VehicleInput`] → physics → `advance_race` path the player's
+//! controls feed.
 //!
 //! - **Roster vs. runtime.** The lineup itself is `mm2_game`'s
 //!   [`OpponentRoster`] contract, built by `mm2_content::opponents` from
@@ -11,83 +10,47 @@
 //!   it — every authored entry keeps its slot even when its vehicle or
 //!   route fails to resolve; a load failure is reported and the slot
 //!   skipped, never repaired or re-numbered.
-//! - **Route following vs. driving control.** [`route_target`] owns
-//!   where the car is going (advance past reached points, close out or
-//!   loop the polyline) and [`crate::racing_line`] turns that into an
-//!   aim point down the line and a speed plan for the corners ahead
-//!   (DSN-66). How it gets there is pursuit steering from the car's
-//!   own geometry, the planned pace's throttle and brake, and the
-//!   bounded reverse-and-turn stuck recovery shared with the scripted
-//!   evidence driver ([`crate::scripted::recovery_input`]).
-//! - **Traffic (F15-B.1).** Each opponent also senses the other
-//!   *participants* in a corridor ahead — the player included — from
-//!   live physics state, never map data: a parked car and a moving one
-//!   are the same obstacle until it moves. A blocker inside the
-//!   corridor commits a pass side and the aim moves to a point down
-//!   the offset lane, so the same steering law lane-changes around it;
-//!   inside the closing-scaled follow gap the demand becomes a brake
-//!   instead of a shove. The pass target is tracked until it falls
-//!   fully behind — the corridor alone would release alongside and the
-//!   merge would cut back across its nose. Static geometry is not part
-//!   of the corridor; the wall feelers (DSN-66,
-//!   [`crate::racing_line::sense_walls`]) steer off static walls
-//!   instead, and dynamic props stay the recovery law's job.
-//! - **Authored tuning (F15-B.2/B.8).** The `[Opponent]` row's
-//!   ten-value parameter tail — the documented
-//!   `aiVehiclePhysics::RegisterRoute` behavioral vocabulary (R3's
-//!   published column table + mm2hook's recovered signature, R4;
-//!   ledger RACE-14) — resolves at spawn into a per-driver
-//!   [`ScriptedTuning`] and corridor sense mask: `maxThrottle`
-//!   ceilings the car's throttle demand, the corner-speed multiplier
-//!   scales the speed plan's corner grip and `cornerBrakingThreshold`
-//!   is its brake-demand floor (DSN-66), the look-ahead distance
-//!   sets the corridor's reach, and the authored `avoidPlayers`/
-//!   `avoidOpponents` flags gate whether the corridor senses human or
-//!   AI participants at all (an unsensed class gets no pass and no
-//!   follow brake — 59% of retail rows author `avoidOpponents=0`, so
-//!   stock opponents genuinely do not dodge each other; only the
-//!   rear-end guard, DSN-66, still brakes for a fellow opponent the
-//!   car would otherwise drive into at speed). `avoidTraffic`/`avoidProps`
-//!   bind but stay inert — ambient cars are not `Player`
-//!   participants and the corridor never sensed props; the remaining
-//!   columns stay decoded-but-unconsumed pending verified semantics.
-//! - **Bounded re-anchor (F15-B.3).** A car the escapes and pass
-//!   machinery cannot free — penned, hull-beached with unloaded wheels
-//!   (the stuck detector only counts grounded cars), or knocked off
-//!   the route entirely — gets a disclosed last resort after
-//!   [`REANCHOR_FRAMES`] without [`REANCHOR_DIST`] of displacement: a
-//!   `ResetVehicle` teleport back onto the chased route leg, walked
-//!   back out of un-cleared checkpoint triggers so the assist cannot
-//!   bank a gate it never drove, and kept [`REANCHOR_CLEAR`] off every
-//!   participant — including poses claimed by another re-anchor in the
-//!   same frame — so competing recoveries cannot land interpenetrating
-//!   (F15-B.10). `OpponentDriver::reanchors` counts each one and the
-//!   smoke record reports the field total; designed policy (DSN-14),
-//!   not a verified original rule.
+//! - **The route.** An `.opp` record is read the way the original reads
+//!   it (`docs/research/opponent-ai.md`): row 0 the start pose, the
+//!   rows after it the course's intersections in order, the last row
+//!   the finish position. [`driving_route`] turns that into the line
+//!   actually driven — each leg laid along the road its two
+//!   intersections share, a circuit reduced to its lap — and the
+//!   driver's [`Guide`] is that line set on the road surface and
+//!   smoothed.
+//! - **The driving.** [`opponent_drive`] runs once per fixed step. It
+//!   follows the car along its guide, feeds the route-bound progress
+//!   ([`RouteGateLine`]) and hands the pedals to the policy for the
+//!   session's difficulty ([`DrivingPolicies`]), capped at the row's
+//!   authored `maxThrottle`. The policy sees the line ahead, the world
+//!   around the car and the vehicles near it — the player, the other
+//!   opponents, police and ambient traffic alike. A car that stalls
+//!   against something is backed out ([`crate::neural::unstick`]).
+//! - **Authored tuning.** Of the row's ten-value tail
+//!   (`aiVehiclePhysics::RegisterRoute`, RACE-14) the driver consumes
+//!   `maxThrottle` — the authored difficulty dial, 0.57–1.00 on retail.
+//!   The corner-speed, braking-threshold, look-ahead and avoid-flag
+//!   columns parametrised the original's own controller and have no
+//!   counterpart in a learned one; they stay decoded on
+//!   [`OpponentSpec`] and unconsumed.
+//! - **Bounded re-anchor (F15-B.3).** A car nothing frees — penned,
+//!   beached on its hull, knocked somewhere its route cannot be
+//!   regained — gets a disclosed last resort after [`REANCHOR_FRAMES`]
+//!   without [`REANCHOR_DIST`] of displacement: a `ResetVehicle`
+//!   teleport back to where its guide last had it, walked back out of
+//!   un-cleared checkpoint triggers and kept [`REANCHOR_CLEAR`] off
+//!   every other car. `OpponentDriver::reanchors` counts each one and
+//!   the smoke record reports the field total; designed policy
+//!   (DSN-14), not an original rule — the original backs up and, when
+//!   that fails, stays stuck.
 //!
 //! Opponents are *not* clones of the player car: each roster entry
 //! loads its own authored vehicle id through
 //! [`mm2_content::load_opponent`] — the same tuning the player gets for
-//! that car, as in the original (RACE-13), so per-vehicle character
-//! (mass, power, size, grip) survives. They are
-//! stamped `PlayerControl::Ai` — never counted as network clients —
-//! and session-owned, so restart/teardown removes them and their
-//! controller state with everything else.
-//!
-//! Slot assignment is provisional (UNK-17): authored `_strtpnts` slot
-//! `index + 1` when the event ships a grid (slot 0 is the player by
-//! convention), else the `.opp` row-0 staging position, else a designed
-//! stagger behind the player. Facing is authored wherever the position
-//! came from: the slot's `yaw_deg` on a grid, the `.opp` row-0 staging
-//! heading on a route anchor — both measured as the vehicle-yaw
-//! convention (the `_strtpnts` `a` column and the `.opp` `brake` field
-//! agree; the waypoint `a` column is the opposite bearing — the UNK-16
-//! split, now measured). A grid slot authoring `a = 0` carries no
-//! heading (`yaw_deg == None` — `cir6_strtpnts` ships all-zero while
-//! its routes stage ~180°) and falls through to the same staged →
-//! first-leg chain rather than facing backward off the course. Which
-//! of the two authored start sets the original consumes stays open
-//! under UNK-17.
+//! that car, as in the original (RACE-13). They are stamped
+//! `PlayerControl::Ai` — never counted as network clients — and
+//! session-owned, so restart/teardown removes them and their controller
+//! state with everything else.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -97,10 +60,10 @@ use mm2_game::{
     OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition,
     RaceProgress, RaceState, RecoveryPolicy, RouteGateLine, RouteOptions, Session, SessionEntity,
     SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleDamage, VehicleRecovery,
-    VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
+    VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 
 use std::sync::Arc;
 
@@ -109,12 +72,8 @@ use crate::neural::drive::{DrivingPolicies, NeuralState};
 use crate::neural::guide::Guide;
 use crate::neural::observe::{Motion, Neighbour};
 use crate::neural::policy::Scratch;
-use crate::racing_line::{
-    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, WallSense, pace, plan_speed,
-    sense_walls, steer_toward,
-};
+use crate::racing_line::RouteCursor;
 use crate::recovery::seat_on_static_ground;
-use crate::scripted::{ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, watch_stuck};
 
 /// XZ distance within which a route point counts as reached. `.opp`
 /// points on retail routes sit 40-200 m apart; a generous radius keeps
@@ -143,53 +102,6 @@ const FALLBACK_SPACING: f32 = 6.0;
 /// the scripted bot's re-anchor (`crate::scripted`).
 pub(crate) const SPAWN_LIFT: f32 = 0.25;
 
-/// Half-width of the brake corridor ahead (m) — about a car width:
-/// a car sharing our line counts, one in the neighbouring lane does
-/// not (test lanes sit 6 m apart; retail lanes are wider).
-const BLOCK_HALF_WIDTH: f32 = 2.4;
-/// Half-width (m) of the pass-room scan either side of the nose — the
-/// far lane must be empty at commit, not just the corridor, so a
-/// pass cannot aim into traffic the corridor never saw.
-const PASS_SCAN: f32 = 7.0;
-/// Obstacle-sensing reach (m) when the authored tail supplies no
-/// look-ahead distance — `RegisterRoute`'s `someDistancePadding`
-/// default (R4). Authored rows carry their own (retail 50–150).
-const LOOK_AHEAD_DEFAULT: f32 = 75.0;
-/// Lateral shift applied to the aim point to drive around a blocker —
-/// just over a car width.
-const PASS_OFFSET: f32 = 3.6;
-/// How far ahead the offset-lane aim point sits while a pass is
-/// committed (m) — far enough that the merge-in is a gentle arc, near
-/// enough that the lane change starts immediately.
-const PASS_LOOKAHEAD: f32 = 12.0;
-/// |lateral| below which a blocker counts as dead-centre — the pass
-/// side then falls to the route side, then a fixed default.
-const CENTRED_LAT: f32 = 0.5;
-/// How far behind (m, negative gap) a committed pass target must fall
-/// before the pass releases — until then the offset holds so the merge
-/// cannot cut back across its nose.
-const PASS_BEHIND: f32 = 4.0;
-/// Wider lateral bound (m) the committed pass target is held inside —
-/// alongside it has left the brake corridor but the pass is not done.
-const PASS_WIDE: f32 = 4.5;
-/// Frames without any threat before the committed pass side releases —
-/// long enough to finish the overtake, short enough to re-pick.
-const PASS_RELEASE: u32 = 45;
-/// Displacement (m) a held pass must cover inside its stall window —
-/// speed alone oscillates through recovery bursts and resets a
-/// velocity check; a car shuffling inside a few metres is not
-/// progressing even when it briefly rolls.
-const PASS_STALL_DIST: f32 = 8.0;
-/// Frames a held pass may go without [`PASS_STALL_DIST`] of progress
-/// before it is abandoned — an offset aim at an unyielding gap (wall
-/// on the pass side, a wedged blocker, a parked player) cannot hold
-/// forever: the bounded response is to give the gap up and drive the
-/// route (AC03).
-const PASS_STALL: u32 = 360;
-/// Frames an abandoned blocker is barred from re-committing a pass —
-/// long enough to push or slip past it on the route line, then the
-/// clean pass gets another try.
-const PASS_BAN: u32 = 300;
 /// Bubble radius (m) around the episode anchor the stuck clock
 /// tolerates: a car that never leaves it is not progressing even while
 /// it rolls — the same displacement-over-speed test the pass stall
@@ -251,22 +163,6 @@ pub fn reanchor_occupied(p: Vec3, occupied: impl IntoIterator<Item = Vec3>) -> b
         }
     })
 }
-/// Base gap (m) the follower keeps behind a blocker.
-const FOLLOW_GAP: f32 = 6.0;
-/// Extra follow gap per m/s of *closing* speed (~0.5 s of travel).
-const FOLLOW_TIME: f32 = 0.5;
-/// Closing speed (m/s) below which the follow brake releases — at
-/// crawl pace the steering, biased a car width off the blocker, is the
-/// avoidance; braking there would stall the pass it is holding open.
-const FOLLOW_RELEASE: f32 = 2.0;
-/// Center-to-center gap (m) that brakes regardless of pace — bumpers
-/// nearly touching; releases again the moment the car stops closing,
-/// so a parked blocker cannot deadlock the follower.
-const PANIC_GAP: f32 = 4.0;
-/// Blocker speed (m/s) below which it counts as standing: a parked
-/// car is steered around, a moving one is trailed at the comfort gap.
-const CRAWL_SPEED: f32 = 3.0;
-
 /// Pure-pursuit aim distance (m) at a standstill, the extra per m/s of
 /// speed, and the bounds — about 0.7 s of travel ahead, never so close
 /// that steering hunts nor so far that it cuts the inside of a bend.
@@ -279,22 +175,12 @@ pub fn aim_distance(speed: f32) -> f32 {
     (AIM_BASE + AIM_PER_SPEED * speed.max(0.0)).clamp(AIM_RANGE.0, AIM_RANGE.1)
 }
 
-/// Height (m) above the body origin the wall feelers cast from — clear
-/// of kerbs and road crowns, below every wall.
-const FEELER_HEIGHT: f32 = 0.5;
-
-/// Distance-to-objective scale (m) the catch-up course measure falls
-/// back to when a definition's own gate spacing cannot be measured —
-/// designed (DSN-27), near a typical city block's length so a
-/// participant a block behind banks roughly one gate unit of deficit.
-const CATCH_UP_LEG_REF: f32 = 80.0;
-
-/// Lateral corridor (m) around the chased route leg inside which a
-/// pose still earns route arc for the [`RouteGateLine`] high-water —
-/// a committed pass or a reverse-and-turn escape stays inside it, a
-/// car punted onto a parallel street does not (designed, DSN-45).
-/// Route credit cannot accumulate off the line.
-const ROUTE_ARC_LATERAL: f32 = 25.0;
+/// Distance (m, XZ) from its place on its guide inside which a car
+/// still earns route arc for the [`RouteGateLine`] high-water — an
+/// overtake or a back-up stays inside it, a car punted onto a parallel
+/// street does not (designed, DSN-45). Route credit cannot accumulate
+/// off the line.
+const ROUTE_ARC_LATERAL: f32 = crate::neural::guide::ON_LINE;
 
 /// A Crash Course lesson's lead car (F21-B.19) — the `[Opponent]` slot a
 /// follow or stop leg watches. Spawned by [`spawn_lead_cars`] on the
@@ -311,8 +197,7 @@ pub struct LeadCar;
 /// session teardown despawns it with everything else the session owns.
 /// Carries the authored [`OpponentSpec`] verbatim (vehicle id, raw
 /// parameter tail, authored route record) plus [`OpponentDriver::route`]
-/// — the driving line actually chased, which session load may have
-/// re-pathed through the road graph (F15-B.6).
+/// — the driving line actually chased.
 #[derive(Component, Debug, Clone)]
 pub struct OpponentDriver {
     /// This participant's index in the authored roster — the slot the
@@ -322,67 +207,16 @@ pub struct OpponentDriver {
     pub index: usize,
     /// The authored lineup entry this participant was spawned from.
     pub spec: OpponentSpec,
-    /// The route the driver chases — the authored `.opp` line verbatim
-    /// when no road graph was bound at session load, else
-    /// [`NavGraph::densify_route`]'s re-pathed copy: authored anchors
-    /// kept verbatim with lane-sampled points spliced between them on
-    /// legs whose straight line leaves the road corridor. `None` when
-    /// the entry resolved no route at all.
+    /// The route the driver follows — [`driving_route`]'s reading of
+    /// the authored `.opp` record. `None` when the entry resolved no
+    /// route at all.
     pub route: Option<OpponentRoute>,
-    /// Control-law tuning resolved from the authored parameter tail at
-    /// spawn (F15-B.2): `maxThrottle` → the throttle ceiling (full
-    /// throttle when absent). The corner-speed multiplier lives in
-    /// [`OpponentDriver::limits`] — the bearing law's corner-brake
-    /// speed is not used by opponents.
-    pub tuning: ScriptedTuning,
-    /// Whether the corridor senses human participants — authored
-    /// `avoidPlayers`, column 6 (default on, the `RegisterRoute`
-    /// default). Retail authors 0 on 75% of rows — most stock
-    /// opponents do not dodge the player.
-    pub avoid_players: bool,
-    /// Whether the corridor senses fellow AI opponents — authored
-    /// `avoidOpponents`, column 7 (default on). 59% of retail rows
-    /// author 0 — the field does not dodge itself on those rows
-    /// (documented polarity, R3/R4).
-    pub avoid_opponents: bool,
-    /// The corridor's obstacle-sensing reach (m) — authored
-    /// `Look Ahead Distance`, column 2 ([`LOOK_AHEAD_DEFAULT`] when
-    /// the column is absent; a designed reading of the documented
-    /// name, R3). Feeds both the brake corridor and the pass hold
-    /// window.
-    pub look_ahead: f32,
-    /// Index of the route point currently being chased.
+    /// The most throttle the driver's pedal is given: the row's
+    /// authored `maxThrottle` (full throttle when absent).
+    pub throttle_cap: f32,
+    /// Index of the route point the car is heading for, from its arc
+    /// position on its guide.
     pub next: usize,
-    /// Bounded stuck-recovery state machine — the same three-point
-    /// escape the scripted driver uses (F15-AC03's recovery leg).
-    pub recovery: ScriptedBot,
-    /// The participant currently being driven around, if any —
-    /// tracked until it falls [`PASS_BEHIND`] metres behind, so the
-    /// merge cannot cut back across its nose the moment it leaves the
-    /// brake corridor.
-    pub pass_entity: Option<Entity>,
-    /// The committed pass side as ±1.0 (0 = uncommitted): which side
-    /// of the route line the offset lane runs on. Held while a threat
-    /// persists so the pick cannot flicker between sides, released
-    /// [`PASS_RELEASE`] frames after the corridor clears. The lateral
-    /// direction itself is re-derived from the route leg each frame,
-    /// so the offset lane bends with the road instead of freezing a
-    /// stale heading or orbiting with the car's nose.
-    pub pass_side: f32,
-    /// Frames since the corridor last held a threat.
-    pub clear_frames: u32,
-    /// Frames since the held pass last covered [`PASS_STALL_DIST`] —
-    /// at [`PASS_STALL`] the commitment is abandoned rather than
-    /// held forever at an unyielding gap (AC03's bounded response).
-    pub stall_frames: u32,
-    /// Where the current stall window started — progress is measured
-    /// as displacement from here, not momentary speed, so recovery
-    /// shuffles do not masquerade as a working pass.
-    pub stall_pos: Vec3,
-    /// A blocker whose abandoned pass is barred from re-committing,
-    /// with the frames left on the ban — the car drives the route
-    /// line past it (push or slip) before the clean pass retries.
-    pub pass_ban: Option<(Entity, u32)>,
     /// Where the current stuck window started — progress is measured
     /// as displacement from here, not momentary speed: a penned or
     /// high-centred car can roll without ever leaving the bubble.
@@ -402,32 +236,12 @@ pub struct OpponentDriver {
     /// observable record of the disclosed teleport assist (surfaced
     /// in the smoke record as `opp_rec=`).
     pub reanchors: u32,
-    /// The catch-up policy this driver runs under (designed, DSN-27 —
-    /// see [`mm2_game::CatchUpPolicy`]). `pub` so tests and evidence
-    /// runs can bind different bounds without touching authored data.
-    pub catch_up_policy: mm2_game::CatchUpPolicy,
-    /// The catch-up assist currently applied — the gates-behind factor
-    /// in `0..=catch_up_policy.assist_max`, `0` while leading, level
-    /// or not racing. The observable the smoke record's `cu=` field
-    /// counts, kept distinct from `reanchors` on purpose: lifted
-    /// demand is not a recovery.
-    pub catch_up: f32,
-    /// What this car can do, from its own handling and the authored
-    /// `cornerSpeedMultiplier` — the speed plan's corner grip and
-    /// braking (DSN-66).
-    pub limits: CarLimits,
-    /// The authored `cornerBrakingThreshold` (column 3,
-    /// [`CORNER_BRAKE_DEFAULT`] when absent): the share of full braking
-    /// below which a corner is made by lifting off rather than braking.
-    pub corner_brake: f32,
     /// How far and how long this driver has actually driven — the
-    /// denominator that turns escape, re-anchor and impact counts into
-    /// rates the smoke record's `opp_drv=` field can compare across
-    /// controller changes.
+    /// denominator that turns back-up, re-anchor and impact counts
+    /// into rates the smoke record's `opp_drv=` field can compare.
     pub stats: DriveStats,
     /// The neural driver's state on this car's route — `None` when the
-    /// entry resolved no drivable route. Drives the car whenever the
-    /// session carries [`DrivingPolicies`].
+    /// entry resolved no drivable route, and the car holds still.
     pub neural: Option<NeuralState>,
 }
 
@@ -462,21 +276,6 @@ impl DriveStats {
         }
         self.seconds += dt;
         self.last_pos = Some(pos);
-    }
-}
-
-impl OpponentDriver {
-    /// Whether the authored avoid flags let the corridor sense `t` —
-    /// human participants under `avoidPlayers`, AI under
-    /// `avoidOpponents` (F15-B.2/B.8). An unsensed class gets no pass,
-    /// no follow brake and no ban — the authored lineup holds its line
-    /// through it. The rear-end guard alone still brakes for an
-    /// unsensed fellow opponent closing ahead (DSN-66).
-    pub fn senses(&self, t: &Traffic) -> bool {
-        match t.control {
-            PlayerControl::Ai => self.avoid_opponents,
-            _ => self.avoid_players,
-        }
     }
 }
 
@@ -634,36 +433,6 @@ pub fn lead_route_finished(route: &OpponentRoute, next: usize, pos: Vec3) -> boo
         }
     }
     true
-}
-
-/// Advance the chase index past reached points and return the point to
-/// drive at. Returns the updated `next` and `Some(target)`; `None` when
-/// the route is complete — an open polyline's end means the opponent
-/// eases to a stop (its race progress is the checkpoints', not the
-/// route's). A closed route rejoins at the first anchor so laps keep
-/// supplying targets; the bounded retry keeps a degenerate all-in-reach
-/// route from looping forever.
-pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize, Option<Vec3>) {
-    let points = &route.points;
-    if points.is_empty() {
-        return (next, None);
-    }
-    let closed = route_is_closed(route);
-    for _ in 0..2 {
-        while next < points.len() && native_point_reached(route, next, pos) {
-            next += 1;
-        }
-        if next < points.len() {
-            return (next, Some(points[next].position));
-        }
-        if !closed {
-            return (next, None);
-        }
-        next = 0;
-    }
-    // Every anchor is in reach even after a wrap — a degenerate blob of
-    // a route; hold on the first point rather than spin.
-    (0, Some(points[0].position))
 }
 
 /// Where roster entry `index` spawns and which way it faces.
@@ -1287,25 +1056,37 @@ fn spawn_roster(
             .as_ref()
             .map(|r| initial_route_index(r, pos, yaw))
             .unwrap_or(0);
-        // Progress for AI participants is route-bound (DSN-45,
-        // UNK-11): each gate binds at the driven line's
-        // closest-approach arc, so a course whose `.opp` line never
-        // threads a cylinder still earns by driving the line — the
-        // authored-miss defect class the F14-A.2 matrix named. An
-        // `AnyOrder` line earns nothing until a neural driver binds
-        // its finish (`opponent_drive`); a route-less entry binds
-        // nothing and stays trigger-bound.
         let neural = route
             .as_ref()
             .and_then(|r| Guide::from_route_on(r, nav))
             .map(|guide| NeuralState::new(Arc::new(guide), &def.config, pos, next));
-        let route_line = participant
-            .then(|| {
-                route.as_ref().and_then(|r| {
-                    RouteGateLine::bind(r, &definition.checkpoints, route_is_closed(r), pos, next)
-                })
-            })
-            .flatten();
+        // Progress for AI participants is route-bound (DSN-45,
+        // UNK-11): each gate binds where the car's guide passes
+        // closest to it, so a course whose `.opp` line never threads a
+        // cylinder still earns by driving the line — the authored-miss
+        // defect class the F14-A.2 matrix named. An `AnyOrder` line
+        // binds the finish too: the original's opponents finish on
+        // their own course and the finish line, never on checkpoint
+        // triggers their lines miss (`0x53d6c0`). A route-less entry
+        // binds nothing and stays trigger-bound.
+        let route_line = neural.as_ref().filter(|_| participant).and_then(|n| {
+            let gates: Vec<f32> = definition
+                .checkpoints
+                .iter()
+                .map(|g| n.guide.closest_approach(g.center))
+                .collect();
+            let mut line =
+                RouteGateLine::bind_arcs(&gates, n.arc, n.guide.length(), n.guide.is_closed())?;
+            if definition.rule == CheckpointRule::AnyOrder {
+                line.bind_finish_arc(
+                    definition
+                        .finish
+                        .as_ref()
+                        .map(|f| n.guide.closest_approach(f.center)),
+                );
+            }
+            Some(line)
+        });
         // The same hull clearance the player spawn applies: the
         // collider's lowest point off the ground plus a settle margin.
         let hull_min_y = def
@@ -1318,14 +1099,6 @@ fn spawn_roster(
 
         let object = session.mint_object_id();
         let player_id = session.mint_player_id();
-        let drive_params = spec.drive_params();
-        if let Some(t) = drive_params.corner_brake.filter(|t| !t.is_finite()) {
-            warn!(
-                car = %def.id,
-                threshold = t,
-                "opponent cornerBrakingThreshold is not finite; using the default"
-            );
-        }
         let vehicle = commands
             .spawn((
                 owner,
@@ -1340,35 +1113,16 @@ fn spawn_roster(
                     index: i,
                     spec: spec.clone(),
                     route,
-                    tuning: ScriptedTuning {
-                        throttle_cap: drive_params.max_throttle.unwrap_or(1.0).clamp(0.0, 1.0),
-                        ..ScriptedTuning::DEFAULT
-                    },
-                    avoid_players: drive_params.avoid_players.unwrap_or(true),
-                    avoid_opponents: drive_params.avoid_opponents.unwrap_or(true),
-                    look_ahead: drive_params
-                        .distance_padding
-                        .filter(|d| d.is_finite() && *d > 0.0)
-                        .unwrap_or(LOOK_AHEAD_DEFAULT),
+                    throttle_cap: spec
+                        .drive_params()
+                        .max_throttle
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0),
                     next,
-                    recovery: ScriptedBot::default(),
-                    pass_entity: None,
-                    pass_side: 0.0,
-                    clear_frames: 0,
-                    stall_frames: 0,
-                    stall_pos: Vec3::ZERO,
-                    pass_ban: None,
                     stuck_pos: pos,
                     stuck_frames: 0,
                     stuck_peak: 0,
                     reanchors: 0,
-                    catch_up_policy: mm2_game::CatchUpPolicy::default(),
-                    catch_up: 0.0,
-                    limits: CarLimits::of(&def.config, drive_params.corner_speed_multiplier),
-                    corner_brake: drive_params
-                        .corner_brake
-                        .filter(|t| t.is_finite())
-                        .unwrap_or(CORNER_BRAKE_DEFAULT),
                     stats: DriveStats::default(),
                     neural,
                 },
@@ -1408,180 +1162,39 @@ fn spawn_roster(
     spawned
 }
 
-/// Another participant on the road — the traffic the avoidance reads.
-/// Positions, headings and speeds come from live physics state: the
-/// local player and every other AI are obstacles exactly alike. The
-/// authored avoid flags then decide which control classes each
-/// opponent senses at all (F15-B.2).
-#[derive(Debug, Clone, Copy)]
-pub struct Traffic {
-    /// The participant's entity — self is excluded by comparison.
-    pub entity: Entity,
-    /// Which input authority drives it — the authored avoid flags key
-    /// on this class.
-    pub control: PlayerControl,
-    /// World position this step.
-    pub pos: Vec3,
-    /// Its nose direction (XZ-projected heading basis).
-    pub fwd: Vec3,
-    /// Signed speed along its own nose (m/s); 0 parked.
-    pub speed: f32,
-}
-
-/// A participant resolved into our drive frame — the unit of both the
-/// brake corridor and the pass hold window.
-#[derive(Debug, Clone, Copy)]
-pub struct Blocker {
-    /// The traffic entry this describes.
-    pub entity: Entity,
-    /// Distance along our heading (m): ahead positive, behind negative.
-    pub gap: f32,
-    /// Lateral offset in our frame (m, + = our right).
-    pub lat: f32,
-    /// Its speed projected along our heading (m/s) — a parked or
-    /// crossing car reads ≈0, a same-direction car its own pace.
-    pub speed: f32,
-}
-
-/// Resolve one traffic entry into our drive frame. `fwd` is our
-/// projected nose direction; right = `fwd × up`.
-fn blocker_at(pos: Vec3, fwd: Vec3, t: &Traffic) -> Blocker {
-    let rel = t.pos - pos;
-    let gap = rel.x * fwd.x + rel.z * fwd.z;
-    let lat = rel.x * -fwd.z + rel.z * fwd.x;
-    let along = t.speed * (t.fwd.x * fwd.x + t.fwd.z * fwd.z);
-    Blocker {
-        entity: t.entity,
-        gap,
-        lat,
-        speed: along,
-    }
-}
-
-/// The nearest participant ahead inside the brake corridor — the
-/// overtake/brake trigger. Only strictly-positive gaps count: a car
-/// already alongside or behind is the hold window's question, not a
-/// new blocker. `senses` is the driver's authored avoid mask — a
-/// class it does not sense never registers as a blocker.
-pub fn nearest_blocker(
-    entity: Entity,
-    pos: Vec3,
-    fwd: Vec3,
-    reach: f32,
-    traffic: &[Traffic],
-    senses: impl Fn(&Traffic) -> bool,
-) -> Option<Blocker> {
-    traffic
-        .iter()
-        .filter(|t| t.entity != entity && senses(t))
-        .map(|t| blocker_at(pos, fwd, t))
-        .filter(|b| b.gap > 0.0 && b.gap <= reach && b.lat.abs() < BLOCK_HALF_WIDTH)
-        .min_by(|a, b| a.gap.total_cmp(&b.gap))
-}
-
-/// The committed pass target while it is still beside or ahead of us —
-/// a wider window than the brake corridor, held until the obstacle
-/// falls [`PASS_BEHIND`] metres behind. Without it the corridor would
-/// release the moment we pull alongside and the merge would cut back
-/// across the blocker's nose.
-fn held_blocker(
-    entity: Entity,
-    pos: Vec3,
-    fwd: Vec3,
-    reach: f32,
-    traffic: &[Traffic],
-) -> Option<Blocker> {
-    traffic
-        .iter()
-        .find(|t| t.entity == entity)
-        .map(|t| blocker_at(pos, fwd, t))
-        .filter(|b| b.gap > -PASS_BEHIND && b.gap < reach && b.lat.abs() < PASS_WIDE)
-}
-
-/// Which way around a blocker (±1.0 in the lateral frame): an offset
-/// blocker is passed on its open side; a dead-centre one on the side
-/// the route itself continues, then a fixed default. Commitment is
-/// structural — the picked side lives in `OpponentDriver::pass_side`
-/// until the corridor clears, so alternating blockers cannot flip it.
-pub fn pick_pass_side(blocker_lat: f32, target_lat: f32) -> f32 {
-    if blocker_lat.abs() >= CENTRED_LAT {
-        -blocker_lat.signum()
-    } else if target_lat.abs() >= CENTRED_LAT {
-        target_lat.signum()
-    } else {
-        1.0
-    }
-}
-
-/// Convert route demand into following distance. A *moving* blocker
-/// inside the comfort gap brakes even at matched pace — a queue that
-/// never trims its gaps rides bumpers into every corner. A *standing*
-/// blocker brakes only on a meaningful approach: at crawl pace the
-/// steering, biased a car width off it, is the avoidance, and braking
-/// there is what deadlocked the follower behind parked cars (AC03).
-/// Either way the brake's reach grows with *closing* speed — a parked
-/// car brakes early from a fast approach — and inside [`PANIC_GAP`]
-/// an active closure brakes hard regardless.
-pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) {
-    let closing = speed - blocker.speed;
-    if blocker.gap < PANIC_GAP {
-        if closing > 0.5 {
-            input.throttle = 0.0;
-            input.brake = input.brake.max(0.85);
-        }
-        return;
-    }
-    let need = FOLLOW_GAP + closing.max(0.0) * FOLLOW_TIME;
-    if blocker.gap >= need {
-        return;
-    }
-    let brake = if blocker.speed >= CRAWL_SPEED {
-        // Adaptive-cruise deficit, softer than the panic stop.
-        (0.25 + (need - blocker.gap) / need * 0.5).min(0.85)
-    } else if closing > FOLLOW_RELEASE {
-        (0.3 + (need - blocker.gap) / need * 0.55).min(0.85)
-    } else {
-        return;
-    };
-    input.throttle = 0.0;
-    input.brake = input.brake.max(brake);
-}
-
-/// Write [`VehicleInput`] for every AI opponent from its route target,
-/// each frame. Scheduled in `Update` like the other input writers;
-/// `vehicle_input` only touches `PlayerVehicle`, so there is no write
-/// contention — this is the same normalized-input path, a different
-/// driver behind it.
+/// Drive every AI opponent for one fixed step: follow it along its
+/// guide, feed its route-bound progress, and write the [`VehicleInput`]
+/// its policy chooses.
 ///
 /// Honors the race's gates: the field must still race — `Playing`, or
-/// `Results` while the opponents behind a finished local driver race
-/// on (DSN-11) — and the countdown's `input_locked` holds every car
-/// still. A participant
-/// whose `RaceProgress` resolved — finished or timed out — gets a
-/// zeroed input and coasts. A roster entry with no route (a dead `.opp`
-/// reference the roster deliberately kept) holds still: the slot exists
-/// because the authored lineup fields it, not because it can drive.
+/// `Results` while the opponents behind a finished local driver race on
+/// (DSN-11) — and the countdown's `input_locked` holds every car still.
+/// A participant whose `RaceProgress` resolved pulls up on the
+/// handbrake, as the original's opponent stops at its finish point. A
+/// roster entry with no route (a dead `.opp` reference the roster
+/// deliberately kept) holds still: the slot exists because the authored
+/// lineup fields it, not because it can drive.
 ///
-/// With a target, the corridor sense runs before the control law: a
-/// participant ahead shifts the aim point one car width to the
-/// committed pass side and the follow gap converts into braking, so a
-/// slower or stopped car is driven around or trailed — never shoved
-/// (F15-B.1, AC03's blocked-road leg).
+/// The policy for the session's difficulty decides every third step and
+/// holds its action between ([`NeuralState::drive`]). It is shown every
+/// other vehicle — players, opponents, police and ambient traffic are
+/// obstacles alike — and the world through rays that ignore them. A
+/// session normally carries its own [`DrivingPolicies`]; a world built
+/// without one drives on the built-in pair.
 ///
-/// The bounded last resort (F15-B.3): the reverse-and-turn escapes and
-/// the pass stall/ban cycle answer ordinary blocks, but a car penned
-/// where every escape lands back in the same pocket, beached on its
-/// hull with the wheels unloaded, or knocked somewhere the route cannot
-/// be regained would sit forever — the stuck detector itself never
-/// counts an ungrounded car. [`REANCHOR_FRAMES`] without
-/// [`REANCHOR_DIST`] of displacement therefore re-anchors it onto the
-/// route it was chasing through the production [`ResetVehicle`] path —
-/// the same disclosed teleport the player's reset uses, so `Teleported`
-/// breaks the swept segment and [`reanchor_pose`]'s trigger walk-back
-/// keeps the landing out of un-cleared gates (AC04). The assist is
-/// explicit and observable: `OpponentDriver::reanchors` counts it and
-/// the smoke record surfaces the field total as `opp_rec=`. Authority
-/// only — a predicted client never teleports a participant.
+/// The bounded last resort (F15-B.3): backing up answers an ordinary
+/// stall, but a car penned where every escape lands back in the same
+/// pocket, beached on its hull, or knocked somewhere its route cannot
+/// be regained would sit forever. [`REANCHOR_FRAMES`] without
+/// [`REANCHOR_DIST`] of displacement therefore re-anchors it through
+/// the production [`ResetVehicle`] path — the same disclosed teleport
+/// the player's reset uses, so `Teleported` breaks the swept segment —
+/// to where its guide last had it: never further along the route than
+/// the car drove, walked back out of un-cleared gates
+/// ([`reanchor_pose`], AC04) and clear of every other car. The assist
+/// is explicit and observable: `OpponentDriver::reanchors` counts it
+/// and the smoke record surfaces the field total as `opp_rec=`.
+/// Authority only — a predicted client never teleports a participant.
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)] // Bevy system: the re-anchor landing threads the physics and water handles beside the driver query
 pub fn opponent_drive(
@@ -1605,92 +1218,55 @@ pub fn opponent_drive(
         Or<(With<Vehicle>, With<crate::traffic::AmbientCar>)>,
     >,
     mut resets: MessageWriter<ResetVehicle>,
-    mut set: ParamSet<(
-        Query<(
-            Entity,
-            &mut VehicleInput,
-            &Position,
-            &Rotation,
-            (&LinearVelocity, &AngularVelocity),
-            &Vehicle,
-            &VehicleState,
-            Option<&RaceProgress>,
-            &mut OpponentDriver,
-            Option<&mut RouteGateLine>,
-        )>,
-        Query<(
-            Entity,
-            &Player,
-            &Position,
-            &Rotation,
-            &VehicleState,
-            Option<&RaceProgress>,
-        )>,
+    mut drivers: Query<(
+        Entity,
+        &mut VehicleInput,
+        &Position,
+        &Rotation,
+        (&LinearVelocity, &AngularVelocity),
+        &Vehicle,
+        &VehicleState,
+        Option<&RaceProgress>,
+        &mut OpponentDriver,
+        Option<&mut RouteGateLine>,
+        Has<mm2_vehicle::Teleported>,
     )>,
 ) {
     let race = race
         .as_deref()
         .filter(|r| !r.is_stale(session.generation()));
     let locked = race.is_some_and(|r| r.input_locked());
-    let traffic: Vec<Traffic> = set
-        .p1()
+    let policies = policies
+        .as_deref()
+        .unwrap_or_else(|| DrivingPolicies::built_in());
+    let policy = policies.for_difficulty(
+        session
+            .config()
+            .map_or(mm2_game::Difficulty::Amateur, |c| c.difficulty),
+    );
+    // Every vehicle a driver may need to know about: simulated cars at
+    // their own size, ambient traffic at a typical one.
+    let field: Vec<(Entity, Neighbour)> = cars
         .iter()
-        .map(|(entity, player, pos, rot, vstate, _)| Traffic {
-            entity,
-            control: player.control,
-            pos: pos.0,
-            fwd: rot.0 * Vec3::NEG_Z,
-            speed: vstate.forward_speed,
+        .map(|(e, pos, rot, vel, vehicle)| {
+            let size = vehicle.map_or(AMBIENT_SIZE, |v| v.config.chassis_size);
+            (
+                e,
+                Neighbour {
+                    position: pos.0,
+                    velocity: vel.0,
+                    forward: rot.0 * Vec3::NEG_Z,
+                    half_width: size[0] * 0.5,
+                    half_length: size[2] * 0.5,
+                },
+            )
         })
         .collect();
-    // F15-B.4 — the disclosed catch-up assist (designed, DSN-27). The
-    // leader is the best continuous course position among every
-    // progress-carrying participant — the human included, so a
-    // trailing field's lift is measured against whoever is actually
-    // ahead, not an AI-only shuffle. The leg scale is the course's
-    // own mean gate spacing; a degenerate definition falls back to
-    // the designed `CATCH_UP_LEG_REF`.
-    let leg_ref = race
-        .and_then(|r| mm2_game::mean_gate_spacing(&r.definition))
-        .unwrap_or(CATCH_UP_LEG_REF);
-    let leader = race.map(|r| {
-        set.p1()
-            .iter()
-            .filter_map(|(_, _, pos, _, _, progress)| progress.map(|p| (pos.0, p)))
-            .map(|(p_pos, progress)| {
-                mm2_game::course_progress(&r.definition, progress, p_pos, leg_ref)
-            })
-            .fold(f32::NEG_INFINITY, f32::max)
-    });
-    // Poses a re-anchor has already claimed this frame. The `traffic`
-    // snapshot predates the loop, so it cannot see a same-frame
-    // teleport — without this, two cars whose windows expire together
-    // (a shared pen, a pileup) both land on the same projected spot.
+    // Poses a re-anchor has already claimed this frame. `field` predates
+    // the loop, so it cannot see a same-frame teleport — without this,
+    // two cars whose windows expire together (a shared pen, a pileup)
+    // both land on the same spot.
     let mut claimed: Vec<Vec3> = Vec::new();
-    // Every vehicle a neural driver may need to know about: simulated
-    // cars with their own size, ambient traffic at a typical one.
-    let field: Vec<(Entity, Neighbour)> = if policies.is_some() {
-        cars.iter()
-            .map(|(e, pos, rot, vel, vehicle)| {
-                let size = vehicle.map_or([2.0, 1.4, 4.6], |v| v.config.chassis_size);
-                (
-                    e,
-                    Neighbour {
-                        position: pos.0,
-                        velocity: vel.0,
-                        forward: rot.0 * Vec3::NEG_Z,
-                        half_width: size[0] * 0.5,
-                        half_length: size[2] * 0.5,
-                    },
-                )
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let difficulty = session
-        .config()
-        .map_or(mm2_game::Difficulty::Amateur, |c| c.difficulty);
     for (
         entity,
         mut input,
@@ -1702,14 +1278,10 @@ pub fn opponent_drive(
         progress,
         mut driver,
         mut line,
-    ) in &mut set.p0()
+        teleported,
+    ) in &mut drivers
     {
-        if let Some((_, left)) = &mut driver.pass_ban {
-            *left = left.saturating_sub(1);
-            if *left == 0 {
-                driver.pass_ban = None;
-            }
-        }
+        let d = &mut *driver;
         // A lesson's lead car carries no progress: it drives while the
         // field races, with nothing of its own to finish.
         let racing = progress.is_none_or(|p| {
@@ -1718,129 +1290,65 @@ pub fn opponent_drive(
                 ParticipantState::AwaitingStart | ParticipantState::Racing
             )
         });
-        // Where the car sits on its line this frame — the speed plan
-        // scans ahead from here.
-        let mut cursor: Option<RouteCursor> = None;
-        let d = &mut *driver;
-        let target = if !session.field_races() || locked || !racing {
-            None
-        } else if let Some(route) = &d.route {
-            // The neural driver's place on the route is its guide arc:
-            // the chase index follows from it, forward or backward.
-            // The scripted law advances the index past reached anchors.
-            let tracked = (policies.is_some())
-                .then_some(d.neural.as_mut())
-                .flatten()
-                .map(|neural| {
-                    let left = neural.track(pos.0);
-                    let next = neural.guide.chase_index(neural.arc);
-                    // Out of route means *at* its end, not merely past
-                    // it: a car that ran wide of the last bend still
-                    // has the end to reach.
-                    let end = neural.guide.point_at(neural.guide.length());
-                    let done = left.is_some_and(|m| m < ROUTE_END)
-                        && (pos.0.x - end.x).hypot(pos.0.z - end.z) < ROUTE_END_RADIUS;
-                    (next, (!done).then(|| neural.guide.point_at(neural.arc)))
-                });
-            let neural = tracked.is_some();
-            let (next, target) = tracked.unwrap_or_else(|| route_target(route, d.next, pos.0));
+        let live = session.field_races() && !locked && racing;
+        // Follow the car along its guide. A car that was moved rather
+        // than drove — a recovery from the water, any reset — is found
+        // again behind where it was. The route point it is heading for
+        // follows from its arc position, and the route is driven out
+        // when the car is *at* its end, not merely past it: one that
+        // ran wide of the last bend still has the end to reach.
+        let mut driving = false;
+        if live && let Some(neural) = d.neural.as_mut() {
+            if teleported {
+                neural.reseat(pos.0);
+            }
+            let left = neural.track(pos.0);
+            let next = neural.guide.chase_index(neural.arc);
+            let end = neural.guide.point_at(neural.guide.length());
+            driving = !(left.is_some_and(|m| m < ROUTE_END)
+                && (pos.0.x - end.x).hypot(pos.0.z - end.z) < ROUTE_END_RADIUS);
+            // Route-bound progress (DSN-45): what the car has driven
+            // along its guide is the high-water mark `advance_route`
+            // reads — while it is on the line. One punted off it keeps
+            // its place but earns nothing until it is back.
             if let Some(line) = &mut line {
-                // The original's opponents finish on their own course
-                // and the finish line, never on checkpoint triggers
-                // their lines miss: a neural driver's `AnyOrder` line
-                // carries the finish too.
-                if neural
-                    && !line.has_finish()
-                    && let Some(r) = race
-                    && r.definition.rule == CheckpointRule::AnyOrder
-                {
-                    line.bind_finish(route, r.definition.finish.as_ref());
-                }
-                // Route-bound progress (DSN-45): a wrap of the chase
-                // index completes a traversal, and the pose's
-                // projection inside the chased leg's corridor grows
-                // the high-water arc `advance_route` reads. The
-                // lateral gate keeps punts off the line from earning.
-                // An index that follows the car can also step back, so
-                // only a jump across most of the route is the lap
-                // boundary — and one the other way takes the lap back.
-                let n = route.points.len();
-                if line.is_closed() {
-                    if neural {
-                        if d.next > next && d.next - next > n / 2 {
-                            line.wrap();
-                        } else if next > d.next && next - d.next > n / 2 {
-                            line.unwrap();
-                        }
-                    } else if next < d.next {
-                        line.wrap();
-                    }
-                }
-                let (arc, lateral) = line.measure(route, next, pos.0);
-                if lateral <= ROUTE_ARC_LATERAL {
-                    line.arc_high = line.arc_high.max(arc);
+                let on_line = neural.guide.point_at(neural.arc);
+                if (pos.0.x - on_line.x).hypot(pos.0.z - on_line.z) <= ROUTE_ARC_LATERAL {
+                    line.arc_high = line.arc_high.max(neural.progress());
                 }
             }
-            // Pure pursuit: aim a speed-scaled distance down the line
-            // from the car's projection onto it, not at the next raw
-            // anchor 40-200 m away — the bend shows up while it is
-            // still ahead, and a car shoved off the line aims back
-            // onto it instead of across the block to a far anchor. An
-            // open route still approaching its first anchor has no
-            // leg to project onto and keeps the anchor.
-            if target.is_some() && (next > 0 || route_is_closed(route)) {
-                cursor = RouteCursor::locate(route, next, pos.0);
-            }
-            let aim = target.map(|t| {
-                cursor.map_or(t, |c| {
-                    c.point_ahead(route, aim_distance(vstate.forward_speed))
-                })
-            });
             d.next = next;
-            aim
-        } else {
-            None
-        };
-        let Some(mut target) = target else {
-            driver.pass_entity = None;
-            driver.pass_side = 0.0;
-            driver.clear_frames = 0;
-            driver.stall_frames = 0;
-            driver.stuck_frames = 0;
-            driver.stuck_pos = pos.0;
-            driver.catch_up = 0.0;
-            driver.stats.last_pos = None;
+        }
+        if !driving {
+            d.stuck_frames = 0;
+            d.stuck_pos = pos.0;
+            d.stats.last_pos = None;
             // A car that has finished pulls up, as the original's does
-            // at its finish point; one still waiting for the start, or
-            // out of route, just holds no pedal.
+            // at its finish point; one waiting for the start, out of
+            // route or without one just holds no pedal.
             *input = VehicleInput {
                 handbrake: if racing { 0.0 } else { 1.0 },
                 ..default()
             };
             continue;
-        };
-        driver.stats.record(pos.0, time.delta_secs());
+        }
+        d.stats.record(pos.0, time.delta_secs());
         let fwd = rot.0 * Vec3::NEG_Z;
         let yaw = (-fwd.x).atan2(-fwd.z);
         // F15-B.3 — the bounded last resort. The stuck window measures
         // displacement, not speed: a penned or hull-beached car can
-        // roll and still never leave the bubble, and an ungrounded one
-        // never even reaches the recovery law's stuck counter. Once
-        // the budget is spent the car teleports onto its chased route
-        // through `ResetVehicle` — the same disclosed path the
-        // player's reset uses, so the jump cannot sweep checkpoints
-        // and the walk-back keeps the landing out of un-cleared
-        // triggers. `reanchors` is the observable count.
+        // roll and still never leave the bubble.
         if session.authority_role().is_authority() && pos.0.is_finite() {
-            if pos.0.distance(driver.stuck_pos) >= REANCHOR_DIST {
-                driver.stuck_pos = pos.0;
-                driver.stuck_frames = 0;
+            if pos.0.distance(d.stuck_pos) >= REANCHOR_DIST {
+                d.stuck_pos = pos.0;
+                d.stuck_frames = 0;
             } else {
-                driver.stuck_frames += 1;
-                driver.stuck_peak = driver.stuck_peak.max(driver.stuck_frames);
+                d.stuck_frames += 1;
+                d.stuck_peak = d.stuck_peak.max(d.stuck_frames);
             }
-            if driver.stuck_frames >= REANCHOR_FRAMES
-                && let Some(route) = driver.route.clone()
+            if d.stuck_frames >= REANCHOR_FRAMES
+                && let Some(route) = d.route.clone()
+                && let Some(neural) = d.neural.as_mut()
             {
                 let gates: Vec<mm2_game::Checkpoint> = race
                     .zip(progress)
@@ -1852,17 +1360,18 @@ pub fn opponent_drive(
                             .collect()
                     })
                     .unwrap_or_default();
-                // The landing also keeps REANCHOR_CLEAR of every
-                // participant (the stuck car's own spot included —
-                // beached on the line it should not teleport back onto
-                // itself) and of poses other re-anchors claimed this
-                // frame — the spec's competing-recovery-positions edge
-                // (F15-B.10). The check is positional, not avoidance:
-                // it applies whatever the authored avoid flags say.
+                // The landing keeps REANCHOR_CLEAR of every car (the
+                // stuck car's own spot included — beached on the line
+                // it should not teleport back onto itself) and of poses
+                // other re-anchors claimed this frame — the spec's
+                // competing-recovery-positions edge (F15-B.10).
                 let occupied = |p: Vec3| {
                     reanchor_occupied(
                         p,
-                        traffic.iter().map(|t| t.pos).chain(claimed.iter().copied()),
+                        field
+                            .iter()
+                            .map(|(_, n)| n.position)
+                            .chain(claimed.iter().copied()),
                     )
                 };
                 let lift = reanchor_lift(&vehicle.config);
@@ -1891,17 +1400,12 @@ pub fn opponent_drive(
                         )
                     })
                 };
-                // A neural driver goes back to where its guide last had
-                // it, not to wherever it was knocked: the landing can
-                // then never sit further along the route than the car
-                // drove.
-                let from = driver
-                    .neural
-                    .as_ref()
-                    .filter(|_| policies.is_some())
-                    .map_or(pos.0, |n| n.guide.point_at(n.arc));
+                // Back to where the guide last had the car, not to
+                // wherever it was knocked: the landing can then never
+                // sit further along the route than the car drove.
+                let from = neural.guide.point_at(neural.arc);
                 let (pose, ryaw, resync_next) =
-                    reanchor_pose_with_progress(&route, driver.next, from, yaw, |p| {
+                    reanchor_pose_with_progress(&route, d.next, from, yaw, |p| {
                         gates.iter().any(|g| {
                             let dx = p.x - g.center.x;
                             let dz = p.z - g.center.z;
@@ -1911,40 +1415,25 @@ pub fn opponent_drive(
                     });
                 // Without a physics world (or when the walk found no
                 // ground at all) the authored height plus clearance
-                // stands, as before.
+                // stands.
                 let pose = seat(pose, ryaw).unwrap_or(pose + Vec3::Y * lift);
                 resets.write(ResetVehicle {
                     entity: Some(entity),
                     position: pose,
                     yaw: ryaw,
                 });
-                // The walk-back can land a closed-route car across
-                // the route boundary — resync the traversal count so
-                // the teleport cannot bank arc it did not drive.
-                if let Some(line) = &mut line {
-                    line.reanchor(&route, driver.next, pos.0, resync_next, pose);
-                }
-                driver.next = resync_next;
-                if let Some(neural) = &mut driver.neural {
-                    neural.reseat(pose);
-                }
-                driver.recovery = ScriptedBot {
-                    escapes: driver.recovery.escapes,
-                    ..ScriptedBot::default()
-                };
-                driver.pass_entity = None;
-                driver.pass_side = 0.0;
-                driver.clear_frames = 0;
-                driver.stall_frames = 0;
-                driver.stuck_frames = 0;
-                driver.stuck_pos = pose;
-                driver.reanchors += 1;
-                driver.catch_up = 0.0;
-                driver.stats.last_pos = None;
+                // The car's place on its guide goes back with it, so the
+                // teleport banks no arc it did not drive.
+                d.next = resync_next;
+                neural.reseat(pose);
+                d.stuck_frames = 0;
+                d.stuck_pos = pose;
+                d.reanchors += 1;
+                d.stats.last_pos = None;
                 claimed.push(pose);
                 info!(
-                    vehicle = %driver.spec.vehicle,
-                    reanchors = driver.reanchors,
+                    vehicle = %d.spec.vehicle,
+                    reanchors = d.reanchors,
                     from = ?pos.0,
                     to = ?pose,
                     "opponent re-anchored onto its route after a bounded stuck"
@@ -1953,316 +1442,49 @@ pub fn opponent_drive(
                 continue;
             }
         } else {
-            driver.stuck_pos = pos.0;
-            driver.stuck_frames = 0;
+            d.stuck_pos = pos.0;
+            d.stuck_frames = 0;
         }
-        // The neural driver: the trained policy turns what the car sees
-        // of its line, the world and the vehicles around it into the
-        // pedals, at the authored `maxThrottle`. Route progress and the
-        // bounded re-anchor above stay as they are.
-        let throttle_cap = driver.tuning.throttle_cap;
-        if let Some(policies) = policies.as_deref()
-            && let Some(neural) = driver.neural.as_mut()
-        {
-            let motion = Motion {
-                position: pos.0,
-                rotation: rot.0,
-                linear_velocity: lin_vel.0,
-                angular_velocity: ang_vel.0,
-                steer_angle: vstate.steer_angle,
-                grounded: vstate.wheels.iter().filter(|w| w.grounded).count() as f32
-                    / vstate.wheels.len().max(1) as f32,
-                reversing: vstate.direction == mm2_vehicle::DriveDirection::Reverse,
-            };
-            let neighbours: Vec<Neighbour> = field
-                .iter()
-                .filter(|(e, _)| *e != entity)
-                .map(|(_, n)| *n)
-                .collect();
-            let filter = SpatialQueryFilter::default();
-            *input = neural.drive(
-                policies.for_difficulty(difficulty),
-                &mut scratch,
-                &motion,
-                &neighbours,
-                throttle_cap,
-                |origin, dir, reach| {
-                    let sq = spatial.as_ref()?;
-                    let dir = Dir3::new(dir).ok()?;
-                    sq.cast_ray_predicate(origin, dir, reach, true, &filter, &|e| !cars.contains(e))
-                        .map(|hit| (hit.distance, hit.normal))
-                },
-            );
-            driver.catch_up = 0.0;
+        let Some(neural) = d.neural.as_mut() else {
             continue;
-        }
-        // The corridor reach is the authored look-ahead distance
-        // (F15-B.8) — how far ahead this driver senses obstacles, not
-        // a speed-scaled sightline.
-        let reach = driver.look_ahead;
-        // A banned blocker — one whose abandoned pass is still on its
-        // cooldown — is fully transparent: no aim, no brake. That is
-        // what lets the fallback actually push or slip past instead
-        // of brake-shuffling at the same unyielding gap.
-        let banned = |e: Entity| driver.pass_ban.is_some_and(|(b, _)| b == e);
-        let narrow = nearest_blocker(entity, pos.0, fwd, reach, &traffic, |t| driver.senses(t))
-            .filter(|b| !banned(b.entity));
-        let held = driver
-            .pass_entity
-            .and_then(|e| held_blocker(e, pos.0, fwd, reach, &traffic))
-            .filter(|b| !banned(b.entity));
-        // A pass commits only when the blocker is an obstruction. A
-        // standing car anywhere in the corridor is one — swinging
-        // wide early can clear a whole knot where creeping to
-        // bumpers only joins it; a moving one needs a genuine
-        // closure — a matched-pace car ahead is a queue to sit in,
-        // not a reason to leave the route: with a field sharing
-        // `.opp` lines an always-on offset aim weaves every car
-        // off-line all race.
-        let engaging = narrow.is_some_and(|b| {
-            vstate.forward_speed - b.speed > FOLLOW_RELEASE || b.speed < CRAWL_SPEED
-        });
-        let mut threat = held.or(if engaging { narrow } else { None });
-        // A pass that cannot make progress cannot hold the offset aim
-        // forever: PASS_STALL frames without PASS_STALL_DIST of
-        // displacement abandons the commitment and bans the blocker
-        // from re-committing for PASS_BAN, so the route line — push
-        // or slip past — gets its turn (AC03's bounded response, not
-        // a parked shuffle).
-        match &threat {
-            Some(b) => {
-                if driver.stall_frames == 0 {
-                    driver.stall_pos = pos.0;
-                }
-                driver.stall_frames += 1;
-                if pos.0.distance(driver.stall_pos) >= PASS_STALL_DIST {
-                    driver.stall_frames = 0;
-                    driver.stall_pos = pos.0;
-                } else if driver.stall_frames >= PASS_STALL {
-                    driver.pass_ban = Some((b.entity, PASS_BAN));
-                    driver.pass_entity = None;
-                    driver.pass_side = 0.0;
-                    driver.stall_frames = 0;
-                    threat = None;
-                }
-            }
-            None => driver.stall_frames = 0,
-        }
-        if let Some(b) = threat {
-            if driver.pass_side == 0.0 {
-                let right = Vec3::new(-fwd.z, 0.0, fwd.x);
-                let t_rel = target - pos.0;
-                let mut side = pick_pass_side(b.lat, t_rel.x * right.x + t_rel.z * right.z);
-                // Room check: weight every car ahead or alongside by
-                // how far into either lane it sits. If the picked
-                // side is the busier one the commit aims into traffic
-                // the corridor never saw — take the emptier side.
-                let mut room = [0.0f32; 2];
-                for t in &traffic {
-                    if t.entity == entity || !driver.senses(t) {
-                        continue;
-                    }
-                    let o = blocker_at(pos.0, fwd, t);
-                    if o.gap <= -PASS_BEHIND || o.gap >= reach || o.lat.abs() >= PASS_SCAN {
-                        continue;
-                    }
-                    room[usize::from(o.lat >= 0.0)] += 1.0 - o.lat.abs() / PASS_SCAN;
-                }
-                if room[usize::from(side > 0.0)] > room[usize::from(side <= 0.0)] {
-                    side = -side;
-                }
-                driver.pass_side = side;
-            }
-            driver.pass_entity = Some(b.entity);
-            driver.clear_frames = 0;
-            // Aim down the offset lane ahead — a lateral shift of the
-            // route anchor itself is a few-degree wiggle at chase
-            // distances, never a pass. The lane direction is the
-            // route leg's lateral, re-derived each frame, so the
-            // offset lane bends with the road: a world-fixed vector
-            // aims across corners, a nose-relative one orbits.
-            let rd = target - pos.0;
-            let rd_len = (rd.x * rd.x + rd.z * rd.z).sqrt();
-            let (rx, rz) = if rd_len > 0.5 {
-                (rd.x / rd_len, rd.z / rd_len)
-            } else {
-                (fwd.x, fwd.z)
-            };
-            let lane = Vec3::new(-rz, 0.0, rx) * driver.pass_side;
-            target = pos.0 + fwd * PASS_LOOKAHEAD + lane * PASS_OFFSET;
-        } else {
-            driver.pass_entity = None;
-            driver.clear_frames += 1;
-            if driver.clear_frames >= PASS_RELEASE {
-                driver.pass_side = 0.0;
-            }
-        }
-        let bearing = relative_bearing(yaw, pos.0, target);
-        // F15-B.4 — disclosed catch-up (designed, DSN-27): a driver
-        // trailing the leader lifts its demand ceiling by the bounded
-        // factor — never the leader's, never the player's, and never
-        // progress itself, which still has to be earned through the
-        // same swept triggers. `driver.catch_up` is the observable
-        // the `cu=` record counts; it is not a re-anchor and stays
-        // out of `reanchors`.
-        let assist = match (race, leader, progress) {
-            (Some(r), Some(l), Some(progress)) => mm2_game::catch_up_factor(
-                l - mm2_game::course_progress(&r.definition, progress, pos.0, leg_ref),
-                &driver.catch_up_policy,
-            ),
-            _ => 0.0,
         };
-        driver.catch_up = assist;
-        let mut tuning = driver.tuning;
-        let mut limits = driver.limits;
-        if assist > 0.0 {
-            tuning.throttle_cap = (tuning.throttle_cap + assist).min(1.0);
-            // The same lift on carried corner speed the bearing law's
-            // corner-brake speed took: speed scales with the root of
-            // the lateral acceleration.
-            limits.corner_accel *= (1.0 + assist) * (1.0 + assist);
-        }
-        // Planned pace (DSN-66): the line ahead sets the speed the car
-        // may carry, from its own grip and brakes; throttle and brake
-        // hold it there; steering puts the car on the arc through the
-        // aim point from its own geometry. The bounded escapes are the
-        // scripted law's.
-        let speed = vstate.forward_speed;
-        // Wall feelers (DSN-66): static geometry around the nose — the
-        // corridor only ever sensed participants.
-        let walls = spatial.as_ref().map_or_else(WallSense::default, |sq| {
-            let filter = SpatialQueryFilter::from_excluded_entities([entity]);
-            let origin = pos.0 + Vec3::Y * FEELER_HEIGHT;
-            let is_static = |e: Entity| bodies.get(e).is_ok_and(|b| b.is_static());
-            sense_walls(fwd, speed, |dir, len| {
-                // Avian's BVH asserts a finite ray origin.
-                if !origin.is_finite() {
-                    return None;
-                }
-                let dir = Dir3::new(dir).ok()?;
-                sq.cast_ray_predicate(origin, dir, len, true, &filter, &is_static)
-                    .map(|hit| (hit.distance, hit.normal))
-            })
-        });
-        let d = &mut *driver;
-        *input = recovery_input(&mut d.recovery, bearing, &tuning).unwrap_or_else(|| {
-            let plan = match (&d.route, cursor) {
-                (Some(route), Some(c)) => plan_speed(route, c, speed, &limits),
-                _ => SpeedPlan {
-                    limit: f32::INFINITY,
-                    demand: 0.0,
-                },
-            };
-            let throttle = bearing_throttle(bearing).min(tuning.throttle_cap);
-            let (throttle, brake) = pace(speed, plan, throttle, d.corner_brake);
-            let aim_dist = (target.x - pos.0.x).hypot(target.z - pos.0.z);
-            let input = VehicleInput {
-                steering: (steer_toward(bearing, aim_dist, speed, &limits) + walls.steer)
-                    .clamp(-1.0, 1.0),
-                throttle,
-                brake,
-                ..default()
-            };
-            let escapes = d.recovery.escapes;
-            watch_stuck(&mut d.recovery, &input, speed, vstate.grounded);
-            // A fresh escape turns toward the open side when the
-            // feelers see one, instead of the blind alternation.
-            if d.recovery.escapes > escapes
-                && let Some(side) = walls.open_side()
-            {
-                d.recovery.recovery_side = side;
-            }
-            // Twice a second of driving, at trace level — the per-car
-            // record behind a stall diagnosis (`RUST_LOG=
-            // mm2_app::opponents=trace`, then filter on `opp=`).
-            if ((d.stats.seconds * 60.0).round() as u32).is_multiple_of(30) {
-                trace!(
-                    opp = d.index,
-                    t = d.stats.seconds,
-                    pos = ?pos.0,
-                    speed,
-                    limit = plan.limit,
-                    demand = plan.demand,
-                    bearing,
-                    steer = input.steering,
-                    throttle = input.throttle,
-                    brake = input.brake,
-                    wall_l = walls.left,
-                    wall_r = walls.right,
-                    next = d.next,
-                    aim = ?target,
-                    "opponent drive"
-                );
-            }
-            input
-        });
-        // Braking answers the narrow corridor only: the committed pass
-        // target may sit outside it while we are alongside, and braking
-        // for it there would stall the overtake it is holding open.
-        if let Some(b) = &narrow {
-            apply_gap_brake(&mut input, b, vstate.forward_speed);
-        }
-        // Rear-end guard (DSN-66): a fellow opponent the authored
-        // `avoidOpponents=0` leaves unsensed is still never driven into
-        // at speed. It commits no pass — the flag keeps deciding
-        // whether the driver manoeuvres around the field — it only
-        // brakes for a closure its own brakes have to answer.
-        let reach = guard_reach(vstate.forward_speed, &driver.limits).min(driver.look_ahead);
-        if let Some(b) = nearest_blocker(entity, pos.0, fwd, reach, &traffic, |t| {
-            t.control == PlayerControl::Ai && !driver.senses(t)
-        }) {
-            apply_rear_end_guard(&mut input, &b, vstate.forward_speed, &driver.limits);
-        }
+        let motion = Motion {
+            position: pos.0,
+            rotation: rot.0,
+            linear_velocity: lin_vel.0,
+            angular_velocity: ang_vel.0,
+            steer_angle: vstate.steer_angle,
+            grounded: vstate.wheels.iter().filter(|w| w.grounded).count() as f32
+                / vstate.wheels.len().max(1) as f32,
+            reversing: vstate.direction == mm2_vehicle::DriveDirection::Reverse,
+        };
+        let neighbours: Vec<Neighbour> = field
+            .iter()
+            .filter(|(e, _)| *e != entity)
+            .map(|(_, n)| *n)
+            .collect();
+        let filter = SpatialQueryFilter::default();
+        let water = water.as_deref();
+        *input = neural.drive(
+            policy,
+            &mut scratch,
+            &motion,
+            &neighbours,
+            d.throttle_cap,
+            |origin, dir, reach| {
+                let sq = spatial.as_ref()?;
+                let unit = Dir3::new(dir).ok()?;
+                let hit = sq.cast_ray_predicate(origin, unit, reach, true, &filter, &|e| {
+                    !cars.contains(e)
+                })?;
+                // Deadly water is no ground to drive on.
+                let point = origin + dir * hit.distance;
+                (!water.is_some_and(|w| w.is_deadly(point))).then_some((hit.distance, hit.normal))
+            },
+        );
     }
 }
 
-/// Centre-to-centre gap (m) the rear-end guard stops short of — a
-/// car length plus a little.
-const GUARD_GAP: f32 = 5.0;
-/// Slack (m) the guard looks past its own stopping distance.
-const GUARD_SLACK: f32 = 15.0;
-/// Brake demand (share of full braking) below which the guard only
-/// lifts off — a closure that gentle resolves itself.
-const GUARD_LIFT: f32 = 0.15;
-/// Brake demand at and above which the guard brakes rather than lifts.
-const GUARD_BRAKE: f32 = 0.3;
-
-/// How far ahead (m) the rear-end guard looks at `speed`: the distance
-/// to stop from it at the planned deceleration, plus the gap and slack.
-pub fn guard_reach(speed: f32, limits: &CarLimits) -> f32 {
-    limits.braking_distance(speed.max(0.0)) + GUARD_GAP + GUARD_SLACK
-}
-
-/// The share of full braking needed to shed the closure on `blocker`
-/// before [`GUARD_GAP`] — `closing² / 2·room` against the car's own
-/// braking limit. Zero when not closing, and zero for a standing
-/// blocker approached at a crawl: there the stuck escape and the wall
-/// feelers do the work, and holding the brake would only pen the car
-/// behind it until the re-anchor fires.
-pub fn rear_end_demand(blocker: &Blocker, speed: f32, limits: &CarLimits) -> f32 {
-    let closing = speed - blocker.speed;
-    if closing <= 0.0 || (blocker.speed < CRAWL_SPEED && closing < FOLLOW_RELEASE) {
-        return 0.0;
-    }
-    let room = (blocker.gap - GUARD_GAP).max(0.5);
-    closing * closing / (2.0 * room) / limits.max_brake_accel
-}
-
-/// Apply the rear-end guard's demand to `input`: lift off from
-/// [`GUARD_LIFT`], brake at the demand from [`GUARD_BRAKE`]. Only ever
-/// adds braking — an input already braking harder keeps its brake.
-pub fn apply_rear_end_guard(
-    input: &mut VehicleInput,
-    blocker: &Blocker,
-    speed: f32,
-    limits: &CarLimits,
-) {
-    let demand = rear_end_demand(blocker, speed, limits);
-    if demand < GUARD_LIFT {
-        return;
-    }
-    input.throttle = 0.0;
-    if demand >= GUARD_BRAKE {
-        input.brake = input.brake.max(demand.min(1.0));
-    }
-}
+/// The size (m: width, height, length) an ambient traffic car is given
+/// as a neighbour — it carries no handling config to read one from.
+const AMBIENT_SIZE: [f32; 3] = [2.0, 1.4, 4.6];

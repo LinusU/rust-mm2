@@ -1768,74 +1768,66 @@ fn run_headless(
                 hard_contacts: field_contacts.map_or(0, |c| c.hard),
                 ..FieldDriving::default()
             };
-            let (opp, opp_done, opp_rec, opp_cu) = world_ecs.iter_entities().fold(
-                (0usize, 0usize, 0usize, 0usize),
-                |(n, d, rec, c), e| {
-                    let Some(driver) = e.get::<opponents::OpponentDriver>() else {
-                        return (n, d, rec, c);
-                    };
-                    // A lesson's lead car (F21-B.19) carries no progress
-                    // and is reported by `lead=`, not as a racer.
-                    let Some(progress) = e.get::<RaceProgress>() else {
-                        return (n, d, rec, c);
-                    };
-                    let progress = Some(progress);
-                    let resolved = progress.and_then(|p| match p.state {
-                        ParticipantState::Finished { .. } => Some('F'),
-                        ParticipantState::TimedOut { .. } => Some('T'),
-                        _ => None,
-                    });
-                    rows.push(OppRow {
-                        index: driver.index,
-                        vehicle: driver.spec.vehicle.as_str(),
-                        cleared: progress.map_or(0, |p| p.cleared_count()),
-                        lap: if ordered {
-                            progress.map(|p| (p.lap + 1).min(r.definition.laps))
-                        } else {
-                            None
-                        },
-                        resolved,
-                        finish_secs: progress.and_then(|p| match p.state {
-                            ParticipantState::Finished { race_ticks, .. } => {
-                                Some(race_ticks as f32 / mm2_game::RACE_TICK_HZ as f32)
-                            }
+            let (opp, opp_done, opp_rec) =
+                world_ecs
+                    .iter_entities()
+                    .fold((0usize, 0usize, 0usize), |(n, d, rec), e| {
+                        let Some(driver) = e.get::<opponents::OpponentDriver>() else {
+                            return (n, d, rec);
+                        };
+                        // A lesson's lead car (F21-B.19) carries no progress
+                        // and is reported by `lead=`, not as a racer.
+                        let Some(progress) = e.get::<RaceProgress>() else {
+                            return (n, d, rec);
+                        };
+                        let progress = Some(progress);
+                        let resolved = progress.and_then(|p| match p.state {
+                            ParticipantState::Finished { .. } => Some('F'),
+                            ParticipantState::TimedOut { .. } => Some('T'),
                             _ => None,
-                        }),
-                        escapes: driver.recovery.escapes
-                            + driver.neural.as_ref().map_or(0, |n| n.unstick.count),
-                        reanchors: driver.reanchors,
-                        stuck: driver.stuck_peak,
-                        route_clears: progress.map_or(0, |p| p.route_clears),
+                        });
+                        rows.push(OppRow {
+                            index: driver.index,
+                            vehicle: driver.spec.vehicle.as_str(),
+                            cleared: progress.map_or(0, |p| p.cleared_count()),
+                            lap: if ordered {
+                                progress.map(|p| (p.lap + 1).min(r.definition.laps))
+                            } else {
+                                None
+                            },
+                            resolved,
+                            finish_secs: progress.and_then(|p| match p.state {
+                                ParticipantState::Finished { race_ticks, .. } => {
+                                    Some(race_ticks as f32 / mm2_game::RACE_TICK_HZ as f32)
+                                }
+                                _ => None,
+                            }),
+                            escapes: driver.neural.as_ref().map_or(0, |n| n.unstick.count),
+                            reanchors: driver.reanchors,
+                            stuck: driver.stuck_peak,
+                            route_clears: progress.map_or(0, |p| p.route_clears),
+                        });
+                        drv.add(
+                            &driver.stats,
+                            e.get::<mm2_game::DamageSignals>()
+                                .map_or(0, |d| d.impact_count),
+                            driver.neural.as_ref().map_or(0, |n| n.unstick.count)
+                                + driver.reanchors,
+                        );
+                        (
+                            n + 1,
+                            d + usize::from(resolved.is_some()),
+                            rec + driver.reanchors as usize,
+                        )
                     });
-                    drv.add(
-                        &driver.stats,
-                        e.get::<mm2_game::DamageSignals>()
-                            .map_or(0, |d| d.impact_count),
-                        driver.recovery.escapes
-                            + driver.neural.as_ref().map_or(0, |n| n.unstick.count)
-                            + driver.reanchors,
-                    );
-                    (
-                        n + 1,
-                        d + usize::from(resolved.is_some()),
-                        rec + driver.reanchors as usize,
-                        c + usize::from(driver.catch_up > 0.0),
-                    )
-                },
-            );
             let opp = if opp > 0 {
                 let rec = if opp_rec > 0 {
                     format!(" opp_rec={opp_rec}")
                 } else {
                     String::new()
                 };
-                let cu = if opp_cu > 0 {
-                    format!(" cu={opp_cu}")
-                } else {
-                    String::new()
-                };
                 format!(
-                    " opp={opp_done}/{opp}{rec}{cu}{}{}",
+                    " opp={opp_done}/{opp}{rec}{}{}",
                     drv.field(),
                     opponent_detail(&mut rows)
                 )

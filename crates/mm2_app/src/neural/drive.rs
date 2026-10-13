@@ -1,17 +1,18 @@
 //! The neural driver inside the game: the trained policies and the
 //! per-car state they are evaluated with.
 //!
-//! [`DrivingPolicies`] holds one network per difficulty, read through
-//! the VFS from the app's own assets (`ai/opponent_amateur.mm2p`,
-//! `ai/opponent_professional.mm2p`) so a mod can replace them like any
-//! other file. [`NeuralState`] rides on each AI car: its guide, where it
+//! [`DrivingPolicies`] holds one network per difficulty. The shipped
+//! pair (`crates/mm2_app/policies/`) is compiled into the binary; a
+//! mod replaces either by providing `ai/opponent_amateur.mm2p` or
+//! `ai/opponent_professional.mm2p` through the VFS, like any other
+//! file. [`NeuralState`] rides on each AI car: its guide, where it
 //! is on it, and the action it is holding.
 //!
 //! The policy decides every [`DECISION_TICKS`] physics steps and holds
 //! its action in between — the cadence it was trained at. Callers run
 //! [`NeuralState::drive`] once per fixed step.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bevy::prelude::*;
 use mm2_assets::Vfs;
@@ -35,10 +36,18 @@ pub const AMATEUR_PATH: &str = "ai/opponent_amateur.mm2p";
 /// Logical VFS path of the Professional policy.
 pub const PROFESSIONAL_PATH: &str = "ai/opponent_professional.mm2p";
 
-/// How far behind its last known arc position (m) a moved car is looked
-/// for on its guide — past the re-anchor's longest walk back.
-const RESEAT_BACK: f32 = 120.0;
+/// The shipped policies, compiled in.
+const BUILT_IN_AMATEUR: &[u8] = include_bytes!("../../policies/opponent_amateur.mm2p");
+const BUILT_IN_PROFESSIONAL: &[u8] = include_bytes!("../../policies/opponent_professional.mm2p");
 
+/// How far behind its last known arc position (m) a moved car is looked
+/// for on its guide — past the re-anchor's longest walk back, and far
+/// enough for a recovery that returns a car to an earlier anchor.
+const RESEAT_BACK: f32 = 400.0;
+
+/// The first distance (m) behind it a moved car is looked for on its
+/// guide, and how near the guide it must then be to have been found.
+const RESEAT_NEAR: f32 = 15.0;
 /// How far behind the point it is heading for (m) a starting car is
 /// looked for on its guide — past the longest authored leg — and how
 /// far beyond it.
@@ -76,38 +85,45 @@ impl DrivingPolicies {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// Read both policies through the VFS. A difficulty whose file is
-    /// missing or stale borrows the other's; `None` when neither loads.
-    pub fn load(vfs: &Vfs) -> Option<Self> {
-        let read = |path: &str| -> Option<Arc<Policy>> {
-            let bytes = vfs.read_logical(path).ok()?;
-            match Self::parse(&bytes) {
-                Ok(policy) => {
-                    info!(
-                        path,
-                        parameters = policy.parameters(),
-                        "driving policy loaded"
-                    );
-                    Some(Arc::new(policy))
-                }
-                Err(e) => {
-                    warn!(path, error = %e, "driving policy rejected");
-                    None
+    /// The shipped pair, compiled into the binary.
+    pub fn built_in() -> &'static Self {
+        static BUILT_IN: OnceLock<DrivingPolicies> = OnceLock::new();
+        BUILT_IN.get_or_init(|| {
+            let parse = |bytes: &[u8]| {
+                Arc::new(Self::parse(bytes).expect("the built-in policy matches this build"))
+            };
+            Self {
+                amateur: parse(BUILT_IN_AMATEUR),
+                professional: parse(BUILT_IN_PROFESSIONAL),
+            }
+        })
+    }
+
+    /// The policies for a session: each difficulty's file through the
+    /// VFS when a mod provides one this build can read, else the
+    /// shipped one. A mod's file trained for another observation layout
+    /// is reported and passed over.
+    pub fn load(vfs: &Vfs) -> Self {
+        let read = |path: &str, built_in: &Arc<Policy>| -> Arc<Policy> {
+            if let Ok(bytes) = vfs.read_logical(path) {
+                match Self::parse(&bytes) {
+                    Ok(policy) => {
+                        info!(
+                            path,
+                            parameters = policy.parameters(),
+                            "driving policy loaded"
+                        );
+                        return Arc::new(policy);
+                    }
+                    Err(e) => warn!(path, error = %e, "driving policy rejected"),
                 }
             }
+            built_in.clone()
         };
-        let amateur = read(AMATEUR_PATH);
-        let professional = read(PROFESSIONAL_PATH);
-        match (amateur, professional) {
-            (Some(amateur), Some(professional)) => Some(Self {
-                amateur,
-                professional,
-            }),
-            (Some(only), None) | (None, Some(only)) => Some(Self {
-                amateur: only.clone(),
-                professional: only,
-            }),
-            (None, None) => None,
+        let built_in = Self::built_in();
+        Self {
+            amateur: read(AMATEUR_PATH, &built_in.amateur),
+            professional: read(PROFESSIONAL_PATH, &built_in.professional),
         }
     }
 
@@ -127,6 +143,13 @@ pub struct NeuralState {
     pub guide: Arc<Guide>,
     /// Its arc position on the guide.
     pub arc: f32,
+    /// Its arc position when it started.
+    start: f32,
+    /// Net metres of guide driven since the start — negative moves
+    /// (reversing, a re-anchor's walk back) included.
+    pub driven: f32,
+    /// Where the car was when `arc` was last taken.
+    last_pos: Vec3,
     profile: CarProfile,
     /// The action being held.
     action: [f32; ACT_DIM],
@@ -141,8 +164,12 @@ impl NeuralState {
     /// heading for the guide's source point `next` — which says which
     /// pass of a street the car is on where the guide runs it twice.
     pub fn new(guide: Arc<Guide>, config: &VehicleConfig, pos: Vec3, next: usize) -> Self {
+        let arc = guide.locate_within(guide.source_arc(next), pos, SEAT_BACK, SEAT_AHEAD);
         Self {
-            arc: guide.locate_within(guide.source_arc(next), pos, SEAT_BACK, SEAT_AHEAD),
+            arc,
+            start: arc,
+            driven: 0.0,
+            last_pos: pos,
             guide,
             profile: CarProfile::of(config),
             action: [0.0; ACT_DIM],
@@ -156,19 +183,46 @@ impl NeuralState {
         (self.profile.half_width, self.profile.half_length)
     }
 
-    /// Follow the car along its guide; returns the metres of guide left
-    /// (`None` on a closed guide).
+    /// The car's progress as an arc position that never wraps: where
+    /// it started plus what it has driven. On a closed guide each lap
+    /// adds the guide's length — the measure a
+    /// [`RouteGateLine`](mm2_game::RouteGateLine) bound from this guide
+    /// counts gates and laps in.
+    pub fn progress(&self) -> f32 {
+        self.start + self.driven
+    }
+
+    /// Follow the car along its guide for one step; returns the metres
+    /// of guide left (`None` on a closed guide). The car's place moves
+    /// only as far as the car did ([`Guide::follow`]).
     pub fn track(&mut self, pos: Vec3) -> Option<f32> {
-        self.arc = self.guide.advance(self.arc, pos);
+        let arc = self
+            .guide
+            .follow(self.arc, pos.distance(self.last_pos), pos);
+        self.driven += self.guide.delta(self.arc, arc);
+        self.arc = arc;
+        self.last_pos = pos;
         self.guide.remaining(self.arc)
     }
 
-    /// Find the car on its guide again after it was moved (a re-anchor
-    /// or reset), and forget the action it was holding.
+    /// Find the car on its guide again after it was moved rather than
+    /// drove — a re-anchor, a recovery from the water — and forget the
+    /// action it was holding. It is looked for only *behind* where it
+    /// was: being moved never puts a car further along its route.
     pub fn reseat(&mut self, pos: Vec3) {
-        self.arc = self
-            .guide
-            .locate_within(self.arc, pos, RESEAT_BACK, RESEAT_BACK);
+        // Nearest first: where a guide runs a street twice, the pass
+        // the car was on is the one just behind it, not the one a lap
+        // of the block earlier that lies just as close.
+        let mut arc = self.arc;
+        for back in [RESEAT_NEAR, RESEAT_NEAR * 4.0, RESEAT_BACK] {
+            arc = self.guide.locate_within(self.arc, pos, back, 0.0);
+            if self.guide.point_at(arc).distance(pos) <= RESEAT_NEAR {
+                break;
+            }
+        }
+        self.driven += self.guide.delta(self.arc, arc);
+        self.arc = arc;
+        self.last_pos = pos;
         self.action = [0.0; ACT_DIM];
         self.hold = 0;
     }
@@ -209,5 +263,27 @@ impl NeuralState {
         }
         self.hold -= 1;
         action_input(&self.action, throttle_cap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_built_in_policies_match_this_builds_layout() {
+        for bytes in [BUILT_IN_AMATEUR, BUILT_IN_PROFESSIONAL] {
+            let policy = DrivingPolicies::parse(bytes).expect("a current policy file");
+            assert_eq!(policy.obs_dim(), OBS_DIM);
+            assert_eq!(policy.act_dim(), ACT_DIM);
+        }
+    }
+
+    #[test]
+    fn a_session_without_policy_files_drives_on_the_built_in_ones() {
+        let policies = DrivingPolicies::load(&Vfs::new());
+        for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
+            assert_eq!(policies.for_difficulty(difficulty).obs_dim(), OBS_DIM);
+        }
     }
 }

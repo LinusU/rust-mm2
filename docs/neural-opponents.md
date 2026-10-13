@@ -23,7 +23,7 @@ designed, not recovered.
 | `mm2_app::neural::env` | The training environment |
 | `crates/mm2_app/examples/mm2_gym.rs` | The environment as a process: serve, benchmark, evaluate, audit |
 | `training/` | The PPO trainer (Python, needed only to train) |
-| `assets/ai/opponent_{amateur,professional}.mm2p` | The shipped policies |
+| `crates/mm2_app/policies/opponent_{amateur,professional}.mm2p` | The shipped policies, compiled into the binary; a mod overrides them at `ai/opponent_*.mm2p` |
 
 ### What the policy is given
 
