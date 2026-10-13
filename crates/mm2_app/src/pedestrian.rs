@@ -25,13 +25,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{
+    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation, SpatialQuery,
+    SpatialQueryFilter,
+};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use mm2_content::PedArchetype;
-use mm2_game::ped::{PED_STATE_FPS, PedAnimator, PedDeform, PedSkin};
+use mm2_game::ped::{PED_STATE_FPS, PedAnimator, PedDeform, PedRig, PedSkin};
 use mm2_game::pedreact::{REACTION_STATES, dive_lateral};
 use mm2_game::{Mm2Vfs, PlayerVehicle, Session, SessionEntity};
 
@@ -165,6 +168,51 @@ pub struct PedShape {
     /// Whether the archetype authors every state a reaction needs
     /// ([`REACTION_STATES`]). One that does not walks on obliviously.
     pub reacts: bool,
+    /// The walker's kinematic body capsule (F19-B.8b), derived once from
+    /// the bind-pose skin bounds. `None` for a degenerate bind pose (a
+    /// flat synthetic fixture), which keeps such a figure collider-free.
+    pub collider: Option<Collider>,
+}
+
+/// The body capsule for `archetype`, derived from its bind-pose skin
+/// bounds (F19-B.8b).
+///
+/// The bind pose is a T-pose: the measured retail figures span
+/// ~1.7–1.9 m along the arms (`x`) but only ~0.4 m fore-aft (`z`), so a
+/// capsule around the whole AABB would be a ~2 m sphere. The walker's
+/// collision body is instead a torso capsule — radius half the body's
+/// fore-aft depth, bounded to a human 0.2–0.35 m and capped at half the
+/// height — spanning the figure from the ground to its head. Arms and
+/// head corners are cosmetic: the point is that a car cannot occupy the
+/// walker's body, not that every skinned vertex is collidable.
+///
+/// `None` when the bind pose is not finite or has no measurable body
+/// (a fixture whose corners all sit on the vertical axis).
+pub fn body_collider(rig: &PedRig, skin: &PedSkin) -> Option<Collider> {
+    let world = rig.world_transforms(&rig.bind_pose());
+    let deform = skin.deform(&world).ok()?;
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for p in &deform.positions {
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return None;
+    }
+    let height = max.y - min.y;
+    let depth = max.z - min.z;
+    if height <= 0.1 || depth <= 0.0 {
+        return None;
+    }
+    let radius = (0.5 * depth).clamp(0.2, 0.35).min(0.5 * height);
+    if !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let centre = (min + max) * 0.5;
+    let a = Vec3::new(centre.x, min.y + radius, centre.z);
+    let b = Vec3::new(centre.x, max.y - radius, centre.z);
+    Some(Collider::capsule_endpoints(radius, a, b))
 }
 
 impl PedShape {
@@ -181,11 +229,13 @@ impl PedShape {
                 .iter()
                 .all(|name| a.states().iter().any(|s| s.name == *name))
         });
+        let collider = body_collider(&archetype.rig, &archetype.skin);
         Self {
             archetype,
             groups,
             walk_speed,
             reacts,
+            collider,
         }
     }
 }
@@ -339,6 +389,24 @@ pub fn spawn_pedestrian(
         meshes: handles,
         in_place: true,
     });
+    if let Some(collider) = &shape.collider {
+        // The walker's body (F19-B.8b): a kinematic capsule on the
+        // pedestrian layer, so a car that catches it is blocked instead
+        // of driving through the figure (DSN-89's designed departure).
+        // The authored walk/dive still writes `Transform` in `Update`;
+        // Avian's transform→position sync carries this body along with
+        // it (the velocity stays zero), so the collider is never a force
+        // on the walker — no knock-down, no run-over.
+        commands.entity(root).insert((
+            RigidBody::Kinematic,
+            collider.clone(),
+            GameLayer::pedestrian(),
+            Position(transform.translation),
+            Rotation(transform.rotation),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+        ));
+    }
     Some(root)
 }
 
@@ -621,5 +689,100 @@ mtxn 4 0
         // (0,0)-(1,0)-(0,1) in the XY plane is counter-clockwise seen
         // from +Z, the authored normal's side.
         assert_eq!(skin.winding_agreement(&d), (2, 2));
+    }
+
+    /// The `MOD` above with body depth: the corners spread on `z`, so
+    /// the bind pose has a torso to measure. Bounds `(0,1,-0.2)` to
+    /// `(1,3,0.2)` — 2 m tall, 0.4 m fore-aft.
+    const SOLID_MOD: &str = "\
+version: 1.09
+verts: 4
+normals: 4
+colors: 1
+tex1s: 1
+tex2s: 0
+tangents: 0
+materials: 2
+adjuncts: 6
+primitives: 2
+matrices: 2
+
+v	0.0	0.0	-0.2
+v	1.0	0.0	0.2
+v	0.0	1.0	-0.2
+v	0.0	2.0	0.2
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+c	1.0	1.0	1.0	1.0
+t1	0.5	0.5
+
+mtl Test1:SKIN {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.4 0.3 0.2
+	diffuse:	0.7 0.6 0.5
+	specular:	0.8 0.7 0.6
+}
+
+mtl Test1:HAIR {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.1 0.0 0.0
+	diffuse:	0.4 0.1 0.1
+	specular:	0.6 0.4 0.4
+}
+
+packet 3 1 1 {
+	adj	0	0	0	0	0	0
+	adj	1	1	0	0	0	0
+	adj	2	2	0	0	0	0
+	tri	0	1	2
+	mtx 0
+}
+
+packet 3 1 1 {
+	adj	0	0	0	0	0	0
+	adj	1	1	0	0	0	0
+	adj	3	3	0	0	0	0
+	tri	0	1	2
+	mtx 0
+}
+
+mtxv 4 0
+mtxn 4 0
+";
+
+    #[test]
+    fn a_solid_bind_pose_derives_a_torso_capsule_from_the_ground_to_the_head() {
+        let rig = PedRig::from_skel(&PedSkel::parse(SKEL).unwrap()).unwrap();
+        let m = PedMod::parse(SOLID_MOD).unwrap();
+        let skin = PedSkin::from_mod(&m, &rig).unwrap();
+        let collider = body_collider(&rig, &skin).expect("a body to measure");
+        let capsule = collider.shape().as_capsule().expect("a capsule");
+        // Radius is half the 0.4 m fore-aft depth, then spans the full
+        // 2 m height, ground (y 1.0) to head (y 3.0).
+        assert!((capsule.radius - 0.2).abs() < 1e-4, "{}", capsule.radius);
+        let (a, b) = (capsule.segment.a, capsule.segment.b);
+        assert!(
+            (a.y - 1.2).abs() < 1e-4 && (b.y - 2.8).abs() < 1e-4,
+            "{a:?} {b:?}"
+        );
+        assert!((a.x - 0.5).abs() < 1e-4 && (a.z).abs() < 1e-4, "{a:?}");
+        assert!((b.x - 0.5).abs() < 1e-4 && (b.z).abs() < 1e-4, "{b:?}");
+    }
+
+    #[test]
+    fn a_flat_bind_pose_has_no_body_to_collide() {
+        let (skin, rig) = skin();
+        assert!(
+            body_collider(&rig, &skin).is_none(),
+            "corners on the vertical axis: no torso"
+        );
     }
 }

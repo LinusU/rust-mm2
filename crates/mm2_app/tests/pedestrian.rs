@@ -79,6 +79,131 @@ mtxv 1 1 1
 mtxn 1 1 1
 ";
 
+/// The same `.mod` with body depth (F19-B.8b): the corners spread on `z`,
+/// so the bind pose spans `(0,0,-0.2)` to `(0,2.0,0.3)` and every walker
+/// made from it carries a body capsule.
+pub(crate) const SOLID_MOD: &str = "\
+version: 1.09
+verts: 3
+normals: 3
+colors: 1
+tex1s: 1
+tex2s: 0
+tangents: 0
+materials: 2
+adjuncts: 3
+primitives: 2
+matrices: 3
+
+v	0.0	-1.0	-0.2
+v	0.0	0.5	-0.2
+v	0.0	-1.0	-0.2
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+c	1.0	1.0	1.0	1.0
+t1	0.5	0.5
+
+mtl Test1:SKIN {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.4 0.3 0.2
+	diffuse:	0.7 0.6 0.5
+	specular:	0.8 0.7 0.6
+}
+
+mtl Test1:HAIR {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.1 0.0 0.0
+	diffuse:	0.4 0.1 0.1
+	specular:	0.6 0.4 0.4
+}
+
+packet 2 1 2 {
+	adj	0	0	0	0	0	0
+	adj	1	1	0	0	0	1
+	tri	0	1	0
+	mtx 0 1
+}
+
+packet 1 1 1 {
+	adj	2	2	0	0	0	0
+	tri	0	0	0
+	mtx 2
+}
+
+mtxv 1 1 1
+mtxn 1 1 1
+";
+
+/// The same `.mod` flattened (F19-B.8b): every corner rides the root
+/// bone, which sits on the vertical axis, so the bind pose has no
+/// fore-aft depth and the figure gets no body capsule. The body-less
+/// contrast arm for the contact test.
+pub(crate) const FLAT_MOD: &str = "\
+version: 1.09
+verts: 3
+normals: 3
+colors: 1
+tex1s: 1
+tex2s: 0
+tangents: 0
+materials: 2
+adjuncts: 3
+primitives: 2
+matrices: 3
+
+v	0.0	-1.0	0.0
+v	0.0	0.5	0.0
+v	0.0	-1.0	0.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+c	1.0	1.0	1.0	1.0
+t1	0.5	0.5
+
+mtl Test1:SKIN {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.4 0.3 0.2
+	diffuse:	0.7 0.6 0.5
+	specular:	0.8 0.7 0.6
+}
+
+mtl Test1:HAIR {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.1 0.0 0.0
+	diffuse:	0.4 0.1 0.1
+	specular:	0.6 0.4 0.4
+}
+
+packet 2 1 2 {
+	adj	0	0	0	0	0	0
+	adj	1	1	0	0	0	0
+	tri	0	1	0
+	mtx 0 0
+}
+
+packet 1 1 1 {
+	adj	2	2	0	0	0	0
+	tri	0	0	0
+	mtx 0
+}
+
+mtxv 3 0 0
+mtxn 3 0 0
+";
+
 /// Four frames; bone `a`'s Z rotation grows with the frame so a posed
 /// vertex bound to it moves as the clip plays.
 fn clip() -> Vec<u8> {
@@ -132,12 +257,52 @@ GROUND_STANDR,xstand,1,4,0,0,0,0,STAND\n\
 WALK_RDIVE,xstand,1,4,0,0,0,-2.188,RDIVE_GROUNDR\n\
 WALK_LDIVE,xstand,1,4,0,0,0,2.224,LDIVE_GROUNDL\n";
 
+/// [`REACTIVE_CSV`] with a *stunted* dive (F19-B.8b): the same authored
+/// state machine, but every dive leg travels 0.2 m instead of the
+/// authored ~2.2 m. The walker still stops, faces, dives and recovers —
+/// the authored avoidance runs — but cannot clear a car's line, so a
+/// point-blank car reaches its body. A fixture for observing the contact
+/// (F19-B.8b), not a proposal to change the dive.
+pub(crate) const CONTACT_CSV: &str = "# header\n\
+STAND,xstand,1,4,0,0,0,0,STAND\n\
+STAND_WALK,xstand,1,2,0,0.1,0,0,WALK\n\
+WALK,xwalk,1,4,0,1,0,0,WALK\n\
+WALK_ANTIC,xstand,1,2,0,0,0,0,ANTIC\n\
+ANTIC,xstand,1,4,0,0,0,0,ANTIC\n\
+ANTIC_WALK,xstand,1,2,0,0,0,0,WALK\n\
+ANTIC_LDIVE,xstand,1,4,0,0,0,0.2,LDIVE_GROUNDL\n\
+LDIVE_GROUNDL,xstand,1,4,0,0,0.2,0.2,GROUND_STANDL\n\
+GROUND_STANDL,xstand,1,4,0,0,0,0,STAND\n\
+ANTIC_RDIVE,xstand,1,4,0,0,0,-0.2,RDIVE_GROUNDR\n\
+RDIVE_GROUNDR,xstand,1,4,0,0,-0.2,-0.2,GROUND_STANDR\n\
+GROUND_STANDR,xstand,1,4,0,0,0,0,STAND\n\
+WALK_RDIVE,xstand,1,4,0,0,0,-0.2,RDIVE_GROUNDR\n\
+WALK_LDIVE,xstand,1,4,0,0,0,0.2,LDIVE_GROUNDL\n";
+
 pub(crate) fn install() -> tempfile::TempDir {
     install_with(CSV)
 }
 
 /// An install whose one archetype authors `csv` as its state model.
 pub(crate) fn install_with(csv: &str) -> tempfile::TempDir {
+    install_mod(csv, MOD)
+}
+
+/// An install whose one archetype is a *solid* figure: its bind pose has
+/// body depth, so [`mm2_app::pedestrian::body_collider`] gives it a body
+/// capsule (F19-B.8b).
+pub(crate) fn install_solid(csv: &str) -> tempfile::TempDir {
+    install_mod(csv, SOLID_MOD)
+}
+
+/// An install whose one archetype is a *flat* figure: its bind pose lies
+/// on the vertical axis, so [`mm2_app::pedestrian::body_collider`] gives
+/// it no body capsule (F19-B.8b's body-less contrast).
+pub(crate) fn install_flat(csv: &str) -> tempfile::TempDir {
+    install_mod(csv, FLAT_MOD)
+}
+
+fn install_mod(csv: &str, mod_text: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     let put = |name: &str, bytes: &[u8]| {
@@ -147,7 +312,7 @@ pub(crate) fn install_with(csv: &str) -> tempfile::TempDir {
     };
     put("anim/pedmodel_man.skel", SKEL.as_bytes());
     put("anim/pedmodel_man.csv", csv.as_bytes());
-    put("anim/pedmodel_man.mod", MOD.as_bytes());
+    put("anim/pedmodel_man.mod", mod_text.as_bytes());
     put("anim/pedmodel_man.shaders", &shaders());
     put("anim/xstand.anim", &clip());
     put("anim/xwalk.anim", &clip());

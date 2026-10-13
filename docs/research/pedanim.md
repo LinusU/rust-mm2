@@ -441,17 +441,37 @@ walker side: nothing in the code reads a contact.
   overlap. What is still not shown is the *response*: there is no
   walker-side state for being struck, no hit/splat/score string and no
   animation change, so a contact does not knock the walker down in the
-  retail code — only the car reacts. Open: OWNER play observation (drive
-  into a walker in a Cruise city and describe blocking, knock-down, sound,
-  score). The port's no-collider policy (DSN-89) is a designed departure;
-  follow-up implementation task #1378 bounds the fix by F19 req 4.
+  retail code — only the car reacts (`0x55b154`: `+0x153c` = 2.0 vs
+  1.0). Open: OWNER play observation (drive into a walker in a Cruise
+  city and describe blocking, knock-down, sound, score).
+
+**The port now runs the contact (F19-B.8b, 2026-10-13).** Each walker
+gets one kinematic body — a torso capsule from its bind-pose skin
+bounds (radius half the fore-aft depth, bounded 0.2–0.35 m; the T-pose's
+~1.9 m arm span is left to the cosmetic mesh) — on a `Pedestrian`
+collision layer that meets only the default layer the cars ride on, not
+the static world, the scenery movers or other walkers. The authored
+walk/dive still writes the walker's `Transform` each `Update`, and
+Avian's transform→position sync carries the body with it at zero
+velocity, so the body is never a force on the car and the car can never
+move the walker: a car that catches a walker is blocked at the body
+(bounded, no interpenetration) and the walker plays only the authored
+stop/look/dive chain — no struck state, animation, score or sound (F19
+req 4, PED-2). `mm2_app`'s `tests/crowd.rs`
+(`a_car_catching_a_walker_contacts_its_body_and_its_authored_avoidance_still_runs`)
+drives a real dynamic car into a walker and contrasts it with a body-less
+figure: the car comes to rest one chassis (2.2 m) and one torso radius
+(0.25 m) short of the walker with the body, and drives straight through
+without it. The car-side response field `+0x153c` (2.0 vs 1.0,
+`0x55b154`) is not remapped — vehicle feel is owner-owned — and is
+recorded here rather than implemented.
 
 Conclusion: no walker-side reaction to a contact is evidenced, but the
 car-side broad phase does not exclude walkers and the walker's narrow-phase
 bounds guard resolves non-null (above), so retail cars do collide with
-pedestrians when the shapes overlap. The no-collider policy (DSN-89) is a
-designed departure, pending implementation per F19 req 4 (#1378) and the
-open play observation.
+pedestrians when the shapes overlap. The port implements that as a
+designed bounded contact (DSN-89, F19-B.8b): the car is blocked, the
+walker is not moved and no walker-side hit state exists, per F19 req 4.
 
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
@@ -461,8 +481,9 @@ The windowed app and the headless evidence path (`--headless`, the
 resolves from the player's pick, else the event's authored `Peds` dial,
 else the session default (0.5 → 24 walkers under the 48-walker cap);
 the draw stream is seeded from the session seed, so a restart with the
-same seed fields the same crowd (F19-AC06). There is still no
-collider — a walker's whole response to a car is the authored
+same seed fields the same crowd (F19-AC06). Each walker's body is now a
+kinematic torso capsule (F19-B.8b) that blocks a car but is never moved
+by one; the walker's own response to a car is still only the authored
 stop/look/dive chain.
 
 Measured on retail (fingerprint `e91e6cd4b2ae30d9`), 3600 frames

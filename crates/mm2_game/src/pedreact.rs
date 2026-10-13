@@ -27,10 +27,14 @@
 //! so a missing state or a threat that never clears cannot wedge a
 //! walker (F19-AC04 "terminate recovery").
 //!
-//! A walker is never *hit* by this model: there is no collider, so the
-//! reaction is the whole response to a car (F19 req 4: "Do not turn the
-//! game into pedestrian run-over simulation"). A car that gives a walker
-//! less time than the dive needs simply drives through the figure.
+//! This model has no notion of a body: a car that gives a walker less
+//! time than the dive needs does not change the reaction. The app does
+//! give each walker a kinematic body (F19-B.8b, `mm2_app::pedestrian`,
+//! `GameLayer::Pedestrian`), so a car that catches one is blocked at the
+//! body instead of driving through the figure — but the walker is never
+//! moved or "hit" by it, and the reaction above stays the whole
+//! walker-side response (F19 req 4: "Do not turn the game into
+//! pedestrian run-over simulation").
 //!
 //! Everything here is pure: the app's system feeds it positions and the
 //! animator's state and applies the [`Order`] it returns.

@@ -13,13 +13,16 @@
 //! timed bridges and the train moved) until they were kept apart.
 //!
 //! Only those pairs are separated: [`GameLayer::World`] is the static
-//! city geometry (ground, room colliders, prop colliders) and
+//! city geometry (ground, room colliders, prop colliders),
 //! [`GameLayer::Scenery`] is the movers, which interact with everything
-//! *except* `World` and each other. Vehicles, bangers and traffic stay on the default
-//! layer, so the player still collides with the train and the ground,
-//! ambient traffic still strikes parked cars, and a mover still shoves a
-//! dynamic prop. Spatial queries (wheel rays, the camera) default to
-//! every layer, so they still see the world.
+//! *except* `World` and each other, and [`GameLayer::Pedestrian`] is the
+//! walkers, which interact with the default layer (the cars) alone.
+//! Vehicles, bangers and traffic stay on the default layer, so the
+//! player still collides with the train and the ground, ambient traffic
+//! still strikes parked cars, a mover still shoves a dynamic prop, and a
+//! car is now blocked by a walker it catches (F19-B.8b). Spatial queries
+//! (wheel rays, the camera) default to every layer, so they still see
+//! the world.
 
 use avian3d::prelude::*;
 
@@ -33,6 +36,8 @@ pub enum GameLayer {
     World,
     /// Kinematic scenery movers: trains, ferries, sailboats, drawbridges.
     Scenery,
+    /// Kinematic pedestrians (F19-B.8b): each walker's body capsule.
+    Pedestrian,
 }
 
 impl GameLayer {
@@ -50,6 +55,15 @@ impl GameLayer {
             GameLayer::Scenery,
             !LayerMask::from([GameLayer::World, GameLayer::Scenery]),
         )
+    }
+
+    /// Layers for a kinematic pedestrian body: a `Pedestrian` member
+    /// that collides with the default layer (vehicles and props) and
+    /// nothing else. Static `World` is left out on purpose — a walker
+    /// stands on the sidewalk without needing a kinematic-vs-trimesh
+    /// pair, and `Scenery` movers do not strike walkers.
+    pub fn pedestrian() -> CollisionLayers {
+        CollisionLayers::new(GameLayer::Pedestrian, GameLayer::Default)
     }
 }
 
@@ -79,5 +93,27 @@ mod tests {
             "a mover still hits the player"
         );
         assert!(anything.interacts_with(anything));
+    }
+
+    #[test]
+    fn a_pedestrian_contacts_the_cars_and_nothing_static() {
+        let pedestrian = GameLayer::pedestrian();
+        let car = CollisionLayers::default();
+        assert!(
+            pedestrian.interacts_with(car) && car.interacts_with(pedestrian),
+            "a car is blocked by a walker (F19-B.8b)"
+        );
+        assert!(
+            !pedestrian.interacts_with(GameLayer::world()),
+            "no kinematic-vs-static-trimesh pair under every walker"
+        );
+        assert!(
+            !pedestrian.interacts_with(GameLayer::scenery()),
+            "movers do not strike walkers"
+        );
+        assert!(
+            !pedestrian.interacts_with(pedestrian),
+            "walkers do not collide with one another"
+        );
     }
 }

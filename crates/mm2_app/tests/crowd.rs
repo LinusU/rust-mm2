@@ -7,13 +7,14 @@
 use std::path::Path;
 use std::time::Duration;
 
-use avian3d::prelude::{LinearVelocity, Position};
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::crowd::{
     PedCrowd, PedDensity, PedReact, PedWalk, maintain_pedestrians, react_pedestrians,
     walk_pedestrians,
 };
+use mm2_app::layers::GameLayer;
 use mm2_app::pedestrian::{PedActor, animate_pedestrians};
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -23,8 +24,11 @@ use mm2_game::{
 
 use mm2_game::pedreact::Phase;
 use mm2_vehicle::vehicle::Vehicle;
+use mm2_vehicle::{VehicleConfig, vehicle_bundle};
 
-use crate::pedestrian::{REACTIVE_CSV, install, install_with};
+use crate::pedestrian::{
+    CONTACT_CSV, REACTIVE_CSV, install, install_flat, install_solid, install_with,
+};
 
 fn push_v3(d: &mut Vec<u8>, v: [f32; 3]) {
     for f in v {
@@ -170,6 +174,57 @@ fn app_as(dir: &Path, seed: u64, density: Option<f32>, authority: SessionAuthori
             control: PlayerControl::Local,
         },
         Position(Vec3::ZERO),
+    ));
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// The crowd app with physics live (F19-B.8b), so a real dynamic car and
+/// a walker's kinematic body actually contact. Everything the plain
+/// [`app`] runs, plus the default Avian plugins and a static ground the
+/// car can drive on; the walker's body ignores the ground (the
+/// `Pedestrian` layer does not meet `World`), so no kinematic-vs-trimesh
+/// pair is created under every figure.
+fn physics_app(dir: &Path, seed: u64, density: f32) -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(TransformPlugin)
+        .init_asset::<StandardMaterial>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .insert_resource(playing(seed, SessionAuthority::Local))
+        .insert_resource(mount(dir))
+        .insert_resource(PedDensity(density))
+        .add_message::<mm2_app::audio::PedScream>()
+        .add_systems(
+            Update,
+            (
+                despawn_session_entities
+                    .run_if(|s: Res<Session>| matches!(s.phase(), SessionPhase::Unloading)),
+                maintain_pedestrians,
+                react_pedestrians,
+                walk_pedestrians,
+                animate_pedestrians,
+            )
+                .chain(),
+        );
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(0),
+            control: PlayerControl::Local,
+        },
+        Position(Vec3::ZERO),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(200.0, 1.0, 200.0),
+        GameLayer::world(),
+        Transform::from_xyz(0.0, -0.5, 0.0),
     ));
     app.finish();
     app.cleanup();
@@ -429,6 +484,27 @@ fn step_car(app: &mut App, car: Entity) {
     e.get_mut::<Position>().unwrap().0 += v * dt;
 }
 
+/// A real dynamic car (the default chassis) placed for Avian to
+/// integrate: the production bundle plus a `Transform` (for rendering
+/// and propagated bounds) and a `Position`. The initial velocity is set
+/// through a follow-up insert because the bundle already carries
+/// `LinearVelocity::ZERO`.
+fn spawn_physics_car(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&VehicleConfig::default()),
+            Transform::from_translation(at),
+            Position(at),
+            Rotation(Quat::IDENTITY),
+        ))
+        .id();
+    app.world_mut()
+        .entity_mut(car)
+        .insert(LinearVelocity(velocity));
+    car
+}
+
 fn first_walker(app: &mut App) -> Entity {
     let mut q = app.world_mut().query_filtered::<Entity, With<PedWalk>>();
     q.iter(app.world()).min().unwrap()
@@ -445,6 +521,66 @@ fn phase(app: &App, walker: Entity) -> Phase {
 
 fn at(app: &App, walker: Entity) -> Transform {
     *app.world().entity(walker).get::<Transform>().unwrap()
+}
+
+/// What one drive-at-a-walker run observed (F19-B.8b).
+#[derive(Debug)]
+struct Approach {
+    /// Closest the car's centre came to the walker's, horizontally.
+    min_gap: f32,
+    /// The car's end z minus the walker's start z: how far past the
+    /// walker's line the car got.
+    car_progress: f32,
+    /// Greatest lateral offset the walker reached from where it started.
+    lateral: f32,
+    /// Whether the walker stayed on the ground the whole run.
+    grounded: bool,
+    /// Whether every sampled position stayed finite.
+    finite: bool,
+    /// Whether the walker ever left its curve (the authored avoidance ran).
+    reacted: bool,
+    dives: u64,
+}
+
+/// Drive a real dynamic car straight at the first walker along its
+/// sidewalk line — from 6 m back at 15 m/s, the same shape as the
+/// existing hand-stepped car tests — for 5 s and report the closest
+/// approach and the walker's response.
+fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
+    let mut app = physics_app(dir, seed, 0.1);
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_physics_car(
+        &mut app,
+        Vec3::new(start.x, 0.3, start.z - 6.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let mut r = Approach {
+        min_gap: f32::INFINITY,
+        car_progress: f32::NEG_INFINITY,
+        lateral: 0.0,
+        grounded: true,
+        finite: true,
+        reacted: false,
+        dives: 0,
+    };
+    for _ in 0..300 {
+        app.update();
+        let now = at(&app, walker).translation;
+        let car_pos = app.world().entity(car).get::<Position>().unwrap().0;
+        r.min_gap = r
+            .min_gap
+            .min(Vec3::new(car_pos.x - now.x, 0.0, car_pos.z - now.z).length());
+        r.car_progress = r.car_progress.max(car_pos.z - start.z);
+        r.lateral = r.lateral.max((now.x - start.x).abs());
+        r.grounded &= now.y.abs() < 0.1;
+        r.finite &= now.is_finite() && car_pos.is_finite();
+        r.reacted |= phase(&app, walker) != Phase::Walking;
+    }
+    let crowd = app.world().resource::<PedCrowd>();
+    r.dives = crowd.dives;
+    r
 }
 
 #[test]
@@ -788,6 +924,59 @@ fn two_cars_closing_on_one_walker_from_both_ends_still_let_it_dive_and_walk_back
     assert!((at(&app, walker).translation.x - start.x).abs() < 0.3);
     let found = walkers(&mut app);
     assert_eq!(actors(&mut app), found.len());
+}
+
+/// F19-B.8b: the retail narrow phase is live — a car that catches a
+/// walker contacts its body capsule instead of driving through the
+/// figure, while the walker's authored avoidance still runs. The
+/// documented deterministic scenario: seed 7, density 0.1, the
+/// stunted-dive archetype of [`crate::pedestrian::CONTACT_CSV`], and a
+/// real dynamic default car released 6 m behind the first walker at
+/// 15 m/s (the same shape as the hand-stepped car tests above). The car
+/// is stopped at the body; with the body-less figure the identical
+/// release drives straight through, which is what proves the block is
+/// the collider and not the reaction.
+#[test]
+fn a_car_catching_a_walker_contacts_its_body_and_its_authored_avoidance_still_runs() {
+    let solid = install_solid(CONTACT_CSV);
+    let blocked = drive_at_first_walker(solid.path(), 7);
+    let flat = install_flat(CONTACT_CSV);
+    let through = drive_at_first_walker(flat.path(), 7);
+
+    assert!(
+        blocked.finite && blocked.grounded,
+        "no run-over: {blocked:?}"
+    );
+    assert!(
+        blocked.reacted && blocked.dives >= 1,
+        "the walker's authored avoidance ran: {blocked:?}"
+    );
+    assert!(through.reacted, "the contrast arm reacts too: {through:?}");
+    assert!(
+        blocked.lateral < 1.0,
+        "the walker stays within its authored dive envelope: {blocked:?}"
+    );
+    // The car's centre comes to rest one chassis (2.2 m) and one torso
+    // radius (0.25 m) short of the walker — the contact surface — not
+    // through it.
+    assert!(
+        (2.0..3.0).contains(&blocked.min_gap),
+        "the car stopped at the walker's body: {blocked:?}"
+    );
+    assert!(
+        blocked.car_progress < 0.0,
+        "the body kept the car behind the walker's line: {blocked:?}"
+    );
+    // The identical release through a body-less figure interpenetrates
+    // and drives on, so the block is the collider, not the reaction.
+    assert!(
+        through.min_gap < 0.5,
+        "without a body the same release passes through: {through:?}"
+    );
+    assert!(
+        through.car_progress > 10.0,
+        "and the car keeps its speed: {through:?}"
+    );
 }
 
 /// F19-B.5: the crowd is cosmetic, so a `Remote` client fields it too.

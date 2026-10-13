@@ -35,17 +35,21 @@
 //!   a car heading for it ([`mm2_game::pedreact`]): it stops and faces
 //!   the car in the authored `ANTIC` state, dives clear through the
 //!   authored `*_DIVE` chain when contact is imminent, then walks back
-//!   to its curve. There is still no collider — a car that gives a
-//!   walker too little time drives through it.
+//!   to its curve. Its body is a kinematic torso capsule (F19-B.8b,
+//!   [`crate::pedestrian::body_collider`]) on the `Pedestrian` layer, so
+//!   a car that catches
+//!   it is blocked at the body instead of driving through the figure —
+//!   the walker is never moved by the car and gains no struck state,
+//!   animation, score or sound (F19 req 4).
 //!
 //! - **Networked sessions (F19-B.5).** The crowd is cosmetic — no
-//!   collider, no score, no rule reads it — so no process is its
+//!   score, no rule reads it — so no process is its
 //!   authority: the host and every `Remote` client field their own from
 //!   the same density and seed, each around the players that process
 //!   holds (a client's copies of remote cars included), and nothing
 //!   about it travels on the wire. Two processes therefore see
 //!   different walkers; that is a designed trade (DSN-90) for keeping
-//!   the snapshot stream free of a population nobody can collide with.
+//!   the snapshot stream free of a population no rule reads.
 //!
 //! Not done here, deliberately: crossings (UNK-42), the original's
 //! sensing rule (UNK-43), and pedestrian audio.
