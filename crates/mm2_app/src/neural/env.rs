@@ -119,6 +119,16 @@ pub struct Rewards {
     pub steer_change: f32,
     /// For an episode that ends in a wreck, a stall or off the route.
     pub failure: f32,
+    /// Per m/s² of cornering beyond [`Rewards::lateral_free`], each
+    /// decision — what makes a cautious driver. 0 leaves cornering to
+    /// the tyres.
+    pub lateral: f32,
+    /// Lateral acceleration (m/s²) a driver may use for free.
+    pub lateral_free: f32,
+    /// Per m/s of speed beyond [`Rewards::speed_free`], each decision.
+    pub speed: f32,
+    /// Speed (m/s) a driver may carry for free.
+    pub speed_free: f32,
 }
 
 impl Default for Rewards {
@@ -129,6 +139,10 @@ impl Default for Rewards {
             impact_free: 1.0,
             steer_change: 0.01,
             failure: -2.0,
+            lateral: 0.0,
+            lateral_free: 0.0,
+            speed: 0.0,
+            speed_free: 0.0,
         }
     }
 }
@@ -255,6 +269,11 @@ pub struct Episode {
     pub car: u32,
     /// Speed lost to impacts (m/s, summed).
     pub impacts: f32,
+    /// Hardest sustained cornering (m/s², smoothed over about a
+    /// quarter second).
+    pub lateral: f32,
+    /// Highest speed (m/s).
+    pub top_speed: f32,
     /// Arc position on the line where it ended.
     pub arc: f32,
     /// World position where it ended.
@@ -320,6 +339,10 @@ struct Slot {
     steps: u32,
     ret: f32,
     impacts: f32,
+    /// Smoothed lateral acceleration (m/s²), its peak, and the top speed.
+    lateral: f32,
+    lateral_peak: f32,
+    top_speed: f32,
     last_action: [f32; ACT_DIM],
     /// Horizontal velocity after the previous physics step.
     last_velocity: Vec3,
@@ -504,8 +527,7 @@ fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>, seed: u64) -> Result<Co
                 };
                 let (pos, yaw) =
                     opponents::spawn_pose(&definition, i, spec, player_pos, player_yaw);
-                let driven =
-                    opponents::driving_route(route, Some(&nav), &definition.checkpoints, pos, yaw);
+                let driven = opponents::driving_route(route, Some(&nav), &[], pos, yaw);
                 let Some(guide) = Guide::from_route(&driven) else {
                     continue;
                 };
@@ -965,6 +987,9 @@ impl DrivingEnv {
             steps: 0,
             ret: 0.0,
             impacts: 0.0,
+            lateral: 0.0,
+            lateral_peak: 0.0,
+            top_speed: 0.0,
             last_action: [0.0; ACT_DIM],
             last_velocity: Vec3::ZERO,
             motion: Motion {
@@ -1047,6 +1072,9 @@ impl DrivingEnv {
             steps: 0,
             ret: 0.0,
             impacts: 0.0,
+            lateral: 0.0,
+            lateral_peak: 0.0,
+            top_speed: 0.0,
             last_action: [0.0; ACT_DIM],
             last_velocity: Vec3::new(velocity.x, 0.0, velocity.z),
             motion: Motion {
@@ -1282,8 +1310,21 @@ impl DrivingEnv {
             });
             let mut end = None;
             let mut progress = 0.0;
+            let (mut cornering, mut speed) = (0.0, 0.0);
             if let (Some(motion), true) = (motion, finite) {
                 slot.motion = motion;
+                // Cornering as speed × yaw rate, on the ground only — a
+                // car spinning through the air is not cornering.
+                let fwd = motion.rotation * Vec3::NEG_Z;
+                speed = motion.linear_velocity.dot(fwd).abs();
+                cornering = if motion.grounded > 0.0 {
+                    (speed * motion.angular_velocity.y).abs()
+                } else {
+                    0.0
+                };
+                slot.lateral += 0.2 * (cornering - slot.lateral);
+                slot.lateral_peak = slot.lateral_peak.max(slot.lateral);
+                slot.top_speed = slot.top_speed.max(speed);
                 let s = slot.guide.advance(slot.s, motion.position);
                 progress = slot.guide.delta(slot.s, s);
                 slot.s = s;
@@ -1304,7 +1345,12 @@ impl DrivingEnv {
                         .is_some_and(|w| w.is_deadly(motion.position))
                 {
                     end = Some(End::Lost);
-                } else if off.x.hypot(off.z) > OFF_ROUTE || off.y.abs() > OFF_ROUTE_HEIGHT {
+                } else if off.x.hypot(off.z) > OFF_ROUTE
+                    // A car in the air over its line is jumping, not
+                    // lost: a San Francisco crest at speed puts one a
+                    // long way above the road.
+                    || (off.y.abs() > OFF_ROUTE_HEIGHT && (off.y < 0.0 || motion.grounded > 0.0))
+                {
                     end = Some(End::OffRoute);
                 } else if slot.upended as f32 > UPENDED_SECONDS * HZ as f32 {
                     end = Some(End::Upended);
@@ -1332,7 +1378,9 @@ impl DrivingEnv {
             }
             let mut reward = rewards.progress * progress
                 - rewards.impact * impact[i]
-                - rewards.steer_change * steer_change[i] * steer_change[i];
+                - rewards.steer_change * steer_change[i] * steer_change[i]
+                - rewards.lateral * (cornering - rewards.lateral_free).max(0.0)
+                - rewards.speed * (speed - rewards.speed_free).max(0.0);
             if end.is_some_and(|e| !e.is_truncation()) {
                 reward += rewards.failure;
             }
@@ -1360,6 +1408,8 @@ impl DrivingEnv {
                 line: slot.line as u32,
                 car: slot.car as u32,
                 impacts: slot.impacts,
+                lateral: slot.lateral_peak,
+                top_speed: slot.top_speed,
                 arc: slot.s,
                 position: slot.motion.position,
             });
@@ -1527,6 +1577,42 @@ impl DrivingEnv {
             s += step;
         }
         found
+    }
+
+    /// Heights of whatever a car could stand on or run into over a
+    /// square of the world: `cells × cells` samples `step` metres apart
+    /// centred on `centre`, each the height of the first non-vehicle
+    /// surface below `centre.y + above`, or NaN where there is none.
+    /// Row-major from the low-X, low-Z corner. For drawing a trouble
+    /// spot from above.
+    pub fn height_map(&mut self, centre: Vec3, step: f32, cells: usize, above: f32) -> Vec<f32> {
+        let mut out = vec![f32::NAN; cells * cells];
+        let Ok((spatial, _, _, vehicles)) = self.probe.get(self.app.world()) else {
+            return out;
+        };
+        let filter = SpatialQueryFilter::default();
+        let half = (cells as f32 - 1.0) * 0.5 * step;
+        let top = centre.y + above;
+        for row in 0..cells {
+            for col in 0..cells {
+                let from = Vec3::new(
+                    centre.x - half + col as f32 * step,
+                    top,
+                    centre.z - half + row as f32 * step,
+                );
+                if let Some(hit) = spatial.cast_ray_predicate(
+                    from,
+                    Dir3::NEG_Y,
+                    above + 60.0,
+                    false,
+                    &filter,
+                    &|e| !vehicles.contains(e),
+                ) {
+                    out[row * cells + col] = top - hit.distance;
+                }
+            }
+        }
+        out
     }
 
     /// Rigid bodies in the world as (dynamic, kinematic, static,

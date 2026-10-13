@@ -370,6 +370,8 @@ def main() -> None:
             # Mean speed over whole episodes, standstills included (m/s at 20 Hz).
             "speed": metres / decisions * 20.0,
             "impact_per_km": sum(e.impacts for e in recent) / max(1.0, metres) * 1000.0,
+            "lateral": float(np.mean([e.lateral for e in recent])) if recent else 0.0,
+            "top_speed": float(np.mean([e.top_speed for e in recent])) if recent else 0.0,
             **{f"end_{k}": ends.get(k, 0) / total for k in ENDS},
             "kl": kl,
             "clipped": clipped,

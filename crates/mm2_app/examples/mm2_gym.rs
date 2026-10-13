@@ -36,8 +36,9 @@
 //! short), a `u32` count and that many final observations (one per
 //! flag-2 agent, in agent order), then a `u32` count and that many
 //! episode records (`u32` end, `u32` steps, `f32` metres, `f32` return,
-//! `u32` line, `u32` car, `f32` impacts, `f32` arc position and three
-//! `f32` world coordinates of where it ended).
+//! `u32` line, `u32` car, `f32` impacts, `f32` peak cornering, `f32`
+//! top speed, `f32` arc position and three `f32` world coordinates of
+//! where it ended).
 
 use std::io::{self, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ use mm2_app::neural::observe::{ACT_DIM, CAR_DIM, MOTION_DIM, OBS_DIM, OBS_VERSIO
 use mm2_app::neural::policy::{Policy, Scratch};
 use mm2_assets::{InstallMount, Vfs, mount_install};
 
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
 
 #[derive(Parser)]
 #[command(about = "Training environment for the neural opponent driver")]
@@ -98,6 +99,23 @@ enum Mode {
     /// Walk every line of the city's events and print where each cannot
     /// be driven as drawn — through a wall, over a void, into water.
     Audit,
+    /// Print a height map of a square of the event's world and the
+    /// lines crossing it, as JSON for `training/mm2rl/plot.py`.
+    Map {
+        /// Centre `x,y,z`.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        at: Vec<f32>,
+        /// Side of the square (m).
+        #[arg(long, default_value_t = 160.0)]
+        size: f32,
+        /// Sample spacing (m).
+        #[arg(long, default_value_t = 1.0)]
+        step: f32,
+        /// Sample from this far above the centre (m): low enough to
+        /// look under a bridge deck, high enough to clear the road.
+        #[arg(long, default_value_t = 8.0)]
+        above: f32,
+    },
     /// Print the points of the event's lines around an arc position, as
     /// `--cam`-ready coordinates — for looking at a trouble spot.
     Where {
@@ -177,6 +195,46 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!(mm2_app::neural::env::race_events(&vfs, &args.city))
+            );
+        }
+        Mode::Map {
+            at,
+            size,
+            step,
+            above,
+        } => {
+            let &[x, y, z] = at.as_slice() else {
+                eprintln!("--at takes x,y,z");
+                std::process::exit(2);
+            };
+            let centre = bevy::math::Vec3::new(x, y, z);
+            let cells = (size / step).round().max(2.0) as usize;
+            let mut env = build(args.event.clone(), 0);
+            let heights = env.height_map(centre, *step, cells, *above);
+            let reach = size * 0.75;
+            let lines: Vec<_> = env
+                .lines()
+                .iter()
+                .map(|line| {
+                    let points: Vec<[f32; 3]> = line
+                        .guide
+                        .points()
+                        .iter()
+                        .filter(|p| (p.x - x).abs() < reach && (p.z - z).abs() < reach)
+                        .map(|p| p.to_array())
+                        .collect();
+                    serde_json::json!({ "label": line.label, "points": points })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "centre": [x, y, z],
+                    "step": step,
+                    "cells": cells,
+                    "heights": heights.iter().map(|h| h.is_finite().then_some(*h)).collect::<Vec<_>>(),
+                    "lines": lines,
+                })
             );
         }
         Mode::Where { arc, only } => {
@@ -420,6 +478,9 @@ fn eval(
                         "metres": e.metres,
                         "length": line.guide.length(),
                         "impacts": e.impacts,
+                        "lateral": e.lateral,
+                        "top_speed": e.top_speed,
+                        "throttle_cap": line.throttle_cap,
                         "at": [e.position.x, e.position.y, e.position.z],
                     })
                 );
@@ -474,6 +535,8 @@ fn write_step(w: &mut impl Write, out: &StepOut) -> io::Result<()> {
         w.write_all(&e.line.to_le_bytes())?;
         w.write_all(&e.car.to_le_bytes())?;
         w.write_all(&e.impacts.to_le_bytes())?;
+        w.write_all(&e.lateral.to_le_bytes())?;
+        w.write_all(&e.top_speed.to_le_bytes())?;
         w.write_all(&e.arc.to_le_bytes())?;
         for v in e.position.to_array() {
             w.write_all(&v.to_le_bytes())?;

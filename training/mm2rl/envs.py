@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-PROTOCOL = 2
-EPISODE = struct.Struct("<IIffIIfffff")
+PROTOCOL = 3
+EPISODE = struct.Struct("<IIffIIfffffff")
 ENDS = ["finished", "time", "stalled", "off_route", "upended", "lost"]
 
 
@@ -30,6 +30,8 @@ class Episode:
     line: str
     car: str
     impacts: float
+    lateral: float
+    top_speed: float
     arc: float
     position: tuple[float, float, float]
 
@@ -194,12 +196,11 @@ class VecEnv:
                 finals.append(w.read_f32(count, w.obs_dim))
                 final_index.append(np.flatnonzero(d == 2) + i * a)
             for _ in range(w.read_u32()):
-                end, steps, metres, ret, line, car, impacts, arc, x, y, z = EPISODE.unpack(
-                    w.read(EPISODE.size)
-                )
+                (end, steps, metres, ret, line, car, impacts, lateral, top_speed,
+                 arc, x, y, z) = EPISODE.unpack(w.read(EPISODE.size))
                 episodes.append(
                     Episode(end, steps, metres, ret, w.lines[line], w.cars[car],
-                            impacts, arc, (x, y, z))
+                            impacts, lateral, top_speed, arc, (x, y, z))
                 )
         empty = np.zeros((0, self.obs_dim), dtype=np.float32)
         return (
