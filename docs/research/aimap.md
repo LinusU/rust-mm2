@@ -207,14 +207,14 @@ uses col 9 as a grip scale around 2.0, which the original does not.
 | col | field | retail range | consumed |
 |-----|-------|--------------|----------|
 | 0 | `maxThrottle` (default 1.0) | 0.57–1.00 | throttle ceiling on the opponent's pace law |
-| 1 | `unkFlag` (unknown/unused per R3) | 0; set on london `crash6`/`race12` rows only | bound, unconsumed |
+| 1 | `unkFlag` (unknown/unused per R3) | 0; set on london `crash6`/`race12` rows only | bound, unconsumed — no reader in the original (opponent-ai.md), so none to match |
 | 2 | look-ahead distance / `someDistancePadding` (default 75) | 50–150 | corridor obstacle-sensing reach (designed reading) |
 | 3 | `cornerBrakingThreshold` (default 0.7; R3: brake-demand floor) | 0.07–1.0, centred ~0.7 | brake-demand floor of the speed plan: below it a corner is made by lifting off, above it by braking (capped at 0.9; DSN-66) |
 | 4 | `avoidTraffic` | 0 on 57% of rows | bound, inert — no ambient-traffic class exists |
 | 5 | `avoidProps` | 0 on 59% | bound, inert — the corridor senses participants only |
 | 6 | `avoidPlayers` | 0 on 75% | gates human participants in the traffic corridor |
 | 7 | `avoidOpponents` | 0 on 59% | gates AI participants in the traffic corridor |
-| 8 | `weirdPathfinding`/`BadPathfinding` | 0; set on london `crash6`/`race12` rows only | bound, unconsumed |
+| 8 | `weirdPathfinding`/`BadPathfinding` | 0; set on london `crash6`/`race12` rows only | bound, unconsumed — the original only reorders its detour candidates (`0x55d980`); we have no candidate search, so consuming it would be invented |
 | 9 | `cornerSpeedMultiplier` (default 2.0) | 0.89–2.29 | scales the planned corner grip by `value / 2.0`, clamped 0.5–1.2 (DSN-66) |
 
 Under the corrected order the avoid flags carry real authored

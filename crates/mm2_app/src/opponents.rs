@@ -1235,6 +1235,13 @@ fn spawn_roster(
         let object = session.mint_object_id();
         let player_id = session.mint_player_id();
         let drive_params = spec.drive_params();
+        if let Some(t) = drive_params.corner_brake.filter(|t| !t.is_finite()) {
+            warn!(
+                car = %def.id,
+                threshold = t,
+                "opponent cornerBrakingThreshold is not finite; using the default"
+            );
+        }
         let vehicle = commands
             .spawn((
                 owner,

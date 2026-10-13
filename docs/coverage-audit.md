@@ -86,7 +86,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F12 Blitz | implemented | retail-data (headless 20/20) | no human play of representative events; reward leg (F16); UNK-4 time unit provisional |
 | F13 Checkpoint | active | retail-data | original-fidelity comparison (placing, pacing, AI competence) absent; traversal stalls on london-2/5/6/9, sf-7/9 |
 | F14 Circuit | implemented | retail-data | same stalls; catalog-wide completability claim gated on F15-B; UNK-11/38 |
-| F15 opponent AI | active | retail-data (controller read from `Midtown2.exe`) | `unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption; designed readings stand in |
+| F15 opponent AI | active | retail-data (controller read from `Midtown2.exe`) | `cornerBrakingThreshold` consumed (designed demand); `unkFlag` (no reader) and `weirdPathfinding` (no candidate search to reorder) deliberately unconsumed; designed readings stand in |
 | F16 profiles/unlocks | active | synthetic + retail-data + two-process restart (AC01: CLI-created profiles, eligible finish in the test process) | AC01 interactive finish in a real process (`--bot` results deliberately ineligible); UNK-6/8 |
 | F17 menu/flow | active | synthetic + local render | AC03 keyboard/gamepad + visible-focus evidence; C&R/scoring result variants; no human journey recorded |
 | F18 weather/time | active | synthetic + retail-data + rendered (16-slot sf capture matrix) | AC05 audio captures (visual half now covered by the sf weather×time capture matrix); network replication; UNK-24/39/40 — `.ldef`/`.lmap` settled 2026-10-11 (`.ldef` has no exe reference; `.lmap` value recovered but deliberately unbound, see `environment.md`) |
