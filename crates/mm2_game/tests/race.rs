@@ -967,6 +967,70 @@ fn route_binding_credits_a_gate_the_line_misses() {
     assert_eq!(progress.crossings, 0, "no cylinder was ever crossed");
 }
 
+/// The original's opponent rule under `AnyOrder` (`0x53d6c0`): a line
+/// that carries its finish earns each gate as the driven arc passes the
+/// gate's bound position and finishes within `ROUTE_FINISH_RANGE` of
+/// the finish's — though the line misses both cylinders by 30 m.
+#[test]
+fn an_any_order_line_with_its_finish_bound_finishes_on_the_route() {
+    let route = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [300.0, 0.0, 0.0]]);
+    let def = any_order(
+        vec![checkpoint(100.0, 30.0), checkpoint(200.0, 30.0)],
+        Some(checkpoint(280.0, 30.0)),
+    );
+    let mut line =
+        RouteGateLine::bind(&route, &def.checkpoints, false, route.points[0].position, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+
+    // Without the finish bound an `AnyOrder` line earns nothing.
+    line.arc_high = 290.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 0);
+
+    line.arc_high = 0.0;
+    line.bind_finish(&route, def.finish.as_ref());
+    assert!(line.has_finish());
+    line.arc_high = 150.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(
+        progress.cleared_count(),
+        1,
+        "the first gate's position is behind"
+    );
+    // Past the last gate but more than the finish range short of the
+    // finish's own position (280 m along).
+    line.arc_high = 255.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 2);
+    line.arc_high = 280.0 - mm2_game::race::ROUTE_FINISH_RANGE;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+    assert_eq!(progress.route_clears, 2);
+    assert_eq!(progress.crossings, 0, "no cylinder was ever crossed");
+}
+
+/// With no finish trigger the race ends where the line does.
+#[test]
+fn an_any_order_line_without_a_finish_trigger_ends_with_the_line() {
+    let route = route(&[[0.0, 0.0, 0.0], [300.0, 0.0, 0.0]]);
+    let def = any_order(vec![checkpoint(100.0, 30.0)], None);
+    let mut line =
+        RouteGateLine::bind(&route, &def.checkpoints, false, route.points[0].position, 1).unwrap();
+    line.bind_finish(&route, None);
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    line.arc_high = 250.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    line.arc_high = 285.0;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+}
+
 /// A gate the car actually crosses still banks once — the physical
 /// crossing wins first and the route pass that remains racing-credit
 /// eligible cannot double-count it.

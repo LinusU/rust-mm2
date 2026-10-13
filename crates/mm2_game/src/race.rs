@@ -770,11 +770,11 @@ impl RaceProgress {
         definition: &RaceDefinition,
         line: &RouteGateLine,
     ) -> ProgressOutcome {
-        if self.state != ParticipantState::Racing
-            || definition.rule != CheckpointRule::Ordered
-            || !line.arc_high.is_finite()
-        {
+        if self.state != ParticipantState::Racing || !line.arc_high.is_finite() {
             return ProgressOutcome::Racing;
+        }
+        if definition.rule == CheckpointRule::AnyOrder {
+            return self.advance_route_any_order(line);
         }
         let n = definition.checkpoints.len();
         while self.next < n
@@ -806,6 +806,45 @@ impl RaceProgress {
     }
 }
 
+impl RaceProgress {
+    /// `AnyOrder` route-bound progress: an AI participant whose line
+    /// carries a finish binding ([`RouteGateLine::bind_finish`]) clears
+    /// each gate as its driven arc passes the gate's bound position and
+    /// finishes when the arc comes within [`ROUTE_FINISH_RANGE`] of the
+    /// finish's. This is the original's rule for its opponents
+    /// (`aiVehicleOpponent` `0x53d6c0`, verified — an opponent finishes
+    /// on its own authored course and the finish line; "checkpoints play
+    /// no part", `docs/research/opponent-ai.md`): 221 of the 335 retail
+    /// checkpoint-race lines miss at least one gate cylinder, so a
+    /// trigger-bound opponent could never finish those races. The gate
+    /// clears keep the standings and the per-car record meaningful; a
+    /// line without the binding stays trigger-bound.
+    fn advance_route_any_order(&mut self, line: &RouteGateLine) -> ProgressOutcome {
+        let Some(finish_rel) = line.finish_rel else {
+            return ProgressOutcome::Racing;
+        };
+        let driven = line.arc_high - line.spawn_arc;
+        for (i, &rel) in line.gate_rel.iter().enumerate() {
+            if let Some(cleared) = self.cleared.get_mut(i)
+                && !*cleared
+                && driven >= rel
+            {
+                *cleared = true;
+                self.route_clears += 1;
+            }
+        }
+        if driven >= finish_rel - ROUTE_FINISH_RANGE && self.cleared.iter().all(|c| *c) {
+            return ProgressOutcome::Finished;
+        }
+        ProgressOutcome::Racing
+    }
+}
+
+/// Distance (m) from the finish's bound route position inside which a
+/// route-bound `AnyOrder` participant has finished — the original's
+/// finish-point radius (`0x53d6c0`, the constant `400` squared).
+pub const ROUTE_FINISH_RANGE: f32 = 20.0;
+
 /// An `Ordered` event's gates bound to positions along one
 /// participant's driven route — the route-derived progress model for
 /// AI opponents (designed, DSN-45 — UNK-11).
@@ -831,9 +870,10 @@ impl RaceProgress {
 /// the water mark, and a car punted off the leg earns nothing.
 ///
 /// A component on the opponent entity (session-owned like
-/// [`RaceProgress`]). Only AI opponents carry it, and only on
-/// `Ordered` definitions — the local player's progress stays
-/// trigger-bound, and `AnyOrder` keeps its physical rule.
+/// [`RaceProgress`]). Only AI opponents carry it — the local player's
+/// progress stays trigger-bound. An `AnyOrder` participant is
+/// route-bound only when its line also carries the finish
+/// ([`Self::bind_finish`]).
 #[derive(Component, Debug, Clone)]
 pub struct RouteGateLine {
     /// Arc position (XZ metres) of each route point — `point_arc[i]`
@@ -864,6 +904,11 @@ pub struct RouteGateLine {
     /// Closed-route traversals the chase index has completed —
     /// `route_target` wraps `next` to 0 once per traversal.
     traversals: u32,
+    /// The finish's arc position relative to [`Self::spawn_arc`], at or
+    /// past the last gate's — present only on a line bound with
+    /// [`Self::bind_finish`], which is what makes an `AnyOrder`
+    /// participant route-bound.
+    finish_rel: Option<f32>,
 }
 
 impl RouteGateLine {
@@ -909,41 +954,67 @@ impl RouteGateLine {
             spawn_arc: 0.0,
             arc_high: 0.0,
             traversals: 0,
+            finish_rel: None,
         };
         line.spawn_arc = line.measure(route, next, pos).0;
         line.arc_high = line.spawn_arc;
         // Each gate binds at the polyline's closest approach in XZ —
         // the point a route-following driver gets nearest it.
         for g in gates {
-            let mut best = (f32::MAX, 0.0f32);
-            for i in 0..leg_count {
-                let a = route.points[i].position;
-                let b = route.points[(i + 1) % n].position;
-                let (dx, dz) = (b.x - a.x, b.z - a.z);
-                let len = dx.hypot(dz);
-                let t = if len > 1e-3 {
-                    (((g.center.x - a.x) * dx + (g.center.z - a.z) * dz) / (len * len))
-                        .clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let miss = (a.x + dx * t - g.center.x).hypot(a.z + dz * t - g.center.z);
-                if miss < best.0 {
-                    best = (miss, line.point_arc[i] + t * len);
-                }
-            }
-            let mut rel = best.1 - line.spawn_arc;
-            rel = if line.closed {
-                rel.rem_euclid(line.loop_len)
-            } else {
-                rel.max(0.0)
-            };
+            let mut rel = line.bound_rel(route, leg_count, g.center);
             if let Some(&prev) = line.gate_rel.last() {
                 rel = rel.max(prev);
             }
             line.gate_rel.push(rel);
         }
         Some(line)
+    }
+
+    /// The arc position, relative to the spawn, at which the polyline
+    /// passes closest to `point` in XZ.
+    fn bound_rel(&self, route: &OpponentRoute, leg_count: usize, point: Vec3) -> f32 {
+        let n = route.points.len();
+        let mut best = (f32::MAX, 0.0f32);
+        for i in 0..leg_count {
+            let a = route.points[i].position;
+            let b = route.points[(i + 1) % n].position;
+            let (dx, dz) = (b.x - a.x, b.z - a.z);
+            let len = dx.hypot(dz);
+            let t = if len > 1e-3 {
+                (((point.x - a.x) * dx + (point.z - a.z) * dz) / (len * len)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let miss = (a.x + dx * t - point.x).hypot(a.z + dz * t - point.z);
+            if miss < best.0 {
+                best = (miss, self.point_arc[i] + t * len);
+            }
+        }
+        let rel = best.1 - self.spawn_arc;
+        if self.closed {
+            rel.rem_euclid(self.loop_len)
+        } else {
+            rel.max(0.0)
+        }
+    }
+
+    /// Also bind where the race ends on this line, making an `AnyOrder`
+    /// participant route-bound (see
+    /// [`RaceProgress::advance_route`]): at the `finish` trigger's
+    /// closest approach when the definition has one, else where the
+    /// line itself ends — never before the last gate.
+    pub fn bind_finish(&mut self, route: &OpponentRoute, finish: Option<&Checkpoint>) {
+        let n = route.points.len();
+        let leg_count = if self.closed { n } else { n.saturating_sub(1) };
+        let end = (self.loop_len - self.spawn_arc).max(0.0);
+        let rel = finish.map_or(end, |f| self.bound_rel(route, leg_count, f.center));
+        let last_gate = self.gate_rel.last().copied().unwrap_or(0.0);
+        self.finish_rel = Some(rel.max(last_gate));
+    }
+
+    /// Whether the finish is bound ([`Self::bind_finish`]).
+    pub fn has_finish(&self) -> bool {
+        self.finish_rel.is_some()
     }
 
     /// The pose's absolute route arc — the chased-leg convention
@@ -997,6 +1068,14 @@ impl RouteGateLine {
     /// count from the arc measure.
     pub fn wrap(&mut self) {
         self.traversals += 1;
+    }
+
+    /// Take back a wrap: the car went backward across the route
+    /// boundary it had crossed. The high-water arc keeps what was
+    /// earned; this only stops a second forward crossing from counting
+    /// the same lap twice.
+    pub fn unwrap(&mut self) {
+        self.traversals = self.traversals.saturating_sub(1);
     }
 
     /// Re-anchor resync (the `reanchor_pose` walk-back can land a
