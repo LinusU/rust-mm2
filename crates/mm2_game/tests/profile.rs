@@ -740,3 +740,93 @@ fn weather_and_time_survive_a_restart_and_bad_selectors_are_rejected() {
         other => panic!("expected Corrupt, got {other:?}"),
     }
 }
+
+/// F17-A.8: the customization a profile remembers for its last event
+/// survives a save/reload and validates as a session config; a
+/// hand-edited out-of-range density or a zero lap count makes the file
+/// corrupt instead of silently launching a degenerate run.
+#[test]
+fn remembered_customization_survives_a_restart_and_bad_picks_are_rejected() {
+    let (dir, store) = store();
+    let mut profile = store
+        .create("Picks", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let picks = SessionCustomization {
+        conditions: SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        },
+        densities: Densities {
+            traffic: 0.25,
+            pedestrians: 0.5,
+            cops: 1.0,
+        },
+        race: Some(RaceCustomization {
+            laps: 3,
+            opponents: 1,
+        }),
+    };
+    profile.selections.customization = Some(picks);
+    // Twice, so the `.bak` copy carries the pick as well.
+    store.save(&mut profile).unwrap();
+    store.save(&mut profile).unwrap();
+
+    // A fresh store over the same directory is a restart.
+    let reopened = ProfileStore::open(dir.path().join("profiles")).unwrap();
+    let loaded = reopened.load(&profile.id).unwrap().profile;
+    assert_eq!(loaded.selections.customization, Some(picks));
+    // The remembered picks are a legal session config — nothing is
+    // fabricated to make them fit.
+    SessionConfig {
+        customization: loaded.selections.customization,
+        ..SessionConfig::default()
+    }
+    .validate()
+    .expect("the remembered picks validate");
+
+    // Hand-edit an out-of-range traffic density into every copy.
+    let profiles = dir.path().join("profiles");
+    for entry in std::fs::read_dir(&profiles).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("driver-0"))
+        {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("\"traffic\": 0.25") {
+                continue;
+            }
+            let edited = text.replacen("\"traffic\": 0.25", "\"traffic\": 9.0", 1);
+            assert_ne!(edited, text, "{path:?}");
+            std::fs::write(&path, edited).unwrap();
+        }
+    }
+    match reopened.load(&profile.id) {
+        Err(ProfileError::Corrupt { .. }) => {}
+        other => panic!("expected Corrupt for an out-of-range density, got {other:?}"),
+    }
+
+    // A zero lap count is rejected the same way, on a fresh copy whose
+    // density is back in range.
+    store.save(&mut profile).unwrap();
+    store.save(&mut profile).unwrap();
+    for entry in std::fs::read_dir(&profiles).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("driver-0"))
+        {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("\"laps\": 3") {
+                continue;
+            }
+            let edited = text.replacen("\"laps\": 3", "\"laps\": 0", 1);
+            assert_ne!(edited, text, "{path:?}");
+            std::fs::write(&path, edited).unwrap();
+        }
+    }
+    match reopened.load(&profile.id) {
+        Err(ProfileError::Corrupt { .. }) => {}
+        other => panic!("expected Corrupt for zero laps, got {other:?}"),
+    }
+}

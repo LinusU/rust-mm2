@@ -520,7 +520,7 @@ pub struct SessionConditions {
 /// chain). `densities.traffic` drives ambient traffic and
 /// `densities.pedestrians` the sidewalk crowd (F19-B.2:
 /// `crate::crowd::resolve_density`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionCustomization {
     /// Picked weather + time-of-day selectors.
     pub conditions: SessionConditions,
@@ -542,7 +542,7 @@ pub struct SessionCustomization {
 /// carries (RACE-3's parenthetical, UI-2). Concrete counts — the menu
 /// seeds both from the authored `NumLaps`/`Opponents` row so an
 /// untouched visit sets no customization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RaceCustomization {
     /// Ordered-rule lap count. Must be at least 1 (an Ordered race
     /// with zero laps is a `RaceError::NoLaps` definition); the
@@ -557,7 +557,7 @@ pub struct RaceCustomization {
 
 /// Ambient population densities, authored per event as 0-1 fractions
 /// (WLD-1: `mm*data.csv` Ambient/Peds).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Densities {
     /// Ambient traffic density.
     pub traffic: f32,

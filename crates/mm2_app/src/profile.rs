@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use bevy::prelude::Resource;
 use mm2_game::{
     Difficulty, EventKey, PlayerProfile, ProfileError, ProfileId, ProfileKind, ProfileStore,
-    VehicleChoice,
+    SessionCustomization, VehicleChoice,
 };
 use tracing::{info, warn};
 
@@ -297,14 +297,15 @@ pub fn vehicle_gate_note(
 /// (a dev-car run does not erase the remembered car) and the session
 /// did not pick it for the player — a Crash Course lesson's required
 /// car (`remember_vehicle` false) never replaces the remembered one;
-/// `last_event` is
+/// `last_event` and `customization` are
 /// only written by an event session (a cruise does not erase the last
-/// played event). Save failures are logged, never fatal — profile I/O
-/// must never sink a session.
+/// played event or its picks). Save failures are logged, never fatal —
+/// profile I/O must never sink a session.
 pub fn note_session_start(
     slot: &mut ActiveProfile,
     selected: &SelectedCar,
     event_key: Option<&EventKey>,
+    customization: Option<SessionCustomization>,
     remember_vehicle: bool,
 ) {
     if let Some(def) = selected.def.as_ref().filter(|_| remember_vehicle) {
@@ -315,6 +316,11 @@ pub fn note_session_start(
     }
     if let Some(key) = event_key {
         slot.profile.selections.last_event = Some(key.clone());
+        // F17-A.8: remember the picks of the event just launched so a
+        // later Quick Race replay re-applies them. An uncustomized
+        // event launch writes `None`, clearing the previous event's
+        // picks instead of leaking them onto this one.
+        slot.profile.selections.customization = customization;
     }
     if let Err(e) = slot.store.save(&mut slot.profile) {
         warn!(profile = %slot.profile.id, error = %e, "profile save failed");

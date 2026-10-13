@@ -267,6 +267,17 @@ pub struct ProfileSelections {
     /// corrupt rather than mapping to the default clear morning.
     #[serde(default)]
     pub conditions: Option<crate::SessionConditions>,
+    /// The customization of the last event this driver launched
+    /// (F17-A.8): the condition, ambient-density and race-shape picks
+    /// the Customize screen made (RACE-3/RACE-4, UI-2). Written at
+    /// session start, cleared by an event launch that carried no picks
+    /// — a direct event row — so a later Quick Race replay re-applies
+    /// exactly the picks of *that* event (DRV-8). `None` until an event
+    /// is launched customized. Validated on read: a density outside
+    /// `0..=1`/non-finite or a zero lap count makes the file corrupt
+    /// rather than silently launching a degenerate run.
+    #[serde(default)]
+    pub customization: Option<crate::SessionCustomization>,
 }
 
 /// One driver profile on disk.
@@ -356,6 +367,16 @@ impl PlayerProfile {
             .any(|pair| pair[0].key >= pair[1].key)
         {
             return Err("event records are unsorted or repeat a key".to_string());
+        }
+        // A remembered customization is applied verbatim to the next
+        // Quick Race launch, so a hand-edited density outside `0..=1`
+        // (or non-finite) or a zero lap count is corrupt, never a
+        // degenerate run.
+        if let Some(picks) = &self.selections.customization {
+            picks.densities.validate().map_err(|e| e.to_string())?;
+            if picks.race.is_some_and(|r| r.laps == 0) {
+                return Err("remembered customization has zero laps".to_string());
+            }
         }
         validate_name(&self.name)
     }

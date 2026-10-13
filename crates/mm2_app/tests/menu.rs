@@ -33,9 +33,9 @@ use mm2_app::settings::{
 };
 use mm2_assets::Vfs;
 use mm2_game::{
-    BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
-    ProfileId, ProfileKind, ProfileStore, ResultLedger, Session, SessionMode, SessionPhase,
-    VehicleSelection, advance_session_tick, despawn_session_entities,
+    BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerProfile,
+    PlayerVehicle, ProfileId, ProfileKind, ProfileStore, ResultLedger, Session, SessionMode,
+    SessionPhase, VehicleSelection, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -2060,6 +2060,266 @@ fn quick_race_reports_an_unresolvable_last_event() {
         assert_eq!(phase(&app), SessionPhase::Menu, "{name} must not launch");
         assert!(shell(&app).status.is_some());
     }
+}
+
+/// F17-A.8: Quick Race re-applies the customization the last event was
+/// launched with. A race customized on its options screen (weather,
+/// time-of-day, traffic density) records those picks on the bound
+/// profile at session start, and the root Quick Race row carries them
+/// back onto the relaunched `SessionConfig::customization`.
+#[test]
+fn quick_race_reapplies_the_remembered_customization() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+
+    // Customize race0: cloudy, noon, 25% traffic.
+    open_options(&mut app, "race0");
+    focus_row(&mut app, "Weather:");
+    press(&mut app, KeyCode::ArrowRight);
+    focus_row(&mut app, "Time of day:");
+    press(&mut app, KeyCode::ArrowRight);
+    focus_row(&mut app, "Traffic density:");
+    press(&mut app, KeyCode::ArrowRight);
+    activate_row(&mut app, "Start race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let first = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .customization
+        .expect("changed picks ride the session config");
+    assert_eq!(first.conditions.weather.get(), 1);
+    assert_eq!(first.conditions.time_of_day.get(), 1);
+    assert_eq!(first.densities.traffic, 0.25);
+
+    // Quit to the menu: the picks were persisted at session start.
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    let saved = store_dir_reopen(&store_dir, &alice.id);
+    assert_eq!(
+        saved.selections.customization,
+        Some(first),
+        "the picks must be recorded for the replay"
+    );
+    let (text, enabled) = quick_race(&app);
+    assert_eq!(text, "Quick Race: Checkpoint #0 (race0)");
+    assert!(
+        enabled.is_ok(),
+        "the replayable event must be open: {enabled:?}"
+    );
+
+    // Activating Quick Race relaunches with the same picks.
+    activate_row(&mut app, "Quick Race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    assert_eq!(
+        config.customization,
+        Some(first),
+        "Quick Race must carry the remembered picks"
+    );
+    assert_eq!(
+        mm2_game::record_eligibility(&config),
+        Err(mm2_game::Ineligible::Customized),
+        "a replayed customized run stays excluded (DRV-6)"
+    );
+}
+
+/// F17-A.8: an event launched straight from its row carries no picks,
+/// so Quick Race must not leak a previous session's customization onto
+/// it — the remembered picks are cleared by that launch.
+#[test]
+fn quick_race_drops_a_stale_customization() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+
+    // First launch: customized.
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    open_options(&mut app, "race0");
+    focus_row(&mut app, "Weather:");
+    press(&mut app, KeyCode::ArrowRight);
+    activate_row(&mut app, "Start race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+
+    // Second launch: the same event straight from its row (no picks).
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    activate_row(&mut app, "race0");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+
+    let saved = store_dir_reopen(&store_dir, &alice.id);
+    assert_eq!(
+        saved.selections.customization, None,
+        "an uncustomized launch clears the remembered picks"
+    );
+    activate_row(&mut app, "Quick Race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config");
+    assert!(
+        config.customization.is_none(),
+        "Quick Race must not replay stale picks"
+    );
+    assert_eq!(mm2_game::record_eligibility(config), Ok(()));
+}
+
+/// F17-A.8: the race-shape picks Quick Race honours are the Circuit
+/// laps/opponents rows (RACE-3's parenthetical) — a remembered
+/// `customization.race` lands on the rebuilt definition/roster exactly
+/// as it did on the original customized launch.
+#[test]
+fn quick_race_reapplies_remembered_race_picks() {
+    let tmp = circuit_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            stem: "circuit0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Circuit");
+
+    open_options(&mut app, "circuit0");
+    focus_row(&mut app, "Laps:");
+    press(&mut app, KeyCode::ArrowRight); // 2 → 3
+    focus_row(&mut app, "Opponents:");
+    press(&mut app, KeyCode::ArrowLeft); // 2 → 1
+    activate_row(&mut app, "Start race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+
+    activate_row(&mut app, "Quick Race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    assert_eq!(
+        config.customization.and_then(|c| c.race),
+        Some(mm2_game::RaceCustomization {
+            laps: 3,
+            opponents: 1
+        }),
+        "the remembered race-shape picks ride the replayed session"
+    );
+    let race = app.world().resource::<mm2_game::RaceState>();
+    assert_eq!(race.definition.laps, 3, "the remembered lap count bound");
+    assert_eq!(race.definition.params.opponents, 1);
+}
+
+/// Re-open the store over the same directory and read one profile —
+/// what a restart sees after the session-start save.
+fn store_dir_reopen(dir: &tempfile::TempDir, id: &ProfileId) -> PlayerProfile {
+    ProfileStore::open(dir.path())
+        .unwrap()
+        .load(id)
+        .unwrap()
+        .profile
 }
 
 /// No content and no store: the rows exist but carry honest reasons —

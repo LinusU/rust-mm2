@@ -64,8 +64,8 @@
 //!   (on/off toggles, device, stereo, quality, balance) are still open.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
-//! a pedestrian density option (no picker — F19; cop density is Cruise-only), Quick
-//! Race customization, Driver's Stats (no aggregate stats are
+//! a pedestrian density option (no picker — F19; cop density is Cruise-only),
+//! Driver's Stats (no aggregate stats are
 //! persisted), original menu art and audio. The in-session overlays
 //! landed in their own modules — `crate::pause`, `crate::results`.
 
@@ -292,8 +292,15 @@ pub enum Action {
         /// City stem (`city/<city>.psdl` must resolve to be enabled).
         city: String,
     },
-    /// Run an authored event.
-    LaunchEvent(EventRef),
+    /// Run an authored event. `customization` carries a remembered pick
+    /// set a Quick Race replay re-applies (F17-A.8); `None` on every
+    /// direct launch from the event list or the records screen.
+    LaunchEvent {
+        /// The event to run.
+        event_ref: EventRef,
+        /// Remembered customization, if any.
+        customization: Option<SessionCustomization>,
+    },
     /// Cycle the Records screen's city filter (Left/Right or Activate).
     RecordsCityFilter,
     /// Cycle the Records screen's race-type filter.
@@ -1292,14 +1299,17 @@ impl MenuShell {
             Action::LaunchCruise { city } => {
                 self.launch(data, vfs, SessionMode::Cruise, city, None, effects)
             }
-            Action::LaunchEvent(event_ref) => {
+            Action::LaunchEvent {
+                event_ref,
+                customization,
+            } => {
                 let city = event_ref.city.clone();
                 self.launch(
                     data,
                     vfs,
                     SessionMode::Event(event_ref),
                     city,
-                    None,
+                    customization,
                     effects,
                 )
             }
@@ -2031,7 +2041,10 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     Row {
                         text,
                         enabled: enabled.clone(),
-                        action: Action::LaunchEvent(e.event_ref.clone()),
+                        action: Action::LaunchEvent {
+                            event_ref: e.event_ref.clone(),
+                            customization: None,
+                        },
                         won,
                         side: Some(Box::new(options_row(
                             e,
@@ -2300,6 +2313,12 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
 /// persistent root selections, so the row launches directly — an
 /// enhanced-layout choice, not an original-rules claim.
 ///
+/// F17-A.8: the replay also re-applies the customization the event was
+/// last launched with (`selections.customization`) — the condition,
+/// ambient-density and race-shape picks the Customize screen made
+/// (RACE-3/RACE-4) — so Quick Race honours the menu's options rather
+/// than silently running a default event.
+///
 /// The stem-keyed [`mm2_game::EventKey`] is resolved back through the
 /// live catalog: a mod that deleted or broke the event disables the row
 /// with the reason instead of launching whatever row now sits at the
@@ -2355,7 +2374,13 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
             data.event_label(vfs, &event.event_ref, &key.stem)
         ),
         enabled,
-        action: Action::LaunchEvent(event.event_ref),
+        action: Action::LaunchEvent {
+            event_ref: event.event_ref,
+            // F17-A.8: re-apply the picks this event was last launched
+            // with so Quick Race honours the Customize screen rather
+            // than silently running a default event.
+            customization: bound.as_ref().and_then(|p| p.selections.customization),
+        },
         won: None,
         side: None,
     }
@@ -3052,7 +3077,10 @@ fn record_row(
             key.city,
         ),
         enabled,
-        action: Action::LaunchEvent(event.event_ref),
+        action: Action::LaunchEvent {
+            event_ref: event.event_ref,
+            customization: None,
+        },
         won: Won::of(record),
         side: None,
     }

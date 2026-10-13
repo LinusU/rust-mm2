@@ -2063,6 +2063,7 @@ pub fn load_session_world(
             profile,
             &selected,
             event_key.as_ref(),
+            config.customization,
             !lesson_installed,
         );
     }
