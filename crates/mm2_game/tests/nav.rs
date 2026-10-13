@@ -1372,6 +1372,82 @@ fn route_path_samples_the_lane_walk() {
     assert!(pts.iter().any(|p| p.z > 60.0));
 }
 
+/// Two intersections 120 m apart joined by one curved, one-way road:
+/// lanes on the right side only, so traffic runs junction 0 → 1.
+fn one_way_link() -> Bai {
+    let centre = [[0.0, 0.0, 10.0], [20.0, 0.0, 60.0], [0.0, 0.0, 110.0]];
+    let right = side(0, &[(3.0, offset(&centre, 3.0, 0.0))], &[], 3);
+    let left = side(0, &[], &[], 3);
+    bai(
+        vec![road(
+            0,
+            &centre,
+            vec![1],
+            right,
+            left,
+            connected(0, 0),
+            connected(1, 0),
+        )],
+        vec![
+            intersection(0, [0.0, 0.0, 0.0], &[0]),
+            intersection(1, [0.0, 0.0, 120.0], &[0]),
+        ],
+    )
+}
+
+/// The original reads a race leg as the road two adjacent intersections
+/// share (`aiMap::FindRoadBetween`) — whichever way its traffic runs.
+#[test]
+fn a_race_leg_runs_the_shared_road_against_its_traffic() {
+    let g = NavGraph::build(&one_way_link()).graph;
+    let (first, second) = (Vec3::new(2.0, 0.0, 3.0), Vec3::new(-3.0, 0.0, 118.0));
+
+    // With the flow: the centre line from junction 0 to junction 1.
+    let with = g.race_leg(first, second, 8.0).expect("adjacent");
+    // (A one-way road's centre is the middle of its lanes: x = +3.)
+    assert!(with.first().unwrap().distance(Vec3::new(3.0, 0.0, 10.0)) < 0.1);
+    assert!(with.last().unwrap().distance(Vec3::new(3.0, 0.0, 110.0)) < 0.1);
+    assert!(
+        with.iter().any(|p| p.x > 15.0),
+        "the leg follows the road's bend, not the chord"
+    );
+    for w in with.windows(2) {
+        assert!(w[0].distance(w[1]) <= 8.01, "sampled at most a step apart");
+    }
+
+    // Against it: the same line the other way — the directed router
+    // has no route here at all.
+    let against = g.race_leg(second, first, 8.0).expect("adjacent");
+    assert!(
+        against
+            .first()
+            .unwrap()
+            .distance(Vec3::new(3.0, 0.0, 110.0))
+            < 0.1
+    );
+    assert!(against.last().unwrap().distance(Vec3::new(3.0, 0.0, 10.0)) < 0.1);
+    assert!(
+        g.route(second.into(), first.into(), &RouteOptions::default())
+            .is_err()
+    );
+    let route = OpponentRoute {
+        points: vec![waypoint(-3.0, 0.0, 118.0), waypoint(2.0, 0.0, 3.0)],
+    };
+    let d = g.densify_route(&route, false, &[], &RouteOptions::default());
+    assert!(d.points.len() > 6, "the leg is laid along the road");
+    assert!(d.points.iter().any(|p| p.position.x > 15.0));
+
+    // Points that name no intersection, or the same one twice, are no
+    // race leg.
+    assert!(g.race_leg(Vec3::new(0.0, 0.0, 60.0), second, 8.0).is_none());
+    assert!(g.race_leg(first, Vec3::new(5.0, 0.0, -4.0), 8.0).is_none());
+    // Nor is a junction on another level.
+    assert!(
+        g.race_leg(Vec3::new(2.0, 20.0, 3.0), second, 8.0).is_none(),
+        "a flyover's junction is not the street's"
+    );
+}
+
 #[test]
 fn densify_route_keeps_corridor_legs_verbatim() {
     let g = NavGraph::build(&straight()).graph;

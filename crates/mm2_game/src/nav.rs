@@ -2006,10 +2006,33 @@ impl NavGraph {
         let legs = if closed { n } else { n - 1 };
         let mut out: Vec<OpponentRoutePoint> = Vec::with_capacity(n);
         out.push(route.points[0].clone());
+        let insert = |out: &mut Vec<OpponentRoutePoint>,
+                      samples: Vec<Vec3>,
+                      a: &OpponentRoutePoint,
+                      b: &OpponentRoutePoint| {
+            for p in samples {
+                // Interior samples only — the endpoints are the
+                // authored anchors themselves.
+                if p.distance(a.position) > DENSIFY_STEP && p.distance(b.position) > DENSIFY_STEP {
+                    out.push(OpponentRoutePoint {
+                        position: p,
+                        // An inserted point is never a staging
+                        // record — `brake` carries a heading only
+                        // on authored rows.
+                        brake: 0.0,
+                        ..b.clone()
+                    });
+                }
+            }
+        };
         for leg in 0..legs {
             let a = &route.points[leg];
             let b = &route.points[(leg + 1) % n];
-            if self.leg_leaves_corridor(a.position, b.position)
+            if let Some(samples) = self.race_leg(a.position, b.position, DENSIFY_STEP) {
+                // Two adjacent intersections: the leg is the road they
+                // share, whichever way its traffic runs.
+                insert(&mut out, samples, a, b);
+            } else if self.leg_leaves_corridor(a.position, b.position)
                 && let Ok(r) = self.route_candidates(a.position.into(), b.position.into(), options)
             {
                 let samples: Vec<Vec3> = self.route_path(&r, DENSIFY_STEP);
@@ -2024,22 +2047,7 @@ impl NavGraph {
                     .filter(|g| g.crossed(a.position, b.position))
                     .all(covered);
                 if preserves_gates {
-                    for p in samples {
-                        // Interior samples only — the endpoints are the
-                        // authored anchors themselves.
-                        if p.distance(a.position) > DENSIFY_STEP
-                            && p.distance(b.position) > DENSIFY_STEP
-                        {
-                            out.push(OpponentRoutePoint {
-                                position: p,
-                                // An inserted point is never a staging
-                                // record — `brake` carries a heading only
-                                // on authored rows.
-                                brake: 0.0,
-                                ..b.clone()
-                            });
-                        }
-                    }
+                    insert(&mut out, samples, a, b);
                 }
             }
             let dest = (leg + 1) % n;
@@ -2052,6 +2060,132 @@ impl NavGraph {
             }
         }
         OpponentRoute { points: out }
+    }
+
+    /// The junctions at the two ends of `road`, in section order.
+    fn road_ends(&self, road: usize) -> Option<(ArcEnd, ArcEnd)> {
+        let r = self.roads.get(road)?;
+        if let Some(arc) = r.arcs[0] {
+            let arc = self.arc(arc);
+            Some((arc.entry, arc.exit))
+        } else {
+            let arc = self.arc(r.arcs[1]?);
+            Some((arc.exit, arc.entry))
+        }
+    }
+
+    /// A race leg as the original reads one: `a` and `b` name two
+    /// adjacent intersections and the leg runs along the one road they
+    /// share (`aiMap::FindRoadBetween`, `0x53a660` — the original does
+    /// no path-finding between `.opp` points and takes no notice of
+    /// which way the road's traffic flows). Returns the road's centre
+    /// line from the first intersection to the second, sampled at most
+    /// `step` apart; `None` when the points do not name two different
+    /// intersections joined by a road.
+    ///
+    /// The directed [`NavGraph::route`] cannot stand in for this: asked
+    /// for a right turn across a London gyratory it obeys the one-way
+    /// flow and goes the long way round the square.
+    pub fn race_leg(&self, a: Vec3, b: Vec3, step: f32) -> Option<Vec<Vec3>> {
+        let near = |p: Vec3| -> Vec<(f32, u16)> {
+            let mut found: Vec<(f32, u16)> = self
+                .intersections
+                .iter()
+                .filter(|i| (i.center[1] - p.y).abs() <= ANCHOR_LEVEL)
+                .map(|i| ((i.center[0] - p.x).hypot(i.center[2] - p.z), i.id))
+                .filter(|(d, _)| *d <= ANCHOR_INTERSECTION)
+                .collect();
+            found.sort_by(|x, y| x.0.total_cmp(&y.0));
+            found.truncate(3);
+            found
+        };
+        // The nearest pair of candidate intersections that share a
+        // road; of two roads between the same pair, the shorter.
+        let mut best: Option<(f32, usize, bool)> = None;
+        for &(da, ia) in &near(a) {
+            for &(db, ib) in &near(b) {
+                if ia == ib {
+                    continue;
+                }
+                let Some(from) = self.intersections.iter().find(|i| i.id == ia) else {
+                    continue;
+                };
+                for &road in &from.roads {
+                    let road = road as usize;
+                    let forward = match self.road_ends(road) {
+                        Some((ArcEnd::Intersection(s), ArcEnd::Intersection(e)))
+                            if s == ia && e == ib =>
+                        {
+                            true
+                        }
+                        Some((ArcEnd::Intersection(s), ArcEnd::Intersection(e)))
+                            if s == ib && e == ia =>
+                        {
+                            false
+                        }
+                        _ => continue,
+                    };
+                    let length = self.roads[road]
+                        .arcs
+                        .iter()
+                        .flatten()
+                        .map(|&arc| self.arc(arc).length)
+                        .fold(f32::INFINITY, f32::min);
+                    let cost = da + db + length * 1e-3;
+                    if best.is_none_or(|(c, _, _)| cost < c) {
+                        best = Some((cost, road, forward));
+                    }
+                }
+            }
+        }
+        let (_, road, forward) = best?;
+        // The road's centre line, from its vehicle lanes (their
+        // vertices pair up section by section): midway between the
+        // centre-most lane of each side, weighted so their offsets
+        // cancel — or, where only one side carries lanes, the middle of
+        // those.
+        let lanes: Vec<&NavLane> = self
+            .lanes
+            .iter()
+            .filter(|l| l.id.road as usize == road && l.id.kind == LaneKind::Vehicle)
+            .collect();
+        let innermost = |positive: bool| {
+            lanes
+                .iter()
+                .filter(|l| (l.lateral_offset > 0.0) == positive)
+                .min_by(|x, y| x.lateral_offset.abs().total_cmp(&y.lateral_offset.abs()))
+                .copied()
+        };
+        let sections = lanes.iter().map(|l| l.points.len()).min()?;
+        let mut centre: Vec<Vec3> = match (innermost(true), innermost(false)) {
+            (Some(right), Some(left)) => {
+                let (r, l) = (right.lateral_offset.abs(), left.lateral_offset.abs());
+                let total = (r + l).max(1e-3);
+                (0..sections)
+                    .map(|i| {
+                        (Vec3::from(right.points[i]) * l + Vec3::from(left.points[i]) * r) / total
+                    })
+                    .collect()
+            }
+            _ => (0..sections)
+                .map(|i| {
+                    lanes.iter().map(|l| Vec3::from(l.points[i])).sum::<Vec3>() / lanes.len() as f32
+                })
+                .collect(),
+        };
+        if !forward {
+            centre.reverse();
+        }
+        let step = step.max(1.0);
+        let mut out = Vec::new();
+        for w in centre.windows(2) {
+            let n = (w[0].distance(w[1]) / step).ceil().max(1.0) as usize;
+            for k in 0..n {
+                out.push(w[0].lerp(w[1], k as f32 / n as f32));
+            }
+        }
+        out.extend(centre.last().copied());
+        (out.len() >= 2 && out.iter().all(|p| p.is_finite())).then_some(out)
     }
 
     /// Whether the straight leg `a`→`b` departs the road corridor —
@@ -2076,6 +2210,13 @@ impl NavGraph {
 /// same road compete, without letting a neighbouring block's lanes
 /// pretend to be the endpoint.
 const ENTRY_TOLERANCE: f32 = 12.0;
+/// How far (m, XZ) from an intersection's centre a route point may sit
+/// and still name it — retail `.opp` rows lie within 15 m of theirs;
+/// the slack covers the big junctions.
+const ANCHOR_INTERSECTION: f32 = 45.0;
+/// ... and how far above or below it (m): a flyover's junction is not
+/// the one on the street under it.
+const ANCHOR_LEVEL: f32 = 8.0;
 /// How close (m) a straight route leg must stay to routable vehicle
 /// lanes to count as already following the road network — roughly a
 /// wide road's half-width plus a sidewalk, so an authored line hugging
