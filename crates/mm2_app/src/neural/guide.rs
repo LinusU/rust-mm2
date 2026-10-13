@@ -24,6 +24,15 @@ const HEIGHT_WEIGHT: f32 = 3.0;
 const SEARCH_BACK: f32 = 20.0;
 /// How far ahead of the previous arc position (m) the tracker looks.
 const SEARCH_AHEAD: f32 = 60.0;
+/// Distance (m, in plan) from its line within which a car is still on
+/// it: its place follows it, and what it drives counts as progress.
+/// Past any road's width and a generous cut across a corner; short of
+/// the next street over.
+pub const ON_LINE: f32 = 25.0;
+/// How many metres of line a car may gain per metre it moves
+/// ([`Guide::follow`]) — past 1 so that a car that cut a corner, and so
+/// drove less than the line it skipped, catches its place up.
+const FOLLOW_GAIN: f32 = 3.0;
 /// Points closer together than this (m) are merged when a guide is
 /// built — zero-length legs have no direction.
 const MIN_LEG: f32 = 0.05;
@@ -374,6 +383,57 @@ impl Guide {
         self.locate_within(prev, pos, SEARCH_BACK, SEARCH_AHEAD)
     }
 
+    /// The tracker's step for a car that drove: the arc length nearest
+    /// `pos`, no further from `prev` than the car could have brought it
+    /// by moving `moved` metres since `prev` was taken.
+    ///
+    /// A car's place on its line changes because the car moves. Tying
+    /// the search window to the distance moved — [`FOLLOW_GAIN`] times
+    /// it, so a car that cut a corner catches its place up — means a
+    /// car that is lifted and put down elsewhere, or shoved while
+    /// standing, does not find itself further along its route for it.
+    /// Progress is what was driven.
+    ///
+    /// Nor does a car that has left its line: further than
+    /// [`ON_LINE`] from it, its place stays where it left until it
+    /// comes back. A car shunting about in a yard beside its route
+    /// would otherwise creep its place forward abreast of itself.
+    pub fn follow(&self, prev: f32, moved: f32, pos: Vec3) -> f32 {
+        // Where the car is on the line, if it is on it at all...
+        let target = self.locate_within(prev, pos, SEARCH_BACK, SEARCH_AHEAD);
+        let at = self.point_at(target);
+        if (pos.x - at.x).hypot(pos.z - at.z) > ON_LINE {
+            return self.normalize(prev);
+        }
+        // ... and how far toward there its place may move this step.
+        let reach = if moved.is_finite() {
+            moved.max(0.0) * FOLLOW_GAIN
+        } else {
+            0.0
+        };
+        self.normalize(prev + self.delta(prev, target).clamp(-reach, reach))
+    }
+
+    /// The arc length at which the line passes closest to `point` in
+    /// plan (XZ) — where a checkpoint off the line is bound to it.
+    pub fn closest_approach(&self, point: Vec3) -> f32 {
+        (0..self.legs())
+            .map(|i| {
+                let (a, b, start, end) = self.leg(i);
+                let (dx, dz) = (b.x - a.x, b.z - a.z);
+                let len2 = dx * dx + dz * dz;
+                let t = if len2 > 1e-9 {
+                    (((point.x - a.x) * dx + (point.z - a.z) * dz) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let miss = (a.x + dx * t - point.x).hypot(a.z + dz * t - point.z);
+                (miss, start + (end - start) * t)
+            })
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .map_or(0.0, |(_, s)| s)
+    }
+
     /// The arc length nearest `pos` between `back` metres behind `prev`
     /// and `ahead` metres past it — [`Guide::advance`] with the window
     /// spelled out, for a car that was moved rather than drove.
@@ -566,6 +626,30 @@ mod tests {
         assert_eq!(s.chase_index(150.0), 2);
         assert_eq!(s.chase_index(s.length() - 20.0), 3);
         assert!((s.source_arc(2) - 200.0).abs() < 8.0, "{}", s.source_arc(2));
+    }
+
+    #[test]
+    fn following_moves_only_as_far_as_the_car_did() {
+        let g = Guide::new([Vec3::ZERO, Vec3::new(1000.0, 0.0, 0.0)], false).unwrap();
+        // Driven 2 m: the place moves with it.
+        let s = g.follow(100.0, 2.0, Vec3::new(102.0, 0.0, 0.5));
+        assert!((s - 102.0).abs() < 1e-3);
+        // Put down 60 m further on without having moved: no gain.
+        assert_eq!(g.follow(100.0, 0.0, Vec3::new(160.0, 0.0, 0.0)), 100.0);
+        // Having moved 4 m, at most three times that.
+        let s = g.follow(100.0, 4.0, Vec3::new(110.0, 0.0, 20.0));
+        assert!((s - 110.0).abs() < 1e-3, "{s}");
+        let s = g.follow(100.0, 2.0, Vec3::new(110.0, 0.0, 20.0));
+        assert!((s - 106.0).abs() < 1e-3, "{s}");
+        // Off its line, its place stays where it left.
+        assert_eq!(g.follow(100.0, 4.0, Vec3::new(104.0, 0.0, 40.0)), 100.0);
+    }
+
+    #[test]
+    fn the_closest_approach_binds_a_point_off_the_line() {
+        let g = square();
+        assert!((g.closest_approach(Vec3::new(40.0, 5.0, -30.0)) - 40.0).abs() < 1e-3);
+        assert!((g.closest_approach(Vec3::new(130.0, 0.0, 50.0)) - 150.0).abs() < 1e-3);
     }
 
     #[test]

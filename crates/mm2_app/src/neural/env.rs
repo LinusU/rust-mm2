@@ -1317,6 +1317,7 @@ impl DrivingEnv {
             let mut progress = 0.0;
             let (mut cornering, mut speed) = (0.0, 0.0);
             if let (Some(motion), true) = (motion, finite) {
+                let moved = motion.position.distance(slot.motion.position);
                 slot.motion = motion;
                 // Cornering as speed × yaw rate, on the ground only — a
                 // car spinning through the air is not cornering.
@@ -1330,7 +1331,9 @@ impl DrivingEnv {
                 slot.lateral += 0.2 * (cornering - slot.lateral);
                 slot.lateral_peak = slot.lateral_peak.max(slot.lateral);
                 slot.top_speed = slot.top_speed.max(speed);
-                let s = slot.guide.advance(slot.s, motion.position);
+                // The car's place moves only as far as the car did, as
+                // in the game.
+                let s = slot.guide.follow(slot.s, moved, motion.position);
                 progress = slot.guide.delta(slot.s, s);
                 slot.s = s;
                 slot.odometer += progress;
