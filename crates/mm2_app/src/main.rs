@@ -1738,6 +1738,12 @@ fn main() {
             // wrecking blow can shed a panel the same tick the repair
             // puts it back (one bounded event per part per attachment).
             breakaway::detach_breaks,
+            // F05-B wheel ejection (REC-2): the damage-driven episode —
+            // accumulated damage reaching `MaxDamage` strips wheels by
+            // `SpeedMPH` — reads the same `DamageEvent` stream
+            // `apply_impact_damage` just wrote, before `resolve_disabled`
+            // so a same-tick repair re-attaches what the episode took.
+            breakaway::eject_wheels,
             // Blitz/Checkpoint breakdown episodes run down and repair
             // right after the outcome starts them, before the
             // impairment sync reads the wreck's state.

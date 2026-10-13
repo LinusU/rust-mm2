@@ -97,6 +97,16 @@ fn vehcarsim() -> String {
     )
 }
 
+/// A retail-shaped `dgBangerData` record — every field the decoder
+/// requires is spelled out, so the record actually decodes (the
+/// filename-only audit does not need a valid body, but
+/// `load_vehicle`'s inventory does).
+fn banger_record(mass: f32, limit: f32) -> String {
+    format!(
+        "type: a\ndgBangerData {{\n  AudioId 0\n  Size 0.3 0.6 0.3\n  CG 0.0 0.0 0.0\n  Mass {mass}\n  Elasticity 0.5\n  Friction 0.9\n  ImpulseLimit2 {limit}\n  SpinAxis 0\n  Flash 0\n  NumParts 0\n  TexNumber 0\n  BillFlags 0\n  YRadius 0.0\n}}\n"
+    )
+}
+
 fn quad_geo(c: [f32; 3], hx: f32, hy: f32, hz: f32) -> Vec<u8> {
     let mut geo = Vec::new();
     geo.extend_from_slice(&1u32.to_le_bytes());
@@ -140,6 +150,7 @@ fn car_pkg() -> Vec<u8> {
         ("whl1_h", quad_geo([-0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
         ("whl2_h", quad_geo([0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
         ("whl3_h", quad_geo([-0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
+        ("whl5_h", quad_geo([-0.8, 0.3, 1.9], 0.15, 0.3, 0.15)),
         ("break01_h", quad_geo([0.0, 0.4, -1.6], 0.4, 0.3, 0.05)),
     ];
     for (name, geo) in chunks {
@@ -250,13 +261,23 @@ fn install() -> tempfile::TempDir {
     write_str(
         d,
         "tune/banger/vpt_break01.dgbangerdata",
-        "type: a\ndgBangerData {\n  Mass 50.0\n}\n",
+        &banger_record(50.0, 1562.5),
     );
     write_str(
         d,
         "tune/banger/vpt_break02.dgbangerdata",
-        "type: a\ndgBangerData {\n  Mass 50.0\n}\n",
+        &banger_record(50.0, 1562.5),
     );
+    // Damage-driven wheel inventory (F05-B, REC-2): whl0 and whl2
+    // author their own records; whl1/whl3 stay bolted on (no record),
+    // and the whl5 follower never enters the original's manager.
+    for whl in ["whl0", "whl2"] {
+        write_str(
+            d,
+            &format!("tune/banger/vpt_{whl}.dgbangerdata"),
+            &banger_record(25.0, 781.25),
+        );
+    }
     tmp
 }
 
@@ -349,6 +370,35 @@ fn load_vehicle_attaches_the_records_with_provenance() {
         "{:?}",
         def.report.entries
     );
+}
+
+#[test]
+fn load_vehicle_pairs_the_damage_driven_wheel_corners() {
+    let tmp = install();
+    let vfs = vfs_of(tmp.path());
+    let def = load_vehicle(&vfs, "vpt", 0).unwrap();
+    // Only the recorded, simulated `whl0..3` corners enter the
+    // damage-driven inventory; the whl5 follower never does (REC-2).
+    let names: Vec<&str> = def.eject_wheels.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(names, ["whl0", "whl2"], "only recorded corners eject");
+    for w in &def.eject_wheels {
+        assert!(
+            w.def.impulse_limit2 > 0.0,
+            "the paired `tune/banger` record lands on {}",
+            w.name
+        );
+        assert!(
+            def.sources
+                .iter()
+                .any(|s| s.contains(&format!("vpt_{}", w.name))),
+            "missing provenance for {}",
+            w.name
+        );
+    }
+    // The two inventories share a rig but not their membership: the
+    // impact-gated `breaks` list holds the panel and no wheel.
+    let breaks: Vec<&str> = def.breaks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(breaks, ["break01"]);
 }
 
 #[test]

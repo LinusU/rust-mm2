@@ -682,6 +682,9 @@ fn run_headless(
                 // F05-B.3: authored breakaway detachment — the
                 // headless record's `brk=` field reads the report.
                 crate::breakaway::detach_breaks,
+                // F05-B wheel ejection (REC-2): damage-driven, off the
+                // `DamageEvent` stream, before the repair.
+                crate::breakaway::eject_wheels,
                 (
                     damage::resolve_disabled,
                     damage::resolve_breakdown,
@@ -2184,12 +2187,13 @@ fn run_headless(
         .filter(|r| r.armed + r.detections + r.recovered > 0)
         .map(|r| format!(" vsk={}a/{}d/{}r", r.armed, r.detections, r.recovered))
         .unwrap_or_default();
-    // F05-B.3 breakaway evidence: detached/restored counts. Same
-    // presence rule — recorded only once the pipeline saw a delivery.
+    // F05-B.3 breakaway evidence: detached/restored counts, with the
+    // damage-driven wheel ejections (REC-2) broken out. Same presence
+    // rule — recorded only once the pipeline saw a delivery.
     let brk_detail = world_ecs
         .get_resource::<crate::breakaway::BreakReport>()
         .filter(|r| r.detached + r.restored > 0)
-        .map(|r| format!(" brk={}d/{}r", r.detached, r.restored))
+        .map(|r| format!(" brk={}d/{}w/{}r", r.detached, r.ejected, r.restored))
         .unwrap_or_default();
     // F05-B.4 gyro evidence: latched spin activations/completions on
     // the local car. Same presence rule — a run whose driver never

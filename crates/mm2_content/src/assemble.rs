@@ -56,6 +56,15 @@ pub struct VehicleDef {
     /// `damage`/`stuck`/`gyro`; the census's dead fragments and
     /// record-less chunks are documented authored gaps, REC-1).
     pub breaks: Vec<BreakPart>,
+    /// Authored damage-driven wheel corners (F05-B, REC-2): every
+    /// simulated `whl0..3` corner whose fragment record
+    /// `tune/banger/<id>_<stem>.dgbangerdata` resolves and decodes. The
+    /// original's wheel manager holds `whl0..3`/`hub0..3`/`variant%d`,
+    /// but no retail car authors hub/variant geometry, so a recovered
+    /// "pair" is one wheel. Followers (`whl4`+) and trailer wheels are
+    /// never in the manager; a record-less corner stays bolted on (same
+    /// absence policy as `breaks`).
+    pub eject_wheels: Vec<BreakPart>,
     /// `aud/cardata/{player,opponent}/<id>.csv` — the authored per-vehicle
     /// audio table (F07-A): horn + clutch bindings and the RPM-faded
     /// engine sample rows. `None` when the record does not resolve or
@@ -326,6 +335,38 @@ fn load_vehicle_impl(
         }
     }
 
+    // Damage-driven wheel corners (F05-B, REC-2): `whl0..3`, simulated,
+    // non-trailer, each requiring its own `tune/banger/<id>_whlN.dgbangerdata`
+    // record — the original's wheel manager set. Same absence policy as
+    // the panels above: no record, no ejection.
+    let mut eject_wheels = Vec::new();
+    for w in &model.wheels {
+        if w.trailer || !w.simulated || w.index > 3 {
+            continue;
+        }
+        let name = format!("whl{}", w.index);
+        let logical = format!("tune/banger/{id}_{name}.dgbangerdata");
+        let Some((bytes, src)) = read_opt(vfs, &logical) else {
+            continue;
+        };
+        sources.push(src);
+        match std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|t| BangerData::parse(t).ok())
+        {
+            Some(data) => {
+                for issue in data.validate() {
+                    damage_warnings.push(format!("{logical}: {issue}"));
+                }
+                let def = BangerDefinition::from_record(format!("{id}_{name}"), &data);
+                eject_wheels.push(BreakPart { name, def });
+            }
+            None => {
+                damage_warnings.push(format!("{logical}: failed to parse"));
+            }
+        }
+    }
+
     // Bounds — optional but expected for stock.
     let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd")).and_then(|(bytes, src)| {
         sources.push(src);
@@ -415,6 +456,7 @@ fn load_vehicle_impl(
         stuck,
         gyro,
         breaks,
+        eject_wheels,
         audio,
         report,
         sources,

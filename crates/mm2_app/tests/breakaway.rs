@@ -20,9 +20,10 @@ use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_app::stuck::{self, StuckReport};
 use mm2_game::{
     BangerDefinition, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, DamageEvent,
-    DamageSpec, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, PartDetached, Player,
-    PlayerControl, Session, SessionConfig, SessionEntity, SessionPhase, StuckEvent, SurfaceState,
-    VehicleBreaks, VehicleDamage, advance_session_tick,
+    DamageSpec, EventRef, EventTableKind, ImpactEvent, ImpactId, ObjectId, ObjectIdentity,
+    PartDetached, Player, PlayerControl, Session, SessionConfig, SessionEntity, SessionMode,
+    SessionPhase, StuckEvent, SurfaceState, VehicleBreakdown, VehicleBreaks, VehicleDamage,
+    advance_session_tick,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -65,11 +66,34 @@ fn part(name: &str, limit: f32) -> BreakPartSpec {
             num_parts: 0,
             audio_id: 0,
         },
+        gate: mm2_game::BreakGate::Impact,
     }
 }
 
-/// The production FixedLast order: impacts → damage → stuck →
-/// breakaway → disabled → stuck-recovery.
+/// A damage-driven wheel part (`whl0..3`) — the same `BreakPartSpec`
+/// `vehicle_rig` builds for a model's wheels (REC-2).
+fn wheel(name: &str) -> BreakPartSpec {
+    let mut spec = part(name, LIMIT);
+    spec.gate = mm2_game::BreakGate::Damage;
+    spec
+}
+
+/// A Blitz session config: the disabled outcome is a Breakdown, so a
+/// wreck gets a dead interval before the repair instead of the reset
+/// outcomes' same-tick re-attach — the window in which an ejected
+/// wheel is observable.
+fn blitz_config() -> SessionConfig {
+    SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "sf".into(),
+            table: EventTableKind::Blitz,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    }
+}
+
+/// breakaway (panels then wheels) → disabled → breakdown → stuck-recovery.
 fn add_pipeline(app: &mut App) {
     app.add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
@@ -79,7 +103,12 @@ fn add_pipeline(app: &mut App) {
                 damage::apply_impact_damage,
                 stuck::track_stuck,
                 breakaway::detach_breaks,
+                // F05-B wheel ejection (REC-2): the damage-driven episode
+                // runs after the panels and before the outcome's repair,
+                // exactly as `main.rs` fixes the order.
+                breakaway::eject_wheels,
                 damage::resolve_disabled,
+                damage::resolve_breakdown,
                 stuck::resolve_stuck,
             )
                 .chain(),
@@ -185,6 +214,7 @@ fn break_app_as(
                     Transform::from_xyz(0.0, 0.4, -1.0 - i as f32),
                     Visibility::Visible,
                     BreakPartVisual {
+                        vehicle: car,
                         part: spec.name.clone(),
                         local: Transform::from_xyz(0.0, 0.4, -1.0 - i as f32),
                         collider: Some(Collider::cuboid(0.4, 0.2, 0.6)),
@@ -601,6 +631,7 @@ fn a_remote_seats_rig_sheds_on_the_authority() {
             Transform::IDENTITY,
             Visibility::Visible,
             BreakPartVisual {
+                vehicle: remote,
                 part: "break0".into(),
                 local: Transform::IDENTITY,
                 collider: Some(Collider::cuboid(0.4, 0.2, 0.6)),
@@ -740,6 +771,7 @@ fn a_part_with_no_render_node_cannot_detach() {
             Transform::IDENTITY,
             Visibility::Visible,
             BreakPartVisual {
+                vehicle: car,
                 part: "break99".into(),
                 local: Transform::IDENTITY,
                 collider: Some(Collider::cuboid(0.4, 0.2, 0.6)),
@@ -803,8 +835,40 @@ fn retail_breakaway_gate_is_manager_wide_not_per_part() {
         .map(|b| BreakPartSpec {
             name: b.name.clone(),
             def: b.def.clone(),
+            gate: mm2_game::BreakGate::Impact,
         })
         .collect();
+
+    // F05-B wheel ejection (REC-2): the damage-driven inventory pairs
+    // the retail car's `whl0..3` banger records, and `vehicle_rig` puts
+    // them in the same rig after the panels, damage-gated. The manager
+    // never holds `whl4`+ (the back-back followers).
+    let wheel_names: Vec<&str> = def.eject_wheels.iter().map(|w| w.name.as_str()).collect();
+    assert!(
+        !wheel_names.is_empty(),
+        "vpcoop authors wheel fragment records (REC-2)"
+    );
+    for name in &wheel_names {
+        let index: usize = name
+            .strip_prefix("whl")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("wheel stem {name:?} is not whl<N>"));
+        assert!(
+            index <= 3,
+            "the wheel manager holds whl0..3 only, got {name}"
+        );
+    }
+    let rig = breakaway::vehicle_rig(&def).expect("vpcoop has a rig");
+    let gated: Vec<&str> = rig
+        .parts
+        .iter()
+        .filter(|p| p.spec.gate == mm2_game::BreakGate::Damage)
+        .map(|p| p.spec.name.as_str())
+        .collect();
+    assert_eq!(
+        gated, wheel_names,
+        "the wheels are the damage-gated rig parts"
+    );
 
     // Every authored `ImpulseLimit2` sits below the recovered manager
     // gate (the whole retail vehicle ladder does: ≈31.25 m/s panels,
@@ -945,5 +1009,164 @@ fn detached_panels_stay_hidden_across_cockpit_cycles() {
             "a detached panel stays hidden after the cockpit cycle"
         );
         assert!(app.world().get::<CockpitHidden>(*node).is_none());
+    }
+}
+
+/// F05-B wheel ejection (REC-2) app integration: a disabling blow at
+/// speed runs the recovered damage-driven episode through the
+/// production damage stream — every wheel leaves as a pooled fragment
+/// carrying the recovered `Speed × 1.3` kick — and the Breakdown
+/// outcome's later repair puts them back. Blitz is used deliberately:
+/// its `Breakdown` outcome leaves the wreck dead for a few seconds, so
+/// the ejected state is observable (the reset outcomes re-attach in
+/// the same tick).
+#[test]
+fn a_disabling_blow_at_speed_ejects_the_wheels_until_the_repair() {
+    let (mut app, car, object, nodes) = break_app_as(
+        (0..4).map(|i| wheel(&format!("whl{i}"))).collect(),
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+        blitz_config(),
+    );
+    // 60 m/s ≈ 134 mph along the car's forward (-Z) — over the `> 100`
+    // "every wheel" band. `eject_wheels` reads the forward velocity the
+    // original's `SpeedMPH` is built from.
+    app.world_mut()
+        .entity_mut(car)
+        .insert(LinearVelocity(Vec3::NEG_Z * 60.0));
+    // A wrecking blow: 300 × 1300 = 390 000 > MaxDamage (321 300).
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+    app.update();
+
+    assert_eq!(report(&app).ejected, 4, "every wheel leaves at > 100 mph");
+    assert_eq!(report(&app).detached, 4, "wheels count as rig detaches");
+    assert!(
+        app.world().get::<VehicleBreakdown>(car).is_some(),
+        "Blitz owns the wreck as a breakdown episode"
+    );
+    for (i, node) in nodes.iter().enumerate() {
+        assert_eq!(
+            *app.world().get::<Visibility>(*node).unwrap(),
+            Visibility::Hidden,
+            "whl{i} is off the car"
+        );
+    }
+    // One bounded event and one pooled fragment body per wheel, the
+    // fragment carrying the recovered kick (m/s) as its estimate.
+    let events = drain_parts(&mut app);
+    assert_eq!(events.len(), 4);
+    for e in &events {
+        assert_eq!(e.object, object);
+        assert!(e.part.starts_with("whl"), "wheel stem, got {}", e.part);
+        assert!(e.fragment.is_some(), "a pooled fragment slot exists");
+        assert!((e.estimate - 60.0 * 1.3).abs() < 1.0);
+    }
+    let mut parts: Vec<usize> = app
+        .world_mut()
+        .query::<&BreakFragment>()
+        .iter(app.world())
+        .map(|f| f.part)
+        .collect();
+    parts.sort_unstable();
+    assert_eq!(parts, vec![0, 1, 2, 3]);
+    assert!(
+        app.world().get::<VehicleBreaks>(car).unwrap().ejected,
+        "the episode latches until the repair"
+    );
+
+    // Park the car so the long breakdown countdown cannot walk it off
+    // the test plane while we wait it out.
+    app.world_mut()
+        .entity_mut(car)
+        .insert(LinearVelocity(Vec3::ZERO));
+    run(&mut app, (5.0 * 60.0) as usize + 10);
+
+    assert_eq!(
+        report(&app).restored,
+        4,
+        "the breakdown repair restores the rig"
+    );
+    assert!(
+        !app.world().get::<VehicleBreaks>(car).unwrap().ejected,
+        "the repair re-arms the one-shot episode flag"
+    );
+    for node in &nodes {
+        assert_eq!(
+            *app.world().get::<Visibility>(*node).unwrap(),
+            Visibility::Visible,
+            "a repaired car shows its wheels again"
+        );
+    }
+    let fragments = app
+        .world_mut()
+        .query::<&BreakFragment>()
+        .iter(app.world())
+        .count();
+    assert_eq!(fragments, 0, "the spawned wheel fragments despawned");
+}
+
+/// A slow disabling blow: the recovered episode still latches but the
+/// `SpeedMPH` band (`< 50`) takes nothing, and a second blow in the
+/// same wreck cannot eject either — one episode per wreck.
+#[test]
+fn a_slow_disabling_blow_ejects_nothing_and_the_episode_latches() {
+    let (mut app, car, object, nodes) = break_app_as(
+        (0..4).map(|i| wheel(&format!("whl{i}"))).collect(),
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+        blitz_config(),
+    );
+    // 10 m/s ≈ 22 mph — under the recovered `> 50` floor.
+    app.world_mut()
+        .entity_mut(car)
+        .insert(LinearVelocity(Vec3::NEG_Z * 10.0));
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+    app.update();
+
+    assert_eq!(report(&app).ejected, 0);
+    assert_eq!(report(&app).detached, 0);
+    for node in &nodes {
+        assert_eq!(
+            *app.world().get::<Visibility>(*node).unwrap(),
+            Visibility::Visible
+        );
+    }
+    assert!(
+        app.world().get::<VehicleBreaks>(car).unwrap().ejected,
+        "the episode latches even when the speed band takes nothing"
+    );
+
+    // A second blow at speed, still inside the same wreck: the latched
+    // episode never fires twice (the original's `+0xa4` one-shot).
+    app.world_mut()
+        .entity_mut(car)
+        .insert(LinearVelocity(Vec3::NEG_Z * 60.0));
+    write_impact(&mut app, 2, object, ObjectId::WORLD, 300.0);
+    app.update();
+    assert_eq!(report(&app).ejected, 0, "one episode per wreck");
+    assert_eq!(report(&app).detached, 0);
+}
+
+/// A damage-gated wheel is never taken by the impact gate: a hard hit
+/// that reaches the manager-wide impulse (REC-2) sheds no wheel — the
+/// two triggers are separate recovered rules (F05-B).
+#[test]
+fn a_qualifying_impact_never_ejects_a_wheel() {
+    let (mut app, _car, object, nodes) = break_app(
+        (0..4).map(|i| wheel(&format!("whl{i}"))).collect(),
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+    );
+    // 9 m/s against the world: 11 700 kg·m/s, comfortably over the
+    // manager gate — but the rig authors only damage-gated wheels.
+    write_impact(&mut app, 1, object, ObjectId::WORLD, OVER);
+    run(&mut app, 3);
+    assert_eq!(report(&app).detached, 0);
+    assert_eq!(report(&app).ejected, 0);
+    for node in &nodes {
+        assert_eq!(
+            *app.world().get::<Visibility>(*node).unwrap(),
+            Visibility::Visible
+        );
     }
 }

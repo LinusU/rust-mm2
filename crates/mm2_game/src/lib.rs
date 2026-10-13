@@ -58,7 +58,7 @@ pub use banger::{
     BangerStateChanged, DEFAULT_ACTIVE_POOL, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,
     contact_impulse_squared,
 };
-pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
+pub use breakaway::{BreakGate, BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, RaceCustomization, SelectorError, SessionAuthority, SessionConditions,

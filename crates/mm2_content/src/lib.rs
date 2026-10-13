@@ -34,8 +34,8 @@ pub mod surface;
 pub mod traffic;
 
 pub use assemble::{
-    AmbientVehicle, LoadError, TrailerDef, VehicleDef, ambient_engine_audio, ambient_vehicle,
-    load_by_id, load_opponent, load_vehicle,
+    AmbientVehicle, BreakPart, LoadError, TrailerDef, VehicleDef, ambient_engine_audio,
+    ambient_vehicle, load_by_id, load_opponent, load_vehicle,
 };
 pub use availability::availability_table;
 pub use catalog::{

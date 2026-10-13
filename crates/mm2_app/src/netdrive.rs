@@ -134,12 +134,12 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use mm2_game::{
-    Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, DamageSignals, DamageSpec,
-    ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl,
-    PlayerVehicle, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy,
-    ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult, SmokePolicy,
-    SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
-    VehicleSmoke, VehicleSparks, VehicleStuck,
+    Banger, BangerPhase, BangerPool, BangerStateChanged, DamageSignals, DamageSpec, ImpactEvent,
+    Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl, PlayerVehicle,
+    RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy, ResultLedger,
+    Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult, SmokePolicy, SparkPolicy,
+    StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
+    VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
@@ -1920,20 +1920,12 @@ fn spawn_remote(
     }
     // F25-B (protocol v11): the authored breakaway inventory rides
     // both roles — on the authority it is the live rig `detach_breaks`
-    // sheds parts off (the seat's `SnapEntry.breaks` bitmask publishes
-    // it); on a client it is the presentation rig the replicated
-    // bitmask reconciles. Same absence policy as the local spawn: no
-    // authored parts, no component.
-    if let Some(def) = def.as_ref().filter(|d| !d.breaks.is_empty()) {
-        commands.entity(vehicle).insert(VehicleBreaks::new(
-            def.breaks
-                .iter()
-                .map(|b| BreakPartSpec {
-                    name: b.name.clone(),
-                    def: b.def.clone(),
-                })
-                .collect(),
-        ));
+    // sheds panels off and `eject_wheels` sheds wheels off (the seat's
+    // `SnapEntry.breaks` bitmask publishes it); on a client it is the
+    // presentation rig the replicated bitmask reconciles. Same absence
+    // policy as the local spawn: no authored parts, no component.
+    if let Some(rig) = def.as_ref().and_then(breakaway::vehicle_rig) {
+        commands.entity(vehicle).insert(rig);
     }
     commands
         .entity(vehicle)
@@ -3219,8 +3211,8 @@ fn apply_break_bits(
             // not data.
             let Some(node) = visuals
                 .iter()
-                .find(|(_, bpv, _, child)| child.parent() == entity && bpv.part == spec.name)
-                .map(|(e, _, _, _)| e)
+                .find(|(_, bpv, _)| bpv.vehicle == entity && bpv.part == spec.name)
+                .map(|(e, _, _)| e)
             else {
                 continue;
             };
@@ -3255,8 +3247,8 @@ fn apply_break_bits(
             if let Some(fragment) = rig.attach(i) {
                 commands.entity(fragment).despawn();
             }
-            for (_, bpv, mut vis, child) in visuals.iter_mut() {
-                if child.parent() == entity && bpv.part == rig.parts[i].spec.name {
+            for (_, bpv, mut vis) in visuals.iter_mut() {
+                if bpv.vehicle == entity && bpv.part == rig.parts[i].spec.name {
                     *vis = Visibility::Visible;
                 }
             }
@@ -4468,7 +4460,7 @@ mod tests {
     /// process's rig identical anyway).
     #[test]
     fn breaks_tail_encodes_the_detached_mask() {
-        let part = |name: String| BreakPartSpec {
+        let part = |name: String| mm2_game::BreakPartSpec {
             name,
             def: mm2_game::BangerDefinition {
                 name: "frag".into(),
@@ -4481,6 +4473,7 @@ mod tests {
                 num_parts: 0,
                 audio_id: 0,
             },
+            gate: mm2_game::BreakGate::Impact,
         };
         assert_eq!(encode_breaks(None), 0, "no authored rig reads intact");
         let mut rig =

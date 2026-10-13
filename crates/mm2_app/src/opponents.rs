@@ -93,11 +93,11 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    BreakPartSpec, CheckpointRule, DamageSignals, DamageSpec, NavGraph, ObjectId, ObjectIdentity,
-    OpponentRoster, OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl,
-    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, RouteGateLine, RouteOptions, Session,
-    SessionEntity, SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage,
-    VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
+    CheckpointRule, DamageSignals, DamageSpec, NavGraph, ObjectId, ObjectIdentity, OpponentRoster,
+    OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition,
+    RaceProgress, RaceState, RecoveryPolicy, RouteGateLine, RouteOptions, Session, SessionEntity,
+    SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleDamage, VehicleRecovery,
+    VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, trace, warn};
@@ -1047,19 +1047,11 @@ pub fn equip_authored_vehicle(
             .entity(vehicle)
             .insert(VehicleAudio { spec: a.clone() });
     }
-    // And the authored breakaway inventory (F05-B.3): only
-    // `dgbangerdata`-backed BREAK chunks, so authoredless cars
-    // detach nothing.
-    if !def.breaks.is_empty() {
-        commands.entity(vehicle).insert(VehicleBreaks::new(
-            def.breaks
-                .iter()
-                .map(|b| BreakPartSpec {
-                    name: b.name.clone(),
-                    def: b.def.clone(),
-                })
-                .collect(),
-        ));
+    // And the authored breakaway inventory (F05-B.3, wheels included):
+    // impact-gated panels plus damage-gated corners, only
+    // `dgbangerdata`-backed parts, so authoredless cars detach nothing.
+    if let Some(rig) = crate::breakaway::vehicle_rig(def) {
+        commands.entity(vehicle).insert(rig);
     }
     // Water/out-of-bounds recovery (F05-B.5) — the designed policy
     // rides on every participant, anchored at its spawn pose.

@@ -42,12 +42,42 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::model::ModelPart;
 use mm2_game::{
-    Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, ImpactEvent, ObjectId,
-    ObjectIdentity, PartDetached, Session, SessionEntity, VehicleBreaks,
+    Banger, BangerPhase, BangerPool, BangerStateChanged, BreakGate, BreakPartSpec, DamageEvent,
+    DamageTier, ImpactEvent, NavRng, ObjectId, ObjectIdentity, PartDetached, Session,
+    SessionEntity, VehicleBreaks,
 };
 
 use crate::banger::{BangerMut, banger_bundle, claim_slot};
 use crate::contracts::delivered_impulse;
+use mm2_vehicle::original::MPS_TO_MPH;
+
+/// Determinism domain for the damage-driven wheel episode's draws —
+/// XORs the object seed and the episode tick so the corner picks and the
+/// fragment kick cannot coincide with another system's `NavRng` stream.
+const WHEEL_EJECT_DOMAIN: u64 = 0x7768_6c5f_656a_6374;
+
+/// Build one vehicle's breakaway rig from its authored inventory: the
+/// impact-gated `BREAK<NN>` panels first, then the damage-gated
+/// `whl0..3` wheels (REC-2). The order is fixed by the authored
+/// definition every process shares, so a rig's part indices are the
+/// replicated `SnapEntry.breaks` bit positions (protocol v11, F25-B).
+/// `None` when the vehicle authored neither side — the same
+/// authored-absence policy as the other damage components.
+pub fn vehicle_rig(def: &mm2_content::VehicleDef) -> Option<VehicleBreaks> {
+    let mut specs: Vec<BreakPartSpec> =
+        Vec::with_capacity(def.breaks.len() + def.eject_wheels.len());
+    specs.extend(def.breaks.iter().map(|b| BreakPartSpec {
+        name: b.name.clone(),
+        def: b.def.clone(),
+        gate: BreakGate::Impact,
+    }));
+    specs.extend(def.eject_wheels.iter().map(|w| BreakPartSpec {
+        name: w.name.clone(),
+        def: w.def.clone(),
+        gate: BreakGate::Damage,
+    }));
+    (!specs.is_empty()).then(|| VehicleBreaks::new(specs))
+}
 
 /// Per-session evidence counters for the breakaway pipeline — the
 /// `brk=` field of the headless smoke record. Session-scoped like
@@ -55,8 +85,12 @@ use crate::contracts::delivered_impulse;
 /// teardown.
 #[derive(Resource, Debug, Default)]
 pub struct BreakReport {
-    /// Parts that left a rig this session.
+    /// Parts that left a rig this session (impact-gated panels and
+    /// damage-gated wheels together).
     pub detached: u64,
+    /// Wheels a damage-driven episode ejected (REC-2) — a subset of
+    /// `detached`, kept apart because the trigger is different.
+    pub ejected: u64,
     /// Parts a repair put back (their fragments despawned).
     pub restored: u64,
 }
@@ -69,18 +103,25 @@ impl BreakReport {
     }
 }
 
-/// The render node of one intact `BREAK<NN>` part, tagged by
+/// The render node of one intact breakaway part, tagged by
 /// `car_visual` when the model carries a part the vehicle's authored
-/// `breaks` inventory can detach. Detachment hides this node and
-/// turns its data into the spawned fragment; repair shows it again.
+/// inventory can detach (a `BREAK<NN>` panel or a `whl0..3` wheel).
+/// Detachment hides this node and turns its data into the spawned
+/// fragment; repair shows it again. The owning vehicle is stored rather
+/// than read from `ChildOf`: a wheel's `WheelSpin` node hangs under its
+/// `WheelMount`, not directly under the root.
 #[derive(Component)]
 pub struct BreakPartVisual {
-    /// Model part stem (`break01`) — the key the rig's spec uses.
+    /// The vehicle root this node belongs to.
+    pub vehicle: Entity,
+    /// Model part stem (`break01`, `whl0`) — the key the rig's spec uses.
     pub part: String,
     /// This node's local transform under the vehicle root — the
     /// fragment's spawn pose is `car_pose * local`, read off the
     /// physics pose directly so a never-propagated `GlobalTransform`
-    /// cannot lag a frame behind the impact.
+    /// cannot lag a frame behind the impact. For a wheel this is the
+    /// authored mount origin (the live suspension droop is presentation,
+    /// not part identity).
     pub local: Transform,
     /// Convex hull over the part's baked mesh verts, in node space —
     /// the fragment's collider. `None` on degenerate geometry: the
@@ -95,9 +136,10 @@ pub struct BreakPartVisual {
 }
 
 impl BreakPartVisual {
-    /// Tag a `BREAK<NN>` render node: hull and centroid over the same
-    /// baked (recentered) verts `spawn_groups` meshes.
-    pub fn of(part: &ModelPart, local: Transform) -> Self {
+    /// Tag a `BREAK<NN>`/`WHL<NN>` render node owned by `vehicle`: hull
+    /// and centroid over the same baked (recentered) verts
+    /// `spawn_groups` meshes.
+    pub fn of(vehicle: Entity, part: &ModelPart, local: Transform) -> Self {
         let recenter = part.recenter.map(Vec3::from).unwrap_or(Vec3::ZERO);
         let mut verts: Vec<Vec3> = Vec::new();
         if let Some(groups) = part.best_nonempty_lod().or_else(|| part.best_lod()) {
@@ -111,6 +153,7 @@ impl BreakPartVisual {
             verts.iter().sum::<Vec3>() / verts.len() as f32
         };
         Self {
+            vehicle,
             part: part.name.clone(),
             local,
             collider: Collider::convex_hull(verts),
@@ -133,13 +176,10 @@ pub struct BreakFragment {
 /// The break-node query shape [`detach_breaks`] scans and
 /// [`spawn_break_fragment`] hides through — shared with the
 /// replicated-detach reconcile in [`crate::netdrive`], which looks the
-/// same nodes up and re-shows them on a repair.
-pub(crate) type BreakVisualMut = (
-    Entity,
-    &'static BreakPartVisual,
-    &'static mut Visibility,
-    &'static ChildOf,
-);
+/// same nodes up and re-shows them on a repair. The owning vehicle is a
+/// field on the component, so a wheel's nested node is found the same
+/// way a root-level panel is.
+pub(crate) type BreakVisualMut = (Entity, &'static BreakPartVisual, &'static mut Visibility);
 
 /// Spawn one detached part's fragment body — the shared half of
 /// [`detach_breaks`] (authority, real impact) and the replicated-detach
@@ -174,7 +214,7 @@ pub(crate) fn spawn_break_fragment(
     render_parts: &Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
     commands: &mut Commands,
 ) -> Option<(Entity, ObjectId)> {
-    let Ok((_, visual, mut vis, _)) = visuals.get_mut(node) else {
+    let Ok((_, visual, mut vis)) = visuals.get_mut(node) else {
         return None;
     };
     let (local, collider, centroid) = (visual.local, visual.collider.clone(), visual.centroid);
@@ -354,8 +394,8 @@ pub fn detach_breaks(
             let anchors = rig.parts.iter().enumerate().filter_map(|(i, p)| {
                 visuals
                     .iter()
-                    .find(|(_, bpv, _, child)| child.parent() == entity && bpv.part == p.spec.name)
-                    .map(|(_, bpv, _, _)| (i, car_pos + car_rot * bpv.local.translation))
+                    .find(|(_, bpv, _)| bpv.vehicle == entity && bpv.part == p.spec.name)
+                    .map(|(_, bpv, _)| (i, car_pos + car_rot * bpv.local.translation))
             });
             let Some(i) = rig.nearest_attached(event.point, anchors) else {
                 continue;
@@ -363,10 +403,8 @@ pub fn detach_breaks(
             // The part's render node: hidden on detach, shown on repair.
             let Some(node) = visuals
                 .iter()
-                .find(|(_, bpv, _, child)| {
-                    child.parent() == entity && bpv.part == rig.parts[i].spec.name
-                })
-                .map(|(e, _, _, _)| e)
+                .find(|(_, bpv, _)| bpv.vehicle == entity && bpv.part == rig.parts[i].spec.name)
+                .map(|(e, _, _)| e)
             else {
                 continue;
             };
@@ -411,6 +449,143 @@ pub fn detach_breaks(
     }
 }
 
+/// A uniformly-ish random unit vector off `rng` — the wheel fragment's
+/// kick direction. The original's direction source (`0x4d8930`'s random
+/// components scaled by the manager's ranges, `+0x14`) is unrecovered;
+/// the magnitude is the recovered `Speed × 1.3`.
+fn random_unit(rng: &mut NavRng) -> Vec3 {
+    let z = rng.next_f32() * 2.0 - 1.0;
+    let theta = rng.next_f32() * std::f32::consts::TAU;
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    Vec3::new(r * theta.cos(), r * theta.sin(), z)
+}
+
+/// Fixed-step: the damage-driven wheel episode (REC-2). Consumes the
+/// same [`DamageEvent`] stream the HUD and impairment read and, when a
+/// participant's accumulated damage reaches `MaxDamage` (tier
+/// `Disabled`), runs the recovered `0x4cdc90` rule once per episode:
+/// `SpeedMPH` (`|forward velocity| × 2.236025`) selects the wheels —
+/// `> 100` every wheel, `> 75` two random corners, `> 50` one — each
+/// leaving as a pooled fragment with the recovered `Speed × 1.3` kick,
+/// and the rig's one-shot flag latches until a repair restores it.
+///
+/// Authority-gated and drains while not `Playing`, like every other
+/// damage consumer. Runs before `resolve_disabled` so a same-tick
+/// repair re-attaches what the episode took (the original's reset
+/// re-arms the episode flag on the same principle). A predicted client
+/// never runs this: its copies reconcile the state off the replicated
+/// `SnapEntry.breaks` bitmask (`netdrive::apply_snapshots`).
+#[allow(clippy::too_many_arguments)] // Bevy system: the eject decision, the fragment spawn and the pool all need their own handles
+pub fn eject_wheels(
+    mut reader: MessageReader<DamageEvent>,
+    mut session: ResMut<Session>,
+    pool: Res<BangerPool>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&SessionEntity>)>,
+    motions: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity), Without<Banger>>,
+    mut rigs: Query<&mut VehicleBreaks>,
+    mut visuals: Query<BreakVisualMut, Without<Banger>>,
+    render_parts: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
+    mut bangers: Query<BangerMut>,
+    mut banger_writer: MessageWriter<BangerStateChanged>,
+    mut writer: MessageWriter<PartDetached>,
+    mut report: ResMut<BreakReport>,
+    mut commands: Commands,
+) {
+    if reader.is_empty() {
+        return;
+    }
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        reader.read().for_each(drop);
+        return;
+    }
+    let tick = session.tick();
+    let generation = session.generation();
+    let index: HashMap<ObjectId, (Entity, Option<SessionEntity>)> = identities
+        .iter()
+        .map(|(e, id, o)| (id.0, (e, o.copied())))
+        .collect();
+    let mut occupied = bangers
+        .iter()
+        .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
+        .count();
+
+    for event in reader.read() {
+        if event.generation != generation || event.tier != DamageTier::Disabled {
+            continue;
+        }
+        let Some(&(entity, owner)) = index.get(&event.object) else {
+            continue;
+        };
+        let Ok(mut rig) = rigs.get_mut(entity) else {
+            continue;
+        };
+        // The one-shot flag: a wreck that stays above `MaxDamage` (a
+        // Breakdown episode) fires once, exactly like `0x4cdc90`'s
+        // `+0xa4` gate.
+        if rig.ejected {
+            continue;
+        }
+        let Some((car_pos, car_rot, car_lv, car_av)) = motions
+            .get(entity)
+            .map(|(p, r, l, a)| (p.0, r.0, l.0, a.0))
+            .ok()
+        else {
+            continue;
+        };
+        let forward = car_rot * Vec3::NEG_Z;
+        let speed_ms = car_lv.dot(forward).abs();
+        let speed_mph = speed_ms * MPS_TO_MPH;
+        let seed = (event.object.generation << 32) | u64::from(event.object.slot);
+        let mut rng = NavRng::new(seed ^ WHEEL_EJECT_DOMAIN ^ event.tick);
+        for i in rig.eject_at(speed_mph, &mut rng) {
+            let Some(owner) = owner else {
+                break;
+            };
+            // A wheel's `WheelSpin` node hangs under its `WheelMount`;
+            // `BreakPartVisual` carries the owner either way.
+            let Some(node) = visuals
+                .iter()
+                .find(|(_, bpv, _)| bpv.vehicle == entity && bpv.part == rig.parts[i].spec.name)
+                .map(|(e, _, _)| e)
+            else {
+                continue;
+            };
+            let spec = rig.parts[i].spec.clone();
+            let dir = random_unit(&mut rng);
+            let spawned = spawn_break_fragment(
+                node,
+                entity,
+                i,
+                &spec,
+                (car_pos, car_rot),
+                (car_lv, car_av),
+                Some((dir, car_pos, VehicleBreaks::EJECT_KICK_SCALE * speed_ms)),
+                owner,
+                &mut occupied,
+                &mut session,
+                &pool,
+                &mut bangers,
+                &mut banger_writer,
+                &mut visuals,
+                &render_parts,
+                &mut commands,
+            );
+            if rig.detach(i, spawned.map(|(e, _)| e)) {
+                report.detached += 1;
+                report.ejected += 1;
+                writer.write(PartDetached {
+                    object: event.object,
+                    generation,
+                    tick,
+                    part: spec.name,
+                    fragment: spawned.map(|(_, o)| o),
+                    estimate: VehicleBreaks::EJECT_KICK_SCALE * speed_ms,
+                });
+            }
+        }
+    }
+}
+
 /// Restore one vehicle's rig where a repair lands (`resolve_disabled`
 /// calls it next to `damage.reset()`): re-attach every part, despawn
 /// the spawned fragments and show the intact nodes again. Returns the
@@ -419,7 +594,7 @@ pub fn detach_breaks(
 pub(crate) fn restore_rig(
     entity: Entity,
     rig: &mut VehicleBreaks,
-    visuals: &mut Query<(&BreakPartVisual, &mut Visibility, &ChildOf)>,
+    visuals: &mut Query<(&BreakPartVisual, &mut Visibility)>,
     commands: &mut Commands,
 ) -> usize {
     let restored = rig.detached_count();
@@ -427,8 +602,8 @@ pub(crate) fn restore_rig(
         commands.entity(fragment).despawn();
     }
     if restored > 0 {
-        for (_, mut vis, child) in visuals.iter_mut() {
-            if child.parent() == entity {
+        for (visual, mut vis) in visuals.iter_mut() {
+            if visual.vehicle == entity {
                 *vis = Visibility::Visible;
             }
         }

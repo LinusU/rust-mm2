@@ -6715,6 +6715,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
             num_parts: 0,
             audio_id: 0,
         },
+        gate: mm2_game::BreakGate::Impact,
     };
     let rig_node = |app: &mut App, car: Entity| {
         app.world_mut()
@@ -6726,6 +6727,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
                 Transform::from_xyz(0.0, 0.4, -1.0),
                 Visibility::Visible,
                 mm2_app::breakaway::BreakPartVisual {
+                    vehicle: car,
                     part: "break0".into(),
                     local: Transform::from_xyz(0.0, 0.4, -1.0),
                     collider: Some(avian3d::prelude::Collider::cuboid(0.4, 0.2, 0.6)),

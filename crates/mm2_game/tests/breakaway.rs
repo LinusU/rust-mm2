@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use mm2_formats::banger::BangerData;
-use mm2_game::{BangerDefinition, BreakPartSpec, VehicleBreaks};
+use mm2_game::{BangerDefinition, BreakGate, BreakPartSpec, NavRng, VehicleBreaks};
 
 fn record(mass: f32, limit: f32) -> BangerData {
     BangerData {
@@ -35,6 +35,16 @@ fn spec(name: &str, limit: f32) -> BreakPartSpec {
     BreakPartSpec {
         name: name.to_string(),
         def: BangerDefinition::from_record(format!("vpcar_{name}"), &record(25.0, limit)),
+        gate: BreakGate::Impact,
+    }
+}
+
+/// A damage-driven wheel spec (`whl0..3`).
+fn wheel(name: &str) -> BreakPartSpec {
+    BreakPartSpec {
+        name: name.to_string(),
+        def: BangerDefinition::from_record(format!("vpcar_{name}"), &record(25.0, 700.0)),
+        gate: BreakGate::Damage,
     }
 }
 
@@ -173,4 +183,94 @@ fn restore_reattaches_and_drains_fragments() {
     assert!(rig.parts.iter().all(|p| p.attached && p.fragment.is_none()));
     // Idempotent: a second restore touches nothing.
     assert!(rig.restore().is_empty());
+}
+
+#[test]
+fn impact_gate_never_takes_a_wheel() {
+    // The two triggers are separate recovered rules: an impact reaching
+    // the manager gate detaches panels, never a damage-gated wheel, and
+    // the wheel is not a candidate for the nearest-part scan.
+    let rig = VehicleBreaks::new(vec![spec("break0", 700.0), wheel("whl0"), wheel("whl1")]);
+    assert!(rig.detaches_on(1.0e9));
+    assert_eq!(
+        rig.nearest_attached(
+            Vec3::ZERO,
+            [
+                (0, Vec3::new(10.0, 0.0, 0.0)),
+                (1, Vec3::ZERO),
+                (2, Vec3::ZERO),
+            ]
+        ),
+        Some(0),
+        "the nearest attached *panel* wins over closer wheels"
+    );
+    // With the only panel gone, an impact has nothing left to take.
+    let mut rig = VehicleBreaks::new(vec![spec("break0", 700.0), wheel("whl0")]);
+    rig.detach(0, None);
+    assert!(!rig.detaches_on(1.0e9));
+    assert_eq!(rig.nearest_attached(Vec3::ZERO, [(1, Vec3::ZERO)]), None);
+}
+
+fn wheel_rig(n: usize) -> VehicleBreaks {
+    VehicleBreaks::new((0..n).map(|i| wheel(&format!("whl{i}"))).collect())
+}
+
+#[test]
+fn eject_bands_follow_speed_mph() {
+    let mut rng = NavRng::new(7);
+    assert_eq!(VehicleBreaks::EJECT_ONE_MPH, 50.0);
+    assert_eq!(VehicleBreaks::EJECT_TWO_MPH, 75.0);
+    assert_eq!(VehicleBreaks::EJECT_ALL_MPH, 100.0);
+
+    // At or below 50 mph: nothing, but the episode still latches.
+    let mut slow = wheel_rig(4);
+    assert!(slow.eject_at(50.0, &mut rng).is_empty());
+    assert!(slow.ejected);
+
+    // Above 50: one corner.
+    let mut one = wheel_rig(4);
+    let picked = one.eject_at(50.1, &mut rng);
+    assert_eq!(picked.len(), 1);
+    assert!(picked[0] < 4);
+
+    // Above 75: two corners (a repeated draw is possible, exactly like
+    // the original's already-detached refusal).
+    let mut two = wheel_rig(4);
+    let picked = two.eject_at(75.1, &mut rng);
+    assert_eq!(picked.len(), 2);
+    assert!(picked.iter().all(|i| *i < 4));
+
+    // Above 100: every wheel.
+    let mut all = wheel_rig(4);
+    assert_eq!(all.eject_at(100.1, &mut rng), vec![0, 1, 2, 3]);
+    assert_eq!(
+        all.eject_at(200.0, &mut rng),
+        Vec::<usize>::new(),
+        "one-shot"
+    );
+}
+
+#[test]
+fn eject_is_one_shot_until_restore() {
+    let mut rig = wheel_rig(4);
+    let mut rng = NavRng::new(3);
+    assert_eq!(rig.eject_at(150.0, &mut rng).len(), 4);
+    // The episode latched: a second wreck before a repair draws nothing.
+    assert!(rig.eject_at(150.0, &mut rng).is_empty());
+    // The model reset re-arms it (the original's `0x4cdfe0`).
+    rig.restore();
+    assert!(!rig.ejected);
+    assert_eq!(rig.eject_at(150.0, &mut rng).len(), 4);
+}
+
+#[test]
+fn eject_ignores_non_finite_speed_and_panel_only_rigs() {
+    let mut rig = wheel_rig(4);
+    let mut rng = NavRng::new(5);
+    assert!(rig.eject_at(f32::NAN, &mut rng).is_empty());
+    assert!(rig.ejected, "a junk reading still closes the episode");
+
+    // A rig with no damage-gated parts ejects nothing at any speed.
+    let mut panels = VehicleBreaks::new(vec![spec("break0", 700.0)]);
+    assert!(panels.eject_at(200.0, &mut rng).is_empty());
 }

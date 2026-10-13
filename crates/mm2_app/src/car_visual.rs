@@ -447,6 +447,20 @@ pub fn spawn_vehicle_model(
             .spawn((WheelSpin, Transform::IDENTITY, Visibility::Inherited))
             .id();
         commands.entity(mount).add_child(spin);
+        // Damage-driven wheel corner (F05-B, REC-2): the original's
+        // wheel manager holds `whl0..3` — tag the spin node so the
+        // eject path can hide just the wheel (the fender rides the
+        // mount and stays). Followers (`whl4`+) and trailer wheels are
+        // never in the manager.
+        if matches!(part.role, PartRole::Wheel(n) if n <= 3) {
+            commands
+                .entity(spin)
+                .insert(crate::breakaway::BreakPartVisual::of(
+                    root,
+                    part,
+                    Transform::from_translation(attach),
+                ));
+        }
         spawn_groups(
             commands, spin, model, paint, part, &mut mats, meshes, false, None,
         );
@@ -511,7 +525,7 @@ pub fn spawn_vehicle_model(
                 commands.entity(root).add_child(node);
                 commands
                     .entity(node)
-                    .insert(crate::breakaway::BreakPartVisual::of(part, local));
+                    .insert(crate::breakaway::BreakPartVisual::of(root, part, local));
                 spawn_groups(
                     commands, node, model, paint, part, &mut mats, meshes, false, None,
                 );

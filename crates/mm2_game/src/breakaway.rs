@@ -8,10 +8,10 @@
 //! friction, elasticity) and an authored `ImpulseLimit2` — original
 //! data — though the latter does not gate detachment (see below).
 //!
-//! Detachment is impact-driven, not damage-driven, and the gate is
-//! recovered from the retail binary (REC-2): an impact whose delivered
+//! A part carries the trigger that can take it off ([`BreakGate`]).
+//! `BREAK<NN>` panels are **impact-driven**: an impact whose delivered
 //! impulse reaches a manager-wide `10000` kg·m/s takes **one** part —
-//! the attached part whose anchor is nearest the contact point. A
+//! the attached panel whose anchor is nearest the contact point. A
 //! part's authored `ImpulseLimit2` does not gate detachment at all; it
 //! only governs the *spawned fragment's* later collisions through the
 //! ordinary banger gate (OPR-1.3). The authored `ImpactThreshold` sits
@@ -21,17 +21,26 @@
 //! compared is the same estimate [`crate::VehicleDamage`] accumulates —
 //! approach speed × the other participant's mass (the struck car's own
 //! mass for a wall hit) — which REC-3 measures as the original's unit,
-//! kg·m/s, though a lower bound for the same wall hit. A part never
-//! detaches on a damage-tier crossing. Repairing the rig (the disabled
-//! outcome's reset) re-attaches every part and retires the spawned
-//! fragments; a plain reset or stuck recovery does not repair, so
-//! detached parts stay off.
+//! kg·m/s, though a lower bound for the same wall hit.
+//!
+//! Wheels (`whl0..3`) are **damage-driven** (REC-2, a separate recovered
+//! rule): once accumulated damage reaches `MaxDamage`, the original's
+//! `vehCarDamage::Update` strips wheel parts from the car model's own
+//! part manager, in random corner pairs selected by `SpeedMPH`
+//! (`vehCarSim +0x24c`): `> 100` takes every wheel, `> 75` two random
+//! pairs, `> 50` one, else nothing; the episode is one-shot (a flag the
+//! model reset clears) and the fragment kick is `Speed × 1.3`. The
+//! original's manager also holds `hubN`/`variantN` parts, but no retail
+//! car authors their geometry, so a recovered "pair" here is one wheel.
+//! [`VehicleBreaks::eject_at`] is that decision; the app spawns the
+//! fragments and repairs re-attach on reset/repair. A part never
+//! detaches on the other gate's trigger.
 //!
 //! Lifecycle per part:
 //!
 //! ```text
 //!   Attached (rides the rig, intact chunk rendered)
-//!     ── delivered impulse reaches the manager-wide 10000 ──▶
+//!     ── an impact reaching 10000, or damage reaching MaxDamage ──▶
 //!   Detached (chunk hidden, fragment body spawned once)
 //!     ── the authority repairs the rig ──▶
 //!   Attached (fragment despawned, chunk shown)
@@ -48,6 +57,20 @@ use bevy::prelude::*;
 
 use crate::banger::BangerDefinition;
 use crate::ids::ObjectId;
+use crate::nav::NavRng;
+
+/// Which trigger can take a part off the rig (REC-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakGate {
+    /// Impact-driven: one panel per impact whose delivered impulse
+    /// reaches [`VehicleBreaks::DETACH_IMPULSE`] — the `break0..3`,
+    /// `break01/12/23/03` panels.
+    Impact,
+    /// Damage-driven: once accumulated damage reaches `MaxDamage`, the
+    /// wheels selected by [`VehicleBreaks::eject_at`] — the `whl0..3`
+    /// corners.
+    Damage,
+}
 
 /// One authored breakaway part: its model stem (`break01`) and the
 /// distilled `<id>_<stem>` fragment record. The record's `CG`/`Size`
@@ -60,11 +83,13 @@ use crate::ids::ObjectId;
 #[derive(Debug, Clone, PartialEq)]
 pub struct BreakPartSpec {
     /// Model part stem, lowercase — matches `VehicleModel.parts`
-    /// (`break0`, `break01`, ...).
+    /// (`break0`, `break01`, ..., `whl0`).
     pub name: String,
     /// The part's own `tune/banger/<id>_<name>.dgbangerdata` record,
     /// distilled — authored threshold and fragment physicals.
     pub def: BangerDefinition,
+    /// Which trigger can take this part off (REC-2).
+    pub gate: BreakGate,
 }
 
 /// Runtime state of one breakaway part.
@@ -87,8 +112,15 @@ pub struct BreakPartState {
 #[derive(Component, Debug)]
 pub struct VehicleBreaks {
     /// Parts in model order; stable indices are the detach contract's
-    /// part identity.
+    /// part identity. Impact-gated panels and damage-gated wheels share
+    /// one rig so the detached bitmask is a single replicated value
+    /// (protocol v11, F25-B).
     pub parts: Vec<BreakPartState>,
+    /// One-shot flag for the damage-driven wheel episode (REC-2,
+    /// `vehCarModel +0xa4`): once accumulated damage reaches
+    /// `MaxDamage` the episode fires once and never again until the
+    /// model reset clears it ([`restore`](Self::restore)).
+    pub ejected: bool,
 }
 
 impl VehicleBreaks {
@@ -103,6 +135,7 @@ impl VehicleBreaks {
                     fragment: None,
                 })
                 .collect(),
+            ejected: false,
         }
     }
 
@@ -117,25 +150,43 @@ impl VehicleBreaks {
     /// is subsumed.
     pub const DETACH_IMPULSE: f32 = 10_000.0;
 
+    /// `vehCarSim +0x24c` (`SpeedMPH`) above which the damage-driven
+    /// wheel episode takes every wheel (`0x5af430` = 100).
+    pub const EJECT_ALL_MPH: f32 = 100.0;
+    /// `SpeedMPH` above which it takes two random wheel pairs
+    /// (`0x5b1d1c` = 75).
+    pub const EJECT_TWO_MPH: f32 = 75.0;
+    /// `SpeedMPH` above which it takes one random wheel pair
+    /// (`0x5b1d18` = 50).
+    pub const EJECT_ONE_MPH: f32 = 50.0;
+    /// Fragment kick scale: the original stores `Speed × 1.3` in the
+    /// wheel manager's kick-speed slot (`0x5af3ec` = 1.3).
+    pub const EJECT_KICK_SCALE: f32 = 1.3;
+
     /// Whether an impact of `impulse` kg·m/s — the same estimate
     /// [`crate::VehicleDamage`] accumulates, approach speed × the other
-    /// participant's mass — is strong enough to take a part and one is
-    /// still attached. Non-finite or negative impulses are rejected: a
-    /// junk delivery is never a detach.
+    /// participant's mass — is strong enough to take an impact-gated
+    /// part and one is still attached. Non-finite or negative impulses
+    /// are rejected: a junk delivery is never a detach.
     pub fn detaches_on(&self, impulse: f32) -> bool {
         impulse.is_finite()
             && impulse >= Self::DETACH_IMPULSE
-            && self.parts.iter().any(|p| p.attached)
+            && self
+                .parts
+                .iter()
+                .any(|p| p.spec.gate == BreakGate::Impact && p.attached)
     }
 
-    /// The attached part nearest `contact` — the recovered rule's
-    /// smallest-squared-distance scan over attached parts (REC-2); the
-    /// original detaches exactly this one part per qualifying impact.
-    /// `anchors` yields `(part index, anchor)` in the same space as
-    /// `contact`; a part with no anchor (no render node) or a non-finite
-    /// one is simply absent and can never be chosen. `None` on a
-    /// non-finite contact, on an out-of-range index or when no attached
-    /// part is a candidate; ties keep the lowest index.
+    /// The attached impact-gated part nearest `contact` — the recovered
+    /// rule's smallest-squared-distance scan over attached panels
+    /// (REC-2); the original detaches exactly this one part per
+    /// qualifying impact. Damage-gated wheels are never candidates: the
+    /// two gates are separate recovered rules. `anchors` yields
+    /// `(part index, anchor)` in the same space as `contact`; a part
+    /// with no anchor (no render node) or a non-finite one is simply
+    /// absent and can never be chosen. `None` on a non-finite contact,
+    /// on an out-of-range index or when no attached panel is a
+    /// candidate; ties keep the lowest index.
     pub fn nearest_attached(
         &self,
         contact: Vec3,
@@ -146,10 +197,56 @@ impl VehicleBreaks {
         }
         anchors
             .into_iter()
-            .filter(|(i, a)| self.parts.get(*i).is_some_and(|p| p.attached) && a.is_finite())
+            .filter(|(i, a)| {
+                self.parts
+                    .get(*i)
+                    .is_some_and(|p| p.spec.gate == BreakGate::Impact && p.attached)
+                    && a.is_finite()
+            })
             .map(|(i, a)| (i, (a - contact).length_squared()))
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .map(|(i, _)| i)
+    }
+
+    /// The damage-driven wheel episode (REC-2, `0x4cdc90`): mark the
+    /// one-shot episode fired and return the part indices to eject, by
+    /// `speed_mph` (`vehCarSim +0x24c`): `> 100` every wheel, `> 75` two
+    /// random corners, `> 50` one, else none. Draws come from `rng`
+    /// (the caller seeds it per vehicle/episode) — the original draws a
+    /// corner per pair and refuses an already-detached one, so a
+    /// repeated corner in the two-pair band yields a single wheel; the
+    /// returned indices may therefore repeat and the caller's
+    /// [`detach`](Self::detach) drops the repeats. The episode is
+    /// marked fired even when the speed band ejects nothing (the
+    /// original sets the flag on its way out), and a second call before
+    /// [`restore`](Self::restore) returns nothing.
+    pub fn eject_at(&mut self, speed_mph: f32, rng: &mut NavRng) -> Vec<usize> {
+        if self.ejected {
+            return Vec::new();
+        }
+        self.ejected = true;
+        let wheels: Vec<usize> = self
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.spec.gate == BreakGate::Damage)
+            .map(|(i, _)| i)
+            .collect();
+        if wheels.is_empty() || !speed_mph.is_finite() {
+            return Vec::new();
+        }
+        if speed_mph > Self::EJECT_ALL_MPH {
+            return wheels;
+        }
+        let pairs = if speed_mph > Self::EJECT_TWO_MPH {
+            2
+        } else if speed_mph > Self::EJECT_ONE_MPH {
+            1
+        } else {
+            0
+        };
+        let pick = |rng: &mut NavRng| wheels[(rng.next_u64() % wheels.len() as u64) as usize];
+        (0..pairs).map(|_| pick(rng)).collect()
     }
 
     /// Mark a part detached and record the fragment body it spawned
@@ -184,10 +281,12 @@ impl VehicleBreaks {
     }
 
     /// Restore the whole rig (the repair side of the disabled
-    /// outcome): every part re-attaches and the fragment entities it
-    /// spawned are returned for the caller to despawn. Idempotent —
-    /// an untouched rig returns empty.
+    /// outcome): every part re-attaches, the damage-driven episode flag
+    /// clears (the original's model reset `0x4cdfe0` re-arms it), and
+    /// the fragment entities it spawned are returned for the caller to
+    /// despawn. Idempotent — an untouched rig returns empty.
     pub fn restore(&mut self) -> Vec<Entity> {
+        self.ejected = false;
         let mut fragments = Vec::new();
         for part in &mut self.parts {
             part.attached = true;
@@ -223,8 +322,9 @@ pub struct PartDetached {
     /// The fragment body's minted identity — `None` when the part
     /// detached without spawning a body (pool bound).
     pub fragment: Option<ObjectId>,
-    /// The impact's delivered impulse — approach speed × the other
-    /// participant's mass, in kg·m/s — that reached the manager-wide
-    /// gate (REC-2/REC-3). Not the part's `ImpulseLimit2`.
+    /// The quantity that drove the detach: the impact's delivered
+    /// impulse for an impact-gated panel (approach speed × the other
+    /// participant's mass, kg·m/s — REC-2/REC-3), or the recovered
+    /// `Speed × 1.3` fragment kick (m/s) for a damage-gated wheel.
     pub estimate: f32,
 }

@@ -36,11 +36,11 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
-    ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionAuthority, SessionEntity, SessionMode, SessionPhase,
-    SmokePolicy, SparkPolicy, StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks,
-    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
+    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player,
+    PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session,
+    SessionAuthority, SessionEntity, SessionMode, SessionPhase, SmokePolicy, SparkPolicy,
+    StuckSpec, TargetSelection, VehicleAudio, VehicleDamage, VehicleRecovery, VehicleSmoke,
+    VehicleSparks, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{ResetAuthority, ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{debug, error, info, warn};
@@ -1621,19 +1621,12 @@ pub fn load_session_world(
                     .entity(vehicle)
                     .insert(VehicleAudio { spec: a.clone() });
             }
-            // Authored breakaway inventory (F05-B.3): only
-            // `dgbangerdata`-backed BREAK chunks make a rig, so a car
-            // without authored fragments detaches nothing.
-            if !def.breaks.is_empty() {
-                commands.entity(vehicle).insert(VehicleBreaks::new(
-                    def.breaks
-                        .iter()
-                        .map(|b| BreakPartSpec {
-                            name: b.name.clone(),
-                            def: b.def.clone(),
-                        })
-                        .collect(),
-                ));
+            // Authored breakaway inventory (F05-B.3, F05-B wheel
+            // ejection): impact-gated panels plus damage-gated wheels,
+            // only `dgbangerdata`-backed parts, so a car without
+            // authored fragments detaches nothing.
+            if let Some(rig) = crate::breakaway::vehicle_rig(def) {
+                commands.entity(vehicle).insert(rig);
             }
             let missing = car_visual::spawn_vehicle_model(
                 &mut commands,
