@@ -136,7 +136,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--init", type=Path, help="start a new run from this checkpoint's weights")
     p.add_argument("--configure", help="JSON reward/start overrides sent to every worker")
     p.add_argument("--total-steps", type=float, default=float("inf"))
-    p.add_argument("--save-minutes", type=float, default=5.0)
+    p.add_argument("--save-minutes", type=float, default=10.0)
     p.add_argument("--snapshot-steps", type=float, default=25e6,
                    help="keep a numbered checkpoint this often")
     p.add_argument("--recycle", type=int, default=2,
@@ -168,10 +168,12 @@ def main() -> None:
         shutil.copy2(args.gym, gym)
 
     configure = json.loads(args.configure) if args.configure else None
+    # Every race of every city, plus each city's "roam" world: routes
+    # planned through the road graph rather than authored for a race.
     worlds = [
         (city, event)
         for city in args.cities.split(",")
-        for event in list_events(gym, args.install, city)
+        for event in [*list_events(gym, args.install, city), "roam"]
     ]
     # Races that go badly are visited more often: each world is drawn in
     # proportion to a floor plus the share of its episodes that failed.
@@ -255,7 +257,7 @@ def main() -> None:
     val_buf = torch.zeros((horizon, n))
 
     recent: deque = deque(maxlen=4000)
-    # Statistics since this start of the run, by line.
+    # Statistics since the last save, by line.
     by_line: dict[str, Counter] = defaultdict(Counter)
     log = (run / "log.jsonl").open("a")
     last_save = time.time()
@@ -400,14 +402,16 @@ def main() -> None:
             scale.resize(n)
         if time.time() - last_save > args.save_minutes * 60:
             save(latest)
+            # Per-line statistics cover the stretch since the last save,
+            # so the file always describes the current policy.
             (run / "lines.json").write_text(json.dumps(by_line, indent=1, sort_keys=True))
+            by_line.clear()
             last_save = time.time()
         if steps >= next_snapshot:
             save(run / f"ckpt_{int(next_snapshot / 1e6):05d}M.pt")
             next_snapshot += args.snapshot_steps
 
     save(latest)
-    (run / "lines.json").write_text(json.dumps(by_line, indent=1, sort_keys=True))
     (run / "pid").unlink(missing_ok=True)
     env.close()
     print(f"{args.run}: stopped at {steps / 1e6:.2f}M steps, checkpoint saved")
