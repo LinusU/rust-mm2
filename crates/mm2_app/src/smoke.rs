@@ -638,6 +638,9 @@ fn run_headless(
         .insert_resource(session::TunedVehicle(vehicle_config.clone()))
         .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
+        // Fixed step like the windowed schedule: the neural driver's
+        // decision cadence and the stuck windows count physics ticks.
+        .add_systems(FixedUpdate, opponents::opponent_drive)
         .init_resource::<crate::worldclock::WorldClock>()
         .init_resource::<crate::worldclock::SceneryProbe>()
         .init_resource::<crate::cablecar::CableCircuits>()
@@ -896,10 +899,6 @@ fn run_headless(
                     crate::precip::reset_precip_report.run_if(session::unloading),
                     crate::wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
                 ),
-                opponents::opponent_drive
-                    // Opponent re-anchors emit `ResetVehicle` — before
-                    // the apply, matching the windowed schedule.
-                    .before(mm2_vehicle::systems::vehicle_reset),
                 // F05-B.6: authored engine smoke — the headless
                 // record's `ptx=` field reads the report. Assets are
                 // real (VFS `fxpt8` + quads); nothing rasterizes.
@@ -970,7 +969,6 @@ fn run_headless(
                 .after(mm2_vehicle::systems::vehicle_self_right)
                 .after(session::dev_reset_at)
                 .after(scripted::scripted_drive)
-                .after(opponents::opponent_drive)
                 .after(crate::netdrive::apply_reset_requests)
                 .before(mm2_vehicle::systems::vehicle_reset),
         )

@@ -64,6 +64,9 @@ const ALLOWED: &[(&str, Reason)] = &[
     // The training environment's `eval` mode reads the trained policy
     // file named on its command line.
     ("crates/mm2_app/examples/mm2_gym.rs", Reason::DevInput),
+    // `--opponent-policy` reads the policy file it names; the shipped
+    // policies resolve through Vfs.
+    ("crates/mm2_app/src/neural/drive.rs", Reason::DevInput),
     ("crates/mm2_app/src/scripted.rs", Reason::DevInput),
     ("crates/mm2_vehicle/src/config.rs", Reason::DevInput),
     (

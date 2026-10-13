@@ -451,6 +451,12 @@ struct Cli {
     #[arg(long, requires_all = ["bot", "event"], value_parser = parse_bot_route)]
     bot_route: Option<PathBuf>,
 
+    /// Drive every opponent with this `.mm2p` policy instead of the
+    /// shipped ones (development aid for trying a trained network;
+    /// results are not record-eligible).
+    #[arg(long, value_name = "file")]
+    opponent_policy: Option<PathBuf>,
+
     /// Stationary control: the player vehicle holds its handbrake for
     /// the whole session — it never races, so an event run measures what
     /// the opponents do with no competing local driver (the isolation
@@ -1209,6 +1215,7 @@ fn main() {
             wreck_seat: cli.wreck_seat,
             bot_speed: cli.bot_speed,
             bot_route: cli.bot_route.clone(),
+            opponent_policy: cli.opponent_policy.clone(),
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
@@ -2005,13 +2012,12 @@ fn main() {
     // AI opponents own their own `VehicleInput` — `vehicle_input` only
     // writes `PlayerVehicle`, so no ordering is needed. Ordinary static
     // captures freeze them; explicit --bot captures keep the real race moving.
+    // Fixed step, not Update: the neural driver decides every third
+    // physics step, and the stuck windows count 60 Hz ticks. A penned
+    // opponent's `ResetVehicle` is applied by the Update that follows.
     .add_systems(
-        Update,
-        opponents::opponent_drive
-            .run_if(evidence_capture_input_allowed)
-            // A penned opponent re-anchors through `ResetVehicle` —
-            // ahead of the apply like the other Update writers.
-            .before(mm2_vehicle::systems::vehicle_reset),
+        FixedUpdate,
+        opponents::opponent_drive.run_if(evidence_capture_input_allowed),
     )
     // F20-A.3: the fielded cops' detect → pursue machine. Frozen with
     // the other AI in ordinary static captures; no-ops without a fleet.
@@ -2031,7 +2037,6 @@ fn main() {
             .after(input::reset_input)
             .after(session::dev_reset_at)
             .after(scripted::scripted_drive)
-            .after(opponents::opponent_drive)
             .after(netdrive::apply_reset_requests)
             .before(mm2_vehicle::systems::vehicle_reset),
     )

@@ -102,7 +102,13 @@ use mm2_game::{
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, trace, warn};
 
+use std::sync::Arc;
+
 use crate::car_visual;
+use crate::neural::drive::{DrivingPolicies, NeuralState};
+use crate::neural::guide::Guide;
+use crate::neural::observe::{Motion, Neighbour};
+use crate::neural::policy::Scratch;
 use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, WallSense, pace, plan_speed,
     sense_walls, steer_toward,
@@ -120,6 +126,13 @@ const ROUTE_REACH: f32 = 14.0;
 /// start (the lap structure lives in the race checkpoints; the route
 /// just keeps supplying waypoints).
 const ROUTE_LOOP: f32 = 40.0;
+
+/// Metres short of an open route's end at which a neural driver has
+/// driven it out.
+const ROUTE_END: f32 = 3.0;
+/// ... and the distance (m, XZ) from the route's last point it must
+/// also be within.
+const ROUTE_END_RADIUS: f32 = 12.0;
 
 /// Spacing between designed-fallback slots behind the player when an
 /// event has neither authored grid rows nor a resolvable route anchor.
@@ -412,6 +425,10 @@ pub struct OpponentDriver {
     /// rates the smoke record's `opp_drv=` field can compare across
     /// controller changes.
     pub stats: DriveStats,
+    /// The neural driver's state on this car's route — `None` when the
+    /// entry resolved no drivable route. Drives the car whenever the
+    /// session carries [`DrivingPolicies`].
+    pub neural: Option<NeuralState>,
 }
 
 /// Distance and time an opponent spent driving its route — only frames
@@ -1208,14 +1225,19 @@ fn spawn_roster(
             .as_ref()
             .map(|r| initial_route_index(r, pos, yaw))
             .unwrap_or(0);
-        // Ordered progress for AI participants is route-bound
-        // (DSN-45, UNK-11): each gate binds at the driven line's
+        // Progress for AI participants is route-bound (DSN-45,
+        // UNK-11): each gate binds at the driven line's
         // closest-approach arc, so a course whose `.opp` line never
         // threads a cylinder still earns by driving the line — the
-        // authored-miss defect class the F14-A.2 matrix named.
-        // AnyOrder stays trigger-bound; a route-less entry binds
-        // nothing.
-        let route_line = (participant && definition.rule == CheckpointRule::Ordered)
+        // authored-miss defect class the F14-A.2 matrix named. An
+        // `AnyOrder` line earns nothing until a neural driver binds
+        // its finish (`opponent_drive`); a route-less entry binds
+        // nothing and stays trigger-bound.
+        let neural = route
+            .as_ref()
+            .and_then(Guide::from_route)
+            .map(|guide| NeuralState::new(Arc::new(guide), &def.config, pos));
+        let route_line = participant
             .then(|| {
                 route.as_ref().and_then(|r| {
                     RouteGateLine::bind(r, &definition.checkpoints, route_is_closed(r), pos, next)
@@ -1286,6 +1308,7 @@ fn spawn_roster(
                         .filter(|t| t.is_finite())
                         .unwrap_or(CORNER_BRAKE_DEFAULT),
                     stats: DriveStats::default(),
+                    neural,
                 },
                 vehicle_bundle(&def.config),
                 Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -1507,6 +1530,18 @@ pub fn opponent_drive(
     colliders: Query<&ColliderOf>,
     water: Option<Res<crate::water::CityWater>>,
     race: Option<Res<RaceState>>,
+    policies: Option<Res<DrivingPolicies>>,
+    mut scratch: Local<Scratch>,
+    cars: Query<
+        (
+            Entity,
+            &Position,
+            &Rotation,
+            &LinearVelocity,
+            Option<&Vehicle>,
+        ),
+        Or<(With<Vehicle>, With<crate::traffic::AmbientCar>)>,
+    >,
     mut resets: MessageWriter<ResetVehicle>,
     mut set: ParamSet<(
         Query<(
@@ -1514,6 +1549,7 @@ pub fn opponent_drive(
             &mut VehicleInput,
             &Position,
             &Rotation,
+            (&LinearVelocity, &AngularVelocity),
             &Vehicle,
             &VehicleState,
             Option<&RaceProgress>,
@@ -1569,8 +1605,42 @@ pub fn opponent_drive(
     // teleport — without this, two cars whose windows expire together
     // (a shared pen, a pileup) both land on the same projected spot.
     let mut claimed: Vec<Vec3> = Vec::new();
-    for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver, mut line) in
-        &mut set.p0()
+    // Every vehicle a neural driver may need to know about: simulated
+    // cars with their own size, ambient traffic at a typical one.
+    let field: Vec<(Entity, Neighbour)> = if policies.is_some() {
+        cars.iter()
+            .map(|(e, pos, rot, vel, vehicle)| {
+                let size = vehicle.map_or([2.0, 1.4, 4.6], |v| v.config.chassis_size);
+                (
+                    e,
+                    Neighbour {
+                        position: pos.0,
+                        velocity: vel.0,
+                        forward: rot.0 * Vec3::NEG_Z,
+                        half_width: size[0] * 0.5,
+                        half_length: size[2] * 0.5,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let difficulty = session
+        .config()
+        .map_or(mm2_game::Difficulty::Amateur, |c| c.difficulty);
+    for (
+        entity,
+        mut input,
+        pos,
+        rot,
+        (lin_vel, ang_vel),
+        vehicle,
+        vstate,
+        progress,
+        mut driver,
+        mut line,
+    ) in &mut set.p0()
     {
         if let Some((_, left)) = &mut driver.pass_ban {
             *left = left.saturating_sub(1);
@@ -1589,18 +1659,60 @@ pub fn opponent_drive(
         // Where the car sits on its line this frame — the speed plan
         // scans ahead from here.
         let mut cursor: Option<RouteCursor> = None;
+        let d = &mut *driver;
         let target = if !session.field_races() || locked || !racing {
             None
-        } else if let Some(route) = &driver.route {
-            let (next, target) = route_target(route, driver.next, pos.0);
+        } else if let Some(route) = &d.route {
+            // The neural driver's place on the route is its guide arc:
+            // the chase index follows from it, forward or backward.
+            // The scripted law advances the index past reached anchors.
+            let tracked = (policies.is_some())
+                .then_some(d.neural.as_mut())
+                .flatten()
+                .map(|neural| {
+                    let left = neural.track(pos.0);
+                    let next = neural.guide.chase_index(neural.arc);
+                    // Out of route means *at* its end, not merely past
+                    // it: a car that ran wide of the last bend still
+                    // has the end to reach.
+                    let end = neural.guide.point_at(neural.guide.length());
+                    let done = left.is_some_and(|m| m < ROUTE_END)
+                        && (pos.0.x - end.x).hypot(pos.0.z - end.z) < ROUTE_END_RADIUS;
+                    (next, (!done).then(|| neural.guide.point_at(neural.arc)))
+                });
+            let neural = tracked.is_some();
+            let (next, target) = tracked.unwrap_or_else(|| route_target(route, d.next, pos.0));
             if let Some(line) = &mut line {
-                // Route-bound Ordered progress (DSN-45): a wrap of the
-                // chase index completes a traversal, and the pose's
+                // The original's opponents finish on their own course
+                // and the finish line, never on checkpoint triggers
+                // their lines miss: a neural driver's `AnyOrder` line
+                // carries the finish too.
+                if neural
+                    && !line.has_finish()
+                    && let Some(r) = race
+                    && r.definition.rule == CheckpointRule::AnyOrder
+                {
+                    line.bind_finish(route, r.definition.finish.as_ref());
+                }
+                // Route-bound progress (DSN-45): a wrap of the chase
+                // index completes a traversal, and the pose's
                 // projection inside the chased leg's corridor grows
                 // the high-water arc `advance_route` reads. The
                 // lateral gate keeps punts off the line from earning.
-                if line.is_closed() && next < driver.next {
-                    line.wrap();
+                // An index that follows the car can also step back, so
+                // only a jump across most of the route is the lap
+                // boundary — and one the other way takes the lap back.
+                let n = route.points.len();
+                if line.is_closed() {
+                    if neural {
+                        if d.next > next && d.next - next > n / 2 {
+                            line.wrap();
+                        } else if next > d.next && next - d.next > n / 2 {
+                            line.unwrap();
+                        }
+                    } else if next < d.next {
+                        line.wrap();
+                    }
                 }
                 let (arc, lateral) = line.measure(route, next, pos.0);
                 if lateral <= ROUTE_ARC_LATERAL {
@@ -1622,7 +1734,7 @@ pub fn opponent_drive(
                     c.point_ahead(route, aim_distance(vstate.forward_speed))
                 })
             });
-            driver.next = next;
+            d.next = next;
             aim
         } else {
             None
@@ -1636,7 +1748,13 @@ pub fn opponent_drive(
             driver.stuck_pos = pos.0;
             driver.catch_up = 0.0;
             driver.stats.last_pos = None;
-            *input = VehicleInput::default();
+            // A car that has finished pulls up, as the original's does
+            // at its finish point; one still waiting for the start, or
+            // out of route, just holds no pedal.
+            *input = VehicleInput {
+                handbrake: if racing { 0.0 } else { 1.0 },
+                ..default()
+            };
             continue;
         };
         driver.stats.record(pos.0, time.delta_secs());
@@ -1711,8 +1829,17 @@ pub fn opponent_drive(
                         )
                     })
                 };
+                // A neural driver goes back to where its guide last had
+                // it, not to wherever it was knocked: the landing can
+                // then never sit further along the route than the car
+                // drove.
+                let from = driver
+                    .neural
+                    .as_ref()
+                    .filter(|_| policies.is_some())
+                    .map_or(pos.0, |n| n.guide.point_at(n.arc));
                 let (pose, ryaw, resync_next) =
-                    reanchor_pose_with_progress(&route, driver.next, pos.0, yaw, |p| {
+                    reanchor_pose_with_progress(&route, driver.next, from, yaw, |p| {
                         gates.iter().any(|g| {
                             let dx = p.x - g.center.x;
                             let dz = p.z - g.center.z;
@@ -1736,6 +1863,9 @@ pub fn opponent_drive(
                     line.reanchor(&route, driver.next, pos.0, resync_next, pose);
                 }
                 driver.next = resync_next;
+                if let Some(neural) = &mut driver.neural {
+                    neural.reseat(pose);
+                }
                 driver.recovery = ScriptedBot {
                     escapes: driver.recovery.escapes,
                     ..ScriptedBot::default()
@@ -1763,6 +1893,46 @@ pub fn opponent_drive(
         } else {
             driver.stuck_pos = pos.0;
             driver.stuck_frames = 0;
+        }
+        // The neural driver: the trained policy turns what the car sees
+        // of its line, the world and the vehicles around it into the
+        // pedals, at the authored `maxThrottle`. Route progress and the
+        // bounded re-anchor above stay as they are.
+        let throttle_cap = driver.tuning.throttle_cap;
+        if let Some(policies) = policies.as_deref()
+            && let Some(neural) = driver.neural.as_mut()
+        {
+            let motion = Motion {
+                position: pos.0,
+                rotation: rot.0,
+                linear_velocity: lin_vel.0,
+                angular_velocity: ang_vel.0,
+                steer_angle: vstate.steer_angle,
+                grounded: vstate.wheels.iter().filter(|w| w.grounded).count() as f32
+                    / vstate.wheels.len().max(1) as f32,
+                reversing: vstate.direction == mm2_vehicle::DriveDirection::Reverse,
+            };
+            let neighbours: Vec<Neighbour> = field
+                .iter()
+                .filter(|(e, _)| *e != entity)
+                .map(|(_, n)| *n)
+                .collect();
+            let filter = SpatialQueryFilter::default();
+            *input = neural.drive(
+                policies.for_difficulty(difficulty),
+                &mut scratch,
+                &motion,
+                &neighbours,
+                throttle_cap,
+                |origin, dir, reach| {
+                    let sq = spatial.as_ref()?;
+                    let dir = Dir3::new(dir).ok()?;
+                    sq.cast_ray_predicate(origin, dir, reach, true, &filter, &|e| !cars.contains(e))
+                        .map(|hit| (hit.distance, hit.normal))
+                },
+            );
+            driver.catch_up = 0.0;
+            continue;
         }
         // The corridor reach is the authored look-ahead distance
         // (F15-B.8) — how far ahead this driver senses obstacles, not

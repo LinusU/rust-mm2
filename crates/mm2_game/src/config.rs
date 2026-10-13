@@ -756,6 +756,11 @@ pub struct DevOverrides {
     /// Explicit `.opp` evidence guide for the scripted player; no opponent is spawned.
     /// Gameplay-affecting diagnostic input, so results are record-ineligible.
     pub bot_route: Option<PathBuf>,
+    /// `--opponent-policy`: a `.mm2p` driving policy that replaces the
+    /// shipped ones at both difficulties, for trying a freshly trained
+    /// network. Changes how every opponent drives, so results are
+    /// record-ineligible.
+    pub opponent_policy: Option<PathBuf>,
     /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
     /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
     /// and the escape hatch for comparing culled vs unculled captures.

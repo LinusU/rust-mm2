@@ -1337,6 +1337,7 @@ fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
         limits: CarLimits::of(&VehicleConfig::default(), None),
         corner_brake: mm2_app::racing_line::CORNER_BRAKE_DEFAULT,
         stats: Default::default(),
+        neural: None,
     }
 }
 

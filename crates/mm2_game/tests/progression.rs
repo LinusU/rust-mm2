@@ -406,6 +406,13 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
     );
     config.dev.bot_route = None;
 
+    config.dev.opponent_policy = Some("trial.mm2p".into());
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("opponent-policy"))
+    );
+    config.dev.opponent_policy = None;
+
     config.dev.traction = Some(0.5);
     assert_eq!(
         record_eligibility(&config),

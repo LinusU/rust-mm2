@@ -681,6 +681,24 @@ pub fn load_session_world(
         error!("load_session_world ran without a session config");
         return;
     };
+    // The opponents' driving policies: the shipped pair through the VFS,
+    // or the one a development run names. Without any, opponents fall
+    // back to the scripted control law.
+    let policies = match config.dev.opponent_policy.as_deref() {
+        Some(path) => match crate::neural::drive::DrivingPolicies::from_file(path) {
+            Ok(policies) => Some(policies),
+            Err(reason) => {
+                error!(%reason, "opponent policy failed to load");
+                session.fail(reason).expect("Loading may fail");
+                return;
+            }
+        },
+        None => crate::neural::drive::DrivingPolicies::load(&vfs.0),
+    };
+    match policies {
+        Some(policies) => commands.insert_resource(policies),
+        None => commands.remove_resource::<crate::neural::drive::DrivingPolicies>(),
+    }
     // Validate before spawning anything: direct SessionConfig callers and a
     // changed-on-disk guide get the same strict failure as the CLI parser.
     let explicit_bot_route = match config.dev.bot_route.as_deref() {

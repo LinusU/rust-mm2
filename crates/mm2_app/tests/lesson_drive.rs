@@ -654,6 +654,7 @@ fn opponent_driver(route: Option<OpponentRoute>, next: usize) -> OpponentDriver 
         limits: CarLimits::of(&VehicleConfig::default(), None),
         corner_brake: CORNER_BRAKE_DEFAULT,
         stats: DriveStats::default(),
+        neural: None,
     }
 }
 
