@@ -98,6 +98,16 @@ enum Mode {
     /// Walk every line of the city's events and print where each cannot
     /// be driven as drawn — through a wall, over a void, into water.
     Audit,
+    /// Print the points of the event's lines around an arc position, as
+    /// `--cam`-ready coordinates — for looking at a trouble spot.
+    Where {
+        /// Arc position (m) along each line.
+        #[arg(long)]
+        arc: f32,
+        /// Only lines whose label contains this.
+        #[arg(long)]
+        only: Option<String>,
+    },
     /// Race every opponent field of the city from its grid with a
     /// trained policy and print one JSON line per car.
     Eval {
@@ -168,6 +178,25 @@ fn main() {
                 "{}",
                 serde_json::json!(mm2_app::neural::env::race_events(&vfs, &args.city))
             );
+        }
+        Mode::Where { arc, only } => {
+            let env = build(args.event.clone(), 0);
+            for line in env.lines() {
+                if only.as_deref().is_some_and(|o| !line.label.contains(o)) {
+                    continue;
+                }
+                let p = line.guide.point_at(*arc);
+                let t = line.guide.tangent_at(*arc);
+                println!(
+                    "{} arc {arc:.0}/{:.0}: {:.1},{:.1},{:.1} heading {:.0}°",
+                    line.label,
+                    line.guide.length(),
+                    p.x,
+                    p.y,
+                    p.z,
+                    (-t.x).atan2(-t.z).to_degrees(),
+                );
+            }
         }
         Mode::Audit => {
             let events = match &args.event {

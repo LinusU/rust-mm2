@@ -46,8 +46,9 @@ use mm2_vehicle::{
 
 use super::guide::Guide;
 use super::observe::{
-    ACT_DIM, CarProfile, Motion, Neighbour, OBS_DIM, RayHit, action_input, observe,
+    ACT_DIM, CarProfile, Motion, Neighbour, OBS_DIM, RayHit, action_input, guide_bearing, observe,
 };
+use super::unstick::Unstick;
 use crate::city;
 use crate::opponents;
 
@@ -61,9 +62,12 @@ pub struct EnvConfig {
     pub city: String,
     /// Event stem (`race3`, `circuit0`) whose world and lines to load:
     /// its course barricades, parked cars and drawbridges, and the
-    /// lines of its two rosters. `None` loads the city as it stands in
-    /// cruise, with every event's lines — props that fence one race's
-    /// course are then missing from it.
+    /// lines of its two rosters. [`ROAM`] loads the city as it stands
+    /// in cruise with lines planned through the road graph between
+    /// random places — driving with no authored route, as a Cops &
+    /// Robbers car or a pursuer must. `None` loads the cruise city with
+    /// every event's lines; props that fence one race's course are then
+    /// missing from it.
     pub event: Option<String>,
     /// Cars driving at once.
     pub agents: usize,
@@ -322,6 +326,8 @@ struct Slot {
     motion: Motion,
     /// The most throttle this driver's pedal is given.
     throttle_cap: f32,
+    /// The stalled-car watch that backs it out of a dead end.
+    unstick: Unstick,
     /// Out of a staged field: its episode ended and nothing replaced it.
     /// For a drone: nowhere to put it just now.
     retired: bool,
@@ -387,6 +393,14 @@ fn yaw_of(dir: Vec3) -> f32 {
     (-dir.x).atan2(-dir.z)
 }
 
+/// The pseudo-event that trains on road-graph routes in the cruise
+/// city (see [`EnvConfig::event`]).
+pub const ROAM: &str = "roam";
+/// Road-graph lines a roam environment plans.
+const ROAM_LINES: usize = 40;
+/// Shortest and longest roam line worth driving (m).
+const ROAM_LENGTH: (f32, f32) = (500.0, 5000.0);
+
 /// What an environment draws its agents from.
 struct Content {
     cars: Vec<CarKind>,
@@ -415,10 +429,24 @@ pub fn race_events(vfs: &Vfs, city: &str) -> Vec<String> {
 /// Every drivable opponent line of `city`'s checkpoint and circuit
 /// races (or of `only` one) at both difficulties, with the cars their
 /// rosters field.
-fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>) -> Result<Content, EnvError> {
+fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>, seed: u64) -> Result<Content, EnvError> {
     let nav = mm2_content::load_routing_nav_graph(vfs, city)
         .map_err(|e| EnvError(format!("nav graph: {e}")))?
         .graph;
+    if only == Some(ROAM) {
+        // Every car the city's races field, on lines of our own.
+        let cars = load_lines(vfs, city, None, seed)?.cars;
+        let lines = roam_lines(&nav, cars.len(), seed);
+        if lines.is_empty() {
+            return Err(EnvError(format!("{city}: the road graph plans no routes")));
+        }
+        return Ok(Content {
+            cars,
+            lines,
+            fields: Vec::new(),
+            pathsets: Vec::new(),
+        });
+    }
     let catalog = EventCatalog::scan(vfs, city);
     let mut cars: Vec<CarKind> = Vec::new();
     let mut lines = Vec::new();
@@ -517,6 +545,47 @@ fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>) -> Result<Content, EnvE
     })
 }
 
+/// Lines planned through the road graph between random places on it.
+fn roam_lines(nav: &mm2_game::NavGraph, cars: usize, seed: u64) -> Vec<Line> {
+    let mut rng = NavRng::new(seed ^ 0x726f_616d);
+    let places: Vec<Vec3> = nav
+        .lanes()
+        .iter()
+        .filter_map(|lane| lane.vertices().first().copied())
+        .map(Vec3::from)
+        .collect();
+    let mut lines = Vec::new();
+    if places.len() < 2 || cars == 0 {
+        return lines;
+    }
+    let mut pick = |n: usize| (rng.next_u64() % n as u64) as usize;
+    for _ in 0..ROAM_LINES * 20 {
+        if lines.len() >= ROAM_LINES {
+            break;
+        }
+        let (from, to) = (places[pick(places.len())], places[pick(places.len())]);
+        let Some(route) = crate::scripted::plan_nav_route(nav, from, to) else {
+            continue;
+        };
+        let Some(guide) = Guide::from_route(&route) else {
+            continue;
+        };
+        if !(ROAM_LENGTH.0..=ROAM_LENGTH.1).contains(&guide.length()) {
+            continue;
+        }
+        let start = guide.point_at(0.0);
+        lines.push(Line {
+            label: format!("{ROAM}/n/{}", lines.len()),
+            car: pick(cars),
+            field: format!("{ROAM}/n"),
+            grid: (start, yaw_of(guide.tangent_at(0.0))),
+            throttle_cap: 1.0,
+            guide: Arc::new(guide),
+        });
+    }
+    lines
+}
+
 impl DrivingEnv {
     /// Build the world and seat the first field of agents.
     pub fn new(vfs: &Vfs, config: EnvConfig) -> Result<Self, EnvError> {
@@ -525,7 +594,7 @@ impl DrivingEnv {
             lines,
             fields,
             pathsets,
-        } = load_lines(vfs, &config.city, config.event.as_deref())?;
+        } = load_lines(vfs, &config.city, config.event.as_deref(), config.seed)?;
 
         let mut session = Session::new();
         session
@@ -590,7 +659,7 @@ impl DrivingEnv {
                 // (the road under them is a hole without) and the
                 // kerbside parked cars — the event's own files when it
                 // ships them, the city's otherwise.
-                let stem = config.event.as_deref();
+                let stem = config.event.as_deref().filter(|e| *e != ROAM);
                 city::spawn_event_pathsets(
                     &mut commands,
                     vfs,
@@ -908,6 +977,7 @@ impl DrivingEnv {
                 reversing: false,
             },
             throttle_cap: 1.0,
+            unstick: Unstick::default(),
             retired: true,
             drone: None,
         }
@@ -989,6 +1059,7 @@ impl DrivingEnv {
                 reversing: false,
             },
             throttle_cap: 1.0,
+            unstick: Unstick::default(),
             retired: false,
             drone: None,
         }
@@ -1127,7 +1198,14 @@ impl DrivingEnv {
                     0.0
                 };
             }
-            steer_change[i] = action[0] - slot.last_action[0];
+            // A stalled car is backed out, as in the game; what was
+            // applied is what the next observation reports.
+            let bearing = guide_bearing(&slot.motion, &slot.guide, slot.s);
+            let backing = slot.unstick.step(slot.motion.position, &action, bearing);
+            let action = backing.unwrap_or(action);
+            if backing.is_none() {
+                steer_change[i] = action[0] - slot.last_action[0];
+            }
             slot.last_action = action;
             if let Some(mut input) = self.app.world_mut().get_mut::<VehicleInput>(slot.entity) {
                 *input = action_input(&action, slot.throttle_cap);
