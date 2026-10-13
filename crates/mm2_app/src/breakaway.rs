@@ -516,6 +516,14 @@ pub fn eject_wheels(
         let Some(&(entity, owner)) = index.get(&event.object) else {
             continue;
         };
+        // Resolve the owner before the decision: the fragment the
+        // episode spawns carries it, so a rig with no `SessionEntity`
+        // cannot eject. Skipping the decision (rather than latching it)
+        // leaves the one-shot episode armed for a car that later gains
+        // an owner.
+        let Some(owner) = owner else {
+            continue;
+        };
         let Ok(mut rig) = rigs.get_mut(entity) else {
             continue;
         };
@@ -538,9 +546,6 @@ pub fn eject_wheels(
         let seed = (event.object.generation << 32) | u64::from(event.object.slot);
         let mut rng = NavRng::new(seed ^ WHEEL_EJECT_DOMAIN ^ event.tick);
         for i in rig.eject_at(speed_mph, &mut rng) {
-            let Some(owner) = owner else {
-                break;
-            };
             // A wheel's `WheelSpin` node hangs under its `WheelMount`;
             // `BreakPartVisual` carries the owner either way.
             let Some(node) = visuals

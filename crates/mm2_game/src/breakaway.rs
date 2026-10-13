@@ -212,14 +212,15 @@ impl VehicleBreaks {
     /// one-shot episode fired and return the part indices to eject, by
     /// `speed_mph` (`vehCarSim +0x24c`): `> 100` every wheel, `> 75` two
     /// random corners, `> 50` one, else none. Draws come from `rng`
-    /// (the caller seeds it per vehicle/episode) — the original draws a
-    /// corner per pair and refuses an already-detached one, so a
-    /// repeated corner in the two-pair band yields a single wheel; the
-    /// returned indices may therefore repeat and the caller's
-    /// [`detach`](Self::detach) drops the repeats. The episode is
-    /// marked fired even when the speed band ejects nothing (the
-    /// original sets the flag on its way out), and a second call before
-    /// [`restore`](Self::restore) returns nothing.
+    /// (the caller seeds it per vehicle/episode). The original draws a
+    /// corner per pair and hands it to the shared leaf `0x4d8930`,
+    /// which refuses a corner whose part is already detached — so a
+    /// repeated draw in the two-pair band contributes nothing, and the
+    /// returned indices are always distinct (the same corner drawn
+    /// twice yields one wheel, never two bodies for one part). The
+    /// episode is marked fired even when the speed band ejects nothing
+    /// (the original sets the flag on its way out), and a second call
+    /// before [`restore`](Self::restore) returns nothing.
     pub fn eject_at(&mut self, speed_mph: f32, rng: &mut NavRng) -> Vec<usize> {
         if self.ejected {
             return Vec::new();
@@ -245,8 +246,16 @@ impl VehicleBreaks {
         } else {
             0
         };
-        let pick = |rng: &mut NavRng| wheels[(rng.next_u64() % wheels.len() as u64) as usize];
-        (0..pairs).map(|_| pick(rng)).collect()
+        let mut picked: Vec<usize> = Vec::with_capacity(pairs);
+        for _ in 0..pairs {
+            let corner = wheels[(rng.next_u64() % wheels.len() as u64) as usize];
+            // `0x4d8930` refuses a part whose attached byte is already
+            // clear, so a repeated corner is a no-op, not a second eject.
+            if !picked.contains(&corner) {
+                picked.push(corner);
+            }
+        }
+        picked
     }
 
     /// Mark a part detached and record the fragment body it spawned

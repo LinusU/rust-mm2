@@ -377,10 +377,10 @@ endpoint ~1 m with every smoke counter identical — the authored record
 subtly changing slide dynamics is the feature, not drift.
 
 Not yet implemented: visual tiers (smoke pivots land in F05-B.6,
-`TextelDamageRadius` decals remain), damage-driven wheel/hub loss at
-`MaxDamage` (the damage-driven half of REC-2, UNK-13),
-replication. (C&R healing is driven by `cnr_host_step` at a designed
-rate; see DMG-4.)
+`TextelDamageRadius` decals remain), and replication. (The
+damage-driven wheel/hub loss at `MaxDamage` — the second half of REC-2,
+UNK-13 — is implemented; see the wheel leg above. C&R healing is driven
+by `cnr_host_step` at a designed rate; see DMG-4.)
 
 ## Water / out-of-bounds recovery (F05-B.5, designed — DSN-23)
 

@@ -233,12 +233,40 @@ fn eject_bands_follow_speed_mph() {
     assert_eq!(picked.len(), 1);
     assert!(picked[0] < 4);
 
-    // Above 75: two corners (a repeated draw is possible, exactly like
-    // the original's already-detached refusal).
-    let mut two = wheel_rig(4);
-    let picked = two.eject_at(75.1, &mut rng);
-    assert_eq!(picked.len(), 2);
-    assert!(picked.iter().all(|i| *i < 4));
+    // Above 75: two corners — unless the second draw repeats the first,
+    // which the leaf `0x4d8930` refuses (already detached), so the
+    // episode takes one wheel. Sweep seeds to observe both outcomes and
+    // pin that a repeat never yields a duplicate index.
+    let mut saw_one = false;
+    let mut saw_two = false;
+    for seed in 0..64 {
+        let mut two = wheel_rig(4);
+        let mut seed_rng = NavRng::new(seed);
+        let picked = two.eject_at(75.1, &mut seed_rng);
+        assert!(picked.len() <= 2, "at most one wheel per drawn corner");
+        assert!(picked.iter().all(|i| *i < 4));
+        let mut unique = picked.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique,
+            {
+                let mut sorted = picked.clone();
+                sorted.sort_unstable();
+                sorted
+            },
+            "a repeated corner is refused, never ejected twice"
+        );
+        match picked.len() {
+            1 => saw_one = true,
+            2 => saw_two = true,
+            other => panic!("two-pair band drew {other} corners"),
+        }
+    }
+    assert!(
+        saw_one && saw_two,
+        "the two-pair band can draw the same corner (one wheel) or two"
+    );
 
     // Above 100: every wheel.
     let mut all = wheel_rig(4);
