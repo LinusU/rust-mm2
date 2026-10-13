@@ -35,6 +35,8 @@ const GROUND_STEP: f32 = 10.0;
 const GROUND_LANE: f32 = 12.0;
 /// How far above or below the straight line (m) the road is looked for.
 const GROUND_SEARCH: f32 = 40.0;
+/// Spacing (m) of the samples a route's guide is smoothed over.
+const SMOOTH_STEP: f32 = 5.0;
 
 /// A polyline to drive along, with cumulative arc lengths.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,7 +168,78 @@ impl Guide {
                 points.push((p, false));
             }
         }
-        Self::with_sources(points, closed)
+        Self::with_sources(points, closed).map(Self::smoothed)
+    }
+
+    /// The same line with its small-scale wiggle taken out.
+    ///
+    /// A route is stitched from authored points inside junctions and
+    /// road centre lines between them, and where one meets the other
+    /// the line can jink a few metres sideways and back — a spur no car
+    /// should follow and a driver shown it has to learn to ignore. The
+    /// line is resampled every [`SMOOTH_STEP`] metres and each sample
+    /// averaged with its neighbours over about ±10 m, twice: spurs
+    /// flatten, a square corner becomes a curve of a few metres'
+    /// radius, and everything longer than a car is left where it was.
+    /// An open line keeps its end points.
+    fn smoothed(self) -> Self {
+        let count = (self.total / SMOOTH_STEP).ceil() as usize;
+        if count < 4 {
+            return self;
+        }
+        let spacing = self.total / count as f32;
+        let samples = if self.closed { count } else { count + 1 };
+        let mut pts: Vec<Vec3> = (0..samples)
+            .map(|i| self.point_at(i as f32 * spacing))
+            .collect();
+        const WEIGHTS: [f32; 5] = [1.0, 2.0, 3.0, 2.0, 1.0];
+        for _ in 0..2 {
+            let before = pts.clone();
+            for (i, p) in pts.iter_mut().enumerate() {
+                if !self.closed && (i == 0 || i + 1 == samples) {
+                    continue;
+                }
+                let mut sum = Vec3::ZERO;
+                for (k, w) in WEIGHTS.iter().enumerate() {
+                    let j = i as isize + k as isize - 2;
+                    let j = if self.closed {
+                        j.rem_euclid(samples as isize) as usize
+                    } else {
+                        j.clamp(0, samples as isize - 1) as usize
+                    };
+                    sum += before[j] * *w;
+                }
+                *p = sum / 9.0;
+            }
+        }
+        let mut cum = Vec::with_capacity(samples);
+        let mut total = 0.0;
+        cum.push(0.0);
+        for w in pts.windows(2) {
+            total += w[0].distance(w[1]);
+            cum.push(total);
+        }
+        if self.closed {
+            total += pts[samples - 1].distance(pts[0]);
+        }
+        // A source point keeps its place among the samples.
+        let source_arc = self
+            .source_arc
+            .iter()
+            .map(|&arc| {
+                let at = (arc / spacing).clamp(0.0, count as f32);
+                let i = (at.floor() as usize).min(samples - 1);
+                let next = cum.get(i + 1).copied().unwrap_or(total);
+                cum[i] + (next - cum[i]) * (at - i as f32).clamp(0.0, 1.0)
+            })
+            .collect();
+        Self {
+            points: pts,
+            cum,
+            closed: self.closed,
+            total,
+            source_arc,
+        }
     }
 
     /// The index of the source point a car at arc length `s` is
@@ -453,6 +526,46 @@ mod tests {
         assert_eq!(open.chase_index(5.0), 1);
         assert_eq!(open.chase_index(10.0), 3);
         assert_eq!(open.chase_index(30.0), 4, "the route is consumed");
+    }
+
+    #[test]
+    fn smoothing_flattens_a_spur_and_keeps_the_course() {
+        // 200 m east with a 6 m sideways jink at the half-way junction,
+        // then a square corner north.
+        let g = Guide::with_sources(
+            [
+                (Vec3::new(0.0, 0.0, 0.0), true),
+                (Vec3::new(96.0, 0.0, 0.0), false),
+                (Vec3::new(100.0, 0.0, 6.0), true),
+                (Vec3::new(104.0, 0.0, 0.0), false),
+                (Vec3::new(200.0, 0.0, 0.0), true),
+                (Vec3::new(200.0, 0.0, -150.0), true),
+            ],
+            false,
+        )
+        .unwrap();
+        let before = g.locate(Vec3::new(100.0, 0.0, 6.0));
+        assert!(g.point_at(before).z > 5.9, "the spur is there");
+        let s = g.smoothed();
+        let spur = s.point_at(s.locate(Vec3::new(100.0, 0.0, 6.0)));
+        assert!(spur.z < 2.5, "the spur is mostly gone: {spur:?}");
+        // The ends stay put and the corner is still a corner, rounded.
+        assert_eq!(s.point_at(0.0), Vec3::ZERO);
+        assert!(
+            s.point_at(s.length())
+                .distance(Vec3::new(200.0, 0.0, -150.0))
+                < 1e-3
+        );
+        let corner = s.point_at(s.locate(Vec3::new(200.0, 0.0, 0.0)));
+        assert!(
+            corner.distance(Vec3::new(200.0, 0.0, 0.0)) < 5.0,
+            "{corner:?}"
+        );
+        // Source points keep their order and roughly their place.
+        assert_eq!(s.chase_index(50.0), 1);
+        assert_eq!(s.chase_index(150.0), 2);
+        assert_eq!(s.chase_index(s.length() - 20.0), 3);
+        assert!((s.source_arc(2) - 200.0).abs() < 8.0, "{}", s.source_arc(2));
     }
 
     #[test]
