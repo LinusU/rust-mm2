@@ -9,16 +9,62 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use mm2_assets::{InstallMount, Vfs, mount_install};
 use mm2_game::{EventRef, EventTableKind};
 
-/// How long a leg waits for one record before failing rather than
-/// hanging on a dead child.
+/// How long a leg waits for one record from a child that declared no
+/// `--frames` drive budget of its own: a `--host` (whose cap is only a
+/// ceiling an operator's `quit` ends) and the fixture `Proc`s that run
+/// a handful of frames. A `--join` client's bound is *derived* from its
+/// own frame budget instead — see [`drive_bound`] and [`Proc::bound`] —
+/// because a client with no `--until-*` condition runs that budget in
+/// full, and the headless run's clock is CPU, not wall time.
 pub const WAIT: Duration = Duration::from_secs(15);
+
+/// Wall-clock bound for a `--join` client that must run `frames` fixed
+/// 60 Hz headless updates — its whole budget when no `--until-*`
+/// condition ends it earlier.
+///
+/// The headless runner steps once per update on CPU (`ManualDuration`,
+/// no real-time pacing), so a frame budget is wall-clock work: measured
+/// ~20 ms/update for a debug retail session on an idle 8-core M1, and
+/// several times that on a machine shared with other agents' builds. A
+/// fixed 15 s or 120 s wait therefore expires while such a child is
+/// still computing — the trap `NET-TIMEOUT-HARNESS` was filed for.
+///
+/// `MM2_NET_BOUND_MS_PER_FRAME` overrides the per-update allowance
+/// (lower it to make a genuine failure surface sooner).
+pub fn drive_bound(frames: u32) -> Duration {
+    // Startup + city/world load, measured ~2 s on a dev world and ~5 s
+    // on a retail city; 60 s leaves room for a loaded machine.
+    const STARTUP: Duration = Duration::from_secs(60);
+    let per_ms = std::env::var("MM2_NET_BOUND_MS_PER_FRAME")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+    STARTUP + Duration::from_millis(per_ms.saturating_mul(u64::from(frames)))
+}
+
+/// The `--frames N` / `--frames=N` budget of a child's argv, if any.
+fn frames_budget(args: &[String]) -> Option<u32> {
+    args.iter().enumerate().find_map(|(i, a)| {
+        if let Some(v) = a.strip_prefix("--frames=") {
+            v.parse().ok()
+        } else if a == "--frames" {
+            args.get(i + 1).and_then(|v| v.parse().ok())
+        } else {
+            None
+        }
+    })
+}
 
 /// How many retail two-process legs run at once. Each child mounts the
 /// whole retail install (4 archives, ~13k files), so with every leg on
@@ -74,9 +120,30 @@ pub struct Proc {
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
     stderr: Arc<Mutex<String>>,
+    /// How long this child may be silent before a wait fails. A
+    /// `--join` client gets its own bound derived from its `--frames`
+    /// budget ([`drive_bound`]); everything else the [`WAIT`] floor.
+    bound: Duration,
+    /// What spawned this child and when — the failure diagnostic's
+    /// "child's state" half. A wait that fails has to say whether the
+    /// child is still computing (slow) or has stopped (dead), and the
+    /// transport alone cannot.
+    exe: String,
+    args: Vec<String>,
+    spawned: Instant,
+    /// When the last stdout line arrived; `None` before the first.
+    last_line: Arc<Mutex<Option<Instant>>>,
+    /// How many stdout lines have arrived.
+    lines_seen: Arc<AtomicUsize>,
 }
 
 impl Proc {
+    /// The bound this child's waits use — its own derived budget for a
+    /// `--join` client, else [`WAIT`].
+    pub fn bound(&self) -> Duration {
+        self.bound
+    }
+
     /// Spawn `exe` with its stdout on the record channel. The child's
     /// log filter is pinned to the app's own default rather than the
     /// ambient `RUST_LOG`: several legs assert on a `WARN` line (an
@@ -108,28 +175,88 @@ impl Proc {
             }
         });
         let (tx, rx) = mpsc::channel();
+        let last_line = Arc::new(Mutex::new(None));
+        let lines_seen = Arc::new(AtomicUsize::new(0));
+        let stamp = Arc::clone(&last_line);
+        let count = Arc::clone(&lines_seen);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { return };
+                *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                count.fetch_add(1, Ordering::Relaxed);
                 if tx.send(line).is_err() {
                     return;
                 }
             }
         });
+        // A `--join` client runs its whole frame budget; a `--host`'s
+        // cap is only a ceiling its operator's `quit` ends.
+        let bound = if args.iter().any(|a| a == "--join") {
+            frames_budget(args).map_or(WAIT, drive_bound)
+        } else {
+            WAIT
+        };
         Self {
             child,
             stdin,
             lines: rx,
             stderr,
+            bound,
+            exe: exe.to_string(),
+            args: args.to_vec(),
+            spawned: Instant::now(),
+            last_line,
+            lines_seen,
+        }
+    }
+
+    /// What this child is and what it has been doing — the "slow or
+    /// dead?" half of a wait failure. Names the exact process, how long
+    /// it has been silent, whether it ever spoke, and everything it has
+    /// written to stderr.
+    pub fn describe(&self) -> String {
+        let mut out = format!("  child: {} {}\n", self.exe, self.args.join(" "));
+        out.push_str(&format!("  pid {}: {}", self.child.id(), self.silence()));
+        let stderr = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
+        if stderr.trim().is_empty() {
+            out.push_str("; stderr: (empty)");
+        } else {
+            out.push_str(&format!("; stderr:\n{stderr}"));
+        }
+        out
+    }
+
+    /// The "\<n\> stdout lines, silent for \<t\>, \<t\> since spawn"
+    /// phrase of [`describe`](Self::describe).
+    fn silence(&self) -> String {
+        let lines = self.lines_seen.load(Ordering::Relaxed);
+        let since_spawn = self.spawned.elapsed();
+        match *self.last_line.lock().unwrap_or_else(|e| e.into_inner()) {
+            None => format!("no stdout line yet, {since_spawn:.1?} since spawn"),
+            Some(at) => format!(
+                "{lines} stdout lines, silent for {:.1?}, {since_spawn:.1?} since spawn",
+                at.elapsed()
+            ),
         }
     }
 
     /// The next record line, failing rather than hanging if the child
-    /// dies or stalls.
+    /// dies or stalls. A stall names the child and its stderr; a child
+    /// that has closed its stdout (it exited or crashed) is reported as
+    /// that, not as a timeout.
     pub fn line(&self) -> String {
-        self.lines
-            .recv_timeout(WAIT)
-            .unwrap_or_else(|_| panic!("no line from child"))
+        match self.lines.recv_timeout(self.bound) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "no line from child within {:?} (still running)\n{}",
+                self.bound,
+                self.describe()
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                "the child closed its stdout before any line arrived (it exited or crashed)\n{}",
+                self.describe()
+            ),
+        }
     }
 
     /// Lines until one contains `needle` — returns it. Earlier records
@@ -144,20 +271,33 @@ impl Proc {
         }
     }
 
-    /// Lines until one contains `needle`, waiting up to `bound` in all
-    /// rather than [`WAIT`] per line — for a leg whose child is quiet
-    /// for a long stretch (a headless match driving to its objective
-    /// prints nothing between its events). Fails past `bound`.
+    /// Lines until one contains `needle`, waiting up to `bound` — or
+    /// the child's own derived bound ([`Proc::bound`]) when that is
+    /// larger — in all rather than [`WAIT`] per line, for a leg whose
+    /// child is quiet for a long stretch (a headless match driving to
+    /// its objective prints nothing between its events). The caller's
+    /// `bound` is a floor, so a child that must run a large `--frames`
+    /// budget still gets the time that budget implies. Fails past the
+    /// effective bound with the child's state and stderr.
     pub fn until_within(&self, needle: &str, bound: Duration) -> String {
+        let bound = bound.max(self.bound);
         let deadline = Instant::now() + bound;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let line = self
-                .lines
-                .recv_timeout(left)
-                .unwrap_or_else(|_| panic!("no {needle:?} from child within {bound:?}"));
-            if line.contains(needle) {
-                return line;
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    if line.contains(needle) {
+                        return line;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "no {needle:?} from child within {bound:?} (still running)\n{}",
+                    self.describe()
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                    "the child closed its stdout before {needle:?} (it exited or crashed)\n{}",
+                    self.describe()
+                ),
             }
         }
     }
