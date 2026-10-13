@@ -1404,7 +1404,7 @@ fn a_race_leg_runs_the_shared_road_against_its_traffic() {
 
     // With the flow: the centre line from junction 0 to junction 1.
     let with = g.race_leg(first, second, 8.0).expect("adjacent");
-    // (A one-way road's centre is the middle of its lanes: x = +3.)
+    // (The middle of the road's one lane: x = +3.)
     assert!(with.first().unwrap().distance(Vec3::new(3.0, 0.0, 10.0)) < 0.1);
     assert!(with.last().unwrap().distance(Vec3::new(3.0, 0.0, 110.0)) < 0.1);
     assert!(

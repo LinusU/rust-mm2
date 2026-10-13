@@ -2078,10 +2078,11 @@ impl NavGraph {
     /// adjacent intersections and the leg runs along the one road they
     /// share (`aiMap::FindRoadBetween`, `0x53a660` — the original does
     /// no path-finding between `.opp` points and takes no notice of
-    /// which way the road's traffic flows). Returns the road's centre
-    /// line from the first intersection to the second, sampled at most
-    /// `step` apart; `None` when the points do not name two different
-    /// intersections joined by a road.
+    /// which way the road's traffic flows). Returns the line down the
+    /// middle of the lanes that run from the first intersection to the
+    /// second — or of whatever lanes the road has, driven against its
+    /// flow — sampled at most `step` apart; `None` when the points do
+    /// not name two different intersections joined by a road.
     ///
     /// The directed [`NavGraph::route`] cannot stand in for this: asked
     /// for a right turn across a London gyratory it obeys the one-way
@@ -2139,40 +2140,40 @@ impl NavGraph {
             }
         }
         let (_, road, forward) = best?;
-        // The road's centre line, from its vehicle lanes (their
-        // vertices pair up section by section): midway between the
-        // centre-most lane of each side, weighted so their offsets
-        // cancel — or, where only one side carries lanes, the middle of
-        // those.
-        let lanes: Vec<&NavLane> = self
-            .lanes
-            .iter()
-            .filter(|l| l.id.road as usize == road && l.id.kind == LaneKind::Vehicle)
-            .collect();
-        let innermost = |positive: bool| {
-            lanes
+        // The line to drive: the middle of the lanes that carry traffic
+        // the way the leg goes — the right carriageway of a divided
+        // road, whose centre line is a median with trees on it. A road
+        // with no lanes that way (one-way, driven against the flow)
+        // gives the middle of the lanes it has. Lane vertices pair up
+        // section by section.
+        let dir = if forward {
+            TravelDir::Forward
+        } else {
+            TravelDir::Backward
+        };
+        let with_flow: Vec<&NavLane> = self.roads[road].arcs[dir_index(dir)]
+            .map(|arc| {
+                self.arc(arc)
+                    .lanes
+                    .iter()
+                    .filter_map(|&id| self.lane(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let lanes: Vec<&NavLane> = if with_flow.is_empty() {
+            self.lanes
                 .iter()
-                .filter(|l| (l.lateral_offset > 0.0) == positive)
-                .min_by(|x, y| x.lateral_offset.abs().total_cmp(&y.lateral_offset.abs()))
-                .copied()
+                .filter(|l| l.id.road as usize == road && l.id.kind == LaneKind::Vehicle)
+                .collect()
+        } else {
+            with_flow
         };
         let sections = lanes.iter().map(|l| l.points.len()).min()?;
-        let mut centre: Vec<Vec3> = match (innermost(true), innermost(false)) {
-            (Some(right), Some(left)) => {
-                let (r, l) = (right.lateral_offset.abs(), left.lateral_offset.abs());
-                let total = (r + l).max(1e-3);
-                (0..sections)
-                    .map(|i| {
-                        (Vec3::from(right.points[i]) * l + Vec3::from(left.points[i]) * r) / total
-                    })
-                    .collect()
-            }
-            _ => (0..sections)
-                .map(|i| {
-                    lanes.iter().map(|l| Vec3::from(l.points[i])).sum::<Vec3>() / lanes.len() as f32
-                })
-                .collect(),
-        };
+        let mut centre: Vec<Vec3> = (0..sections)
+            .map(|i| {
+                lanes.iter().map(|l| Vec3::from(l.points[i])).sum::<Vec3>() / lanes.len() as f32
+            })
+            .collect();
         if !forward {
             centre.reverse();
         }
