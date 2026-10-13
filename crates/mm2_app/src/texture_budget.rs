@@ -16,8 +16,13 @@
 //! rasterizer — refuses the same oversize mod texture by name instead of
 //! failing texture creation inside wgpu.
 //!
-//! This is an implementation choice, not an original rule: the retail
-//! `.tex` files are far smaller, so the ceiling only ever bites on mods.
+//! This is an implementation choice, not an original rule: measured on
+//! the retail install (F30 low-GPU edge case) the largest pipeline
+//! texture is 650×597 (`texture/sf_wall_brick03_blkfence_2_l.tex`) and
+//! every one of the 3972 `texture/*` files fits a 2048-limit adapter, so
+//! the ceiling only ever bites on mods. (The install's one larger image,
+//! `jpg/credits.jpg` at 215×4582, is menu art this pipeline never loads.)
+//! `crates/mm2_app/tests/texture_sizes.rs` measures it with `MM2_RETAIL`.
 
 use bevy::prelude::*;
 use bevy::render::renderer::RenderDevice;

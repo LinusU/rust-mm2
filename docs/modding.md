@@ -114,6 +114,15 @@ You never need to know which archive or physical file shipped the original.
   `--perf-log` report) — is refused by name before it is decoded, and the
   surface gets no texture — the original is not substituted, the same as a
   corrupt mod file.
+  The ceiling never bites on stock surfaces: measured on the retail install
+  (F30 low-GPU edge case), all 3972 pipeline textures (`texture/*`: 3665
+  `.tex` + 307 `.tga`) are at most 650×597
+  (`texture/sf_wall_brick03_blkfence_2_l.tex`), so a 2048-limit adapter
+  serves every one. The largest image in the install is menu art this
+  pipeline never loads — `jpg/credits.jpg`, a 215×4582 scrolling credits
+  strip. Command: `cargo test -p mm2_app --test app
+  retail_textures_fit_the_texture_ceiling` with `MM2_RETAIL` set (headers
+  read only; the leg skips without the install and says so).
 - **Geometry/props**: PKG overrides by same logical path; modern formats
   (`.glb`) are resolved by the preference list — glTF importing is a planned
   importer, not yet implemented.

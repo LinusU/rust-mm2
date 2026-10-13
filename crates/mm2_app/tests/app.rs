@@ -75,6 +75,7 @@ mod speedometer;
 mod stuck;
 mod surface;
 mod texel_fx;
+mod texture_sizes;
 mod traffic;
 mod traffic_retail;
 mod trailer;

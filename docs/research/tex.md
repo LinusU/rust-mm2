@@ -56,6 +56,17 @@ decal renderer must read them — the decal channel decodes with
 opaque decode. Whether the original keys off the pixel type, the bits
 flags, or the decal draw call itself is unverified.
 
+## Sizes (measured, F30 low-GPU edge case)
+
+The VFS texture pipeline resolves 3972 retail `texture/*` images — 3665
+`.tex` and 307 `.tga` — and every one is small: the largest is 650×597
+(`sf_wall_brick03_blkfence_2_l`), 2598 are at most 64 px on their larger
+axis and only 2 exceed 512, so all fit an adapter reporting 2048 for
+`max_texture_dimension_2d`. The install's one larger image is menu art
+outside this pipeline: `jpg/credits.jpg`, 215×4582. Header reads only;
+measured by `cargo test -p mm2_app --test app
+retail_textures_fit_the_texture_ceiling` with `MM2_RETAIL` set.
+
 ## Confidence
 
 - Header fields + type numbers: **documented** (angel-file-formats TEX spec)
