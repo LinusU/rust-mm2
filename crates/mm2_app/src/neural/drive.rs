@@ -21,9 +21,10 @@ use tracing::{info, warn};
 
 use super::guide::Guide;
 use super::observe::{
-    ACT_DIM, CarProfile, Motion, Neighbour, OBS_DIM, RayHit, action_input, observe,
+    ACT_DIM, CarProfile, Motion, Neighbour, OBS_DIM, RayHit, action_input, guide_bearing, observe,
 };
 use super::policy::{Policy, Scratch};
+use super::unstick::Unstick;
 
 /// Physics steps per decision — 20 Hz at the game's 60 Hz step, the
 /// rate the policies are trained at.
@@ -125,6 +126,8 @@ pub struct NeuralState {
     action: [f32; ACT_DIM],
     /// Physics steps left before the next decision.
     hold: u8,
+    /// The stalled-car watch that backs it out of a dead end.
+    pub unstick: Unstick,
 }
 
 impl NeuralState {
@@ -136,6 +139,7 @@ impl NeuralState {
             profile: CarProfile::of(config),
             action: [0.0; ACT_DIM],
             hold: 0,
+            unstick: Unstick::default(),
         }
     }
 
@@ -188,7 +192,11 @@ impl NeuralState {
             );
             let mut action = [0.0; ACT_DIM];
             policy.act(&obs, &mut action, scratch);
-            self.action = action;
+            let bearing = guide_bearing(motion, &self.guide, self.arc);
+            self.action = self
+                .unstick
+                .step(motion.position, &action, bearing)
+                .unwrap_or(action);
             self.hold = DECISION_TICKS;
         }
         self.hold -= 1;

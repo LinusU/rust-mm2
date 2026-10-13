@@ -7,6 +7,7 @@
 //! - [`guide`] — the line a driver follows and its position on it.
 //! - [`observe`] — the observation layout and the action mapping.
 //! - [`policy`] — the network itself, evaluated on the CPU.
+//! - [`unstick`] — backing a stalled car out, around the policy.
 //! - [`drive`] — the trained policies and per-car state in the game.
 //! - [`env`] — the lean multi-car environment the policy is trained in
 //!   (served to the trainer by the `mm2_gym` example).
@@ -18,3 +19,4 @@ pub mod env;
 pub mod guide;
 pub mod observe;
 pub mod policy;
+pub mod unstick;

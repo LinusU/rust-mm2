@@ -399,6 +399,20 @@ impl Writer<'_> {
     }
 }
 
+/// Signed angle (rad, positive right) from the car's nose to its guide
+/// [`BEARING_AHEAD`] metres on — what a backing-up car steers by.
+pub fn guide_bearing(motion: &Motion, guide: &Guide, s: f32) -> f32 {
+    let Some(fwd) = motion.heading() else {
+        return 0.0;
+    };
+    let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+    let aim = point_ahead(guide, s, BEARING_AHEAD) - motion.position;
+    aim.dot(right).atan2(aim.dot(fwd))
+}
+
+/// How far down the guide (m) [`guide_bearing`] aims.
+const BEARING_AHEAD: f32 = 15.0;
+
 /// Turn a policy's output into pedals: steering as given, the pedal
 /// axis split into throttle and brake, the handbrake on when its output
 /// is positive. `throttle_cap` is the driver's authored `maxThrottle`.
