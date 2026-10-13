@@ -292,8 +292,26 @@ are skipped (F25+).
 AI in-place reset all repair the wreck, so all three restore the rig:
 every part re-attaches, its fragment despawns, the node shows again
 (F05-AC03). A plain reset or the stuck recovery does not repair —
-detached parts stay off until a repair lands. `BreakReport` feeds a
-`brk=` smoke field only once the pipeline saw activity.
+detached parts stay off until a repair lands, and that same repair
+re-arms the wheel episode's one-shot flag. `BreakReport` feeds a
+`brk=<detached>d/<ejected>w/<restored>r` smoke field only once the
+pipeline saw activity; the middle counter is the damage-driven wheel
+ejections (a subset of the detachments).
+
+The wheel leg (`mm2_app::breakaway::eject_wheels`, REC-2) runs on the
+`DamageEvent` stream rather than the impact stream: a participant
+reaching the `Disabled` tier runs `VehicleBreaks::eject_at` once, which
+strips the recorded `whl0..3` corners by `SpeedMPH` — every wheel
+`> 100`, two random corners `> 75`, one `> 50`, nothing at or below `50`
+— and latches the episode. The app spawns a pooled fragment per wheel
+with the recovered `Speed × 1.3` kick; the intact `WheelSpin` node hides
+(its fender rides the `WheelMount` and stays). The ejection is
+visual-only in the original and here: the physics wheel stays, so the
+car drives on invisible wheels. A non-finite speed ejects nothing but
+still closes the episode; a repair clears the flag and re-attaches. The
+kick's *direction* is the one unrecovered piece (the original draws
+random components scaled by the manager's ranges) and is a deterministic
+per-episode `NavRng` draw — designed presentation.
 
 Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`): sf/london
 `--frames 600` scripted cruises on the default vpbug record all
@@ -648,8 +666,9 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
   0x4c bytes) is `{attached byte, id, mtx, banger record index, ...}`.
 - **Impact path (break parts).** The impact leaf `0x4cb130(impact)` reads
   the impact record's impulse (`+0x34`). Gate 1: `impulse > ImpactThreshold`
-  (`0x4cb1fb`; plus a `vehCarSim +0x24c < 10` clause that additionally
-  needs the other body's `+0x24` set). Past it: `0x4caeb0` adds the impulse
+  (`0x4cb1fb`; plus a `vehCarSim +0x24c < 10` clause — `SpeedMPH`, so
+  under 10 mph — that additionally needs the other body's `+0x24` set).
+  Past it: `0x4caeb0` adds the impulse
   to the accumulated damage, then `0x4d8890(impulse, &contact, modelIdx)` on
   the `+0xa0` manager. `0x4d8890` returns unless `impulse >= manager[+4]`;
   `manager[+4]` is `10000.0` (`0x461c4000`, written by the ctor at
@@ -668,13 +687,27 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
   consumer). The `Mass × {31.25, 2500}` ladder therefore says how easily a
   *fallen* part breaks further or tumbles, not when it leaves the car.
 - **Damage path (wheels/hubs).** `vehCarDamage::Update` ends (`0x4cadf0`) with
-  `if (damage >= MaxDamage) carModel->0x4cdc90()`. That routine strips
-  parts of the `+0xac` manager once per episode (flag `+0xa4`): a
-  `vehCarSim +0x24c` value `> 100` removes everything, `> 75` two random
-  wheel/hub pairs plus a variant, `> 50` one pair, otherwise it just marks
-  the episode done. The model reset `0x4cdfe0` clears the flag and restores
-  the full mask (`0xffffffff`). *Unknown:* what `+0x24c` is (it is also
-  compared with 10 and 15 on the impact path); `MedDamage` is not read here.
+  `if (damage >= MaxDamage) carModel->0x4cdc90()`. That routine (`0x4cdc90`)
+  enters the `+0xac` part manager and returns at once if the model's
+  one-shot byte (`+0xa4`) is set, so the episode runs once. It writes the
+  kick speed `manager[+0x10] = Speed(+0x248) × 1.3` (`0x5af3ec`), then
+  branches on **`SpeedMPH` (`vehCarSim +0x24c`)** — `+0x248` is
+  `|forward velocity|` m/s and `SpeedMPH = Speed × 2.236025`
+  ([vehicle-physics/04](vehicle-physics/04-chassis-and-assists.md) §
+  `vehCarSim` fields): `> 100` (`0x5af430`) detaches **every** part in the
+  manager's `+0x48` list (`0x4d8ba0`) and clears the model's visibility mask
+  (`+0xa8`); `> 75` (`0x5b1d1c`) detaches **two random corner pairs**
+  (`rand & 3`) plus a `variant` bit (`8 + rand & 1`); `> 50` (`0x5b1d18`)
+  **one random pair**; otherwise nothing. Every path then sets the one-shot
+  byte `+0xa4`. The shared detach leaf `0x4d8930(manager, part)` refuses a
+  part whose attached byte (`part[+0]`) is already 0, so the two-pair band
+  can draw the same corner twice and yield a single pair. The model reset
+  `0x4cdfe0` clears the flag and restores the full mask (`0xffffffff`).
+  The manager's parts are `whl0..3` (bits `0x1/0x4/0x10/0x40`), `hub0..3`
+  (bits `0x2/0x8/0x20/0x80`) and `variant%d` (bits 8/9) — but **no retail
+  car authors `hubN`/`variantN` geometry**, so a recovered "pair" is one
+  wheel in practice; only `whl0..3` exist in the manager (`whl4`+ are the
+  back-back visual followers). `MedDamage` is not read here.
 - **The unit of `+0x34` (measured 2026-10-12).** The impact record is a
   12-slot table inside `vehCarDamage` (slots at `this+0x44`, stride
   `0x40`, key = the other body). It is written by the car's collision
@@ -731,22 +764,36 @@ Method: `objdump -d -M intel` of the retail x86-32 image, anchored on the
     X m/s" claim is made. For any one vehicle the wall-hit speed that
     reaches 10000 is `10000 / ((1+e) · m_eff)`.
   - **Still open.** Whether the slot expiry (0.2 s) re-arms the leaf
-    during a sustained push, the effective value of `e` per retail
-    surface pair, and what `vehCarSim +0x24c` is.
+    during a sustained push, and the effective value of `e` per retail
+    surface pair.
 
 **Consequences for the port.** Breakaway detachment is *not*
-damage-driven, so there is no accumulated-damage detach to implement.
-The implemented gate (DSN-21) follows the recovered rule: one nearest
-part when the delivered impulse reaches a manager-wide `10000`, on the
-accumulator's own `severity × other_mass` estimate
+damage-driven, so there is no accumulated-damage detach. The implemented
+gate (DSN-21) follows the recovered rule: one nearest part when the
+delivered impulse reaches a manager-wide `10000`, on the accumulator's
+own `severity × other_mass` estimate
 (`mm2_app::contracts::delivered_impulse`) — kg·m/s in kind, a lower
 bound for a wall hit. The remaining gap is magnitude: per-car retail
 masses and restitutions are unmeasured, so `10000` is applied as a
 disclosed unit match rather than a per-car calibration; and the
 recovered `1.25×` per-other-body re-offer gate is folded into the
-upstream `ImpactDedup` pair window rather than modelled. Wheel/hub loss
-at `MaxDamage` is a damage-driven behaviour the port does not have yet,
-and is filed as a follow-up task.
+upstream `ImpactDedup` pair window rather than modelled.
+
+The damage-driven wheel episode (`0x4cdc90`, REC-2) is implemented
+(`mm2_app::breakaway::eject_wheels`): when accumulated damage reaches
+`MaxDamage` it strips the recorded `whl0..3` corners by `SpeedMPH` —
+every wheel `> 100`, two random corners `> 75`, one `> 50`, nothing at or
+below `50` — each leaving as a pooled fragment with the recovered
+`Speed × 1.3` kick, and the episode is one-shot until a repair restores
+the rig (`VehicleBreaks::restore` mirrors the model reset `0x4cdfe0`,
+which also re-arms the flag). `hubN`/`variantN` are not modelled: no
+retail car authors their geometry, so a recovered pair is one wheel. The
+fragment's *direction* is the one part of the rule left unrecovered —
+`0x4d8930` draws random components scaled by the manager's `+0x14..`
+ranges and its RNG source was not traced — so the port draws a uniform
+direction from a deterministic per-episode stream (`NavRng`) and marks it
+**designed**. Ejection is visual-only in the original: the physics wheel
+stays, so the car drives on invisible wheels exactly as retail does.
 
 ## Open questions
 
