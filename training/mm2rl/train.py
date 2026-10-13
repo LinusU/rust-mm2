@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import time
 from collections import Counter, defaultdict, deque
@@ -28,7 +29,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from .envs import ENDS, VecEnv
+from .envs import ENDS, VecEnv, list_events
 from .export import export_policy
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,11 +109,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True, help="run name under training/runs/")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 2),
-                   help="mm2_gym processes, one core each")
-    p.add_argument("--agents", type=int, default=32, help="cars per worker")
+                   help="mm2_gym processes, one core each; each holds one race's world")
+    p.add_argument("--agents", type=int, default=32, help="trained cars per worker")
+    p.add_argument("--drones", type=int, default=6,
+                   help="untrained cars per worker: parked, or driving at traffic pace")
     p.add_argument("--cities", default="sf,london")
     p.add_argument("--install", type=Path, default=Path(os.environ.get("MM2_RETAIL", ROOT / "retail")))
-    p.add_argument("--gym", type=Path, default=ROOT / "target/release/examples/mm2_gym")
+    p.add_argument("--gym", type=Path, default=ROOT / "target/release/examples/mm2_gym",
+                   help="environment binary; copied into the run on first start")
+    p.add_argument("--refresh-gym", action="store_true",
+                   help="replace the run's copy of the environment binary")
     p.add_argument("--horizon", type=int, default=256, help="decisions per agent per iteration")
     p.add_argument("--epochs", type=int, default=4)
     p.add_argument("--minibatch", type=int, default=8192)
@@ -133,8 +139,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-minutes", type=float, default=5.0)
     p.add_argument("--snapshot-steps", type=float, default=25e6,
                    help="keep a numbered checkpoint this often")
-    p.add_argument("--recycle-iters", type=int, default=40,
-                   help="restart one worker every this many iterations")
+    p.add_argument("--recycle", type=int, default=2,
+                   help="workers moved to another race's world after each iteration")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--device", default="cpu")
     p.add_argument("--threads", type=int, default=4, help="torch CPU threads")
@@ -154,12 +160,40 @@ def main() -> None:
     hidden = state["hidden"] if state else [int(x) for x in args.hidden.split(",")]
     critic_hidden = state["critic_hidden"] if state else [int(x) for x in args.critic_hidden.split(",")]
 
+    # The run keeps its own copy of the environment: rebuilding the
+    # repository's binary (perhaps with another observation layout) must
+    # not change what a running or resumed run trains against.
+    gym = run / "mm2_gym"
+    if args.refresh_gym or not gym.exists():
+        shutil.copy2(args.gym, gym)
+
     configure = json.loads(args.configure) if args.configure else None
+    worlds = [
+        (city, event)
+        for city in args.cities.split(",")
+        for event in list_events(gym, args.install, city)
+    ]
+    # Races that go badly are visited more often: each world is drawn in
+    # proportion to a floor plus the share of its episodes that failed.
+    failures = {world: 0.5 for world in worlds}
+    rng = np.random.default_rng(args.seed + (int(state["iteration"]) if state else 0))
+
+    order = [worlds[i] for i in rng.permutation(len(worlds))]
+
+    def pick(index: int) -> tuple[str, str | None]:
+        # The first field of workers is spread over the worlds; every
+        # recycled one is drawn by how its world has been going.
+        if index < args.workers:
+            return order[index % len(order)]
+        weights = np.array([0.25 + failures[w] for w in worlds])
+        return worlds[int(rng.choice(len(worlds), p=weights / weights.sum()))]
+
     env = VecEnv(
-        args.gym, args.install, args.cities.split(","), args.workers, args.agents,
+        gym, args.install, worlds, args.workers, args.agents, args.drones,
         # A resumed run must not replay the starts it already saw.
         seed=args.seed + (int(state["iteration"]) if state else 0),
         configure=configure,
+        pick=pick,
     )
     n, obs_dim, act_dim = env.n, env.obs_dim, env.act_dim
     agent = Agent(obs_dim, act_dim, hidden, critic_hidden).to(device)
@@ -221,6 +255,7 @@ def main() -> None:
     val_buf = torch.zeros((horizon, n))
 
     recent: deque = deque(maxlen=4000)
+    # Statistics since this start of the run, by line.
     by_line: dict[str, Counter] = defaultdict(Counter)
     log = (run / "log.jsonl").open("a")
     last_save = time.time()
@@ -255,8 +290,15 @@ def main() -> None:
                 obs = torch.from_numpy(next_obs.copy())
                 for e in episodes:
                     recent.append(e)
-                    by_line[e.line][ENDS[e.end]] += 1
-                    by_line[e.line]["metres"] += e.metres
+                    stats = by_line[e.line]
+                    stats[ENDS[e.end]] += 1
+                    stats["metres"] += e.metres
+                    failed = e.end >= 2
+                    if failed:
+                        # Where on the line it went wrong, in 25 m bins.
+                        stats[f"at{int(e.arc // 25) * 25:05d}"] += 1
+                    city, event = e.line.split("/")[:2]
+                    failures[(city, event)] += 0.01 * (failed - failures[(city, event)])
             last_value = agent.value(obs.to(device)).cpu()
 
             adv_buf = torch.zeros((horizon, n))
@@ -333,7 +375,7 @@ def main() -> None:
             "v_loss": float(v_loss.detach()),
             "entropy": float(entropy.detach()),
             "explained": explained,
-            "std": [round(float(x), 3) for x in agent.log_std.exp()],
+            "std": [round(float(x), 3) for x in agent.log_std.detach().exp()],
             "ret_scale": scale.scale,
             "time": time.time(),
         }
@@ -351,9 +393,9 @@ def main() -> None:
                 flush=True,
             )
 
-        if args.recycle_iters and iteration % args.recycle_iters == 0:
-            index = (iteration // args.recycle_iters) % len(env.workers)
-            env.recycle(index)
+        if args.recycle:
+            for k in range(args.recycle):
+                env.recycle((iteration * args.recycle + k) % len(env.workers))
             obs = torch.from_numpy(env.observe().copy())
             scale.resize(n)
         if time.time() - last_save > args.save_minutes * 60:

@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-PROTOCOL = 1
-EPISODE = struct.Struct("<IIffIIf")
+PROTOCOL = 2
+EPISODE = struct.Struct("<IIffIIfffff")
 ENDS = ["finished", "time", "stalled", "off_route", "upended", "lost"]
 
 
@@ -30,6 +30,8 @@ class Episode:
     line: str
     car: str
     impacts: float
+    arc: float
+    position: tuple[float, float, float]
 
 
 @dataclass
@@ -39,6 +41,7 @@ class Worker:
     obs_dim: int
     act_dim: int
     city: str
+    event: str | None = None
     lines: list[str] = field(default_factory=list)
     cars: list[str] = field(default_factory=list)
 
@@ -63,29 +66,44 @@ class Worker:
         self.proc.stdin.flush()
 
 
+def list_events(gym: Path, install: Path, city: str) -> list[str]:
+    """The race events of `city` an environment can load."""
+    out = subprocess.run(
+        [str(gym), "--mm2-path", str(install), "--city", city, "events"],
+        check=True, capture_output=True, text=True,
+    )
+    return json.loads(out.stdout)
+
+
 def spawn_worker(
     gym: Path,
     install: Path,
     city: str,
+    event: str | None,
     agents: int,
+    drones: int,
     seed: int,
     decision_ticks: int = 3,
 ) -> Worker:
+    command = [
+        str(gym),
+        "--mm2-path", str(install),
+        "--city", city,
+        "--agents", str(agents),
+        "--drones", str(drones),
+        "--seed", str(seed),
+        "--decision-ticks", str(decision_ticks),
+    ]
+    if event:
+        command += ["--event", event]
     proc = subprocess.Popen(
-        [
-            str(gym),
-            "--mm2-path", str(install),
-            "--city", city,
-            "--agents", str(agents),
-            "--seed", str(seed),
-            "--decision-ticks", str(decision_ticks),
-            "serve",
-        ],
+        command + ["serve"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         bufsize=1 << 20,
     )
-    worker = Worker(proc, agents, 0, 0, city)
+    worker = Worker(proc, agents, 0, 0, city, event)
     if worker.read(4) != b"MM2G":
         raise RuntimeError("mm2_gym did not say hello")
     protocol, obs_dim, act_dim, n, _layout = struct.unpack("<5I", worker.read(20))
@@ -99,35 +117,47 @@ def spawn_worker(
 
 
 class VecEnv:
-    """Every worker's agents as one batch."""
+    """Every worker's agents as one batch.
+
+    Each worker holds one race event's world — its course barricades,
+    parked cars and bridges — and that event's lines. `worlds` is the
+    list of `(city, event)` pairs to draw from; `pick` chooses the next
+    one whenever a worker is started or recycled.
+    """
 
     def __init__(
         self,
         gym: Path,
         install: Path,
-        cities: list[str],
+        worlds: list[tuple[str, str | None]],
         workers: int,
         agents: int,
+        drones: int,
         seed: int,
         configure: dict | None = None,
+        pick=None,
     ):
         self.gym, self.install = gym, install
         self.agents_per_worker = agents
+        self.drones = drones
         self.configure = configure
         self.seed = seed
         self.spawned = 0
+        self.worlds = worlds
+        self.pick = pick or (lambda i: worlds[i % len(worlds)])
         self.workers: list[Worker] = []
-        for i in range(workers):
-            self.workers.append(self._spawn(cities[i % len(cities)]))
+        for _ in range(workers):
+            self.workers.append(self._spawn())
         self.obs_dim = self.workers[0].obs_dim
         self.act_dim = self.workers[0].act_dim
         self.n = workers * agents
 
-    def _spawn(self, city: str) -> Worker:
+    def _spawn(self) -> Worker:
+        city, event = self.pick(self.spawned)
         self.spawned += 1
         worker = spawn_worker(
-            self.gym, self.install, city, self.agents_per_worker,
-            self.seed * 100_003 + self.spawned,
+            self.gym, self.install, city, event, self.agents_per_worker,
+            self.drones, self.seed * 100_003 + self.spawned,
         )
         if self.configure:
             payload = json.dumps(self.configure).encode()
@@ -164,11 +194,12 @@ class VecEnv:
                 finals.append(w.read_f32(count, w.obs_dim))
                 final_index.append(np.flatnonzero(d == 2) + i * a)
             for _ in range(w.read_u32()):
-                end, steps, metres, ret, line, car, impacts = EPISODE.unpack(
+                end, steps, metres, ret, line, car, impacts, arc, x, y, z = EPISODE.unpack(
                     w.read(EPISODE.size)
                 )
                 episodes.append(
-                    Episode(end, steps, metres, ret, w.lines[line], w.cars[car], impacts)
+                    Episode(end, steps, metres, ret, w.lines[line], w.cars[car],
+                            impacts, arc, (x, y, z))
                 )
         empty = np.zeros((0, self.obs_dim), dtype=np.float32)
         return (
@@ -181,10 +212,12 @@ class VecEnv:
         )
 
     def recycle(self, index: int) -> None:
-        """Replace one worker with a fresh process — a city whose props
-        have all been knocked over is not the city the game starts in."""
+        """Replace one worker with a fresh process on another event —
+        the batch keeps moving through every race's world, and a city
+        whose props have all been knocked over is not the city the game
+        starts in."""
         old = self.workers[index]
-        self.workers[index] = self._spawn(old.city)
+        self.workers[index] = self._spawn()
         _close(old)
 
     def close(self) -> None:
