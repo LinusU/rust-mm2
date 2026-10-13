@@ -351,7 +351,12 @@ fn a_stopped_host_ends_a_parked_app_client() {
     let host = Proc::spawn(HOST_EXE, &dev_host_args(install.path()));
     let (addr, _fp, _) = listening(&host);
 
-    let client = Proc::spawn(MM2_EXE, &mm2_join_args(install.path(), addr, 100_000));
+    // `--frames` is a ceiling the host's SIGSTOP ends the run before, not a
+    // run budget: above RUN_FRAMES_MAX it keeps the 30 s guard.
+    let client = Proc::spawn(
+        MM2_EXE,
+        &mm2_join_args(install.path(), addr, HOST_FRAME_CEILING),
+    );
     host.until("event=joined");
 
     host.stop();
