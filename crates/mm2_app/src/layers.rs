@@ -42,7 +42,7 @@ pub enum GameLayer {
     Scenery,
     /// Kinematic pedestrians (F19-B.8b): each walker's body capsule.
     Pedestrian,
-    /// A dormant banger's extra membership (see
+    /// A banger still waiting for its first strike (see
     /// [`GameLayer::dormant_prop`]).
     DormantProp,
 }
@@ -65,8 +65,8 @@ impl GameLayer {
     }
 
     /// Layers for a dormant banger: a static sensor waiting for a
-    /// striker. It is on the default layer as well as `DormantProp`, so
-    /// cars, walkers, active props and movers still meet it, but it
+    /// striker. It is alone on `DormantProp`, which cars, active props,
+    /// movers and walkers (via their own filters) still meet, but it
     /// filters out `World` and `DormantProp`. Avian pairs a static sensor
     /// with the static city trimeshes and with its neighbours (it skips
     /// static-static pairs only for solid colliders), and ~40,000 such
@@ -74,22 +74,25 @@ impl GameLayer {
     /// thing that read a dormant prop's contact with the ground was the
     /// activation gate, which on sf fired twice on a parking meter off a
     /// ~1e-5 m/s "strike" by the static ground (infinite striker mass
-    /// makes any approach speed clear the limit). Every transition out of `Dormant` restores
-    /// [`CollisionLayers::default`] along with removing the `Sensor`.
+    /// makes any approach speed clear the limit). Every transition out
+    /// of `Dormant` restores [`CollisionLayers::default`] along with removing the `Sensor`.
     pub fn dormant_prop() -> CollisionLayers {
         CollisionLayers::new(
-            [GameLayer::Default, GameLayer::DormantProp],
+            GameLayer::DormantProp,
             !LayerMask::from([GameLayer::World, GameLayer::DormantProp]),
         )
     }
 
     /// Layers for a kinematic pedestrian body: a `Pedestrian` member
-    /// that collides with the default layer (vehicles and props) and
-    /// nothing else. Static `World` is left out on purpose — a walker
+    /// that collides with the default layer (vehicles and active props),
+    /// the dormant props and nothing else. Static `World` is left out on purpose — a walker
     /// stands on the sidewalk without needing a kinematic-vs-trimesh
     /// pair, and `Scenery` movers do not strike walkers.
     pub fn pedestrian() -> CollisionLayers {
-        CollisionLayers::new(GameLayer::Pedestrian, GameLayer::Default)
+        CollisionLayers::new(
+            GameLayer::Pedestrian,
+            [GameLayer::Default, GameLayer::DormantProp],
+        )
     }
 
     /// Every layer a car's or camera's ray may hit: all but
