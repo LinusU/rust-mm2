@@ -237,6 +237,11 @@ const FINISH_MARGIN: f32 = 4.0;
 /// ... if it is also within this distance (m, XZ) of the end itself: a
 /// car that ran wide of the last bend has not arrived.
 const FINISH_RADIUS: f32 = 10.0;
+/// How far under the city's authored floor (m) a car is out of the
+/// world. The floor is the lowest authored geometry and cars drive on
+/// it — London's Underground runs along the bottom of the bounds — so
+/// the line sits well below.
+const FLOOR_SLACK: f32 = 20.0;
 /// Most agents one staged grid start takes.
 const GRID_MOST: usize = 8;
 /// Seconds a drone stays where it is put, at least and at most.
@@ -528,7 +533,7 @@ fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>, seed: u64) -> Result<Co
                 let (pos, yaw) =
                     opponents::spawn_pose(&definition, i, spec, player_pos, player_yaw);
                 let driven = opponents::driving_route(route, Some(&nav), &[], pos, yaw);
-                let Some(guide) = Guide::from_route(&driven) else {
+                let Some(guide) = Guide::from_route_on(&driven, Some(&nav)) else {
                     continue;
                 };
                 if guide.length() < 200.0 {
@@ -589,7 +594,7 @@ fn roam_lines(nav: &mm2_game::NavGraph, cars: usize, seed: u64) -> Vec<Line> {
         let Some(route) = crate::scripted::plan_nav_route(nav, from, to) else {
             continue;
         };
-        let Some(guide) = Guide::from_route(&route) else {
+        let Some(guide) = Guide::from_route_on(&route, Some(nav)) else {
             continue;
         };
         if !(ROAM_LENGTH.0..=ROAM_LENGTH.1).contains(&guide.length()) {
@@ -1338,7 +1343,7 @@ impl DrivingEnv {
                 slot.steps += 1;
                 let on_line = slot.guide.point_at(s);
                 let off = motion.position - on_line;
-                if motion.position.y < self.floor
+                if motion.position.y < self.floor - FLOOR_SLACK
                     || self
                         .water
                         .as_ref()
@@ -1463,7 +1468,7 @@ impl DrivingEnv {
                         slot.s = slot.guide.advance(slot.s, m.position);
                         let off = m.position - slot.guide.point_at(slot.s);
                         spent |= (m.rotation * Vec3::Y).y < 0.2
-                            || m.position.y < self.floor
+                            || m.position.y < self.floor - FLOOR_SLACK
                             || off.x.hypot(off.z) > OFF_ROUTE
                             || slot.guide.remaining(slot.s).is_some_and(|left| left < 30.0)
                             || self.water.as_ref().is_some_and(|w| w.is_deadly(m.position));
@@ -1530,13 +1535,29 @@ impl DrivingEnv {
             return found;
         };
         let filter = SpatialQueryFilter::default();
+        let world = self.app.world();
+        // Ground is anything that is not a car or a loose prop — a
+        // drawbridge leaf is kinematic and is road. A wall is static
+        // and not a prop a car knocks over.
+        let body_of = |e: Entity| colliders.get(e).map_or(e, |c| c.body);
+        let ground = |e: Entity| {
+            !vehicles.contains(e) && bodies.get(body_of(e)).is_ok_and(|b| !b.is_dynamic())
+        };
         let solid = |e: Entity| {
-            let body = colliders.get(e).map_or(e, |c| c.body);
-            !vehicles.contains(e) && bodies.get(body).is_ok_and(|b| b.is_static())
+            !vehicles.contains(e)
+                && bodies.get(body_of(e)).is_ok_and(|b| b.is_static())
+                && world.get::<mm2_game::Banger>(body_of(e)).is_none()
         };
         let ground_at = |p: Vec3| -> Option<Vec3> {
             spatial
-                .cast_ray_predicate(p + Vec3::Y * 4.0, Dir3::NEG_Y, 30.0, false, &filter, &solid)
+                .cast_ray_predicate(
+                    p + Vec3::Y * 4.0,
+                    Dir3::NEG_Y,
+                    30.0,
+                    false,
+                    &filter,
+                    &ground,
+                )
                 .map(|hit| p + Vec3::Y * (4.0 - hit.distance))
         };
         let mut s = 0.0;

@@ -14,6 +14,7 @@
 
 use bevy::math::Vec3;
 use mm2_game::OpponentRoute;
+use mm2_game::nav::{LaneQuery, NavGraph};
 
 /// Vertical distances count this many times over in the nearest-point
 /// search, so a car under a bridge projects onto the road it is on
@@ -26,6 +27,14 @@ const SEARCH_AHEAD: f32 = 60.0;
 /// Points closer together than this (m) are merged when a guide is
 /// built — zero-length legs have no direction.
 const MIN_LEG: f32 = 0.05;
+/// Spacing (m) of the height samples [`Guide::from_route_on`] lays
+/// along a leg.
+const GROUND_STEP: f32 = 10.0;
+/// How far (m, XZ) from a sample a road lane may run and still give it
+/// its height — a wide road's half width.
+const GROUND_LANE: f32 = 12.0;
+/// How far above or below the straight line (m) the road is looked for.
+const GROUND_SEARCH: f32 = 40.0;
 
 /// A polyline to drive along, with cumulative arc lengths.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,14 +57,23 @@ impl Guide {
     /// the first. `None` when fewer than two distinct finite points
     /// remain.
     pub fn new(points: impl IntoIterator<Item = Vec3>, closed: bool) -> Option<Self> {
+        Self::with_sources(points.into_iter().map(|p| (p, true)), closed)
+    }
+
+    /// A guide through `points`, of which only those flagged `true`
+    /// are *source* points — the ones [`Guide::chase_index`] counts.
+    /// The rest shape the line between them.
+    fn with_sources(points: impl IntoIterator<Item = (Vec3, bool)>, closed: bool) -> Option<Self> {
         let mut pts: Vec<Vec3> = Vec::new();
         // For each source point, the kept point it became.
         let mut kept: Vec<usize> = Vec::new();
-        for p in points {
+        for (p, source) in points {
             if p.is_finite() && pts.last().is_none_or(|l| l.distance(p) >= MIN_LEG) {
                 pts.push(p);
             }
-            kept.push(pts.len().saturating_sub(1));
+            if source {
+                kept.push(pts.len().saturating_sub(1));
+            }
         }
         if closed && pts.len() > 2 && pts[0].distance(*pts.last().unwrap()) < MIN_LEG {
             pts.pop();
@@ -90,10 +108,65 @@ impl Guide {
 
     /// The guide along an opponent's driving line.
     pub fn from_route(route: &OpponentRoute) -> Option<Self> {
-        Self::new(
-            route.points.iter().map(|p| p.position),
-            crate::opponents::route_is_closed(route),
-        )
+        Self::from_route_on(route, None)
+    }
+
+    /// The guide along an opponent's driving line, laid on the road.
+    ///
+    /// A route's points can sit 200 m apart, and the straight line
+    /// between two of them is not the road: over a San Francisco hill
+    /// it runs up to 12 m under the crest or above the dip. So each leg
+    /// is sampled every [`GROUND_STEP`] metres and each sample takes
+    /// the height of the road lane under it, where `nav` has one within
+    /// [`GROUND_LANE`]. The line keeps its plan shape; only its heights
+    /// change. Where no lane runs — a park, a plaza — the straight
+    /// line's height stands.
+    pub fn from_route_on(route: &OpponentRoute, nav: Option<&NavGraph>) -> Option<Self> {
+        let closed = crate::opponents::route_is_closed(route);
+        let n = route.points.len();
+        let Some(nav) = nav else {
+            return Self::new(route.points.iter().map(|p| p.position), closed);
+        };
+        let road_height = |p: Vec3| -> Option<f32> {
+            let query = LaneQuery::vehicles(GROUND_SEARCH);
+            // The nearest lane in plan; of two at different levels, the
+            // one nearer the line's own height.
+            nav.lane_hits(p.into(), &query)
+                .into_iter()
+                .filter(|h| (h.point[0] - p.x).hypot(h.point[2] - p.z) <= GROUND_LANE)
+                .min_by(|a, b| {
+                    (a.point[1] - p.y)
+                        .abs()
+                        .total_cmp(&(b.point[1] - p.y).abs())
+                })
+                .map(|h| h.point[1])
+        };
+        let mut points: Vec<(Vec3, bool)> = Vec::new();
+        for i in 0..n {
+            let a = route.points[i].position;
+            points.push((a, true));
+            let last = i + 1 == n;
+            if last && !closed {
+                break;
+            }
+            let b = route.points[(i + 1) % n].position;
+            let length = (b.x - a.x).hypot(b.z - a.z);
+            if !length.is_finite() {
+                continue;
+            }
+            let steps = (length / GROUND_STEP).floor() as usize;
+            for k in 1..steps {
+                let mut p = a.lerp(b, k as f32 / steps as f32);
+                if let Some(y) = road_height(p) {
+                    p.y = y;
+                    // The lane was found near the straight line's
+                    // height; look again from its own.
+                    p.y = road_height(p).unwrap_or(y);
+                }
+                points.push((p, false));
+            }
+        }
+        Self::with_sources(points, closed)
     }
 
     /// The index of the source point a car at arc length `s` is

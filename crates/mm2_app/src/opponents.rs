@@ -1297,7 +1297,7 @@ fn spawn_roster(
         // nothing and stays trigger-bound.
         let neural = route
             .as_ref()
-            .and_then(Guide::from_route)
+            .and_then(|r| Guide::from_route_on(r, nav))
             .map(|guide| NeuralState::new(Arc::new(guide), &def.config, pos, next));
         let route_line = participant
             .then(|| {
