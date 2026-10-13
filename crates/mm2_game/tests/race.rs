@@ -1012,6 +1012,66 @@ fn an_any_order_line_with_its_finish_bound_finishes_on_the_route() {
     assert_eq!(progress.crossings, 0, "no cylinder was ever crossed");
 }
 
+/// The neural driver binds gates as arc positions on its own guide and
+/// reports what it has driven in the same measure: laps add the guide's
+/// length, and an `AnyOrder` line ends at the finish's arc.
+#[test]
+fn a_line_bound_from_arcs_counts_gates_and_laps_by_distance_driven() {
+    // A 400 m lap; the car starts 50 m round it. Gates 100 m and 300 m
+    // round, and the start line itself (arc 50) closing each lap.
+    let def = ordered(
+        vec![
+            checkpoint(100.0, 0.0),
+            checkpoint(300.0, 0.0),
+            checkpoint(50.0, 0.0),
+        ],
+        2,
+    );
+    let mut line = RouteGateLine::bind_arcs(&[100.0, 300.0, 50.0], 50.0, 400.0, true).unwrap();
+    assert_eq!(line.arc_high, 50.0, "nothing driven at the start");
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(
+        progress.cleared_count(),
+        0,
+        "the start-line gate is a lap away"
+    );
+
+    line.arc_high = 50.0 + 260.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!((progress.lap, progress.next), (0, 2));
+    line.arc_high = 50.0 + 400.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!((progress.lap, progress.next), (1, 0), "one lap driven");
+    line.arc_high = 50.0 + 799.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    line.arc_high = 50.0 + 800.0;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+
+    // An open line, `AnyOrder`: gates behind the start are already
+    // passed, and the race ends within range of the finish's arc.
+    let def = any_order(vec![checkpoint(0.0, 0.0), checkpoint(200.0, 0.0)], None);
+    let mut line = RouteGateLine::bind_arcs(&[10.0, 200.0], 30.0, 500.0, false).unwrap();
+    line.bind_finish_arc(Some(450.0));
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    line.arc_high = 30.0 + 180.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 2);
+    line.arc_high = 450.0 - mm2_game::race::ROUTE_FINISH_RANGE;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+
+    assert!(RouteGateLine::bind_arcs(&[], 0.0, 100.0, false).is_none());
+    assert!(RouteGateLine::bind_arcs(&[1.0], 0.0, 0.0, false).is_none());
+}
+
 /// With no finish trigger the race ends where the line does.
 #[test]
 fn an_any_order_line_without_a_finish_trigger_ends_with_the_line() {

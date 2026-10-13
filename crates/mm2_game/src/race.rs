@@ -970,6 +970,77 @@ impl RouteGateLine {
         Some(line)
     }
 
+    /// Bind gates that are already positions on a driven line: each of
+    /// `gate_arcs` is where the line passes closest to that gate, in
+    /// the same arc measure the driver will report its progress in
+    /// ([`Self::arc_high`]), `spawn_arc` where the participant starts
+    /// and `loop_len` the length of the line (of one lap, when
+    /// `closed`). The neural driver binds this way, from its guide: the
+    /// car's place on the guide is then the one account of its
+    /// progress, and nothing has to re-project its pose onto a route.
+    /// `None` for an empty gate list or a degenerate line.
+    pub fn bind_arcs(
+        gate_arcs: &[f32],
+        spawn_arc: f32,
+        loop_len: f32,
+        closed: bool,
+    ) -> Option<Self> {
+        if gate_arcs.is_empty()
+            || !loop_len.is_finite()
+            || loop_len < 1e-3
+            || !spawn_arc.is_finite()
+        {
+            return None;
+        }
+        let mut line = Self {
+            point_arc: Vec::new(),
+            gate_rel: Vec::with_capacity(gate_arcs.len()),
+            loop_len,
+            closed,
+            spawn_arc,
+            arc_high: spawn_arc,
+            traversals: 0,
+            finish_rel: None,
+        };
+        for &arc in gate_arcs {
+            let mut rel = line.rel_of(arc);
+            if let Some(&prev) = line.gate_rel.last() {
+                // Gates are met in authored order. On a lap, one that
+                // lies before its predecessor is round the lap from it
+                // — the start line closing a lap the car began just
+                // short of, most of all, which is a whole lap away and
+                // not already passed. On an open line it can only be
+                // passed with its predecessor.
+                if closed && rel < prev {
+                    rel += loop_len;
+                }
+                rel = rel.max(prev);
+            }
+            line.gate_rel.push(rel);
+        }
+        Some(line)
+    }
+
+    /// Also bind where the race ends, as an arc position on the driven
+    /// line — the arc-measure counterpart of [`Self::bind_finish`].
+    /// `None` ends the race where the line does.
+    pub fn bind_finish_arc(&mut self, finish_arc: Option<f32>) {
+        let end = (self.loop_len - self.spawn_arc).max(0.0);
+        let rel = finish_arc.map_or(end, |arc| self.rel_of(arc));
+        let last_gate = self.gate_rel.last().copied().unwrap_or(0.0);
+        self.finish_rel = Some(rel.max(last_gate));
+    }
+
+    /// An absolute arc position as a distance driven from the spawn.
+    fn rel_of(&self, arc: f32) -> f32 {
+        let rel = arc - self.spawn_arc;
+        if self.closed {
+            rel.rem_euclid(self.loop_len)
+        } else {
+            rel.max(0.0)
+        }
+    }
+
     /// The arc position, relative to the spawn, at which the polyline
     /// passes closest to `point` in XZ.
     fn bound_rel(&self, route: &OpponentRoute, leg_count: usize, point: Vec3) -> f32 {
