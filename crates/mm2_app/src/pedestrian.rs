@@ -395,8 +395,9 @@ pub fn spawn_pedestrian(
         // of driving through the figure (DSN-89's designed departure).
         // The authored walk/dive still writes `Transform` in `Update`;
         // Avian's transform→position sync carries this body along with
-        // it (the velocity stays zero), so the collider is never a force
-        // on the walker — no knock-down, no run-over.
+        // it one physics step later (the velocity stays zero), so the
+        // collider is never a force on the walker — no knock-down, no
+        // run-over.
         commands.entity(root).insert((
             RigidBody::Kinematic,
             collider.clone(),

@@ -539,6 +539,11 @@ struct Approach {
     finite: bool,
     /// Whether the walker ever left its curve (the authored avoidance ran).
     reacted: bool,
+    /// Greatest gap between the walker's `Transform` and its physics
+    /// `Position` at a sample: the body rides the authored transform
+    /// (F19-B.8b) one physics step behind it, never stranded at spawn and
+    /// never moved by the car.
+    body_lag: f32,
     dives: u64,
 }
 
@@ -563,12 +568,17 @@ fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
         grounded: true,
         finite: true,
         reacted: false,
+        body_lag: 0.0,
         dives: 0,
     };
     for _ in 0..300 {
         app.update();
         let now = at(&app, walker).translation;
+        let body = app.world().entity(walker).get::<Position>().map(|p| p.0);
         let car_pos = app.world().entity(car).get::<Position>().unwrap().0;
+        if let Some(body) = body {
+            r.body_lag = r.body_lag.max((body - now).length());
+        }
         r.min_gap = r
             .min_gap
             .min(Vec3::new(car_pos.x - now.x, 0.0, car_pos.z - now.z).length());
@@ -950,6 +960,12 @@ fn a_car_catching_a_walker_contacts_its_body_and_its_authored_avoidance_still_ru
     assert!(
         blocked.reacted && blocked.dives >= 1,
         "the walker's authored avoidance ran: {blocked:?}"
+    );
+    assert!(
+        blocked.body_lag < 0.5,
+        "the body rides the authored transform instead of stranding at spawn \
+         (a kinematic body is one physics step behind it, ~0.13 m at this \
+         fixture's walk speed): {blocked:?}"
     );
     assert!(through.reacted, "the contrast arm reacts too: {through:?}");
     assert!(
