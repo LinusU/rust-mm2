@@ -304,8 +304,8 @@ mod tests {
 
     /// Trickle `bytes` into `fifo` in `chunk`-sized writes, pausing `pause`
     /// between them, then close. Write errors end the thread quietly: a
-    /// reader that stops early (the over-limit leg) closes its end, and
-    /// that is the reader's answer, not a writer failure.
+    /// reader that stops early (the truncated-stream case closes its end),
+    /// and that is the reader's answer, not a writer failure.
     #[cfg(unix)]
     fn trickle(
         fifo: PathBuf,
@@ -324,6 +324,29 @@ mod tests {
                 }
                 std::thread::sleep(pause);
             }
+        })
+    }
+
+    /// Open `fifo` for writing, send `bytes` bytes of filler, then keep the
+    /// write end open until the test releases it, so the stream never reaches
+    /// EOF. A reader that stops at its own bound returns without ever seeing
+    /// that EOF; one that reads the stream whole blocks here forever.
+    #[cfg(unix)]
+    fn hold_prefix(
+        fifo: PathBuf,
+        bytes: usize,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::Write;
+        std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&fifo)
+                .expect("open the fifo for writing");
+            file.write_all(&vec![7u8; bytes]).expect("write the prefix");
+            // Hold the write end open: no EOF until the test releases it.
+            let _ = release.recv();
+            drop(file);
         })
     }
 
@@ -355,22 +378,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_slow_stream_over_the_limit_is_refused_without_reading_it_all() {
+    fn a_stream_over_the_limit_is_refused_without_waiting_for_eof() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("big.bin");
         mkfifo(&fifo);
         const LIMIT: u64 = 4096;
-        // Sixteen times the limit: the reader must stop at the bound, not
-        // wait for the whole stream (or allocate it).
-        let writer = trickle(
-            fifo.clone(),
-            vec![7u8; 64 * 1024],
-            4096,
-            std::time::Duration::from_millis(1),
-        );
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        // One byte past the limit, then held open: the reader must stop at
+        // its bound rather than wait for the rest of the stream (or allocate
+        // it). If it read the stream whole it would never see EOF.
+        let writer = hold_prefix(fifo.clone(), LIMIT as usize + 1, release_rx);
 
-        let err = read_bounded(&fifo, "big.bin", LIMIT).expect_err("over the limit is refused");
+        // Read on another thread so a reader that waits for the whole stream
+        // fails a bounded deadline instead of hanging the suite.
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = result_tx.send(read_bounded(&fifo, "big.bin", LIMIT));
+        });
+        let outcome = result_rx.recv_timeout(std::time::Duration::from_secs(30));
+        release_tx.send(()).unwrap();
         writer.join().unwrap();
+        reader.join().unwrap();
+
+        let err = outcome
+            .expect("a reader bounded at the limit must not wait for end-of-stream")
+            .expect_err("over the limit is refused");
         assert!(
             matches!(err, AssetsError::TooLarge { limit, .. } if limit == LIMIT),
             "{err:?}"
