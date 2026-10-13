@@ -111,6 +111,15 @@ impl Guide {
         }
     }
 
+    /// Arc length of source point `index` (clamped to the last one).
+    pub fn source_arc(&self, index: usize) -> f32 {
+        self.source_arc
+            .get(index)
+            .or(self.source_arc.last())
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     /// Whole length (m).
     pub fn length(&self) -> f32 {
         self.total

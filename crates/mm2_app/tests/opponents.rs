@@ -16,9 +16,9 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
     Blocker, DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
-    apply_rear_end_guard, initial_route_index, nearest_blocker, opponent_drive, pick_pass_side,
-    reanchor_pose, reanchor_pose_with_progress, rear_end_demand, route_target, spawn_pose,
-    trim_behind_staging,
+    apply_rear_end_guard, circuit_lap, driving_route, initial_route_index, nearest_blocker,
+    opponent_drive, pick_pass_side, reanchor_pose, reanchor_pose_with_progress, rear_end_demand,
+    route_is_closed, route_target, spawn_pose, trim_behind_staging,
 };
 use mm2_app::racing_line::CarLimits;
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
@@ -418,8 +418,71 @@ fn route_target_closed_route_loops_to_nearest() {
     assert_eq!(target, Some(Vec3::new(100.0, 0.0, 0.0)));
 }
 
+/// A circuit record's lap is its intersection rows (`0x55c2d0`: the
+/// route index wraps to row 1). The start pose and the finish position
+/// stand on the lap; closing the loop through them would send the car
+/// back and forth past its own grid every lap.
 #[test]
-fn spawn_pose_prefers_the_authored_grid_then_the_route_anchor() {
+fn a_circuit_record_reduces_to_its_lap_of_intersections() {
+    // Retail `sf circuit8` in miniature: staged at x = −244 facing −X on
+    // the road from row 1 (x = −113, behind the grid) to row 2
+    // (x = −351); the last intersection is row 1's junction again and
+    // the finish position sits just past the start.
+    let record = staged_route(
+        90.0,
+        &[
+            [-244.0, 0.0, -288.0],
+            [-113.0, 0.0, -285.0],
+            [-351.0, 0.0, -283.0],
+            [-351.0, 0.0, -100.0],
+            [-113.0, 0.0, -100.0],
+            [-126.0, 0.0, -287.0],
+            [-255.0, 0.0, -290.0],
+        ],
+    );
+    let lap = circuit_lap(&record).expect("a circuit record");
+    let xs: Vec<f32> = lap.points.iter().map(|p| p.position.x).collect();
+    assert_eq!(
+        xs,
+        [-113.0, -351.0, -351.0, -113.0, -126.0, -113.0],
+        "rows 1..n-2, closed on the first intersection"
+    );
+    assert!(route_is_closed(&lap));
+    // The car, staged between rows 1 and 2 facing row 2, heads for it.
+    let start = record.points[0].position;
+    let yaw = record.start_heading_deg().unwrap().to_radians();
+    assert_eq!(initial_route_index(&lap, start, yaw), 1);
+
+    // The driving line is the lap: nothing in it doubles back onto the
+    // staging or finish rows.
+    let driven = driving_route(&record, None, &[], start, yaw);
+    assert_eq!(driven.points.len(), lap.points.len());
+
+    // An open record, and a closed one too short to hold a lap, are
+    // left to the staging trim.
+    let open = route(&[
+        [0.0, 0.0, 0.0],
+        [-50.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [200.0, 0.0, 0.0],
+        [300.0, 0.0, 0.0],
+        [400.0, 0.0, 0.0],
+    ]);
+    assert!(circuit_lap(&open).is_none());
+    let short = route(&[
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [0.0, 0.0, 10.0],
+    ]);
+    assert!(circuit_lap(&short).is_none());
+}
+
+/// An opponent stages on its own route — the original places every
+/// opponent at its `.opp` row 0 and reads no start grid (UNK-17). A
+/// grid slot seats only an entry with no route to stage on.
+#[test]
+fn spawn_pose_stages_on_the_route_then_the_grid() {
     let mut def = RaceDefinition {
         checkpoints: Vec::new(),
         finish: None,
@@ -444,24 +507,29 @@ fn spawn_pose_prefers_the_authored_grid_then_the_route_anchor() {
         params: Vec::new(),
         route: Some(route(&[[70.0, 0.0, 140.0], [110.0, 0.0, 140.0]])),
     };
-    let (pos, yaw) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
-    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "authored slot 1 wins");
-    // The slot's own authored `a` is the facing — vehicle-yaw degrees —
-    // not the route leg (+X would give −π/2).
-    assert!(
-        (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
-        "slot spawn faces its authored yaw, got {yaw}"
-    );
-
-    // No authored grid → the route's row-0 anchors the spawn; with no
-    // authored staging heading the first leg still supplies the facing.
-    def.start_slots.truncate(1);
+    // The route's row 0 anchors the spawn, grid or no grid; with no
+    // authored staging heading the first leg supplies the facing.
     let (pos, yaw) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
     assert_eq!(pos, Vec3::new(70.0, 0.0, 140.0), "route row0 anchors");
     assert!(
         (yaw + std::f32::consts::FRAC_PI_2).abs() < 0.35,
         "no authored heading → the +X first leg faces it, got {yaw}"
     );
+
+    // A route-less entry takes its grid slot and the slot's authored
+    // `a` — vehicle-yaw degrees.
+    let bare = OpponentSpec {
+        vehicle: "vpt".into(),
+        params: Vec::new(),
+        route: None,
+    };
+    let (pos, yaw) = spawn_pose(&def, 0, &bare, Vec3::new(60.0, 0.0, 140.0), 1.57);
+    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "authored slot 1");
+    assert!(
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "slot spawn faces its authored yaw, got {yaw}"
+    );
+    def.start_slots.truncate(1);
 
     // No grid, no route → designed stagger behind the player.
     let bare = OpponentSpec {
@@ -512,14 +580,13 @@ fn spawn_pose_faces_the_authored_staging_heading() {
     );
 }
 
-/// A grid slot carrying no authored heading (`yaw_deg == None` — the
-/// producer's `_strtpnts` `a = 0` mapping, retail `cir6`'s all-zero
-/// column) still spawns on the slot but takes the route's staged
-/// heading — a verbatim −Z would face it backward off the measured
-/// ~180° course. With no staged heading the first leg supplies the
-/// facing, like a route-anchor spawn.
+/// A route stages its opponent whatever grid the event carries: the
+/// staged heading when row 0 authors one, else the first leg. A grid
+/// slot with no authored heading (`yaw_deg == None` — the producer's
+/// `_strtpnts` `a = 0` mapping, retail `cir6`'s all-zero column) seats
+/// a route-less entry facing the way the player does.
 #[test]
-fn spawn_pose_on_a_headless_grid_slot_uses_the_route_facing() {
+fn spawn_pose_faces_the_route_and_a_headless_slot_the_player() {
     let def = RaceDefinition {
         checkpoints: Vec::new(),
         finish: None,
@@ -551,24 +618,23 @@ fn spawn_pose_on_a_headless_grid_slot_uses_the_route_facing() {
         )),
     };
     let (pos, yaw) = spawn_pose(&def, 0, &staged, Vec3::new(60.0, 0.0, 140.0), 0.0);
-    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "the authored slot stands");
+    assert_eq!(pos, Vec3::new(70.0, 0.0, 144.0), "the route's row 0 stands");
     assert!(
         fwd(yaw).z > 0.98,
-        "no authored slot yaw → the route's 180° staging faces +Z, got {yaw}"
+        "the route's 180° staging faces +Z, got {yaw}"
     );
 
-    // No staged heading either → the route's first leg supplies it:
-    // the nearest anchor sits +X of the slot.
+    // No staged heading → the route's first leg supplies it: +Z.
     let unstaged = OpponentSpec {
         vehicle: "vpt".into(),
         params: Vec::new(),
         route: Some(route(&[[70.0, 0.0, 144.0], [70.0, 0.0, 170.0]])),
     };
     let (pos, yaw) = spawn_pose(&def, 0, &unstaged, Vec3::new(60.0, 0.0, 140.0), 0.0);
-    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0));
+    assert_eq!(pos, Vec3::new(70.0, 0.0, 144.0));
     assert!(
-        fwd(yaw).x > 0.98,
-        "no authored headings at all → the first-leg facing, got {yaw}"
+        fwd(yaw).z > 0.98,
+        "no authored heading → the first-leg facing, got {yaw}"
     );
 
     // A route-less entry on a headless slot inherits the player's yaw.
@@ -577,7 +643,8 @@ fn spawn_pose_on_a_headless_grid_slot_uses_the_route_facing() {
         params: Vec::new(),
         route: None,
     };
-    let (_, yaw) = spawn_pose(&def, 0, &bare, Vec3::new(60.0, 0.0, 140.0), 0.4);
+    let (pos, yaw) = spawn_pose(&def, 0, &bare, Vec3::new(60.0, 0.0, 140.0), 0.4);
+    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "the authored slot stands");
     assert_eq!(yaw, 0.4, "no route → the player's heading");
 }
 
@@ -1075,10 +1142,10 @@ fn restart_restores_the_circuit_grid_counters_and_objects() {
             "the chase index restored to its spawn value"
         );
         let pos = app.world().get::<Position>(e).unwrap().0;
-        let slot = app.world().resource::<RaceState>().definition.start_slots[d.index + 1].position;
+        let staged = d.spec.route.as_ref().expect("authored route").points[0].position;
         assert!(
-            (pos.x - slot.x).abs() < 3.0 && (pos.z - slot.z).abs() < 3.0,
-            "opponent {} back on its authored grid slot, got {pos:?}",
+            (pos.x - staged.x).abs() < 3.0 && (pos.z - staged.z).abs() < 3.0,
+            "opponent {} back on its route's staging point, got {pos:?}",
             d.index
         );
         let route = d.route.as_ref().expect("circuit route resolved");

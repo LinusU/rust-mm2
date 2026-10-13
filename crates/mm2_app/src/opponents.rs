@@ -573,7 +573,7 @@ pub(crate) fn spacing_point_reached(route: &OpponentRoute, next: usize, pos: Vec
 /// first — the retail circuit pattern, where the lap structure lives
 /// in the race checkpoints and the route just keeps supplying
 /// waypoints by rejoining at the first anchor.
-pub(crate) fn route_is_closed(route: &OpponentRoute) -> bool {
+pub fn route_is_closed(route: &OpponentRoute) -> bool {
     let points = &route.points;
     points.len() > 1 && {
         let last = points.last().unwrap().position;
@@ -668,22 +668,19 @@ pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize
 
 /// Where roster entry `index` spawns and which way it faces.
 ///
-/// Position, provisional (UNK-17): authored `_strtpnts` slot `index + 1`
-/// when the event ships a grid (slot 0 is the player), else the route's
-/// row-0 staging position, else a staggered line behind the player
-/// along its reverse heading.
+/// An entry with a route stages on it — the route's row 0, as the
+/// original places every opponent (`aiVehicleOpponent::Init`
+/// `0x53d26f`; the shipped game reads no start grid at all, UNK-17).
+/// An entry with no route takes authored `_strtpnts` slot `index + 1`
+/// when the event carries a grid (slot 0 is the player), else a
+/// staggered line behind the player along its reverse heading.
 ///
-/// Facing follows the position source, all authored: a grid slot's own
-/// `yaw_deg` (measured vehicle-yaw convention — the `a` column faces
-/// the course, not away from it), else the `.opp` row-0 staging
-/// heading (the mislabelled `brake` column — measured as the same yaw
-/// convention on 592/612 retail files). Only a route with no authored
-/// heading falls back to the first-leg direction it used before, and
-/// a route-less entry inherits the player's yaw. A grid slot carrying
-/// no authored heading (`yaw_deg == None` — `cir6_strtpnts`' all-zero
-/// `a` column) takes the same staged-heading → first-leg chain: a
-/// verbatim 0 would face the slot backward off the measured course
-/// (the staged routes there run ~180°).
+/// Facing follows the position source: the `.opp` row-0 staging
+/// heading (the mislabelled `brake` column — measured as vehicle yaw
+/// on 592/612 retail files), or the first-leg direction for a route
+/// that authors none; a grid slot's own `yaw_deg`; and for a slot with
+/// no authored heading (`cir6_strtpnts`' all-zero `a` column) or no
+/// slot at all, the player's yaw.
 pub fn spawn_pose(
     definition: &RaceDefinition,
     index: usize,
@@ -691,8 +688,13 @@ pub fn spawn_pose(
     player_pos: Vec3,
     player_yaw: f32,
 ) -> (Vec3, f32) {
+    // An opponent with a route stages on it: the original places every
+    // opponent at its own `.opp` row 0 and reads no start grid at all
+    // (`aiVehicleOpponent::Init` `0x53d26f`, UNK-17). A grid slot only
+    // seats an entry that has no route to stage on.
+    let staged = spec.route.as_ref().is_some_and(|r| !r.points.is_empty());
     pose_at(
-        definition.start_slots.get(index + 1),
+        definition.start_slots.get(index + 1).filter(|_| !staged),
         index,
         spec,
         player_pos,
@@ -974,6 +976,61 @@ pub fn trim_behind_staging(route: &OpponentRoute, pos: Vec3, yaw: f32) -> Oppone
     OpponentRoute { points }
 }
 
+/// Distance (m, XZ) within which a circuit's staging row counts as
+/// standing on its lap — a road's width and then some.
+const STAGED_ON_LAP: f32 = 30.0;
+
+/// A circuit's lap as the original drives it, or `None` when `route`
+/// is not a circuit record.
+///
+/// An `.opp` file is a start pose (row 0), the intersections of the
+/// course in order (rows 1 … n−2) and a finish position (row n−1); a
+/// circuit, on reaching the end of the list, wraps to row 1
+/// (`0x55c2d0`, `docs/research/opponent-ai.md`). The lap is therefore
+/// the intersection rows alone. The start pose and the finish position
+/// are places *on* the lap — measured on every retail circuit they sit
+/// on the road between rows 1 and 2 — not corners of it: closing the
+/// loop through them sends the car from the last intersection past its
+/// own grid to the finish position, back to the start pose, back
+/// further to row 1 (which is behind the grid) and round again — two
+/// reversals a lap.
+///
+/// The lap is returned closed on its first intersection, so
+/// [`route_is_closed`] holds however far apart the first and last
+/// intersections are (they are one road apart on retail `sf circuit6`
+/// and `london circuit3`, the same junction everywhere else).
+pub fn circuit_lap(route: &OpponentRoute) -> Option<OpponentRoute> {
+    let n = route.points.len();
+    if n < 6 || !route_is_closed(route) {
+        return None;
+    }
+    let lap = &route.points[1..n - 1];
+    let start = route.points[0].position;
+    // The staging row must stand on the lap: on the road out of the
+    // first intersection, or the one back into it.
+    let off = |a: Vec3, b: Vec3| {
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len2 = dx * dx + dz * dz;
+        let t = if len2 > 1e-6 {
+            (((start.x - a.x) * dx + (start.z - a.z) * dz) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (start.x - (a.x + dx * t)).hypot(start.z - (a.z + dz * t))
+    };
+    let first = lap[0].position;
+    let on_lap = off(first, lap[1].position) <= STAGED_ON_LAP
+        || off(lap[lap.len() - 1].position, first) <= STAGED_ON_LAP;
+    if !on_lap || !lap.iter().all(|p| p.position.is_finite()) {
+        return None;
+    }
+    let mut points = lap.to_vec();
+    if points[points.len() - 1].position != first {
+        points.push(lap[0].clone());
+    }
+    Some(OpponentRoute { points })
+}
+
 /// The driving line a participant chases: `route` verbatim when no
 /// road graph was bound at session load, else
 /// [`NavGraph::densify_route`]'s re-pathed copy (F15-B.6). Ambient
@@ -988,7 +1045,8 @@ pub fn trim_behind_staging(route: &OpponentRoute, pos: Vec3, yaw: f32) -> Oppone
 ///
 /// `pos`/`yaw` is the staged pose the car starts from: anchors behind
 /// it are dropped by [`trim_behind_staging`] before the re-path, so the
-/// densified line cannot open with a detour back to them.
+/// densified line cannot open with a detour back to them. A circuit
+/// record is first reduced to its lap ([`circuit_lap`]).
 pub fn driving_route(
     route: &OpponentRoute,
     nav: Option<&NavGraph>,
@@ -996,7 +1054,7 @@ pub fn driving_route(
     pos: Vec3,
     yaw: f32,
 ) -> OpponentRoute {
-    let route = trim_behind_staging(route, pos, yaw);
+    let route = circuit_lap(route).unwrap_or_else(|| trim_behind_staging(route, pos, yaw));
     match nav {
         Some(g) => g.densify_route(
             &route,
@@ -1217,7 +1275,11 @@ fn spawn_roster(
         let route = spec
             .route
             .as_ref()
-            .map(|r| driving_route(r, nav, &definition.checkpoints, pos, yaw));
+            // No gate constrains the re-path: an opponent earns its
+            // gates by route position, so a leg is always better driven
+            // along the road than straight through a block to keep a
+            // checkpoint cylinder on the line.
+            .map(|r| driving_route(r, nav, &[], pos, yaw));
         // First chase index along the authored facing — early anchors
         // behind the staged heading are left for the next pass, not
         // chased off the spawn line.
@@ -1236,7 +1298,7 @@ fn spawn_roster(
         let neural = route
             .as_ref()
             .and_then(Guide::from_route)
-            .map(|guide| NeuralState::new(Arc::new(guide), &def.config, pos));
+            .map(|guide| NeuralState::new(Arc::new(guide), &def.config, pos, next));
         let route_line = participant
             .then(|| {
                 route.as_ref().and_then(|r| {

@@ -39,6 +39,12 @@ pub const PROFESSIONAL_PATH: &str = "ai/opponent_professional.mm2p";
 /// for on its guide — past the re-anchor's longest walk back.
 const RESEAT_BACK: f32 = 120.0;
 
+/// How far behind the point it is heading for (m) a starting car is
+/// looked for on its guide — past the longest authored leg — and how
+/// far beyond it.
+const SEAT_BACK: f32 = 250.0;
+const SEAT_AHEAD: f32 = 5.0;
+
 /// The trained driving policies, one per difficulty.
 #[derive(Resource, Clone)]
 pub struct DrivingPolicies {
@@ -131,10 +137,12 @@ pub struct NeuralState {
 }
 
 impl NeuralState {
-    /// State for a car of `config` starting at `pos` on `guide`.
-    pub fn new(guide: Arc<Guide>, config: &VehicleConfig, pos: Vec3) -> Self {
+    /// State for a car of `config` starting at `pos` on `guide`,
+    /// heading for the guide's source point `next` — which says which
+    /// pass of a street the car is on where the guide runs it twice.
+    pub fn new(guide: Arc<Guide>, config: &VehicleConfig, pos: Vec3, next: usize) -> Self {
         Self {
-            arc: guide.locate(pos),
+            arc: guide.locate_within(guide.source_arc(next), pos, SEAT_BACK, SEAT_AHEAD),
             guide,
             profile: CarProfile::of(config),
             action: [0.0; ACT_DIM],
