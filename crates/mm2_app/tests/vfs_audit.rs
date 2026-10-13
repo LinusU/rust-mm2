@@ -61,6 +61,9 @@ const ALLOWED: &[(&str, Reason)] = &[
         "crates/mm2_app/examples/source_tyre_audit.rs",
         Reason::DevInput,
     ),
+    // The training environment's `eval` mode reads the trained policy
+    // file named on its command line.
+    ("crates/mm2_app/examples/mm2_gym.rs", Reason::DevInput),
     ("crates/mm2_app/src/scripted.rs", Reason::DevInput),
     ("crates/mm2_vehicle/src/config.rs", Reason::DevInput),
     (
