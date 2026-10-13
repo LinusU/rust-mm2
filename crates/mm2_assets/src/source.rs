@@ -286,4 +286,94 @@ mod tests {
         let index = deterministic_index(rows);
         assert_eq!(index["texture/foo.tex"], "texture/FOO.tex");
     }
+
+    // F30 edge case "slow storage" for the loose-file reader: the bytes
+    // arrive over time. A FIFO is the one way to hand `read_bounded`
+    // exactly that on a normal filesystem, and it exercises the same
+    // open/stat/read sequence a real slow device would.
+
+    /// Create a FIFO with the system `mkfifo`.
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo {} failed", path.display());
+    }
+
+    /// Trickle `bytes` into `fifo` in `chunk`-sized writes, pausing `pause`
+    /// between them, then close. Write errors end the thread quietly: a
+    /// reader that stops early (the over-limit leg) closes its end, and
+    /// that is the reader's answer, not a writer failure.
+    #[cfg(unix)]
+    fn trickle(
+        fifo: PathBuf,
+        bytes: Vec<u8>,
+        chunk: usize,
+        pause: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::Write;
+        std::thread::spawn(move || {
+            let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&fifo) else {
+                return;
+            };
+            for part in bytes.chunks(chunk) {
+                if file.write_all(part).is_err() {
+                    return;
+                }
+                std::thread::sleep(pause);
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_stream_under_the_limit_is_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("slow.bin");
+        mkfifo(&fifo);
+        let payload: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+        let writer = trickle(
+            fifo.clone(),
+            payload.clone(),
+            4096,
+            std::time::Duration::from_millis(2),
+        );
+
+        let started = std::time::Instant::now();
+        let got = read_bounded(&fifo, "slow.bin", 1024 * 1024).expect("the slow read completes");
+        let waited = started.elapsed();
+        writer.join().unwrap();
+
+        assert_eq!(got, payload, "a slow read must wait for the whole stream");
+        assert!(
+            waited >= std::time::Duration::from_millis(10),
+            "returned after only {waited:?} of a ~30 ms stream"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_stream_over_the_limit_is_refused_without_reading_it_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("big.bin");
+        mkfifo(&fifo);
+        const LIMIT: u64 = 4096;
+        // Sixteen times the limit: the reader must stop at the bound, not
+        // wait for the whole stream (or allocate it).
+        let writer = trickle(
+            fifo.clone(),
+            vec![7u8; 64 * 1024],
+            4096,
+            std::time::Duration::from_millis(1),
+        );
+
+        let err = read_bounded(&fifo, "big.bin", LIMIT).expect_err("over the limit is refused");
+        writer.join().unwrap();
+        assert!(
+            matches!(err, AssetsError::TooLarge { limit, .. } if limit == LIMIT),
+            "{err:?}"
+        );
+    }
 }

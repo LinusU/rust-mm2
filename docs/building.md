@@ -209,6 +209,24 @@ directory holding the `.ar` archives and/or loose files). It is mounted
 read-only through the VFS; mods are layered above it with `--mods <dir>`
 (see [modding.md](modding.md)). `--dev-world` needs no original data.
 
+### Slow or failing storage
+
+Mounting reads a whole `.ar` or loose file in one call and applies no
+timeout. Slow media makes that read (and startup) take longer, but it
+cannot truncate the result: a `DAVE` archive is only accepted once its
+whole range is present, so a stream that stops early is a reported error
+(`skipped archive …` on the mount report, or a named read error), never a
+silently short or empty load. A loose path that is not a regular file is
+refused by name rather than read, so a FIFO or device node cannot block a
+load forever.
+
+Guarded by `cargo test -p mm2_assets --locked` —
+`crates/mm2_assets/tests/slow_storage.rs` trickles a synthetic archive
+through a FIFO (slow in, whole out; truncated in, `AssetsError::Archive`
+out and no partial mount; a corrupt `.ar` is reported in `MountReport::skipped`)
+and the `slow_storage` unit tests do the same for the bounded loose-file
+read. Synthetic media only: no real slow device has been tested.
+
 ## Where the app writes files
 
 | What | Default location | Override |
