@@ -6219,3 +6219,287 @@ fn retail_ui_stems_resolve_and_decode() {
             .unwrap_or_else(|e| panic!("{stem}: {e}"));
     }
 }
+
+/// Which device drives the F17-AC03 navigation crawl.
+#[derive(Clone, Copy)]
+enum Dev {
+    Keys,
+    Pad(Entity),
+}
+
+impl Dev {
+    fn tap(self, app: &mut App, key: KeyCode, button: GamepadButton) {
+        match self {
+            Dev::Keys => press(app, key),
+            Dev::Pad(pad) => pad_press(app, pad, button),
+        }
+    }
+    fn down(self, app: &mut App) {
+        self.tap(app, KeyCode::ArrowDown, GamepadButton::DPadDown);
+    }
+    fn up(self, app: &mut App) {
+        self.tap(app, KeyCode::ArrowUp, GamepadButton::DPadUp);
+    }
+    fn right(self, app: &mut App) {
+        self.tap(app, KeyCode::ArrowRight, GamepadButton::DPadRight);
+    }
+    fn accept(self, app: &mut App) {
+        self.tap(app, KeyCode::Enter, GamepadButton::South);
+    }
+    fn back(self, app: &mut App) {
+        self.tap(app, KeyCode::Escape, GamepadButton::East);
+    }
+    fn focus(self, app: &mut App, index: usize) {
+        while shell(app).focus != index {
+            if shell(app).focus < index {
+                self.down(app);
+            } else {
+                self.up(app);
+            }
+        }
+    }
+}
+
+/// The focus marker is drawn on exactly one text (the row, or its side
+/// entry) of every list screen.
+fn assert_focus_is_drawn(app: &mut App, trail: &str) {
+    if shell(app).rows.is_empty() {
+        return;
+    }
+    let marked: Vec<String> = menu_texts(app)
+        .into_iter()
+        .filter(|t| t.starts_with('>'))
+        .collect();
+    assert_eq!(marked.len(), 1, "{trail}: focus markers drawn: {marked:?}");
+}
+
+/// Walk every screen reachable from `screen` through `Push` rows and
+/// options side entries with `dev` alone: each row is reachable by
+/// Up/Down, focus is drawn, and Back returns to the parent with the
+/// opener's focus restored. Returns how many screens it opened.
+fn crawl_screens(
+    app: &mut App,
+    dev: Dev,
+    seen: &mut Vec<String>,
+    trail: &str,
+    depth: usize,
+) -> usize {
+    let parent = shell(app).screen.clone();
+    let rows = shell(app).rows.clone();
+    app.update();
+    assert_focus_is_drawn(app, trail);
+    let mut opened = 0;
+    for (i, row) in rows.iter().enumerate() {
+        // Reachability: Up/Down alone lands on every row.
+        dev.focus(app, i);
+        app.update();
+        assert_eq!(shell(app).focus, i, "{trail}: row {i} unreachable");
+        assert_focus_is_drawn(app, &format!("{trail} > {}", row.text));
+        let candidates = [
+            (
+                false,
+                matches!(row.action, menu::Action::Push(_)) && row.enabled.is_ok(),
+            ),
+            (
+                true,
+                row.side.as_ref().is_some_and(|s| {
+                    matches!(s.action, menu::Action::Push(_)) && s.enabled.is_ok()
+                }),
+            ),
+        ];
+        for (side, openable) in candidates {
+            if !openable {
+                continue;
+            }
+            let here = format!(
+                "{trail} > {}{}",
+                row.text,
+                if side { " [options]" } else { "" }
+            );
+            if side {
+                dev.right(app);
+                assert!(
+                    shell(app).side,
+                    "{here}: Right must reach the options entry"
+                );
+            }
+            dev.accept(app);
+            if shell(app).screen == parent {
+                // A Push that bounced (e.g. a refusal) must say why.
+                assert!(shell(app).status.is_some(), "{here}: silent no-op");
+                continue;
+            }
+            opened += 1;
+            let key = format!("{:?}", std::mem::discriminant(&shell(app).screen));
+            let child = shell(app).screen.clone();
+            if depth < 4 && !seen.contains(&key) {
+                seen.push(key);
+                opened += crawl_screens(app, dev, seen, &here, depth + 1);
+            } else {
+                app.update();
+                assert_focus_is_drawn(app, &here);
+            }
+            assert_eq!(shell(app).screen, child, "{here}: crawl left the screen");
+            // Back (also out of text-entry screens) returns to the opener.
+            dev.back(app);
+            assert_eq!(shell(app).screen, parent, "{here}: Back must return");
+            assert_eq!(shell(app).focus, i, "{here}: Back restores the focus");
+            assert_eq!(
+                shell(app).side,
+                side,
+                "{here}: Back restores the side focus"
+            );
+            if side {
+                dev.tap(app, KeyCode::ArrowLeft, GamepadButton::DPadLeft);
+            }
+        }
+    }
+    opened
+}
+
+/// F17-AC03: the keyboard alone and the pad alone reach every screen
+/// the primary flows open (profile, driver name, mode, content, car,
+/// customize, records, options, controls), see the focus drawn on each
+/// and leave each with Back/cancel to the exact row that opened it.
+#[test]
+fn keyboard_only_and_pad_only_reach_and_leave_every_menu_screen() {
+    for pad_only in [false, true] {
+        let tmp = install();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        let alice = store
+            .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap();
+        seed_record(
+            &store,
+            &alice.id,
+            EventKey {
+                city: "testcity".into(),
+                table: EventTableKind::Checkpoint,
+                stem: "race1".into(),
+            },
+            9_000,
+            Some(1),
+        );
+        let mut app = menu_app(tmp.path(), Some(store));
+        app.update();
+        let dev = if pad_only {
+            Dev::Pad(spawn_pad(&mut app))
+        } else {
+            Dev::Keys
+        };
+        // Bind the driver by the device under test so Records opens.
+        let driver = shell(&app)
+            .rows
+            .iter()
+            .position(|r| r.text.contains("Driver:"));
+        dev.focus(&mut app, driver.expect("a Driver row"));
+        dev.accept(&mut app);
+        let alice_row = shell(&app)
+            .rows
+            .iter()
+            .position(|r| r.text.contains("Alice"));
+        dev.focus(&mut app, alice_row.expect("Alice listed"));
+        dev.accept(&mut app);
+        dev.back(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Root);
+        let mut seen = vec![format!("{:?}", std::mem::discriminant(&menu::Screen::Root))];
+        let opened = crawl_screens(&mut app, dev, &mut seen, "Root", 0);
+        let names: Vec<String> = seen.clone();
+        assert!(
+            opened >= 10 && names.len() >= 8,
+            "pad_only={pad_only}: crawl opened {opened} screens, kinds {names:?}"
+        );
+        assert_eq!(shell(&app).screen, menu::Screen::Root);
+    }
+}
+
+/// F17-AC03, the screens a plain `Push` crawl cannot reach: the paint
+/// list (opened by picking a car), the delete confirmation (opened by
+/// the delete key / West) and a pending key capture (cancelled by Back)
+/// all open and back out under the keyboard alone and the pad alone.
+#[test]
+fn paints_delete_confirmation_and_key_capture_back_out_on_either_device() {
+    for pad_only in [false, true] {
+        let tmp = install();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        store
+            .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap();
+        let mut app = menu_app(tmp.path(), Some(store));
+        app.update();
+        let dev = if pad_only {
+            Dev::Pad(spawn_pad(&mut app))
+        } else {
+            Dev::Keys
+        };
+        let row_of = |app: &App, needle: &str| {
+            shell(app)
+                .rows
+                .iter()
+                .position(|r| r.text.contains(needle))
+                .unwrap_or_else(|| panic!("no row {needle:?}"))
+        };
+
+        // Garage -> pick the car -> Paints -> Back -> Garage.
+        let target = row_of(&app, "Vehicle:");
+        dev.focus(&mut app, target);
+        dev.accept(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Garage);
+        let car = shell(&app)
+            .rows
+            .iter()
+            .position(|r| matches!(r.action, menu::Action::PickVehicle { .. }) && r.enabled.is_ok())
+            .expect("an unlocked car");
+        dev.focus(&mut app, car);
+        dev.accept(&mut app);
+        assert!(
+            matches!(shell(&app).screen, menu::Screen::Paints { .. }),
+            "pad_only={pad_only}: picking a car opens its paints"
+        );
+        assert_focus_is_drawn(&mut app, "paints");
+        dev.back(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Garage);
+        dev.back(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Root);
+
+        // Profiles -> delete key -> confirmation -> Back keeps the profile.
+        let target = row_of(&app, "Driver:");
+        dev.focus(&mut app, target);
+        dev.accept(&mut app);
+        let alice = row_of(&app, "Alice");
+        dev.focus(&mut app, alice);
+        dev.tap(&mut app, KeyCode::Delete, GamepadButton::West);
+        assert!(
+            matches!(shell(&app).screen, menu::Screen::ConfirmDelete { .. }),
+            "pad_only={pad_only}: the delete key asks first"
+        );
+        assert_focus_is_drawn(&mut app, "confirm delete");
+        dev.back(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Profiles);
+        assert!(shell(&app).rows.iter().any(|r| r.text.contains("Alice")));
+        dev.back(&mut app);
+
+        // Controls -> a rebind row listens -> Back cancels, screen stays.
+        let target = row_of(&app, "Options");
+        dev.focus(&mut app, target);
+        dev.accept(&mut app);
+        let target = row_of(&app, "Driving controls");
+        dev.focus(&mut app, target);
+        dev.accept(&mut app);
+        assert_eq!(shell(&app).screen, menu::Screen::Controls);
+        let rebind = shell(&app)
+            .rows
+            .iter()
+            .position(|r| matches!(r.action, menu::Action::RebindKey { .. }))
+            .expect("a key row");
+        dev.focus(&mut app, rebind);
+        dev.accept(&mut app);
+        assert!(shell(&app).capture.is_some(), "the row listens for a key");
+        dev.back(&mut app);
+        assert!(shell(&app).capture.is_none(), "Back cancels the capture");
+        assert_eq!(shell(&app).screen, menu::Screen::Controls);
+        assert_eq!(shell(&app).focus, rebind);
+    }
+}
