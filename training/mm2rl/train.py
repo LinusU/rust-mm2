@@ -204,7 +204,9 @@ def main() -> None:
     steps, iteration = 0, 0
     if state:
         agent.load_state_dict(state["agent"])
-        optim.load_state_dict(state["optim"])
+        # A checkpoint carried over to a new layout has no optimiser state.
+        if "optim" in state:
+            optim.load_state_dict(state["optim"])
         for group in optim.param_groups:
             group["lr"] = args.lr
         scale.load(state["scale"])
