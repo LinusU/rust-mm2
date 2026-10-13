@@ -34,7 +34,7 @@ can equally be a nav-graph path to a Cops & Robbers objective, or the
 straight segment to a target. Route information is how a caller says
 where to drive, not something the driver needs to exist.
 
-One observation is 118 floats in the car's own heading frame, scaled
+One observation is 126 floats in the car's own heading frame, scaled
 to about unit size (`observe.rs` is the reference):
 
 | Block | Size | Contents |
@@ -42,7 +42,7 @@ to about unit size (`observe.rs` is the reference):
 | car | 11 | size, mass, power, top speed, steering lock, grip, the driver's throttle ceiling |
 | motion | 15 | velocity, spin, tilt, steering angle, wheel contact, reverse, last action |
 | guide | 34 | offset and heading against the line, then the line at ten distances from 5 m to 170 m |
-| rays | 16 | free distance to the world, long and narrow ahead, short to the sides and rear |
+| rays | 24 | free distance to the world: three down the corridor the car is about to sweep, then a fan, close-set ahead and wide to the sides and rear |
 | floor | 6 | where the ground ahead is against where level ground would be — a quay, a crest, a raised bridge leaf |
 | neighbours | 36 | the four nearest other vehicles: position, relative velocity, heading, size |
 

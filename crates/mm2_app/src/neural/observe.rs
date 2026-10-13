@@ -8,7 +8,7 @@
 //! | car | [`CAR_DIM`] | what this car is: size, mass, power, grip, steering lock, throttle ceiling |
 //! | motion | [`MOTION_DIM`] | velocity, spin, tilt, steering angle, wheel contact, last action |
 //! | guide | [`GUIDE_DIM`] | offset and heading against the line, then the line ahead at [`LOOKAHEAD`] |
-//! | rays | [`RAYS`]`.len()` | free distance to the world around the car |
+//! | rays | [`RAYS`]`.len()` | free distance to the world: the corridor ahead, then a fan round the car |
 //! | floor | [`FLOOR`]`.len()` | where the ground ahead is, against where level ground would be |
 //! | neighbours | [`NEIGHBOURS`]` × `[`NEIGHBOUR_DIM`] | the nearest other vehicles |
 //!
@@ -23,30 +23,47 @@ use mm2_vehicle::{HandlingMetrics, VehicleConfig, VehicleInput};
 use super::guide::Guide;
 
 /// Layout version, recorded with trained weights by the trainer.
-pub const OBS_VERSION: u32 = 2;
+pub const OBS_VERSION: u32 = 3;
 
 /// Distances (m) down the guide at which the line ahead is sampled.
 pub const LOOKAHEAD: [f32; 10] = [5.0, 10.0, 16.0, 24.0, 34.0, 48.0, 66.0, 90.0, 125.0, 170.0];
 
-/// World rays: angle off the nose (degrees, positive right) and reach
-/// (m). Long and narrow ahead, short and wide to the sides and rear.
-pub const RAYS: [(f32, f32); 16] = [
-    (0.0, 120.0),
-    (-4.0, 120.0),
-    (4.0, 120.0),
-    (-10.0, 100.0),
-    (10.0, 100.0),
-    (-20.0, 80.0),
-    (20.0, 80.0),
-    (-35.0, 60.0),
-    (35.0, 60.0),
-    (-55.0, 40.0),
-    (55.0, 40.0),
-    (-90.0, 25.0),
-    (90.0, 25.0),
-    (-135.0, 15.0),
-    (135.0, 15.0),
-    (180.0, 15.0),
+/// World rays: angle off the nose (degrees, positive right), reach
+/// (m) and where across the car the ray starts, in half-widths from its
+/// centre line.
+///
+/// The first three run straight ahead from the left edge, the centre
+/// and the right edge: the corridor the car is about to sweep. A fan of
+/// rays from one point leaves gaps a parked car fits in — at 40 m, rays
+/// 4° apart are 2.8 m apart — so something standing a metre off the
+/// heading line went unseen until half a second before the bumper
+/// reached it. The rest fan out from the centre, close together ahead
+/// and wider to the sides and rear.
+pub const RAYS: [(f32, f32, f32); 24] = [
+    (0.0, 120.0, -1.0),
+    (0.0, 120.0, 0.0),
+    (0.0, 120.0, 1.0),
+    (-3.0, 120.0, 0.0),
+    (3.0, 120.0, 0.0),
+    (-6.0, 110.0, 0.0),
+    (6.0, 110.0, 0.0),
+    (-10.0, 100.0, 0.0),
+    (10.0, 100.0, 0.0),
+    (-15.0, 90.0, 0.0),
+    (15.0, 90.0, 0.0),
+    (-22.0, 70.0, 0.0),
+    (22.0, 70.0, 0.0),
+    (-32.0, 55.0, 0.0),
+    (32.0, 55.0, 0.0),
+    (-45.0, 45.0, 0.0),
+    (45.0, 45.0, 0.0),
+    (-65.0, 35.0, 0.0),
+    (65.0, 35.0, 0.0),
+    (-90.0, 25.0, 0.0),
+    (90.0, 25.0, 0.0),
+    (-135.0, 15.0, 0.0),
+    (135.0, 15.0, 0.0),
+    (180.0, 15.0, 0.0),
 ];
 
 /// Floor probes: angle off the nose (degrees, positive right) and the
@@ -294,13 +311,14 @@ pub fn observe(
     let origin = motion.position + motion.rotation * Vec3::new(0.0, car.ray_y, 0.0);
     let nose = motion.rotation * Vec3::NEG_Z;
     let side = motion.rotation * Vec3::X;
-    for (angle, reach) in RAYS {
+    for (angle, reach, across) in RAYS {
         let (sin, cos) = angle.to_radians().sin_cos();
         let dir = (nose * cos + side * sin).normalize_or_zero();
+        let from = origin + side * (across * car.half_width);
         let free = if dir == Vec3::ZERO {
             reach
         } else {
-            free_distance(origin, dir, reach, &mut cast)
+            free_distance(from, dir, reach, &mut cast)
         };
         w.push(free / reach);
     }
@@ -518,15 +536,31 @@ mod tests {
         let wall = see(&motion(), &straight(), 0.0, &[], |_, dir, _| {
             (dir.z < -0.99).then_some((30.0, Vec3::Z))
         });
-        assert!((wall[RAYS_AT] - 30.0 / 120.0).abs() < 1e-6);
-        assert_eq!(wall[RAYS_AT + 11], 1.0, "the side ray is clear");
+        for corridor in 0..3 {
+            assert!((wall[RAYS_AT + corridor] - 30.0 / 120.0).abs() < 1e-6);
+        }
+        assert_eq!(wall[RAYS_AT + 19], 1.0, "the side ray is clear");
         let mut casts = 0;
         let slope = see(&motion(), &straight(), 0.0, &[], |_, dir, _| {
             casts += 1;
-            // The first cast of the centre ray meets rising road.
+            // The first cast of the first ray meets rising road.
             (casts == 1 && dir.z < -0.99).then_some((30.0, Vec3::new(0.0, 0.95, 0.31)))
         });
         assert_eq!(slope[RAYS_AT], 1.0, "carried on up the slope");
+    }
+
+    #[test]
+    fn the_corridor_sees_what_a_fan_from_the_centre_misses() {
+        // A post 1 m right of the heading line, 40 m ahead: only a ray
+        // that starts right of the centre and runs straight ahead can
+        // meet it.
+        let o = see(&motion(), &straight(), 0.0, &[], |origin, dir, _| {
+            (dir.z < -0.9999 && origin.x > 0.5).then_some((40.0, Vec3::Z))
+        });
+        assert_eq!(o[RAYS_AT], 1.0, "left edge clear");
+        assert_eq!(o[RAYS_AT + 1], 1.0, "centre clear");
+        assert!((o[RAYS_AT + 2] - 40.0 / 120.0).abs() < 1e-6, "right edge");
+        assert!(o[RAYS_AT + 3..FLOOR_AT].iter().all(|&r| r == 1.0));
     }
 
     #[test]
