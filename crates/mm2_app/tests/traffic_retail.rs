@@ -70,5 +70,23 @@ fn retail_soak_keeps_traffic_finite_and_bounded_in_both_cities() {
         // The stuck outcome counter must be reported (present, numeric).
         num(&record, "stuck");
         num(&record, "crx");
+
+        // F10-AC01: several distinct authored types spawned, and every
+        // audited live lane follower heads the authored travel way.
+        let (types, _) = field(&record, "tty")
+            .and_then(|t| t.split_once('/'))
+            .unwrap_or_else(|| panic!("{city}: no tty= field:\n{record}"));
+        assert!(
+            types.parse::<usize>().unwrap() >= 2,
+            "{city}: fewer than two ambient types spawned:\n{record}"
+        );
+        let (ok, total) = field(&record, "hdg")
+            .and_then(|t| t.split_once('/'))
+            .unwrap_or_else(|| panic!("{city}: no hdg= field:\n{record}"));
+        assert!(total != "0", "{city}: no live car was audited:\n{record}");
+        assert_eq!(
+            ok, total,
+            "{city}: cars off the authored direction:\n{record}"
+        );
     }
 }

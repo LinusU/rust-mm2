@@ -2101,6 +2101,24 @@ fn run_headless(
             if t.signals > 0 {
                 s.push_str(&format!(" sig={}", t.signals));
             }
+            // F10-AC01 evidence: `tty=` the ever-spawned census per
+            // authored vehicle id, `hdg=` live lane followers whose
+            // nose and velocity follow the authored travel direction
+            // (agreeing/audited).
+            let census = t.type_census();
+            if !census.is_empty() {
+                let list: Vec<String> = census.iter().map(|(id, n)| format!("{id}:{n}")).collect();
+                s.push_str(&format!(" tty={}/{}", census.len(), list.join(",")));
+            }
+            let mut query = world_ecs.try_query::<(
+                &crate::traffic::AmbientCar,
+                &Transform,
+                &avian3d::prelude::LinearVelocity,
+            )>();
+            if let Some(q) = query.as_mut() {
+                let (ok, total) = t.heading_audit(q.iter(world_ecs));
+                s.push_str(&format!(" hdg={ok}/{total}"));
+            }
             if t.signals_dropped > 0 {
                 s.push_str(&format!(" sigd={}", t.signals_dropped));
             }

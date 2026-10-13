@@ -104,6 +104,32 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F30 performance/packaging | active | local measurement | release-profile baseline for named scenes; memory/draw-call/voice/bandwidth columns; packaging step, real OS layouts |
 | F31 final audit | A.1 this doc; B.1 synthetic single-player journey; C queued | synthetic | B.1: `menu::a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch` (name a driver → locked paint/race → launch → authored finish → results → restart → menu → relaunch). Open: retail-data journey, lesson/C&R/multiplayer journeys, negative-path journeys |
 
+### F10 ambient traffic evidence (F10-AC01 / F10-AC05)
+
+Recorded 2026-10-13 with `MM2_RETAIL` set, original-content validation level.
+Command (also asserted by `cargo test -p mm2_app --test app traffic_retail`):
+
+```sh
+cargo run -p mm2_app --bin mm2 -- --headless --mm2-path "$MM2_RETAIL" --city <london|sf> --frames 3600
+```
+
+The smoke record's `tty=<n>/<id>:<count>,...` is the census of every ambient
+car spawned in the 60 s run; `hdg=<agreeing>/<audited>` audits each live lane
+follower at the end of the run (nose within ~8 degrees of the authored lane or
+junction-crossing tangent at its cursor, velocity not against it).
+
+| city | finite | traf | stuck | jmp | distinct types spawned | hdg |
+|------|--------|------|-------|-----|------------------------|-----|
+| london | true | 16/16 | 0 | 0 | 10 of 12 rostered (`va_2sitersport_l`, `va_compact_s`, `va_cooper_l`, `va_ddbus_l`, `va_euro_l`, `va_eurocargo_l`, `va_largesuv_s`, `va_sedans_s`, `va_smallsuv_s`, `va_ultrasport_l`); sp=21 | 15/15 |
+| sf | true | 16/16 | 0 | 0 | 11 of 11 rostered (`va_2siter_s`, `va_bus_f`, `va_compact_s`, `va_diesels_s`, `va_eurovan_f`, `va_largesuv_s`, `va_limo_f`, `va_sedans_s`, `va_smallsuv_s`, `va_taxi_f`, `va_wedelivertruck_f`); sp=82 | 9/9 |
+
+Limits: one fixed seed, 60 s per city. The direction audit compares each car's
+pose and velocity with the *graph's* lane tangent (built from the BAI lane point
+order), so it catches pose/cursor disagreement, not a misreading of the BAI
+itself; the authored-direction convention is `docs/research/bai.md`. Whether
+the cars *look* right on the road is not measured. Population constants stay
+designed (UNK-12).
+
 ## 4. Cross-cutting gaps (not owned by one feature)
 
 1. **Audio is unlistened.** The mixer, decoders and cue logic have code and

@@ -238,6 +238,9 @@ pub struct AmbientTraffic {
     classes: HashMap<usize, Option<Arc<AmbientClass>>>,
     /// Cars ever spawned (initial plan + respawns).
     pub spawned: usize,
+    /// Cars ever spawned per roster class (F10-AC01 type census); sums
+    /// to `spawned`.
+    pub spawned_by_class: std::collections::BTreeMap<usize, usize>,
     /// Cars despawned past `policy.recycle_distance`.
     pub recycled: usize,
     /// Cars that ran out of road (no legal open exit).
@@ -450,6 +453,48 @@ impl AmbientTraffic {
         &self.graph
     }
 
+    /// Ever-spawned cars per authored vehicle id, sorted by id — the
+    /// F10-AC01 type census. Roster rows that repeat an id (london
+    /// authors `va_compact_s` twice) are merged.
+    pub fn type_census(&self) -> Vec<(String, usize)> {
+        let mut by_id = std::collections::BTreeMap::new();
+        for (class, n) in &self.spawned_by_class {
+            if let Some(spec) = self.roster.entries.get(*class) {
+                *by_id.entry(spec.id.clone()).or_insert(0) += n;
+            }
+        }
+        by_id.into_iter().collect()
+    }
+
+    /// Lane followers whose pose and velocity agree with the authored
+    /// travel direction at their cursor: `(agreeing, audited)`
+    /// (F10-AC01). A car agrees when its nose lies within ~8 degrees of
+    /// the lane (or crossing) tangent and it is not moving backwards
+    /// along it. Knocked wrecks and cars whose cursor no longer
+    /// samples are not audited.
+    pub fn heading_audit<'a>(
+        &self,
+        cars: impl Iterator<Item = (&'a AmbientCar, &'a Transform, &'a LinearVelocity)>,
+    ) -> (usize, usize) {
+        let (mut ok, mut total) = (0, 0);
+        for (car, transform, velocity) in cars {
+            if car.drive != AmbientDrive::Lane {
+                continue;
+            }
+            let Some(sample) = car.cursor.sample(&self.graph) else {
+                continue;
+            };
+            let tangent = Vec3::from(sample.tangent).normalize_or_zero();
+            total += 1;
+            let aligned = transform.forward().dot(tangent) > 0.99;
+            let forward_speed = velocity.0.dot(tangent) >= 0.0;
+            if aligned && forward_speed {
+                ok += 1;
+            }
+        }
+        (ok, total)
+    }
+
     /// The junction controller beside the graph it reads, so a caller
     /// outside the lane drivers (the cable car) can gate its own route
     /// through [`Junctions::gate_approach`].
@@ -658,6 +703,7 @@ pub fn load_ambient_traffic(
         target: plan.target,
         classes: HashMap::new(),
         spawned: 0,
+        spawned_by_class: std::collections::BTreeMap::new(),
         recycled: 0,
         dead_ends: 0,
         unspawnable: plan.unspawnable,
@@ -700,6 +746,7 @@ pub fn load_ambient_traffic(
         .is_some()
         {
             traffic.spawned += 1;
+            *traffic.spawned_by_class.entry(directive.class).or_insert(0) += 1;
         }
     }
     spawn_traffic_signals(commands, &mut traffic, owner);
@@ -2029,6 +2076,7 @@ pub fn maintain_ambient(
                 .is_some()
                 {
                     traffic.spawned += 1;
+                    *traffic.spawned_by_class.entry(directive.class).or_insert(0) += 1;
                     active += 1;
                     // Commands-deferred — later draws this tick cannot
                     // see the new car through the query, so claim its
