@@ -78,12 +78,30 @@ footprint (`SUNK_EPS` / `SUNK_MAX` / `SUNK_DEPTH_EPS`).
 - **SF SidewalkTop, 18 hits**, with one real cluster: pathset **136**
   (`sp_lightstreet_rt_f`, rooms 567/568, Golden Gate approach). The
   four poles are at y = 34.31, 34.82, 35.33, 35.84 along z — a straight
-  1.17 % authored grade — while the covering surface rises faster
-  (penetration 0.23, 0.45, 0.68, 0.90). The pole line and the PSDL
-  deck disagree in *slope*, which is an authored inconsistency between
-  two retail files (the poles are authored on a constant grade, the
-  deck is not), or the derived `SidewalkTop` is steeper than the real
-  deck there. *Unknown which; the only SF cluster over 0.5 m.* Path 133
+  1.17 % grade — while the covering surface rises faster (penetration
+  0.23, 0.45, 0.68, 0.90). **Resolved (task #1169): neither the derived
+  `SidewalkTop` nor an authored pole line is wrong; the poles are
+  interpolated, not authored.** Path 136 is a two-point `LineStrip`
+  (kind 2, spacing code 160) from (−1770.0, 38.384, −1591.1) to
+  (−1770.0, 33.799, −1199.6): a 392 m chord. Both authored endpoints
+  lie on the derived `SidewalkTop` to within 1 mm (38.385 and 33.799);
+  every stamp between them is a linear interpolation of those two Ys.
+  The deck between them is not straight — sampled every 20 m it climbs
+  to a crest of 39.40 m at z ≈ −1531 (room 565, 1.7 m above the chord)
+  and falls back; at the audit's four hits (rooms 567/568) it is
+  0.23–0.90 m above the chord. The derived surface is faithful to the
+  raw vertices: room 567's `RoadWithSidewalks` refs resolve to a road
+  edge running y 37.25 (z −1412.8) → 35.25 (z −1294.4), a 1.69 % grade,
+  with the sidewalk outer chain at 37.40 → 35.40 (road edge +
+  `SIDEWALK_KERB_LIFT` 0.15, parallel to the road). The *Driving* band
+  is as far above the chord there, so this is not a sidewalk-lift
+  artefact; the line at x = −1770.0 sits on the road/sidewalk seam
+  x = −1770.3, which is why the audit files it under SidewalkTop. So
+  the pole line is a straight chord through a vertically curved deck.
+  Whether the retail game also stamps interior points with this linear
+  Y (burying the poles) is not established; the loader's interpolation
+  is unchanged and no Y is touched.
+  Path 133
   (same bridge, 0.05–0.09 m) and the rest (`sp_dumpstr`, `sp_cone`,
   `sp_crashbarrelgroup`, `sp_hillwarn`; 0.05–0.27 m, ≤0.5 m deep) are
   authored noise.
@@ -92,6 +110,17 @@ footprint (`SUNK_EPS` / `SUNK_MAX` / `SUNK_DEPTH_EPS`).
 - **SF FloorFan, 17 hits**: 12 `sp_tree*_s`, 4 `sp_barricadewood_f`,
   one `sp_hotdogcart_f` (0.67 m, 6.4 m inside a sloped fan, room 195).
   Trees are planted into slopes; the cart is the single outlier.
+  **Cart measured (task #1169):** it is path 0 point 1, an authored
+  `Points` entry at (−1919.85, 40.679, 301.86), not an interpolation.
+  The only walkable surface covering it is one room-195 `Fan`
+  triangle, (−1965.4, 37.34, 348.1) (−1799.5, 43.00, 295.4)
+  (−1955.7, 41.50, 295.4), a 165 m wide sliver whose plane gives
+  41.348 m there (cart 0.669 m below). No PSDL vertex lies within
+  25 m, so that height is extrapolated from corners 50–120 m away.
+  The other 11 of the path's 15 points that have a covering surface
+  agree with it to ≤ 4 mm (3 have none). So this one Y is either on
+  terrain finer than the fan (a mesh the audit does not read) or an
+  authoring slip; the PSDL alone cannot tell them apart. Left open.
 
 ## Result
 
@@ -101,13 +130,13 @@ sub-0.3 m offsets (foundations, planted bases, roots, jitter). The
 residue that is **not** explained, and is left open:
 
 1. London room 166 terraced houses (−0.69 / −1.00 m under a flat floor).
-2. SF pathset 136 (Golden Gate approach lamps, 0.23–0.90 m, slope
-   mismatch between the pole line and the deck).
+2. ~~SF pathset 136~~ — resolved: the poles are a linear chord between
+   two on-deck endpoints over a crested deck (see above).
 3. SF INST FloorFan hillside buildings (> 0.5 m: rooms 27, 147, 193,
    125, 59, 111, 24, 17) — slope hypothesis unmeasured.
-4. `sp_hotdogcart_f` pathset 0:1, SF (0.67 m).
+4. `sp_hotdogcart_f` pathset 0:1, SF (0.67 m) — measured, still
+   unexplained (single authored point; see above).
 
 Resolving 1 and 3 needs the building meshes' lowest local Y against the
-fan slope over the footprint; 2 needs the deck surface compared with the
-authored pole line. The audit's `sunk` counter is a measured finding,
+fan slope over the footprint; The audit's `sunk` counter is a measured finding,
 not a failure (`--strict` ignores it).
