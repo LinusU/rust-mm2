@@ -232,11 +232,13 @@ const OFF_ROUTE_HEIGHT: f32 = 12.0;
 const UPENDED_SECONDS: f32 = 3.0;
 /// Longest episode (s).
 const EPISODE_SECONDS: f32 = 150.0;
-/// Metres short of an open guide's end at which an agent has finished.
-const FINISH_MARGIN: f32 = 4.0;
-/// ... if it is also within this distance (m, XZ) of the end itself: a
-/// car that ran wide of the last bend has not arrived.
-const FINISH_RADIUS: f32 = 10.0;
+/// Metres short of an open guide's end at which an agent has finished
+/// — the game's own rule for a route-bound finish, which credits the
+/// arc the car has driven and asks nothing of where across the road it
+/// arrives. A tighter test here failed a third of the arrivals on a
+/// line that swerves to its last row, and taught the driver to fear the
+/// finish.
+const FINISH_MARGIN: f32 = mm2_game::race::ROUTE_FINISH_RANGE;
 /// How far under the city's authored floor (m) a car is out of the
 /// world. The floor is the lowest authored geometry and cars drive on
 /// it — London's Underground runs along the bottom of the bounds — so
@@ -1368,7 +1370,7 @@ impl DrivingEnv {
                     .guide
                     .remaining(s)
                     .is_some_and(|left| left < FINISH_MARGIN)
-                    && off.x.hypot(off.z) < FINISH_RADIUS)
+                    && off.x.hypot(off.z) < super::guide::ON_LINE)
                     // A staged field's circuit is one lap long.
                     || (self.staged
                         && slot.guide.is_closed()
