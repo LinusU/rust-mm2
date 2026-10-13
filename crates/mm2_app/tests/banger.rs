@@ -2155,6 +2155,9 @@ fn a_hypervelocity_striker_cannot_launch_a_prop_past_the_bound() {
     let (striker, _) = spawn_banger(&mut app, Vec3::new(-0.6, 0.5, 0.0), banger_def("frag", 0.0));
     app.world_mut().entity_mut(striker).insert((
         RigidBody::Dynamic,
+        // Waking a prop restores the default layers; a dormant one is
+        // filtered away from its dormant neighbours.
+        CollisionLayers::default(),
         LinearVelocity(Vec3::new(5_000.0, 0.0, 0.0)),
         AngularVelocity(Vec3::new(0.0, 0.0, 1.0e6)),
     ));
