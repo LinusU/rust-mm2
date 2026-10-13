@@ -1316,6 +1316,75 @@ fn event_aimap_speed_limit_sets_the_spawned_cars_target_speed() {
     );
 }
 
+/// F10-AC06 restart leg for a race: the event's `[Speed Limit]` and
+/// `[Density]` are aimap-layer overrides, not session state. Tearing
+/// the event down to the menu and restarting it re-reads the same
+/// aimap, so the fresh population still carries the event's limit and
+/// target instead of reverting to the city's authored values.
+#[test]
+fn event_restart_reapplies_the_aimap_overrides() {
+    let (tmp, config) = event_install();
+    write(
+        tmp.path(),
+        "race/testcity/race0.aimap",
+        "[Density]\n0.5\n\n[Speed Limit]\n7\n",
+    );
+    let mut app = test_app(config, vfs_of(tmp.path()));
+    let snapshot = |app: &mut App| -> (usize, Vec<f32>) {
+        let target = app.world().resource::<AmbientTraffic>().target;
+        let speeds: Vec<f32> = app
+            .world_mut()
+            .query::<&AmbientCar>()
+            .iter(app.world())
+            .map(|c| c.target_speed)
+            .collect();
+        (target, speeds)
+    };
+    assert!(
+        run_until(&mut app, 30, |a| {
+            matches!(
+                a.world().resource::<Session>().phase(),
+                SessionPhase::Playing | SessionPhase::Countdown
+            )
+        }),
+        "event session never left Loading"
+    );
+    let (before_target, before) = snapshot(&mut app);
+    assert!(!before.is_empty(), "the event spawned no traffic");
+    assert!(
+        before.iter().all(|&s| s == 7.0),
+        "pre-restart cars miss the event limit: {before:?}"
+    );
+
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        run_until(&mut app, 30, |a| phase_is(a, SessionPhase::Menu)),
+        "quit never reached Menu"
+    );
+    assert!(app.world().get_resource::<AmbientTraffic>().is_none());
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    assert!(
+        run_until(&mut app, 60, |a| {
+            matches!(
+                a.world().resource::<Session>().phase(),
+                SessionPhase::Playing | SessionPhase::Countdown
+            )
+        }),
+        "restart never re-began the event"
+    );
+    let (after_target, after) = snapshot(&mut app);
+    assert!(!after.is_empty(), "the restarted event spawned no traffic");
+    assert_eq!(
+        after_target, before_target,
+        "the event's authored density must replan the same target"
+    );
+    assert!(
+        after.iter().all(|&s| s == 7.0),
+        "the event limit was lost on restart: {after:?}"
+    );
+}
+
 /// Session teardown removes the resource and every car — a restart
 /// replans under the same seed rather than leaking the old population.
 #[test]
