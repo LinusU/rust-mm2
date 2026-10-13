@@ -161,7 +161,7 @@ fn authored_strtpnts_become_the_start_slots() {
     write(
         d,
         "race/sf/cir0_strtpnts",
-        "-489.25,19.59,-55.05,92.36,0,0,0,0,0,\n-499.99,19.25,-54.46,-267.54,0,0,0,0,0,\n",
+        "-9.25,0.59,-5.05,92.36,0,0,0,0,0,\n-19.99,0.25,-4.46,-267.54,0,0,0,0,0,\n",
     );
     let vfs = vfs_of(d);
     let catalog = EventCatalog::scan(&vfs, "sf");
@@ -172,7 +172,7 @@ fn authored_strtpnts_become_the_start_slots() {
     .unwrap();
 
     assert_eq!(def.start_slots.len(), 2, "both authored slots kept");
-    assert_eq!(def.start_slots[0].position.x, -489.25);
+    assert_eq!(def.start_slots[0].position.x, -9.25);
     assert_eq!(
         def.start_slots[0].yaw_deg,
         Some(92.36),
@@ -187,6 +187,52 @@ fn authored_strtpnts_become_the_start_slots() {
         "authored 92° yaw must face −X (the course), fwd=({}, {})",
         -a.sin(),
         -a.cos()
+    );
+}
+
+/// Retail's `cir<N>_strtpnts` are not numbered like the circuit table:
+/// five SF circuits would take a grid up to 1.5 km from their first
+/// gate. A grid nowhere near the start line is another course's, and
+/// the designed slot on the line stands instead.
+#[test]
+fn a_grid_far_from_the_start_line_is_not_this_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/sf/mmcircuitdata.csv",
+        &format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/sf/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/sf/circuit0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 9.0),
+            row(90.0, 0.0, 10.0)
+        ),
+    );
+    // Retail `cir2_strtpnts`' first row, 1.3 km from circuit 2's gates.
+    write(
+        d,
+        "race/sf/cir0_strtpnts",
+        "-1630.85,50.25,-60.28,91.65,0,0,0,0,0,\n-1625.24,50.25,-56.62,91.65,0,0,0,0,0,\n",
+    );
+    let vfs = vfs_of(d);
+    let catalog = EventCatalog::scan(&vfs, "sf");
+    let def = race_definition(
+        event(&catalog, EventTableKind::Circuit, 0),
+        Difficulty::Amateur,
+    )
+    .unwrap();
+    assert_eq!(def.start_slots.len(), 1, "the designed slot stands");
+    assert_eq!(
+        def.start_slots[0].position,
+        bevy::prelude::Vec3::new(0.0, 0.0, 0.0),
+        "on the start line"
     );
 }
 
@@ -220,7 +266,7 @@ fn zero_strtpnts_angle_is_no_authored_heading() {
     write(
         d,
         "race/sf/cir0_strtpnts",
-        "-395.0,0.0,-402.0,0,0,0,0,0,0,\n-391.0,0.0,-406.0,0,0,0,0,0,0,\n-399.0,0.0,-406.0,90.0,0,0,0,0,0,\n",
+        "-5.0,0.0,-2.0,0,0,0,0,0,0,\n-1.0,0.0,-6.0,0,0,0,0,0,0,\n-9.0,0.0,-6.0,90.0,0,0,0,0,0,\n",
     );
     let vfs = vfs_of(d);
     let catalog = EventCatalog::scan(&vfs, "sf");

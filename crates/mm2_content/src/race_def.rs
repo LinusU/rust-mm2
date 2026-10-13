@@ -272,7 +272,24 @@ pub(crate) fn start_slots(
     event: &CatalogEvent,
     rows: &[mm2_formats::waypoints::Waypoint],
 ) -> Vec<RaceStart> {
-    if let Some(slots) = authored_start_slots(event) {
+    // An authored grid counts only where the race starts. Retail's
+    // `cir<N>_strtpnts` files are not numbered like the circuit table
+    // (measured 2026-10-13: `cir2` sits on circuit 0's start, `cir5`
+    // on circuit 8's, `cir8` on circuit 4's; only `cir1` and `cir6`
+    // agree with their index) and the shipped game reads none of them
+    // (UNK-17), so the same-index alias hands five SF circuits a grid
+    // up to 1.5 km from their first gate. A grid that far from the
+    // start line belongs to another course.
+    let line = Vec3::new(
+        rows[0].position[0],
+        rows[0].position[1],
+        rows[0].position[2],
+    );
+    if let Some(slots) = authored_start_slots(event)
+        && slots
+            .first()
+            .is_some_and(|s| s.position.distance(line) <= START_GRID_RANGE)
+    {
         return slots;
     }
     // Designed fallback (DSN-6): a single player slot on the start
@@ -282,11 +299,6 @@ pub(crate) fn start_slots(
     // `blitz6`'s line sits on an elevated deck; 10 m behind it is
     // past the edge, over a void). The waypoint `a` column is a
     // bearing, not a facing (UNK-16 split), so the tangent supplies it.
-    let line = Vec3::new(
-        rows[0].position[0],
-        rows[0].position[1],
-        rows[0].position[2],
-    );
     let next = Vec3::new(
         rows[1].position[0],
         rows[1].position[1],
@@ -300,6 +312,12 @@ pub(crate) fn start_slots(
         yaw_deg: Some((-d.x).atan2(-d.z).to_degrees()),
     }]
 }
+
+/// Furthest (m) an authored grid's first slot may sit from the event's
+/// start line and still be this event's grid — past every retail grid
+/// that is on its own course (`cir1` 52 m, `cir6` 53 m), far short of
+/// the nearest one that is not (475 m).
+const START_GRID_RANGE: f32 = 200.0;
 
 /// `_strtpnts` rows as start slots — only SF circuit records ship
 /// these on retail (F11-A); row 0 is the player slot by convention
