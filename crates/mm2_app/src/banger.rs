@@ -213,6 +213,7 @@ pub fn banger_bundle(
             // Every transition out of `Dormant` removes the marker,
             // and a body spawned past `Dormant` never carries it.
             Sensor,
+            crate::layers::GameLayer::dormant_prop(),
             collider,
             // Authored physicals ride the dormant collider already:
             // they shape resting contact the same way and the
@@ -446,7 +447,9 @@ pub(crate) fn spawn_fragment<'a>(
     ));
     fragment.insert(tag);
     if spawn.phase != BangerPhase::Dormant {
-        fragment.remove::<Sensor>();
+        fragment
+            .remove::<Sensor>()
+            .insert(CollisionLayers::default());
     }
     let id = fragment.id();
     for (mesh, material) in &piece.parts {
@@ -899,7 +902,7 @@ pub fn activate_bangers(
         banger.activated = Some(tick);
         commands
             .entity(a.entity)
-            .insert(RigidBody::Dynamic)
+            .insert((RigidBody::Dynamic, CollisionLayers::default()))
             .remove::<Sensor>();
         writer.write(BangerStateChanged {
             object: a.object,

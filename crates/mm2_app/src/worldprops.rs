@@ -1053,7 +1053,11 @@ fn apply_body(
             // First sight snaps (below); the blend starts from there.
             commands
                 .entity(entity)
-                .insert((RigidBody::Kinematic, PropLerp::at(pos, rot, now)))
+                .insert((
+                    RigidBody::Kinematic,
+                    PropLerp::at(pos, rot, now),
+                    CollisionLayers::default(),
+                ))
                 .remove::<Sensor>();
         }
         (BangerPhase::Dormant | BangerPhase::Active, BangerPhase::Settled) => {
@@ -1061,7 +1065,7 @@ fn apply_body(
             banger.activated = None;
             commands
                 .entity(entity)
-                .insert(RigidBody::Static)
+                .insert((RigidBody::Static, CollisionLayers::default()))
                 .remove::<(PropLerp, Sensor)>();
         }
         // A live body's refresh blends from the displayed pose; only a

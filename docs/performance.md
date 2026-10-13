@@ -126,6 +126,65 @@ more events and cities, and an explanation of the client stall remain open.
   does not name a function worth optimising. Frustum/OBB intersection and
   shadow specialisation appear among the visible non-idle frames.
 
+## Headless fixed tick on sf (#1396, 2026-10-13)
+
+The headless smoke (`mm2 --headless --city sf`, one car, retail install)
+cost ~22 ms wall per 60 Hz tick in the dev profile, which is what made the
+local retail network legs take 10-25 minutes each.
+
+```sh
+target/debug/mm2 --headless --mm2-path "$MM2_RETAIL" --city sf --frames 1000
+```
+
+Profile: `sample <pid> 15 -file <out>` against a running 1500-frame
+headless run (macOS' `xctrace` Time Profiler would not record this
+binary), summed over the "Sort by top of stack" table by crate. Of the
+non-idle samples, **parry3d was 57%** and avian3d 16% (convex-polyhedron
+support points, GJK/EPA, trimesh BVH traversal: Avian's narrow phase);
+the rest was spread thin (allocator 8%, mm2_vehicle 5%). The parked task-pool
+workers (`__psynch_cvwait`, 72% of all samples) are waiting, not spinning;
+the "59 s of CPU" in the issue was real narrow-phase work spread over the
+pool.
+
+Cause: `MM2_SMOKE_DIAG=1` showed **42,924 active contact pairs at tick 250**
+with one car, about 40,000 of them `Static` against `Static`
+(`proprule-*`, `pathset-*`, `parkedcar-*` against `city-ground-*` and
+`city-room*`). A dormant banger is a static *sensor*
+(`banger.rs`, `banger_bundle`), and Avian skips static-static broad-phase
+pairs only for solid colliders, so every dormant prop paired with the city
+trimeshes under it and with its neighbours, and ran full manifold generation
+each tick for a contact nothing reads.
+
+Fix: dormant bangers carry `GameLayer::dormant_prop()`, which keeps them
+off `World` and off each other, and every transition out of `Dormant`
+restores `CollisionLayers::default()`.
+
+| sf, `--frames`, dev profile | before | after |
+|---|---|---|
+| 60 frames, wall | 3.1 s | 1.8 s |
+| 1000 frames, wall | 36.1 s (user 83 s) | 9.5-11.5 s (user 12-15 s) |
+| contact pairs at tick 250 | 42,924 | see `MM2_SMOKE_DIAG` (the static-static sensor pairs are gone) |
+
+Both runs were on a loaded machine (load average 8-15, other agents
+building), so read the ratio, not the seconds. Release (after the fix only,
+same load): 1.5 s for 60 frames, 10.0 s for 1000; with the narrow-phase
+waste gone the dev and release builds are within noise of each other, so
+the remaining cost is not optimisation level. A profile of the fixed run
+afterwards has bevy's `mark_3d_meshes_as_changed_if_their_assets_changed`
+as its largest single frame, not a physics function. Dev-profile opt-level
+changes were therefore not tried.
+
+Smoke record: the final line is identical but for two dormant parking
+meters that no longer activate. Before the change `proprule-meter-r844R-10`
+(tick 218) and `proprule-meter-r828R-4` (tick 290) activated on a
+`city-ground-m6-flat` "strike" with severity 1.6e-5 and 3.9e-5: the static
+ground has infinite striker mass, so any non-zero approach speed clears the
+activation limit. That is a defect in the gate rather than original
+behaviour (not verified against retail). Fields that moved:
+`impacts=137` to `135`, `bng=5895d/12a/4s/4b` to `5897d/12a/2s/4b`,
+`bng_ev=2a/4s/4b` to `0a/2s/4b`; `final=(-1316,49.9,620)` and everything
+else are unchanged, and repeated runs after the change are identical.
+
 ## Still open (F30-AC01 / AC02)
 
 - Per-system timing inside the fixed and update stages to name the

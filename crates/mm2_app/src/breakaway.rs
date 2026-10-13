@@ -274,6 +274,7 @@ pub(crate) fn spawn_break_fragment(
         ))
         // Born `Active`, so solid: only a dormant prop is a sensor.
         .remove::<Sensor>()
+        .insert(CollisionLayers::default())
         .id();
     // The fragment's visuals are the part's own mesh children,
     // re-spawned under the new body.

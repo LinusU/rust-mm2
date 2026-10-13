@@ -42,6 +42,9 @@ pub enum GameLayer {
     Scenery,
     /// Kinematic pedestrians (F19-B.8b): each walker's body capsule.
     Pedestrian,
+    /// A dormant banger's extra membership (see
+    /// [`GameLayer::dormant_prop`]).
+    DormantProp,
 }
 
 impl GameLayer {
@@ -58,6 +61,25 @@ impl GameLayer {
         CollisionLayers::new(
             GameLayer::Scenery,
             !LayerMask::from([GameLayer::World, GameLayer::Scenery]),
+        )
+    }
+
+    /// Layers for a dormant banger: a static sensor waiting for a
+    /// striker. It is on the default layer as well as `DormantProp`, so
+    /// cars, walkers, active props and movers still meet it, but it
+    /// filters out `World` and `DormantProp`. Avian pairs a static sensor
+    /// with the static city trimeshes and with its neighbours (it skips
+    /// static-static pairs only for solid colliders), and ~40,000 such
+    /// manifolds were most of the headless fixed tick on sf. The only
+    /// thing that read a dormant prop's contact with the ground was the
+    /// activation gate, which on sf fired twice on a parking meter off a
+    /// ~1e-5 m/s "strike" by the static ground (infinite striker mass
+    /// makes any approach speed clear the limit). Every transition out of `Dormant` restores
+    /// [`CollisionLayers::default`] along with removing the `Sensor`.
+    pub fn dormant_prop() -> CollisionLayers {
+        CollisionLayers::new(
+            [GameLayer::Default, GameLayer::DormantProp],
+            !LayerMask::from([GameLayer::World, GameLayer::DormantProp]),
         )
     }
 
@@ -112,6 +134,21 @@ mod tests {
             "a mover still hits the player"
         );
         assert!(anything.interacts_with(anything));
+    }
+
+    #[test]
+    fn a_dormant_prop_skips_the_world_and_its_neighbours_only() {
+        let dormant = GameLayer::dormant_prop();
+        let car = CollisionLayers::default();
+        assert!(!dormant.interacts_with(GameLayer::world()));
+        assert!(!dormant.interacts_with(dormant), "dormant against dormant");
+        assert!(dormant.interacts_with(car), "a striker still meets it");
+        assert!(dormant.interacts_with(GameLayer::pedestrian()));
+        assert!(dormant.interacts_with(GameLayer::scenery()));
+        assert!(
+            GameLayer::world().interacts_with(CollisionLayers::default()),
+            "a woken prop (default layers) hits the ground again"
+        );
     }
 
     #[test]
