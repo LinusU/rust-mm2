@@ -33,6 +33,11 @@ const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
 const JOIN_EXE: &str = env!("CARGO_BIN_EXE_mm2-join");
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 
+/// The in-app host's `--frames` cap, only a ceiling: a host that reaches
+/// its cap stops draining lobby events, so it must sit past any bounded
+/// wait. The leg that uses it ends the host with a kill.
+const HOST_FRAME_CEILING: u32 = 500_000;
+
 /// How long a client may take to notice a stopped host: the
 /// `LIVENESS_TIMEOUT` (5 s) plus slack for process start and a loaded
 /// runner. The legs spin on this deadline, never a fixed sleep.
@@ -395,7 +400,7 @@ fn a_killed_host_closes_a_started_client() {
 #[test]
 fn a_killed_host_ends_a_driving_client() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &mm2_host_args(install.path(), 9000));
+    let mut host = Proc::spawn(MM2_EXE, &mm2_host_args(install.path(), HOST_FRAME_CEILING));
     let addr = mm2_listening_addr(&host);
 
     let client = Proc::spawn(MM2_EXE, &mm2_join_args(install.path(), addr, 3000));

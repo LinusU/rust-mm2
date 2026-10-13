@@ -345,7 +345,7 @@ fn quit_and_assert_host_drove(mut host: Proc) -> NetField {
 #[test]
 fn two_mm2_processes_drive_one_session_over_loopback() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
 
     let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 1400));
@@ -581,7 +581,7 @@ fn a_scheduled_reset_comes_back_across_two_processes_on_an_impaired_link() {
 #[test]
 fn two_mm2_processes_play_a_rematch_without_reconnecting() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
     let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 4500));
     start_when_ready(&mut host, 1);
@@ -617,7 +617,7 @@ fn two_mm2_processes_play_a_rematch_without_reconnecting() {
 #[test]
 fn a_session_edit_typed_on_the_host_reaches_the_next_round() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
     let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 4500));
     start_when_ready(&mut host, 1);
@@ -656,7 +656,7 @@ fn a_session_edit_typed_on_the_host_reaches_the_next_round() {
 #[test]
 fn a_client_that_joins_a_running_session_is_handed_the_live_one() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
 
     host.cmd("start");
@@ -691,7 +691,7 @@ fn a_client_that_joins_a_running_session_is_handed_the_live_one() {
 #[test]
 fn a_late_joiner_inherits_the_hosts_weather_not_the_default() {
     let install = tempfile::tempdir().unwrap();
-    let mut args = host_args(install.path(), 12000);
+    let mut args = host_args(install.path(), HOST_FRAME_CEILING);
     args.extend(["--weather".into(), "3".into()]);
     let mut host = Proc::spawn(MM2_EXE, &args);
     let addr = listening_addr(&host);
@@ -735,7 +735,7 @@ fn a_late_joiner_inherits_the_hosts_weather_not_the_default() {
 #[test]
 fn a_pinned_client_follows_the_authoritys_surface_state() {
     let install = tempfile::tempdir().unwrap();
-    let mut args = host_args(install.path(), 12000);
+    let mut args = host_args(install.path(), HOST_FRAME_CEILING);
     args.extend(["--weather".into(), "3".into()]);
     let mut host = Proc::spawn(MM2_EXE, &args);
     let addr = listening_addr(&host);
@@ -818,7 +818,7 @@ fn a_late_joiner_lights_the_scene_like_the_host_on_a_retail_city() {
         "the conditions bind the default preset, so this leg proves nothing"
     );
 
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(["--city".into(), "sf".into()]);
     host_args.extend(conditions.iter().map(|a| a.to_string()));
@@ -857,7 +857,7 @@ fn a_late_joiner_lights_the_scene_like_the_host_on_a_retail_city() {
 #[test]
 fn a_seat_freed_by_a_leaver_is_not_resurrected_for_the_next_joiner() {
     let install = tempfile::tempdir().unwrap();
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 12000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
 
     host.cmd("start");
@@ -937,7 +937,7 @@ fn two_mm2_processes_relay_a_live_resolved_surface_contact() {
     let install = tempfile::tempdir().unwrap();
     support::surface_audio(install.path());
     support::surface_materials(install.path());
-    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
 
     let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 1400));
@@ -1366,7 +1366,7 @@ fn two_retail_processes_stamp_the_same_prop_world() {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     // The retail world, not the dev cruise.
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(["--city".into(), "sf".into()]);
@@ -1422,7 +1422,7 @@ fn two_retail_processes_roll_the_same_parked_cars_in_a_race() {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(["--event".into(), "checkpoint:0".into()]);
     let mut host = Proc::spawn(MM2_EXE, &host_args);
@@ -1485,7 +1485,7 @@ fn two_retail_processes_stand_the_same_scenery(extra: &[&str]) {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(extra.iter().map(|a| a.to_string()));
     let mut host = Proc::spawn(MM2_EXE, &host_args);
@@ -1606,7 +1606,7 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(["--city".into(), "sf".into()]);
     let mut host = Proc::spawn(MM2_EXE, &host_args);
@@ -1685,7 +1685,7 @@ fn two_retail_processes_play_a_started_cops_and_robbers_match() {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
-    let mut host_args = host_args(&retail, 9000);
+    let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
     host_args.extend(
         ["--city", "sf", "--cnr", "cops", "--cnr-limit", "5m"]
