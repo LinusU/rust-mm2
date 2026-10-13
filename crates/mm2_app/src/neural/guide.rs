@@ -37,6 +37,10 @@ pub struct Guide {
     closed: bool,
     /// Whole length (m), the closing leg included on a closed guide.
     total: f32,
+    /// Arc length of each point the guide was built from, merged and
+    /// dropped ones included — what maps a position on the guide back
+    /// to an index into the source route ([`Guide::chase_index`]).
+    source_arc: Vec<f32>,
 }
 
 impl Guide {
@@ -45,13 +49,13 @@ impl Guide {
     /// remain.
     pub fn new(points: impl IntoIterator<Item = Vec3>, closed: bool) -> Option<Self> {
         let mut pts: Vec<Vec3> = Vec::new();
+        // For each source point, the kept point it became.
+        let mut kept: Vec<usize> = Vec::new();
         for p in points {
-            if !p.is_finite() {
-                continue;
-            }
-            if pts.last().is_none_or(|l| l.distance(p) >= MIN_LEG) {
+            if p.is_finite() && pts.last().is_none_or(|l| l.distance(p) >= MIN_LEG) {
                 pts.push(p);
             }
+            kept.push(pts.len().saturating_sub(1));
         }
         if closed && pts.len() > 2 && pts[0].distance(*pts.last().unwrap()) < MIN_LEG {
             pts.pop();
@@ -69,11 +73,18 @@ impl Guide {
         if closed {
             total += pts[pts.len() - 1].distance(pts[0]);
         }
+        // A source point merged into a dropped closing point sits at
+        // the end of the lap.
+        let source_arc = kept
+            .iter()
+            .map(|&i| cum.get(i).copied().unwrap_or(total))
+            .collect();
         Some(Self {
             points: pts,
             cum,
             closed,
             total,
+            source_arc,
         })
     }
 
@@ -83,6 +94,21 @@ impl Guide {
             route.points.iter().map(|p| p.position),
             crate::opponents::route_is_closed(route),
         )
+    }
+
+    /// The index of the source point a car at arc length `s` is
+    /// heading for: the first one past `s`. On a closed guide the
+    /// stretch after the last point heads for point 0; on an open one
+    /// the end of the guide returns the source's length — past its last
+    /// point, the route consumed.
+    pub fn chase_index(&self, s: f32) -> usize {
+        let s = self.normalize(s);
+        let i = self.source_arc.partition_point(|&a| a <= s);
+        if self.closed && i >= self.source_arc.len() {
+            0
+        } else {
+            i
+        }
     }
 
     /// Whole length (m).
@@ -190,8 +216,15 @@ impl Guide {
     /// `prev` — the tracker's step. On a closed guide the result is
     /// normalized; compare with [`Guide::delta`] to get signed progress.
     pub fn advance(&self, prev: f32, pos: Vec3) -> f32 {
-        let lo = prev - SEARCH_BACK;
-        let hi = prev + SEARCH_AHEAD;
+        self.locate_within(prev, pos, SEARCH_BACK, SEARCH_AHEAD)
+    }
+
+    /// The arc length nearest `pos` between `back` metres behind `prev`
+    /// and `ahead` metres past it — [`Guide::advance`] with the window
+    /// spelled out, for a car that was moved rather than drove.
+    pub fn locate_within(&self, prev: f32, pos: Vec3, back: f32, ahead: f32) -> f32 {
+        let lo = prev - back;
+        let hi = prev + ahead;
         let mut best = (f32::INFINITY, prev);
         let mut consider = |i: usize, shift: f32| {
             let (_, _, start, end) = self.leg(i);
@@ -315,6 +348,29 @@ mod tests {
         assert!(s > 150.0, "{s}");
         let s = g.locate(Vec3::new(50.0, 0.5, 0.0));
         assert!((s - 50.0).abs() < 1.0, "{s}");
+    }
+
+    #[test]
+    fn the_chase_index_names_the_next_source_point() {
+        let g = square();
+        assert_eq!(g.chase_index(0.0), 1);
+        assert_eq!(g.chase_index(99.0), 1);
+        assert_eq!(g.chase_index(100.0), 2);
+        assert_eq!(g.chase_index(350.0), 0, "the closing leg heads for point 0");
+        let open = Guide::new(
+            [
+                Vec3::ZERO,
+                Vec3::new(10.0, 0.0, 0.0),
+                // A duplicate the guide merges away still counts.
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(30.0, 0.0, 0.0),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(open.chase_index(5.0), 1);
+        assert_eq!(open.chase_index(10.0), 3);
+        assert_eq!(open.chase_index(30.0), 4, "the route is consumed");
     }
 
     #[test]

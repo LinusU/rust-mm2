@@ -36,7 +36,8 @@
 //! short), a `u32` count and that many final observations (one per
 //! flag-2 agent, in agent order), then a `u32` count and that many
 //! episode records (`u32` end, `u32` steps, `f32` metres, `f32` return,
-//! `u32` line, `u32` car, `f32` impacts).
+//! `u32` line, `u32` car, `f32` impacts, `f32` arc position and three
+//! `f32` world coordinates of where it ended).
 
 use std::io::{self, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -48,7 +49,7 @@ use mm2_app::neural::observe::{ACT_DIM, CAR_DIM, MOTION_DIM, OBS_DIM, OBS_VERSIO
 use mm2_app::neural::policy::{Policy, Scratch};
 use mm2_assets::{InstallMount, Vfs, mount_install};
 
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 
 #[derive(Parser)]
 #[command(about = "Training environment for the neural opponent driver")]
@@ -59,9 +60,16 @@ struct Args {
     /// City to drive in.
     #[arg(long, default_value = "sf")]
     city: String,
+    /// Event stem (`race3`, `circuit0`) whose world and lines to load;
+    /// without it the cruise city with every event's lines.
+    #[arg(long)]
+    event: Option<String>,
     /// Cars driving at once.
     #[arg(long, default_value_t = 16)]
     agents: usize,
+    /// Untrained cars in the way: parked, or driven at traffic pace.
+    #[arg(long, default_value_t = 4)]
+    drones: usize,
     /// Seed for the environment's random choices.
     #[arg(long, default_value_t = 1)]
     seed: u64,
@@ -85,6 +93,11 @@ enum Mode {
     },
     /// Serve the wire protocol on stdin/stdout.
     Serve,
+    /// Print the city's race event stems as a JSON array.
+    Events,
+    /// Walk every line of the city's events and print where each cannot
+    /// be driven as drawn — through a wall, over a void, into water.
+    Audit,
     /// Race every opponent field of the city from its grid with a
     /// trained policy and print one JSON line per car.
     Eval {
@@ -120,59 +133,125 @@ fn main() {
         eprintln!("mount {}: {e}", args.mm2_path.display());
         std::process::exit(2);
     }
-    let config = EnvConfig {
-        city: args.city.clone(),
-        // An evaluation stages its own fields.
-        agents: if matches!(args.mode, Mode::Eval { .. }) {
-            0
-        } else {
-            args.agents
-        },
-        seed: args.seed,
-        decision_ticks: args.decision_ticks,
-        threads: args.threads,
-        ..EnvConfig::default()
-    };
-    let started = Instant::now();
-    let mut env = match DrivingEnv::new(&vfs, config) {
-        Ok(env) => env,
-        Err(e) => {
+    let build = |event: Option<String>, agents: usize| {
+        let config = EnvConfig {
+            city: args.city.clone(),
+            event,
+            agents,
+            drones: args.drones,
+            seed: args.seed,
+            decision_ticks: args.decision_ticks,
+            threads: args.threads,
+            ..EnvConfig::default()
+        };
+        DrivingEnv::new(&vfs, config).unwrap_or_else(|e| {
             eprintln!("environment: {e}");
             std::process::exit(2);
-        }
+        })
     };
-    eprintln!(
-        "mm2_gym: {} ready in {:.1}s — {} agents, {} lines, {} cars, obs {OBS_DIM}, act {ACT_DIM}",
-        args.city,
-        started.elapsed().as_secs_f32(),
-        env.agents(),
-        env.lines().len(),
-        env.cars().len(),
-    );
-    match args.mode {
-        Mode::Bench { steps } => bench(&mut env, steps, args.decision_ticks),
+    let announce = |env: &DrivingEnv| {
+        eprintln!(
+            "mm2_gym: {}{} — {} agents, {} lines, {} cars, obs {OBS_DIM}, act {ACT_DIM}",
+            args.city,
+            args.event
+                .as_deref()
+                .map(|e| format!("/{e}"))
+                .unwrap_or_default(),
+            env.agents(),
+            env.lines().len(),
+            env.cars().len(),
+        );
+    };
+    match &args.mode {
+        Mode::Events => {
+            println!(
+                "{}",
+                serde_json::json!(mm2_app::neural::env::race_events(&vfs, &args.city))
+            );
+        }
+        Mode::Audit => {
+            let events = match &args.event {
+                Some(event) => vec![event.clone()],
+                None => mm2_app::neural::env::race_events(&vfs, &args.city),
+            };
+            for event in events {
+                let mut env = build(Some(event), 0);
+                for line in 0..env.lines().len() {
+                    let found = env.audit_line(line, 4.0);
+                    // Runs of the same finding print once, with their extent.
+                    let mut i = 0;
+                    while i < found.len() {
+                        let (start, at, what) = found[i];
+                        let mut j = i;
+                        while j + 1 < found.len()
+                            && found[j + 1].2 == what
+                            && found[j + 1].0 - found[j].0 <= 4.5
+                        {
+                            j += 1;
+                        }
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "city": args.city,
+                                "line": env.lines()[line].label,
+                                "what": what,
+                                "arc": start,
+                                "metres": found[j].0 - start + 4.0,
+                                "at": [at.x, at.y, at.z],
+                            })
+                        );
+                        i = j + 1;
+                    }
+                }
+            }
+        }
+        Mode::Bench { steps } => {
+            let mut env = build(args.event.clone(), args.agents);
+            announce(&env);
+            bench(&mut env, *steps, args.decision_ticks);
+        }
         Mode::Eval {
             policy,
             only,
             max_seconds,
         } => {
-            let policy = std::fs::read(&policy)
+            let policy = std::fs::read(policy)
                 .map_err(|e| e.to_string())
                 .and_then(|b| Policy::parse(&b, OBS_DIM, ACT_DIM).map_err(|e| e.to_string()))
                 .unwrap_or_else(|e| {
                     eprintln!("policy: {e}");
                     std::process::exit(2);
                 });
-            eval(
-                &mut env,
-                &policy,
-                only.as_deref(),
-                max_seconds,
-                args.decision_ticks,
+            // Each event races in its own world.
+            let events = match &args.event {
+                Some(event) => vec![event.clone()],
+                None => mm2_app::neural::env::race_events(&vfs, &args.city),
+            };
+            let mut tally = Tally::default();
+            for event in events {
+                // An evaluation stages its own fields.
+                let mut env = build(Some(event), 0);
+                eval(
+                    &mut env,
+                    &policy,
+                    only.as_deref(),
+                    *max_seconds,
+                    args.decision_ticks,
+                    &mut tally,
+                );
+            }
+            eprintln!(
+                "eval: {}/{} cars finished; finishers averaged {:.1} m/s",
+                tally.finished,
+                tally.cars,
+                tally.metres / tally.seconds.max(1e-3)
             );
         }
         Mode::Serve => {
-            if let Err(e) = serve(&mut env) {
+            let mut env = build(args.event.clone(), args.agents);
+            announce(&env);
+            let env = &mut env;
+            if let Err(e) = serve(env) {
                 // A trainer that went away is the normal way to stop.
                 if e.kind() != io::ErrorKind::UnexpectedEof && e.kind() != io::ErrorKind::BrokenPipe
                 {
@@ -234,13 +313,24 @@ fn bench(env: &mut DrivingEnv, steps: u32, decision_ticks: u32) {
     );
 }
 
-/// Race each field once and report every car's outcome.
+/// Totals over an evaluation.
+#[derive(Default)]
+struct Tally {
+    cars: u32,
+    finished: u32,
+    seconds: f32,
+    metres: f32,
+}
+
+/// Race each field of the environment's event once and report every
+/// car's outcome.
 fn eval(
     env: &mut DrivingEnv,
     policy: &Policy,
     only: Option<&str>,
     max_seconds: f32,
     decision_ticks: u32,
+    tally: &mut Tally,
 ) {
     const ENDS: [&str; 6] = [
         "finished",
@@ -262,7 +352,6 @@ fn eval(
         }
     }
     let mut scratch = Scratch::default();
-    let (mut cars, mut finished, mut seconds, mut metres) = (0u32, 0u32, 0.0f32, 0.0f32);
     for (field, lines) in &fields {
         env.stage_field(lines);
         let agents = env.agents();
@@ -285,11 +374,11 @@ fn eval(
                 if let Some(i) = lines.iter().position(|&l| l == e.line as usize) {
                     reported[i] = true;
                 }
-                cars += 1;
+                tally.cars += 1;
                 if e.end as u32 == 0 {
-                    finished += 1;
-                    seconds += e.steps as f32 * seconds_per_step;
-                    metres += e.metres;
+                    tally.finished += 1;
+                    tally.seconds += e.steps as f32 * seconds_per_step;
+                    tally.metres += e.metres;
                 }
                 println!(
                     "{}",
@@ -302,6 +391,7 @@ fn eval(
                         "metres": e.metres,
                         "length": line.guide.length(),
                         "impacts": e.impacts,
+                        "at": [e.position.x, e.position.y, e.position.z],
                     })
                 );
             }
@@ -309,7 +399,7 @@ fn eval(
         }
         for (i, &l) in lines.iter().enumerate() {
             if !reported[i] {
-                cars += 1;
+                tally.cars += 1;
                 let line = &env.lines()[l];
                 println!(
                     "{}",
@@ -325,10 +415,6 @@ fn eval(
             }
         }
     }
-    eprintln!(
-        "eval: {finished}/{cars} cars finished; finishers averaged {:.1} m/s",
-        metres / seconds.max(1e-3)
-    );
 }
 
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
@@ -359,6 +445,10 @@ fn write_step(w: &mut impl Write, out: &StepOut) -> io::Result<()> {
         w.write_all(&e.line.to_le_bytes())?;
         w.write_all(&e.car.to_le_bytes())?;
         w.write_all(&e.impacts.to_le_bytes())?;
+        w.write_all(&e.arc.to_le_bytes())?;
+        for v in e.position.to_array() {
+            w.write_all(&v.to_le_bytes())?;
+        }
     }
     Ok(())
 }

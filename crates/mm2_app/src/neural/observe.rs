@@ -5,10 +5,11 @@
 //!
 //! | Block | Size | Contents |
 //! | --- | ---: | --- |
-//! | car | [`CAR_DIM`] | what this car is: size, mass, power, grip, steering lock |
+//! | car | [`CAR_DIM`] | what this car is: size, mass, power, grip, steering lock, throttle ceiling |
 //! | motion | [`MOTION_DIM`] | velocity, spin, tilt, steering angle, wheel contact, last action |
 //! | guide | [`GUIDE_DIM`] | offset and heading against the line, then the line ahead at [`LOOKAHEAD`] |
 //! | rays | [`RAYS`]`.len()` | free distance to the world around the car |
+//! | floor | [`FLOOR`]`.len()` | where the ground ahead is, against where level ground would be |
 //! | neighbours | [`NEIGHBOURS`]` × `[`NEIGHBOUR_DIM`] | the nearest other vehicles |
 //!
 //! The training environment and the game build observations through
@@ -22,7 +23,7 @@ use mm2_vehicle::{HandlingMetrics, VehicleConfig, VehicleInput};
 use super::guide::Guide;
 
 /// Layout version, recorded with trained weights by the trainer.
-pub const OBS_VERSION: u32 = 1;
+pub const OBS_VERSION: u32 = 2;
 
 /// Distances (m) down the guide at which the line ahead is sampled.
 pub const LOOKAHEAD: [f32; 10] = [5.0, 10.0, 16.0, 24.0, 34.0, 48.0, 66.0, 90.0, 125.0, 170.0];
@@ -48,19 +49,33 @@ pub const RAYS: [(f32, f32); 16] = [
     (180.0, 15.0),
 ];
 
+/// Floor probes: angle off the nose (degrees, positive right) and the
+/// distance ahead (m) at which the probe would meet level ground. Each
+/// is cast from roof height down toward that point; a hit short of it
+/// is rising ground or an obstacle, a long one a dip, none a drop — a
+/// quay, a raised drawbridge, the far side of a crest.
+pub const FLOOR: [(f32, f32); 6] = [
+    (0.0, 6.0),
+    (-25.0, 6.0),
+    (25.0, 6.0),
+    (0.0, 14.0),
+    (-25.0, 14.0),
+    (25.0, 14.0),
+];
+
 /// Other vehicles described per observation.
 pub const NEIGHBOURS: usize = 4;
 /// Floats per neighbour slot.
 pub const NEIGHBOUR_DIM: usize = 9;
 /// Floats describing the car itself.
-pub const CAR_DIM: usize = 10;
+pub const CAR_DIM: usize = 11;
 /// Floats describing its motion.
 pub const MOTION_DIM: usize = 15;
 /// Floats describing the guide.
 pub const GUIDE_DIM: usize = 4 + 3 * LOOKAHEAD.len();
 /// Whole observation size.
 pub const OBS_DIM: usize =
-    CAR_DIM + MOTION_DIM + GUIDE_DIM + RAYS.len() + NEIGHBOURS * NEIGHBOUR_DIM;
+    CAR_DIM + MOTION_DIM + GUIDE_DIM + RAYS.len() + FLOOR.len() + NEIGHBOURS * NEIGHBOUR_DIM;
 /// Action size: steering, pedal (throttle positive, brake negative),
 /// handbrake (on when positive).
 pub const ACT_DIM: usize = 3;
@@ -73,6 +88,12 @@ const RAY_HEIGHT: f32 = 0.7;
 const GROUND_NORMAL_Y: f32 = 0.7;
 /// Times one ray may be carried along ground it met.
 const RAY_BOUNCES: usize = 2;
+/// Height (m) above the ground under the car that floor probes start
+/// at — about the roof.
+const FLOOR_HEIGHT: f32 = 1.5;
+/// A floor probe reaches this many times the distance to level ground
+/// before the ground counts as gone.
+const FLOOR_REACH: f32 = 2.0;
 /// Neighbours further than this (m) are not described.
 const NEIGHBOUR_RANGE: f32 = 90.0;
 /// Neighbours more than this far above or below (m) are on another
@@ -84,7 +105,8 @@ const CLIP: f32 = 5.0;
 /// The fixed part of an observation: what kind of car this is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarProfile {
-    features: [f32; CAR_DIM],
+    /// Everything but the throttle ceiling, which is the driver's.
+    features: [f32; CAR_DIM - 1],
     /// Half the body's width (m).
     pub half_width: f32,
     /// Half the body's length (m).
@@ -207,8 +229,10 @@ fn free_distance(
 ///
 /// `s` is its arc position on `guide`, `last` the action it took last
 /// decision, `neighbours` every other vehicle worth knowing about (any
-/// number, any order — the nearest are picked), and `cast` a ray query
-/// against the world that ignores vehicles.
+/// number, any order — the nearest are picked), `throttle_cap` the
+/// most throttle its pedal will be given, and `cast` a ray query
+/// against the world that ignores vehicles and treats deadly water as
+/// open space.
 #[allow(clippy::too_many_arguments)] // one observation's full set of sources
 pub fn observe(
     out: &mut [f32],
@@ -218,6 +242,7 @@ pub fn observe(
     s: f32,
     last: &[f32; ACT_DIM],
     neighbours: &[Neighbour],
+    throttle_cap: f32,
     mut cast: impl FnMut(Vec3, Vec3, f32) -> Option<RayHit>,
 ) {
     assert_eq!(out.len(), OBS_DIM);
@@ -228,6 +253,7 @@ pub fn observe(
     let mut w = Writer { out, at: 0 };
 
     w.extend(&car.features);
+    w.push(throttle_cap);
 
     let v = local(motion.linear_velocity);
     let inv = motion.rotation.inverse();
@@ -277,6 +303,21 @@ pub fn observe(
             free_distance(origin, dir, reach, &mut cast)
         };
         w.push(free / reach);
+    }
+
+    let roof = motion.position
+        + motion.rotation * Vec3::new(0.0, car.ray_y - RAY_HEIGHT + FLOOR_HEIGHT, 0.0);
+    let below = motion.rotation * Vec3::NEG_Y;
+    for (angle, ahead) in FLOOR {
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let Some(dir) = ((nose * cos + side * sin) * ahead + below * FLOOR_HEIGHT).try_normalize()
+        else {
+            w.push(1.0);
+            continue;
+        };
+        let level = ahead.hypot(FLOOR_HEIGHT);
+        let hit = cast(roof, dir, level * FLOOR_REACH).map_or(FLOOR_REACH, |(d, _)| d / level);
+        w.push(hit);
     }
 
     let mut near: Vec<(f32, &Neighbour)> = neighbours
@@ -401,7 +442,8 @@ mod tests {
 
     const GUIDE_AT: usize = CAR_DIM + MOTION_DIM;
     const RAYS_AT: usize = GUIDE_AT + GUIDE_DIM;
-    const NEIGHBOURS_AT: usize = RAYS_AT + RAYS.len();
+    const FLOOR_AT: usize = RAYS_AT + RAYS.len();
+    const NEIGHBOURS_AT: usize = FLOOR_AT + FLOOR.len();
 
     fn see(
         m: &Motion,
@@ -412,7 +454,7 @@ mod tests {
     ) -> Vec<f32> {
         let mut out = vec![0.0; OBS_DIM];
         let car = CarProfile::of(&VehicleConfig::default());
-        observe(&mut out, &car, m, g, s, &[0.0; ACT_DIM], n, cast);
+        observe(&mut out, &car, m, g, s, &[0.0; ACT_DIM], n, 1.0, cast);
         out
     }
 
@@ -426,8 +468,13 @@ mod tests {
             let p = &o[GUIDE_AT + 4 + 3 * k..][..3];
             assert!(p[0].abs() < 1e-6 && (p[1] - 1.0).abs() < 1e-6, "{p:?}");
         }
-        assert!(o[RAYS_AT..NEIGHBOURS_AT].iter().all(|&r| r == 1.0));
+        assert!(o[RAYS_AT..FLOOR_AT].iter().all(|&r| r == 1.0));
+        assert!(
+            o[FLOOR_AT..NEIGHBOURS_AT].iter().all(|&f| f == FLOOR_REACH),
+            "nothing under the car: every probe finds a drop"
+        );
         assert!(o[NEIGHBOURS_AT..].iter().all(|&v| v == 0.0));
+        assert_eq!(o[CAR_DIM - 1], 1.0, "the throttle ceiling");
     }
 
     #[test]
@@ -466,6 +513,23 @@ mod tests {
             (casts == 1 && dir.z < -0.99).then_some((30.0, Vec3::new(0.0, 0.95, 0.31)))
         });
         assert_eq!(slope[RAYS_AT], 1.0, "carried on up the slope");
+    }
+
+    #[test]
+    fn floor_probes_read_level_ground_as_one() {
+        // A flat floor `FLOOR_HEIGHT` under the probes' origin.
+        let floor_y =
+            motion().position.y + CarProfile::of(&VehicleConfig::default()).ray_y - RAY_HEIGHT;
+        let o = see(&motion(), &straight(), 0.0, &[], |origin, dir, reach| {
+            if dir.y >= -1e-3 {
+                return None;
+            }
+            let d = (floor_y - origin.y) / dir.y;
+            (d <= reach).then_some((d, Vec3::Y))
+        });
+        for (k, f) in o[FLOOR_AT..NEIGHBOURS_AT].iter().enumerate() {
+            assert!((f - 1.0).abs() < 1e-3, "probe {k}: {f}");
+        }
     }
 
     #[test]

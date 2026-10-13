@@ -18,6 +18,13 @@
 //! somewhere else, so the field never empties and one environment
 //! yields `agents` transitions per decision.
 //!
+//! Around the agents drive *drones*: cars nobody is training, parked
+//! in the road or pottering along a line at traffic pace, so there is
+//! always something to steer round. And every so often a handful of
+//! agents are pulled out and lined up on a race's real starting grid,
+//! with a drone where the player would be, because a standing start in
+//! a pack is its own skill.
+//!
 //! One decision lasts [`EnvConfig::decision_ticks`] physics steps.
 //! The reward is progress along the guide, less the speed lost in
 //! impacts, less a little for sawing at the wheel; see [`Rewards`].
@@ -52,8 +59,17 @@ const HZ: f64 = 60.0;
 pub struct EnvConfig {
     /// City stem (`sf`, `london`).
     pub city: String,
+    /// Event stem (`race3`, `circuit0`) whose world and lines to load:
+    /// its course barricades, parked cars and drawbridges, and the
+    /// lines of its two rosters. `None` loads the city as it stands in
+    /// cruise, with every event's lines — props that fence one race's
+    /// course are then missing from it.
+    pub event: Option<String>,
     /// Cars driving at once.
     pub agents: usize,
+    /// Cars in the way: parked or driven at traffic pace by a crude
+    /// line follower, never trained.
+    pub drones: usize,
     /// Seed for every random choice the environment makes.
     pub seed: u64,
     /// Physics steps per decision (3 = 20 Hz).
@@ -71,7 +87,9 @@ impl Default for EnvConfig {
     fn default() -> Self {
         Self {
             city: "sf".into(),
+            event: None,
             agents: 16,
+            drones: 4,
             seed: 1,
             decision_ticks: 3,
             threads: 1,
@@ -131,6 +149,15 @@ pub struct Starts {
     pub speed: f32,
     /// Share of ordinary starts that begin at a standstill.
     pub standing: f32,
+    /// Decisions between staged grid starts — a group of agents pulled
+    /// onto a race's real starting grid together. 0 stages none.
+    pub grid_period: u32,
+    /// Share of episodes driven at full throttle; the rest draw a
+    /// throttle ceiling between `throttle_floor` and 1, as the authored
+    /// `maxThrottle` gives the game's opponents.
+    pub full_throttle: f32,
+    /// Lowest throttle ceiling an episode may draw.
+    pub throttle_floor: f32,
 }
 
 impl Default for Starts {
@@ -143,6 +170,9 @@ impl Default for Starts {
             heading: 0.2,
             speed: 20.0,
             standing: 0.25,
+            grid_period: 500,
+            full_throttle: 0.6,
+            throttle_floor: 0.55,
         }
     }
 }
@@ -186,6 +216,19 @@ const UPENDED_SECONDS: f32 = 3.0;
 const EPISODE_SECONDS: f32 = 150.0;
 /// Metres short of an open guide's end at which an agent has finished.
 const FINISH_MARGIN: f32 = 4.0;
+/// ... if it is also within this distance (m, XZ) of the end itself: a
+/// car that ran wide of the last bend has not arrived.
+const FINISH_RADIUS: f32 = 10.0;
+/// Most agents one staged grid start takes.
+const GRID_MOST: usize = 8;
+/// Seconds a drone stays where it is put, at least and at most.
+const DRONE_SECONDS: (f32, f32) = (20.0, 60.0);
+/// How far ahead of an agent (m) a drone is put, nearest and furthest.
+const DRONE_AHEAD: (f32, f32) = (40.0, 160.0);
+/// Pace (m/s) a moving drone holds, slowest and fastest.
+const DRONE_PACE: (f32, f32) = (6.0, 16.0);
+/// Share of drones that stand still.
+const DRONE_PARKED: f32 = 0.4;
 /// Clearance (m) a fresh start keeps from every other agent.
 const START_CLEAR: f32 = 9.0;
 /// Attempts at finding a clear, grounded start before giving up on the
@@ -208,6 +251,10 @@ pub struct Episode {
     pub car: u32,
     /// Speed lost to impacts (m/s, summed).
     pub impacts: f32,
+    /// Arc position on the line where it ended.
+    pub arc: f32,
+    /// World position where it ended.
+    pub position: Vec3,
 }
 
 /// A car that can be driven.
@@ -229,6 +276,27 @@ pub struct Line {
     pub field: String,
     /// Where the roster stages this line's car: position and heading.
     pub grid: (Vec3, f32),
+    /// The roster's `maxThrottle` for this line's driver.
+    pub throttle_cap: f32,
+}
+
+/// One race's field: the lines of one event at one difficulty.
+pub struct Field {
+    /// Event stem and difficulty (`race3/p`).
+    pub name: String,
+    /// Indices of its lines.
+    pub lines: Vec<usize>,
+    /// Where the player's car stands on its grid.
+    pub player: (Vec3, f32),
+}
+
+/// What a drone does.
+#[derive(Debug, Clone, Copy)]
+struct Drone {
+    /// Pace it holds (m/s); 0 stands still on the handbrake.
+    pace: f32,
+    /// Decisions left before it is put somewhere else.
+    left: u32,
 }
 
 struct Slot {
@@ -252,8 +320,13 @@ struct Slot {
     /// Horizontal velocity after the previous physics step.
     last_velocity: Vec3,
     motion: Motion,
+    /// The most throttle this driver's pedal is given.
+    throttle_cap: f32,
     /// Out of a staged field: its episode ended and nothing replaced it.
+    /// For a drone: nowhere to put it just now.
     retired: bool,
+    /// Set on a drone.
+    drone: Option<Drone>,
 }
 
 type Probe<'w, 's> = (
@@ -287,8 +360,12 @@ pub struct DrivingEnv {
     lines: Vec<Line>,
     water: Option<crate::water::CityWater>,
     floor: f32,
+    fields: Vec<Field>,
     slots: Vec<Slot>,
+    drones: Vec<Slot>,
     rng: NavRng,
+    /// Decisions stepped.
+    clock: u64,
     /// Whether the agents are a staged race field ([`Self::stage_field`])
     /// rather than a self-renewing training field.
     staged: bool,
@@ -310,22 +387,59 @@ fn yaw_of(dir: Vec3) -> f32 {
     (-dir.x).atan2(-dir.z)
 }
 
+/// What an environment draws its agents from.
+struct Content {
+    cars: Vec<CarKind>,
+    lines: Vec<Line>,
+    fields: Vec<Field>,
+    /// Logical paths of the loaded event's `.pathset` overlays.
+    pathsets: Vec<String>,
+}
+
+/// The stems of `city`'s checkpoint and circuit races that are ready to
+/// load — what [`EnvConfig::event`] may name.
+pub fn race_events(vfs: &Vfs, city: &str) -> Vec<String> {
+    EventCatalog::scan(vfs, city)
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event_ref.table,
+                EventTableKind::Checkpoint | EventTableKind::Circuit
+            ) && e.status.is_ready()
+        })
+        .map(|e| e.stem.clone())
+        .collect()
+}
+
 /// Every drivable opponent line of `city`'s checkpoint and circuit
-/// races at both difficulties, with the cars their rosters field.
-fn load_lines(vfs: &Vfs, city: &str) -> Result<(Vec<CarKind>, Vec<Line>), EnvError> {
+/// races (or of `only` one) at both difficulties, with the cars their
+/// rosters field.
+fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>) -> Result<Content, EnvError> {
     let nav = mm2_content::load_routing_nav_graph(vfs, city)
         .map_err(|e| EnvError(format!("nav graph: {e}")))?
         .graph;
     let catalog = EventCatalog::scan(vfs, city);
     let mut cars: Vec<CarKind> = Vec::new();
     let mut lines = Vec::new();
+    let mut fields = Vec::new();
+    let mut pathsets = Vec::new();
     for event in &catalog.events {
         if !matches!(
             event.event_ref.table,
             EventTableKind::Checkpoint | EventTableKind::Circuit
         ) || !event.status.is_ready()
+            || only.is_some_and(|stem| stem != event.stem)
         {
             continue;
+        }
+        if only.is_some() {
+            pathsets = event
+                .records
+                .iter()
+                .filter(|r| r.kind == mm2_formats::racefiles::RaceFileKind::Pathset)
+                .map(|r| r.logical.clone())
+                .collect();
         }
         for (difficulty, tag) in [(Difficulty::Amateur, 'a'), (Difficulty::Professional, 'p')] {
             let Ok(definition) = mm2_content::race_definition(event, difficulty) else {
@@ -339,6 +453,11 @@ fn load_lines(vfs: &Vfs, city: &str) -> Result<(Vec<CarKind>, Vec<Line>), EnvErr
                 .first()
                 .map(|s| (s.position, s.yaw_deg.unwrap_or(0.0).to_radians()))
                 .unwrap_or((Vec3::ZERO, 0.0));
+            let mut field = Field {
+                name: format!("{}/{tag}", event.stem),
+                lines: Vec::new(),
+                player: (player_pos, player_yaw),
+            };
             for (i, spec) in roster.entries.iter().enumerate() {
                 let Some(route) = &spec.route else { continue };
                 let car = match cars.iter().position(|c| c.id == spec.vehicle) {
@@ -365,26 +484,48 @@ fn load_lines(vfs: &Vfs, city: &str) -> Result<(Vec<CarKind>, Vec<Line>), EnvErr
                 if guide.length() < 200.0 {
                     continue;
                 }
+                field.lines.push(lines.len());
                 lines.push(Line {
                     label: format!("{}/{tag}/{i}", event.stem),
                     guide: Arc::new(guide),
                     car,
-                    field: format!("{}/{tag}", event.stem),
+                    field: field.name.clone(),
                     grid: (pos, yaw),
+                    throttle_cap: spec
+                        .drive_params()
+                        .max_throttle
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0),
                 });
+            }
+            if !field.lines.is_empty() {
+                fields.push(field);
             }
         }
     }
     if lines.is_empty() {
-        return Err(EnvError(format!("{city}: no drivable opponent lines")));
+        return Err(EnvError(format!(
+            "{city}{}: no drivable opponent lines",
+            only.map(|e| format!("/{e}")).unwrap_or_default()
+        )));
     }
-    Ok((cars, lines))
+    Ok(Content {
+        cars,
+        lines,
+        fields,
+        pathsets,
+    })
 }
 
 impl DrivingEnv {
     /// Build the world and seat the first field of agents.
     pub fn new(vfs: &Vfs, config: EnvConfig) -> Result<Self, EnvError> {
-        let (cars, lines) = load_lines(vfs, &config.city)?;
+        let Content {
+            cars,
+            lines,
+            fields,
+            pathsets,
+        } = load_lines(vfs, &config.city, config.event.as_deref())?;
 
         let mut session = Session::new();
         session
@@ -411,6 +552,7 @@ impl DrivingEnv {
         .add_systems(
             FixedLast,
             (
+                crate::drawbridge::drive_drawbridges,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
             )
@@ -431,17 +573,57 @@ impl DrivingEnv {
                     Assets::<Image>::default(),
                     Assets::<StandardMaterial>::default(),
                 );
-                city::load_city(
+                let owner = mm2_game::SessionEntity(session.generation());
+                let loaded = city::load_city(
                     &mut commands,
                     vfs,
                     &format!("city/{}.psdl", config.city),
                     &mut meshes,
                     &mut images,
                     &mut materials,
-                    mm2_game::SessionEntity(session.generation()),
+                    owner,
                     &mut session,
                 )
-                .map_err(|e| EnvError(format!("city: {e:?}")))?
+                .map_err(|e| EnvError(format!("city: {e:?}")))?;
+                // What a session adds to the bare city, in its order:
+                // the event's course props, then the drawbridge leaves
+                // (the road under them is a hole without) and the
+                // kerbside parked cars — the event's own files when it
+                // ships them, the city's otherwise.
+                let stem = config.event.as_deref();
+                city::spawn_event_pathsets(
+                    &mut commands,
+                    vfs,
+                    &pathsets,
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                    owner,
+                    &mut session,
+                );
+                crate::drawbridge::spawn_drawbridges(
+                    &mut commands,
+                    vfs,
+                    &config.city,
+                    stem,
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                    owner,
+                );
+                city::spawn_parked_cars(
+                    &mut commands,
+                    vfs,
+                    &config.city,
+                    stem,
+                    config.seed,
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                    owner,
+                    &mut session,
+                );
+                loaded
             };
             queue.apply(world);
             loaded
@@ -471,14 +653,27 @@ impl DrivingEnv {
             lines,
             water: loaded.water,
             floor: loaded.floor.map_or(-1.0e4, |f| f.0),
+            fields,
             slots: Vec::new(),
+            drones: Vec::new(),
             rng: NavRng::new(config.seed),
+            clock: 0,
             staged: false,
             config,
         };
         for _ in 0..env.config.agents {
             let slot = env.fresh_slot(None);
             env.slots.push(slot);
+        }
+        if !env.slots.is_empty() {
+            for i in 0..env.config.drones {
+                let drone = env.fresh_drone();
+                env.drones.push(drone);
+                // Spread the first moves out.
+                if let Some(d) = &mut env.drones[i].drone {
+                    d.left = d.left * (i as u32 + 1) / env.config.drones as u32;
+                }
+            }
         }
         Ok(env)
     }
@@ -527,7 +722,10 @@ impl DrivingEnv {
     ) -> Option<Vec3> {
         let near = self.slots.iter().enumerate().any(|(i, s)| {
             Some(i) != skip && !s.retired && s.motion.position.distance(pos) < START_CLEAR
-        });
+        }) || self
+            .drones
+            .iter()
+            .any(|d| !d.retired && d.motion.position.distance(pos) < START_CLEAR);
         if near {
             return None;
         }
@@ -615,9 +813,126 @@ impl DrivingEnv {
             if pos.distance(guide.point_at(s)) > OFF_ROUTE_HEIGHT {
                 continue;
             }
-            return self.spawn(line, car, pos, yaw, speed, s);
+            let mut slot = self.spawn(line, car, pos, yaw, speed, s);
+            if self.rng.next_f32() >= starts.full_throttle {
+                slot.throttle_cap = self.uniform(starts.throttle_floor, 1.0);
+            }
+            return slot;
         }
         unreachable!("the start search only leaves by returning")
+    }
+
+    /// A drone put down ahead of some agent on that agent's line — or a
+    /// retired placeholder when no clear spot turns up, to be tried
+    /// again shortly.
+    fn fresh_drone(&mut self) -> Slot {
+        let per_second = HZ as f32 / self.config.decision_ticks as f32;
+        for _ in 0..START_TRIES {
+            let agents: Vec<usize> = (0..self.slots.len())
+                .filter(|&i| !self.slots[i].retired)
+                .collect();
+            if agents.is_empty() {
+                break;
+            }
+            let agent = agents[self.pick(agents.len())];
+            let line = self.slots[agent].line;
+            let guide = self.lines[line].guide.clone();
+            let s = self.slots[agent].s + self.uniform(DRONE_AHEAD.0, DRONE_AHEAD.1);
+            if !guide.is_closed() && s > guide.length() - 60.0 {
+                continue;
+            }
+            let s = guide.normalize(s);
+            let parked = self.rng.next_f32() < DRONE_PARKED;
+            let pace = if parked {
+                0.0
+            } else {
+                self.uniform(DRONE_PACE.0, DRONE_PACE.1)
+            };
+            let tangent = guide.tangent_at(s);
+            let right = Vec3::new(-tangent.z, 0.0, tangent.x).normalize_or_zero();
+            let lateral = self.uniform(-4.0, 4.0);
+            // A parked car may stand at any angle; a moving one points
+            // down the road.
+            let yaw = yaw_of(tangent)
+                + if parked && self.rng.next_f32() < 0.3 {
+                    self.uniform(-1.6, 1.6)
+                } else {
+                    self.uniform(-0.1, 0.1)
+                };
+            let car = self.pick(self.cars.len());
+            let config = self.cars[car].config.clone();
+            let Some(pos) = self.seat(&config, guide.point_at(s) + right * lateral, yaw, None)
+            else {
+                continue;
+            };
+            let mut slot = self.spawn(line, car, pos, yaw, pace, s);
+            slot.drone = Some(Drone {
+                pace,
+                left: (self.uniform(DRONE_SECONDS.0, DRONE_SECONDS.1) * per_second) as u32,
+            });
+            return slot;
+        }
+        // Nowhere just now: a placeholder that retries in a second.
+        let mut slot = self.blank_slot();
+        slot.drone = Some(Drone {
+            pace: 0.0,
+            left: per_second as u32,
+        });
+        slot
+    }
+
+    /// A slot with no car in the world behind it.
+    fn blank_slot(&self) -> Slot {
+        Slot {
+            entity: Entity::PLACEHOLDER,
+            car: 0,
+            line: 0,
+            guide: self.lines[0].guide.clone(),
+            s: 0.0,
+            odometer: 0.0,
+            best: 0.0,
+            since_best: 0,
+            upended: 0,
+            steps: 0,
+            ret: 0.0,
+            impacts: 0.0,
+            last_action: [0.0; ACT_DIM],
+            last_velocity: Vec3::ZERO,
+            motion: Motion {
+                position: Vec3::splat(1.0e9),
+                rotation: Quat::IDENTITY,
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+                steer_angle: 0.0,
+                grounded: 0.0,
+                reversing: false,
+            },
+            throttle_cap: 1.0,
+            retired: true,
+            drone: None,
+        }
+    }
+
+    /// The pedals of a drone: the handbrake for a parked one, else steer
+    /// at the line a little way ahead and hold the pace.
+    fn drone_input(slot: &Slot, drone: Drone) -> VehicleInput {
+        if drone.pace <= 0.0 {
+            return VehicleInput {
+                handbrake: 1.0,
+                ..default()
+            };
+        }
+        let fwd = slot.motion.rotation * Vec3::NEG_Z;
+        let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+        let aim = slot.guide.point_at(slot.s + 14.0) - slot.motion.position;
+        let bearing = aim.dot(right).atan2(aim.dot(fwd));
+        let speed = slot.motion.linear_velocity.dot(fwd);
+        VehicleInput {
+            steering: (bearing * 2.0).clamp(-1.0, 1.0),
+            throttle: if speed < drone.pace { 0.6 } else { 0.0 },
+            brake: if speed > drone.pace + 3.0 { 0.5 } else { 0.0 },
+            ..default()
+        }
     }
 
     /// Put `car` on `line` at `pos` facing `yaw`, rolling at `speed`,
@@ -631,6 +946,14 @@ impl DrivingEnv {
         let entity = world
             .spawn((
                 vehicle_bundle(config),
+                // A participant like the game's opponents: the proximity
+                // drawbridges open for `Player` cars. Nothing here reads
+                // the id, and agents are replaced far more often than
+                // the session can mint one.
+                mm2_game::Player {
+                    id: mm2_game::PlayerId(0),
+                    control: mm2_game::PlayerControl::Ai,
+                },
                 CollidingEntities::default(),
                 Position(pos),
                 Rotation(rotation),
@@ -665,7 +988,9 @@ impl DrivingEnv {
                 grounded: 1.0,
                 reversing: false,
             },
+            throttle_cap: 1.0,
             retired: false,
+            drone: None,
         }
     }
 
@@ -674,7 +999,10 @@ impl DrivingEnv {
     /// end are retired, not replaced — step until [`Self::running`]
     /// reaches zero. For evaluating a policy on whole races.
     pub fn stage_field(&mut self, lines: &[usize]) {
-        for slot in std::mem::take(&mut self.slots) {
+        let old = std::mem::take(&mut self.slots)
+            .into_iter()
+            .chain(std::mem::take(&mut self.drones));
+        for slot in old {
             if !slot.retired {
                 self.app.world_mut().despawn(slot.entity);
             }
@@ -688,9 +1016,15 @@ impl DrivingEnv {
                 .ground(&config, pos, yaw)
                 .unwrap_or(pos + Vec3::Y * opponents::reanchor_lift(&config));
             let s = self.lines[line].guide.locate(pos);
-            let slot = self.spawn(line, car, pos, yaw, 0.0, s);
+            let mut slot = self.spawn(line, car, pos, yaw, 0.0, s);
+            slot.throttle_cap = self.lines[line].throttle_cap;
             self.slots.push(slot);
         }
+    }
+
+    /// The race fields this environment can stage.
+    pub fn fields(&self) -> &[Field] {
+        &self.fields
     }
 
     /// Agents still driving.
@@ -727,7 +1061,9 @@ impl DrivingEnv {
             .iter()
             .enumerate()
             .filter(|(j, o)| *j != i && !o.retired)
-            .map(|(_, o)| {
+            .map(|(_, o)| o)
+            .chain(self.drones.iter().filter(|d| !d.retired))
+            .map(|o| {
                 let profile = &self.cars[o.car].profile;
                 Neighbour {
                     position: o.motion.position,
@@ -748,13 +1084,15 @@ impl DrivingEnv {
             .get(self.app.world())
             .expect("the probe reads only what the physics plugins provide");
         let filter = SpatialQueryFilter::default();
+        let water = self.water.as_ref();
         let cast = |origin: Vec3, dir: Vec3, reach: f32| -> Option<RayHit> {
-            let dir = Dir3::new(dir).ok()?;
-            spatial
-                .cast_ray_predicate(origin, dir, reach, true, &filter, &|e| {
-                    !vehicles.contains(e)
-                })
-                .map(|hit| (hit.distance, hit.normal))
+            let unit = Dir3::new(dir).ok()?;
+            let hit = spatial.cast_ray_predicate(origin, unit, reach, true, &filter, &|e| {
+                !vehicles.contains(e)
+            })?;
+            // Deadly water is no ground to drive on.
+            let point = origin + dir * hit.distance;
+            (!water.is_some_and(|w| w.is_deadly(point))).then_some((hit.distance, hit.normal))
         };
         observe(
             out,
@@ -764,6 +1102,7 @@ impl DrivingEnv {
             slot.s,
             &slot.last_action,
             &neighbours,
+            slot.throttle_cap,
             cast,
         );
     }
@@ -791,7 +1130,37 @@ impl DrivingEnv {
             steer_change[i] = action[0] - slot.last_action[0];
             slot.last_action = action;
             if let Some(mut input) = self.app.world_mut().get_mut::<VehicleInput>(slot.entity) {
-                *input = action_input(&action, 1.0);
+                *input = action_input(&action, slot.throttle_cap);
+            }
+        }
+        for slot in &self.drones {
+            if let (false, Some(drone)) = (slot.retired, slot.drone)
+                && let Some(mut input) = self.app.world_mut().get_mut::<VehicleInput>(slot.entity)
+            {
+                *input = Self::drone_input(slot, drone);
+            }
+        }
+        // A staged grid start falls due: the longest-running agents are
+        // cut short this step and lined up on one race's grid.
+        self.clock += 1;
+        let period = self.config.starts.grid_period as u64;
+        let mut grid: Vec<(usize, usize)> = Vec::new();
+        if !self.staged
+            && period > 0
+            && self.clock.is_multiple_of(period)
+            && !self.fields.is_empty()
+        {
+            let field = self.pick(self.fields.len());
+            let mut oldest: Vec<usize> = (0..n).collect();
+            oldest.sort_by_key(|&i| std::cmp::Reverse(self.slots[i].steps));
+            let take = self.fields[field].lines.len().min(GRID_MOST).min(n / 3);
+            grid = oldest
+                .into_iter()
+                .zip(self.fields[field].lines.iter().copied())
+                .take(take)
+                .collect();
+            if !grid.is_empty() && !self.drones.is_empty() {
+                self.stage_player(field);
             }
         }
 
@@ -863,17 +1232,20 @@ impl DrivingEnv {
                     end = Some(End::Upended);
                 } else if slot.since_best as f32 > STALL_SECONDS * decisions_per_second {
                     end = Some(End::Stalled);
-                } else if slot
+                } else if (slot
                     .guide
                     .remaining(s)
                     .is_some_and(|left| left < FINISH_MARGIN)
+                    && off.x.hypot(off.z) < FINISH_RADIUS)
                     // A staged field's circuit is one lap long.
                     || (self.staged
                         && slot.guide.is_closed()
                         && slot.odometer >= slot.guide.length())
                 {
                     end = Some(End::Finished);
-                } else if !self.staged && slot.steps as f32 > EPISODE_SECONDS * decisions_per_second
+                } else if !self.staged
+                    && (slot.steps as f32 > EPISODE_SECONDS * decisions_per_second
+                        || grid.iter().any(|&(agent, _)| agent == i))
                 {
                     end = Some(End::TimeLimit);
                 }
@@ -910,16 +1282,32 @@ impl DrivingEnv {
                 line: slot.line as u32,
                 car: slot.car as u32,
                 impacts: slot.impacts,
+                arc: slot.s,
+                position: slot.motion.position,
             });
             let old = slot.entity;
             self.app.world_mut().despawn(old);
             if self.staged {
                 self.slots[i].retired = true;
+            } else if let Some(&(_, line)) = grid.iter().find(|&&(agent, _)| agent == i) {
+                // Its place on the staged grid, in the roster's car at
+                // the roster's throttle.
+                let car = self.lines[line].car;
+                let (pos, yaw) = self.lines[line].grid;
+                let config = self.cars[car].config.clone();
+                let pos = self
+                    .ground(&config, pos, yaw)
+                    .unwrap_or(pos + Vec3::Y * opponents::reanchor_lift(&config));
+                let s = self.lines[line].guide.locate(pos);
+                let mut fresh = self.spawn(line, car, pos, yaw, 0.0, s);
+                fresh.throttle_cap = self.lines[line].throttle_cap;
+                self.slots[i] = fresh;
             } else {
                 let fresh = self.fresh_slot(Some(i));
                 self.slots[i] = fresh;
             }
         }
+        self.step_drones();
         for i in 0..n {
             let (a, b) = (i * OBS_DIM, (i + 1) * OBS_DIM);
             // `out.obs` is detached from `self` while it is filled.
@@ -928,6 +1316,139 @@ impl DrivingEnv {
             out.obs[a..b].copy_from_slice(&row);
         }
         out
+    }
+
+    /// Follow the drones through the step just taken and move on any
+    /// whose time is up, that wrecked, or that ran out of line.
+    fn step_drones(&mut self) {
+        for i in 0..self.drones.len() {
+            let Some(mut drone) = self.drones[i].drone else {
+                continue;
+            };
+            drone.left = drone.left.saturating_sub(1);
+            let mut spent = drone.left == 0;
+            if !self.drones[i].retired {
+                match Self::read_motion(self.app.world(), self.drones[i].entity) {
+                    Some(m) if m.position.is_finite() => {
+                        let slot = &mut self.drones[i];
+                        slot.motion = m;
+                        slot.s = slot.guide.advance(slot.s, m.position);
+                        let off = m.position - slot.guide.point_at(slot.s);
+                        spent |= (m.rotation * Vec3::Y).y < 0.2
+                            || m.position.y < self.floor
+                            || off.x.hypot(off.z) > OFF_ROUTE
+                            || slot.guide.remaining(slot.s).is_some_and(|left| left < 30.0)
+                            || self.water.as_ref().is_some_and(|w| w.is_deadly(m.position));
+                    }
+                    _ => spent = true,
+                }
+            }
+            if spent {
+                if !self.drones[i].retired {
+                    let old = self.drones[i].entity;
+                    self.app.world_mut().despawn(old);
+                    self.drones[i].retired = true;
+                }
+                let fresh = self.fresh_drone();
+                self.drones[i] = fresh;
+            } else {
+                self.drones[i].drone = Some(drone);
+            }
+        }
+    }
+
+    /// Put a drone where the player's car stands on `field`'s grid:
+    /// parked there, or setting off down one of the field's lines.
+    fn stage_player(&mut self, field: usize) {
+        let per_second = HZ as f32 / self.config.decision_ticks as f32;
+        let (pos, yaw) = self.fields[field].player;
+        let lines = self.fields[field].lines.clone();
+        let line = lines[self.pick(lines.len())];
+        let car = self.pick(self.cars.len());
+        let config = self.cars[car].config.clone();
+        let Some(pos) = self.ground(&config, pos, yaw) else {
+            return;
+        };
+        if !self.drones[0].retired {
+            let old = self.drones[0].entity;
+            self.app.world_mut().despawn(old);
+        }
+        let pace = if self.rng.next_f32() < 0.5 {
+            0.0
+        } else {
+            self.uniform(DRONE_PACE.0, DRONE_PACE.1)
+        };
+        let s = self.lines[line].guide.locate(pos);
+        let mut slot = self.spawn(line, car, pos, yaw, 0.0, s);
+        slot.drone = Some(Drone {
+            pace,
+            left: (DRONE_SECONDS.1 * per_second) as u32,
+        });
+        self.drones[0] = slot;
+    }
+
+    /// Walk `line` in `step`-metre strides and report where it cannot
+    /// be driven as drawn: no ground under it (`"void"`), deadly water
+    /// (`"water"`), ground more than 3 m off the line's own height
+    /// (`"level"`), or a stride that passes through something solid a
+    /// metre above the road (`"wall"`). Each entry is the arc position,
+    /// the point and what is wrong there. A line can be fine to drive
+    /// and still be flagged — a jump has no ground under it — so this
+    /// is a list of places to look, not of faults.
+    pub fn audit_line(&mut self, line: usize, step: f32) -> Vec<(f32, Vec3, &'static str)> {
+        let guide = self.lines[line].guide.clone();
+        let mut found = Vec::new();
+        let Ok((spatial, bodies, colliders, vehicles)) = self.probe.get(self.app.world()) else {
+            return found;
+        };
+        let filter = SpatialQueryFilter::default();
+        let solid = |e: Entity| {
+            let body = colliders.get(e).map_or(e, |c| c.body);
+            !vehicles.contains(e) && bodies.get(body).is_ok_and(|b| b.is_static())
+        };
+        let ground_at = |p: Vec3| -> Option<Vec3> {
+            spatial
+                .cast_ray_predicate(p + Vec3::Y * 4.0, Dir3::NEG_Y, 30.0, false, &filter, &solid)
+                .map(|hit| p + Vec3::Y * (4.0 - hit.distance))
+        };
+        let mut s = 0.0;
+        let mut last: Option<Vec3> = None;
+        while s < guide.length() {
+            let p = guide.point_at(s);
+            match ground_at(p) {
+                None => {
+                    found.push((s, p, "void"));
+                    last = None;
+                }
+                Some(g) if self.water.as_ref().is_some_and(|w| w.is_deadly(g)) => {
+                    found.push((s, p, "water"));
+                    last = None;
+                }
+                Some(g) => {
+                    if (g.y - p.y).abs() > 3.0 {
+                        found.push((s, p, "level"));
+                    }
+                    let here = g + Vec3::Y;
+                    if let Some(from) = last
+                        && let Ok(dir) = Dir3::new(here - from)
+                        && let Some(hit) = spatial.cast_ray_predicate(
+                            from,
+                            dir,
+                            from.distance(here),
+                            true,
+                            &filter,
+                            &solid,
+                        )
+                        && hit.normal.y < 0.7
+                    {
+                        found.push((s, p, "wall"));
+                    }
+                    last = Some(here);
+                }
+            }
+            s += step;
+        }
+        found
     }
 
     /// Rigid bodies in the world as (dynamic, kinematic, static,
