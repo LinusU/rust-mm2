@@ -163,7 +163,6 @@ restores `CollisionLayers::default()`.
 |---|---|---|
 | 60 frames, wall | 3.1 s | 1.8 s |
 | 1000 frames, wall | 36.1 s (user 83 s) | 9.5-11.5 s (user 12-15 s) |
-| contact pairs at tick 250 | 42,924 | see `MM2_SMOKE_DIAG` (the static-static sensor pairs are gone) |
 
 Both runs were on a loaded machine (load average 8-15, other agents
 building), so read the ratio, not the seconds. Release (after the fix only,
