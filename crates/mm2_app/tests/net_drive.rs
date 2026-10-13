@@ -2859,7 +2859,11 @@ fn a_networked_retail_race_agrees_across_an_impaired_link() {
         client.wait().success(),
         "the client did not exit cleanly: {rec}"
     );
-    let host_rec = host.until_within("smoke=headless-physics", bound);
+    // Unlike the client (whose own `--frames` budget is a floor under
+    // `bound`), the host has no `quit` path here, so its 90 000-frame
+    // cap — not `bound` — decides when its terminal record prints; bound
+    // that wait by the cap.
+    let host_rec = host.until_within("smoke=headless-physics", host.budget().unwrap_or(bound));
     assert!(
         host.wait().success(),
         "the host did not exit cleanly: {host_rec}"

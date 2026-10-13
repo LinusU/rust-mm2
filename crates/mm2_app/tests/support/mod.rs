@@ -20,13 +20,12 @@ use std::time::{Duration, Instant};
 use mm2_assets::{InstallMount, Vfs, mount_install};
 use mm2_game::{EventRef, EventTableKind};
 
-/// How long a leg waits for one record from a child that declared no
-/// `--frames` drive budget of its own: a `--host` (whose cap is only a
-/// ceiling an operator's `quit` ends) and the fixture `Proc`s that run
-/// a handful of frames. A `--join` client's bound is *derived* from its
-/// own frame budget instead — see [`drive_bound`] and [`Proc::bound`] —
-/// because a client with no `--until-*` condition runs that budget in
-/// full, and the headless run's clock is CPU, not wall time.
+/// How long a leg waits for one record from a child whose `--frames` is
+/// no run budget: a `--host` (its cap is a ceiling an operator's `quit`
+/// ends, not a length) and the fixture `Proc`s that run a handful of
+/// frames. A child that *runs* its budget to the end — a `--join`
+/// client with no `--until-*` condition — gets a bound derived from it
+/// instead; see [`drive_bound`] and [`Proc::bound`].
 pub const WAIT: Duration = Duration::from_secs(15);
 
 /// Wall-clock bound for a `--join` client that must run `frames` fixed
@@ -40,8 +39,11 @@ pub const WAIT: Duration = Duration::from_secs(15);
 /// fixed 15 s or 120 s wait therefore expires while such a child is
 /// still computing — the trap `NET-TIMEOUT-HARNESS` was filed for.
 ///
-/// `MM2_NET_BOUND_MS_PER_FRAME` overrides the per-update allowance
-/// (lower it to make a genuine failure surface sooner).
+/// Only a *run* budget is derived from; a `--frames` above
+/// [`RUN_FRAMES_MAX`] is a ceiling the child is quit from, and no wait
+/// is taken from it. `MM2_NET_BOUND_MS_PER_FRAME` overrides the
+/// per-update allowance (lower it to make a genuine failure surface
+/// sooner).
 pub fn drive_bound(frames: u32) -> Duration {
     // Startup + city/world load, measured ~2 s on a dev world and ~5 s
     // on a retail city; 60 s leaves room for a loaded machine.
@@ -52,6 +54,13 @@ pub fn drive_bound(frames: u32) -> Duration {
         .unwrap_or(30);
     STARTUP + Duration::from_millis(per_ms.saturating_mul(u64::from(frames)))
 }
+
+/// The largest `--frames` that is a *run budget* a child works through
+/// rather than a ceiling it is quit from. The racing legs run up to
+/// 90 000 frames; the suite's deliberate never-reached ceiling is
+/// 500 000. A value above this is treated as no budget at all, so a
+/// quit-from cap can never inflate a wait.
+const RUN_FRAMES_MAX: u32 = 200_000;
 
 /// The `--frames N` / `--frames=N` budget of a child's argv, if any.
 fn frames_budget(args: &[String]) -> Option<u32> {
@@ -64,6 +73,13 @@ fn frames_budget(args: &[String]) -> Option<u32> {
             None
         }
     })
+}
+
+/// The child's *run* budget ([`RUN_FRAMES_MAX`]) as a wall-clock bound.
+fn run_budget(args: &[String]) -> Option<Duration> {
+    frames_budget(args)
+        .filter(|f| *f <= RUN_FRAMES_MAX)
+        .map(drive_bound)
 }
 
 /// How many retail two-process legs run at once. Each child mounts the
@@ -120,9 +136,9 @@ pub struct Proc {
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
     stderr: Arc<Mutex<String>>,
-    /// How long this child may be silent before a wait fails. A
-    /// `--join` client gets its own bound derived from its `--frames`
-    /// budget ([`drive_bound`]); everything else the [`WAIT`] floor.
+    /// How long this child may be silent before a wait fails. A child
+    /// that runs its `--frames` budget gets a bound derived from it
+    /// ([`drive_bound`]); everything else the [`WAIT`] floor.
     bound: Duration,
     /// What spawned this child and when — the failure diagnostic's
     /// "child's state" half. A wait that fails has to say whether the
@@ -138,10 +154,18 @@ pub struct Proc {
 }
 
 impl Proc {
-    /// The bound this child's waits use — its own derived budget for a
-    /// `--join` client, else [`WAIT`].
+    /// The bound this child's waits use — its own `--frames`-derived
+    /// budget for a `--join` client, else [`WAIT`].
     pub fn bound(&self) -> Duration {
         self.bound
+    }
+
+    /// The child's run budget as a wall-clock bound ([`drive_bound`]),
+    /// if it declared one — for a leg that *knows* the cap, not a
+    /// caller's bound, decides when a record prints (a `--host` with no
+    /// `quit` path). `None` for a child with no run budget.
+    pub fn budget(&self) -> Option<Duration> {
+        run_budget(&self.args)
     }
 
     /// Spawn `exe` with its stdout on the record channel. The child's
@@ -189,10 +213,12 @@ impl Proc {
                 }
             }
         });
-        // A `--join` client runs its whole frame budget; a `--host`'s
-        // cap is only a ceiling its operator's `quit` ends.
+        // A `--join` client runs its whole frame budget (its `--frames`
+        // is its run length); a `--host`'s cap is only a ceiling its
+        // operator's `quit` ends, so it keeps the short floor here and
+        // a leg that awaits a run-to-cap host asks for `budget()`.
         let bound = if args.iter().any(|a| a == "--join") {
-            frames_budget(args).map_or(WAIT, drive_bound)
+            run_budget(args).unwrap_or(WAIT)
         } else {
             WAIT
         };
