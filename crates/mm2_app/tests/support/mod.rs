@@ -33,17 +33,19 @@ pub const WAIT: Duration = Duration::from_secs(15);
 /// condition ends it earlier.
 ///
 /// The headless runner steps once per update on CPU (`ManualDuration`,
-/// no real-time pacing), so a frame budget is wall-clock work: measured
-/// ~20 ms/update for a debug retail session on an idle 8-core M1, and
-/// several times that on a machine shared with other agents' builds. A
-/// fixed 15 s or 120 s wait therefore expires while such a child is
-/// still computing — the trap `NET-TIMEOUT-HARNESS` was filed for.
+/// no real-time pacing), so a frame budget is wall-clock work. Measured
+/// on this 8-core M1: ~20 ms/update idle, ~23 ms/update with other
+/// agents building, and ~57 ms/update for a parked client driving a
+/// decided match while a 40 000-update host runs beside it. The
+/// allowance below (100 ms/update) is well clear of the slowest of
+/// those, and a fixed 15 s or 120 s wait is nowhere near any of them —
+/// the trap `NET-TIMEOUT-HARNESS` was filed for.
 ///
 /// Only a *run* budget is derived from; a `--frames` above
 /// [`RUN_FRAMES_MAX`] is a ceiling the child is quit from, and no wait
-/// is taken from it. `MM2_NET_BOUND_MS_PER_FRAME` overrides the
-/// per-update allowance (lower it to make a genuine failure surface
-/// sooner).
+/// is taken from it. The result is capped at [`MAX_BOUND`].
+/// `MM2_NET_BOUND_MS_PER_FRAME` overrides the per-update allowance
+/// (lower it to make a genuine failure surface sooner).
 pub fn drive_bound(frames: u32) -> Duration {
     // Startup + city/world load, measured ~2 s on a dev world and ~5 s
     // on a retail city; 60 s leaves room for a loaded machine.
@@ -51,9 +53,15 @@ pub fn drive_bound(frames: u32) -> Duration {
     let per_ms = std::env::var("MM2_NET_BOUND_MS_PER_FRAME")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(30);
-    STARTUP + Duration::from_millis(per_ms.saturating_mul(u64::from(frames)))
+        .unwrap_or(100);
+    (STARTUP + Duration::from_millis(per_ms.saturating_mul(u64::from(frames)))).min(MAX_BOUND)
 }
+
+/// The longest any derived wait may be, so a slow machine cannot turn a
+/// genuine hang into an unbounded wait. It comfortably clears the
+/// slowest budget a leg actually runs to: the 90 000-update retail host
+/// takes ~31 min, well under this hour.
+pub const MAX_BOUND: Duration = Duration::from_secs(60 * 60);
 
 /// The largest `--frames` that is a *run budget* a child works through
 /// rather than a ceiling it is quit from. The racing legs run up to
