@@ -186,7 +186,7 @@ impl SupportProbe<'_, '_> {
         if !com.is_finite() {
             return false;
         }
-        let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
+        let filter = crate::layers::GameLayer::probe_filter([car]);
         // `solid: false` — a centre of mass already inside the ground
         // must find nothing below it, not a hit at its own origin.
         let Some(hit) =
@@ -257,7 +257,7 @@ pub(crate) fn seat_on_static_ground(
     let ground = position.y + HandlingMetrics::of(config).ground_y;
     let mut top = ground + reach * ANCHOR_MIN_UPRIGHT.acos().tan() + LANDING_PROBE_MARGIN;
     let com = position + Quat::from_rotation_y(yaw) * Vec3::from(config.center_of_mass);
-    let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
+    let filter = crate::layers::GameLayer::probe_filter([car]);
     if top > com.y
         && let Some(hit) = spatial.cast_ray(com, Dir3::Y, top - com.y, false, &filter)
     {

@@ -30,7 +30,7 @@ pub mod vehicle;
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
-pub use surface::{OriginalContactMaterial, TireConditions, TireSurface};
+pub use surface::{OriginalContactMaterial, TireConditions, TireSurface, VehicleProbeLayers};
 pub use systems::{UprightLanding, seat_level, seated_upright_pose, upright_recovery_pose};
 pub use vehicle::{
     DriveDirection, EngineImpairment, HumanDriver, PreStepVelocity, RemoteReplica, ResetAuthority,
@@ -53,6 +53,7 @@ impl Plugin for VehiclePlugin {
             // The tire path reads this every physics step; sessions
             // overwrite it at load with their environment modifier.
             .init_resource::<TireConditions>()
+            .init_resource::<VehicleProbeLayers>()
             .init_resource::<original_contacts::OriginalContactSnapshots>()
             .add_systems(
                 PhysicsSchedule,

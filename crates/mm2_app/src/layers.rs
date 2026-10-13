@@ -21,10 +21,14 @@
 //! player still collides with the train and the ground, ambient traffic
 //! still strikes parked cars, a mover still shoves a dynamic prop, and a
 //! car is now blocked by a walker it catches (F19-B.8b). Spatial queries
-//! (wheel rays, the camera) default to every layer, so they still see
-//! the world.
+//! default to every layer, so a query that must not see a walker says so
+//! with [`GameLayer::probe_mask`]: wheel rays and the original step's
+//! probes (via `VehicleProbeLayers`), the chase camera and the recovery
+//! anchor. The few that deliberately see walkers are listed in
+//! `docs/research/pedanim.md` "Car contact".
 
 use avian3d::prelude::*;
+use bevy::ecs::entity::Entity;
 
 /// The game's collision layers.
 #[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
@@ -64,6 +68,21 @@ impl GameLayer {
     /// pair, and `Scenery` movers do not strike walkers.
     pub fn pedestrian() -> CollisionLayers {
         CollisionLayers::new(GameLayer::Pedestrian, GameLayer::Default)
+    }
+
+    /// Every layer a car's or camera's ray may hit: all but
+    /// `Pedestrian`. A walker meets a car through the collision pair
+    /// only; a wheel ray, an anchor probe or the chase camera that ended
+    /// on a capsule would change how the car drives or where the camera
+    /// sits (#1390).
+    pub fn probe_mask() -> LayerMask {
+        !LayerMask::from(GameLayer::Pedestrian)
+    }
+
+    /// A [`SpatialQueryFilter`] over [`GameLayer::probe_mask`] that skips
+    /// `excluded`.
+    pub fn probe_filter(excluded: impl IntoIterator<Item = Entity>) -> SpatialQueryFilter {
+        SpatialQueryFilter::from_mask(Self::probe_mask()).with_excluded_entities(excluded)
     }
 }
 

@@ -473,6 +473,33 @@ pedestrians when the shapes overlap. The port implements that as a
 designed bounded contact (DSN-89, F19-B.8b): the car is blocked, the
 walker is not moved and no walker-side hit state exists, per F19 req 4.
 
+### Which spatial queries see a walker (#1390)
+
+The `Pedestrian` layer meets the default layer only, but a
+`SpatialQueryFilter` defaults to every layer, so each query was classified
+(designed; handling is owner-owned, so nothing a car's physics reads may
+end on a capsule):
+
+- **Must not see walkers**, via `GameLayer::probe_mask` / `probe_filter`:
+  the wheel ground probes, the original step's suspension and air-levelling
+  rays (`mm2_vehicle::VehicleProbeLayers`, installed by the app next to
+  `VehiclePlugin` because the vehicle crate cannot name `GameLayer`); the
+  chase camera's min/max clamp and `collide_eye` (a walker crossing the
+  eye-to-car ray does not pull the camera in); the recovery anchor and
+  landing-ceiling rays (a walker beside the hull must not read as ground
+  or as a ceiling).
+- **Deliberately see walkers**: the original step's contact re-cast in
+  `original_contacts.rs` (it recovers the impact point of a contact the
+  solver already has and must land on its partner, a walker included),
+  and `banger.rs`'s strike-bound overlap (non-banger hits are skipped).
+- **Already blind**: police line of sight (`World` only); the opponent
+  wall feelers, the recovery ground test and traffic draping, whose
+  predicates accept static or listed ground colliders only (a kinematic
+  walker is neither); `seat_level`'s `ground` predicate likewise.
+- Tests: `mm2_app` `tests/layers.rs`
+  (`probe_filter_ignores_a_walker_on_the_ray_but_sees_the_world`,
+  `vehicle_probe_layers_skip_a_walker_and_the_car_itself`).
+
 ## Runtime crowd and retail soak evidence (F19-B.2/B.3)
 
 The windowed app and the headless evidence path (`--headless`, the

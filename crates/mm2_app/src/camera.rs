@@ -1032,7 +1032,7 @@ pub fn chase_follow(
             // hitch gap or behind the trailer's rear wall. Other
             // vehicles' trailers still occlude like any world
             // object (designed reading — UNK-36).
-            let filter = SpatialQueryFilter::from_excluded_entities(
+            let filter = crate::layers::GameLayer::probe_filter(
                 std::iter::once(veh_ent).chain(
                     spawn
                         .as_deref()

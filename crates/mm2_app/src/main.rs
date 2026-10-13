@@ -34,7 +34,7 @@ use mm2_game::{
     RaceStarted, RecoveryEvent, Session, SessionConfig, SessionPhase, StuckEvent, VehicleSelection,
     WorldMode, advance_session_tick, despawn_session_entities,
 };
-use mm2_vehicle::{VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
+use mm2_vehicle::{VehicleConfig, VehicleDebugEnabled, VehiclePlugin, VehicleProbeLayers};
 use tracing::{error, info, warn};
 
 use camera::CameraMode;
@@ -1629,6 +1629,8 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .insert_resource(ScreenshotDir(screenshot_dir))
     .add_plugins(VehiclePlugin)
+    // Wheel and contact rays never end on a walker (#1390).
+    .insert_resource(VehicleProbeLayers(mm2_app::layers::GameLayer::probe_mask()))
     .add_plugins(audio::NativeSkidTimingPlugin)
     .insert_resource(graphics)
     .insert_resource(control_settings.clone())

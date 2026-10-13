@@ -26,7 +26,7 @@ use mm2_game::{
     WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
-use mm2_vehicle::{VehicleConfig, VehiclePlugin};
+use mm2_vehicle::{VehicleConfig, VehiclePlugin, VehicleProbeLayers};
 
 use crate::{
     camera, city, contracts, crowd, damage, net, opponents, pedestrian, race, scripted, session,
@@ -569,6 +569,8 @@ fn run_headless(
         .insert_resource(session_res)
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
+        // Wheel and contact rays never end on a walker (#1390).
+        .insert_resource(VehicleProbeLayers(crate::layers::GameLayer::probe_mask()))
         .add_message::<ImpactEvent>()
         // The record's `opp_drv=` AI-on-AI contact rate.
         .init_resource::<FieldContacts>()

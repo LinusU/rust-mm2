@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 use crate::config::VehicleConfig;
 use crate::sim;
-use crate::surface::{TireConditions, TireSurface};
+use crate::surface::{TireConditions, TireSurface, VehicleProbeLayers};
 use crate::vehicle::{
     DriveDirection, EngineImpairment, GyroSpin, HumanDriver, PreStepVelocity, ResetAuthority,
     ResetPending, ResetVehicle, SelfRightOptOut, Teleported, Vehicle, VehicleInput, VehicleState,
@@ -71,9 +71,10 @@ fn leveling_inertia(cfg: &crate::config::VehicleConfig) -> f32 {
     (ix + iz) * 0.5
 }
 
-/// Vehicle raycasts exclude the vehicle's own collider.
-fn wheel_filter(vehicle: Entity) -> SpatialQueryFilter {
-    SpatialQueryFilter::default().with_excluded_entities([vehicle])
+/// Vehicle raycasts exclude the vehicle's own collider and any layer the
+/// session keeps out of the probes ([`VehicleProbeLayers`]).
+fn wheel_filter(vehicle: Entity, layers: &VehicleProbeLayers) -> SpatialQueryFilter {
+    layers.filter(vehicle)
 }
 
 type VehicleQuery<'w, 's> = Query<
@@ -99,6 +100,7 @@ pub fn vehicle_simulation(
     spatial_query: SpatialQuery,
     tire_surfaces: Query<&'static TireSurface>,
     conditions: Res<TireConditions>,
+    probe_layers: Res<VehicleProbeLayers>,
     mut vehicles: VehicleQuery,
 ) {
     let dt = time.delta_secs();
@@ -189,7 +191,7 @@ pub fn vehicle_simulation(
         // --- drivetrain bookkeeping ------------------------------------------
         let mut driven_ground_speed = 0.0f32;
         let mut driven_count = 0usize;
-        let filter = wheel_filter(entity);
+        let filter = wheel_filter(entity, &probe_layers);
 
         // Drive-torque shares: explicit per-wheel fractions when configured,
         // otherwise an even split across driven wheels.
@@ -910,7 +912,7 @@ pub fn seat_level(
         return None;
     }
     let heading = Quat::from_rotation_y(yaw);
-    let filter = wheel_filter(vehicle);
+    let filter = wheel_filter(vehicle, &VehicleProbeLayers::default());
     // `solid: false` — a probe that starts inside a prop reports where
     // it leaves that body, not a hit at its own origin.
     let highest = crate::analysis::hull_points(config)

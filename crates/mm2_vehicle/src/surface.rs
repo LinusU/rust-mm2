@@ -20,7 +20,31 @@
 //! `Restitution` on the collider (attached by the spawner, not this
 //! component), and `sound`/`ptx*` still wait for the F07 consumers.
 
+use avian3d::prelude::{LayerMask, SpatialQueryFilter};
 use bevy::prelude::*;
+
+/// Which collision layers the car's own spatial queries (wheel ground
+/// probes, the original step's contact and air-levelling rays) may hit.
+/// The vehicle crate cannot name the game's layer enum, so whoever
+/// defines the layers sets this; the default sees every layer. The app
+/// leaves `Pedestrian` out: a walker's capsule meets the chassis through
+/// the collision pair, but a wheel ray that ended on one would change how
+/// the car drives (F19-B.8b follow-up, #1390).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct VehicleProbeLayers(pub LayerMask);
+
+impl Default for VehicleProbeLayers {
+    fn default() -> Self {
+        Self(LayerMask::ALL)
+    }
+}
+
+impl VehicleProbeLayers {
+    /// A probe filter for `vehicle`: these layers, never the car itself.
+    pub fn filter(&self, vehicle: Entity) -> SpatialQueryFilter {
+        SpatialQueryFilter::from_mask(self.0).with_excluded_entities([vehicle])
+    }
+}
 
 /// Physics-side surface properties a collider exposes to the tire path.
 /// Attach to collider entities; wheel probes hitting an unmarked

@@ -202,3 +202,90 @@ fn a_pedestrian_body_meets_vehicles_but_not_the_world_movers_or_walkers() {
         "walkers must not collide with one another"
     );
 }
+
+/// A walker's capsule standing on the eye→car ray, and the world behind it.
+fn ray_scene() -> (App, Entity, Entity, Entity) {
+    let mut app = physics_app();
+    let wall = body(
+        &mut app,
+        RigidBody::Static,
+        Vec3::new(10.0, 10.0, 1.0),
+        Vec3::new(0.0, 0.0, -10.0),
+        Some(GameLayer::world()),
+    );
+    let walker = app
+        .world_mut()
+        .spawn((
+            RigidBody::Kinematic,
+            Collider::capsule_endpoints(0.25, Vec3::new(0.0, -0.5, 0.0), Vec3::new(0.0, 0.5, 0.0)),
+            GameLayer::pedestrian(),
+            Position(Vec3::new(0.0, 0.0, -5.0)),
+            Transform::from_translation(Vec3::new(0.0, 0.0, -5.0)),
+        ))
+        .id();
+    let car = body(
+        &mut app,
+        RigidBody::Dynamic,
+        Vec3::splat(1.0),
+        Vec3::new(0.0, 0.0, 5.0),
+        None,
+    );
+    for _ in 0..4 {
+        app.update();
+    }
+    (app, wall, walker, car)
+}
+
+/// #1390: the chase camera and the recovery probes build their filter
+/// with `GameLayer::probe_filter`, so a walker crossing the eye→car ray
+/// neither pulls the camera in nor holds a car up, while the world and
+/// the car itself still are seen.
+#[test]
+fn probe_filter_ignores_a_walker_on_the_ray_but_sees_the_world() {
+    let (mut app, wall, walker, car) = ray_scene();
+    let cast = move |app: &mut App, filter: SpatialQueryFilter| {
+        app.world_mut()
+            .run_system_once(move |q: SpatialQuery| {
+                q.cast_ray(Vec3::ZERO, Dir3::NEG_Z, 20.0, true, &filter)
+                    .map(|h| h.entity)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        cast(&mut app, SpatialQueryFilter::default()),
+        Some(walker),
+        "control: the default filter sees the capsule"
+    );
+    assert_eq!(
+        cast(&mut app, GameLayer::probe_filter([car])),
+        Some(wall),
+        "the probe filter skips the walker and lands on the world"
+    );
+}
+
+/// #1390: `VehicleProbeLayers` (what the app installs) keeps the wheel
+/// and original-step rays off walkers; its default sees every layer.
+#[test]
+fn vehicle_probe_layers_skip_a_walker_and_the_car_itself() {
+    use mm2_vehicle::VehicleProbeLayers;
+    let (mut app, wall, walker, car) = ray_scene();
+    let cast = move |app: &mut App, layers: VehicleProbeLayers| {
+        app.world_mut()
+            .run_system_once(move |q: SpatialQuery| {
+                q.cast_ray(
+                    Vec3::new(0.0, 0.0, 8.0),
+                    Dir3::NEG_Z,
+                    30.0,
+                    true,
+                    &layers.filter(car),
+                )
+                .map(|h| h.entity)
+            })
+            .unwrap()
+    };
+    assert_eq!(cast(&mut app, VehicleProbeLayers::default()), Some(walker));
+    assert_eq!(
+        cast(&mut app, VehicleProbeLayers(GameLayer::probe_mask())),
+        Some(wall)
+    );
+}

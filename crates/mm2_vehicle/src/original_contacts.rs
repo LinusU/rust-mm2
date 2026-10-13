@@ -304,6 +304,9 @@ pub(crate) fn respond_original_static_contacts(
                 let impact_point = Dir3::new(travel)
                     .ok()
                     .and_then(|direction| {
+                        // All layers on purpose (not `VehicleProbeLayers`): this
+                        // re-casts a contact the solver already has, and must be
+                        // able to land on its partner — a walker included.
                         spatial.cast_ray(
                             previous_point,
                             direction,

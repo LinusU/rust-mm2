@@ -16,7 +16,7 @@ use crate::original::{
     self, Bristles, Coupling, EngineConstants, FIRST_GEAR, MPS_TO_MPH, REVERSE_GEAR, TrainInput,
     TyreInput, WheelConstants,
 };
-use crate::surface::{TireConditions, TireSurface};
+use crate::surface::{TireConditions, TireSurface, VehicleProbeLayers};
 use crate::vehicle::{
     DriveDirection, HumanDriver, OriginalState, Vehicle, VehicleInput, VehicleState, WheelState,
 };
@@ -26,6 +26,7 @@ pub(crate) struct StepWorld<'a, 'w, 's> {
     pub spatial: &'a SpatialQuery<'w, 's>,
     pub surfaces: &'a Query<'w, 's, &'static TireSurface>,
     pub conditions: &'a TireConditions,
+    pub probe_layers: &'a VehicleProbeLayers,
     pub dt: f32,
 }
 
@@ -299,7 +300,7 @@ pub(crate) fn step(
     body_force += -speed * orig.aero.drag * linvel - speed * speed * orig.aero.down * up;
 
     // --- contacts: probe, suspension, surface --------------------------------
-    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+    let filter = world.probe_layers.filter(entity);
     let mut contacts = [Contact::default(); 4];
     let mut compression_rate = [0.0; 4];
     let mut suspension_load = [0.0; 4];
@@ -774,6 +775,7 @@ pub(crate) fn evaluate(
     spatial: SpatialQuery,
     surfaces: Query<&'static TireSurface>,
     conditions: Res<TireConditions>,
+    probe_layers: Res<VehicleProbeLayers>,
     mut vehicles: OriginalVehicles,
 ) {
     let dt = time.delta_secs();
@@ -784,6 +786,7 @@ pub(crate) fn evaluate(
         spatial: &spatial,
         surfaces: &surfaces,
         conditions: &conditions,
+        probe_layers: &probe_layers,
         dt,
     };
     for (entity, vehicle, mut state, input, human, impairment, mut forces) in &mut vehicles {
