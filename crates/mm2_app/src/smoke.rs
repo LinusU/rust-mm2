@@ -1795,7 +1795,14 @@ fn run_headless(
                             None
                         },
                         resolved,
-                        escapes: driver.recovery.escapes,
+                        finish_secs: progress.and_then(|p| match p.state {
+                            ParticipantState::Finished { race_ticks, .. } => {
+                                Some(race_ticks as f32 / mm2_game::RACE_TICK_HZ as f32)
+                            }
+                            _ => None,
+                        }),
+                        escapes: driver.recovery.escapes
+                            + driver.neural.as_ref().map_or(0, |n| n.unstick.count),
                         reanchors: driver.reanchors,
                         stuck: driver.stuck_peak,
                         route_clears: progress.map_or(0, |p| p.route_clears),
@@ -1804,7 +1811,9 @@ fn run_headless(
                         &driver.stats,
                         e.get::<mm2_game::DamageSignals>()
                             .map_or(0, |d| d.impact_count),
-                        driver.recovery.escapes + driver.reanchors,
+                        driver.recovery.escapes
+                            + driver.neural.as_ref().map_or(0, |n| n.unstick.count)
+                            + driver.reanchors,
                     );
                     (
                         n + 1,
@@ -2800,7 +2809,10 @@ struct OppRow<'a> {
     lap: Option<u32>,
     /// `F` finished / `T` timed out; `None` while still racing.
     resolved: Option<char>,
-    /// Three-point reverse-and-turn escapes attempted (`ScriptedBot`).
+    /// A finisher's race time, seconds.
+    finish_secs: Option<f32>,
+    /// Reverse escapes attempted: the scripted law's three-point turns
+    /// (`ScriptedBot`) or the neural driver's back-ups (`Unstick`).
     escapes: u32,
     /// Bounded re-anchor teleports (DSN-14).
     reanchors: u32,
@@ -2852,6 +2864,9 @@ fn opponent_detail(rows: &mut [OppRow]) -> String {
         }
         if let Some(res) = r.resolved {
             s.push_str(&format!("/{res}"));
+        }
+        if let Some(secs) = r.finish_secs {
+            s.push_str(&format!("/{secs:.1}s"));
         }
         if r.escapes > 0 {
             s.push_str(&format!("/{}e", r.escapes));
@@ -3123,6 +3138,7 @@ mod tests {
                 cleared: 0,
                 lap: Some(1),
                 resolved: None,
+                finish_secs: None,
                 escapes: 0,
                 reanchors: 2,
                 stuck: 1040,
@@ -3134,6 +3150,7 @@ mod tests {
                 cleared: 4,
                 lap: Some(2),
                 resolved: None,
+                finish_secs: None,
                 escapes: 1,
                 reanchors: 0,
                 stuck: 0,
@@ -3145,6 +3162,7 @@ mod tests {
                 cleared: 9,
                 lap: Some(3),
                 resolved: Some('F'),
+                finish_secs: None,
                 escapes: 0,
                 reanchors: 0,
                 stuck: 24,
@@ -3162,6 +3180,7 @@ mod tests {
             cleared: 3,
             lap: None,
             resolved: Some('T'),
+            finish_secs: None,
             escapes: 0,
             reanchors: 0,
             stuck: 0,
