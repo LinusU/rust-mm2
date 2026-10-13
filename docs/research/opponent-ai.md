@@ -251,20 +251,40 @@ player-dependent behaviour is the collision level of detail above.
 
 ## Port status
 
-Our opponents (`mm2_app::opponents`, `mm2_app::racing_line`) are a
-designed controller: pure pursuit along the `.opp` anchors densified
-through the nav graph, a speed plan from the line's curvature and the
-car's own handling, wall feelers, a participant corridor, and the
-bounded re-anchor teleport. Like the original,
-`mm2_content::load_opponent` gives an opponent the player's own tune
-and ignores the `_opp` files. Where it still diverges:
+Our opponents (`mm2_app::opponents`, `mm2_app::neural`) are driven by a
+learned policy, not by a port of this controller: a small network
+trained in our own vehicle simulation that sees the car's line, the
+world and the vehicles around it and outputs steering and pedals
+(`docs/neural-opponents.md`, ledger DSN-110). What we take from the
+original is everything *around* the driving:
 
-- Col 2's default reads 75 and col 9 is a grip scale around 2.0
-  (DSN-66); the original defaults are 50 and 1.0, and col 9 scales
-  speed.
-- The original never teleports a stuck opponent; it backs up, and a
-  car that falls out of the world is simply out.
-- The original finishes an opponent on its route and the finish line;
-  ours makes a checkpoint-race opponent cross every gate (so routes
-  that skip one never finish) and credits circuit gates along the
-  driven line (DSN-45).
+- **The route.** The `.opp` record is read as above: the car stages on
+  row 0, the rows after it are intersections, a leg between two adjacent
+  ones runs along the road they share whichever way its traffic flows
+  (`NavGraph::race_leg`), and a circuit's lap is its intersection rows,
+  wrapping to row 1 (`opponents::circuit_lap`). Ledger DSN-112.
+- **The car.** `mm2_content::load_opponent` gives an opponent the
+  player's own tune and ignores the `_opp` files.
+- **Finishing.** An opponent finishes on its own course and the finish
+  line: gates and finish are bound to positions on its driven line and
+  earned by driving it, never by a checkpoint cylinder its line misses
+  (ledger DSN-45).
+- **`maxThrottle`**, the ceiling on the driver's throttle.
+- **Backing up.** A stalled car is reversed for at most 66 frames
+  steering `−2.857 ×` the bearing to its line, ending inside 0.1 rad —
+  state 1's manoeuvre (ledger DSN-111).
+- **No rubber-banding.** Nothing the driver sees or is given depends on
+  another participant's progress.
+
+Where it still diverges:
+
+- The other nine `[Opponent]` columns are unconsumed. They parametrise
+  the path planner and the braking rule above, which we do not run.
+- None of the physics interventions are made: no yaw damping while
+  braking, no momentum edits around a back-up, no orientation snap, no
+  halved grip against the player.
+- A car nothing frees is re-anchored onto its route after 15 s, a
+  disclosed teleport (ledger DSN-14); the original leaves it stuck, and
+  a car that falls out of the world out of the race.
+- Opponents keep gate-by-gate progress for the standings; the original
+  credits an opponent no gates at all.
