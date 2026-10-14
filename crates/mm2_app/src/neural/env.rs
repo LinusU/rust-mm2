@@ -1401,6 +1401,14 @@ impl DrivingEnv {
                 continue;
             }
             let motion = Self::read_motion(self.app.world(), self.slots[i].entity);
+            // A car lifted above its line by ground that moves — a
+            // drawbridge leaf rising under it — is still on its course.
+            let carried = motion.as_ref().is_some_and(|m| {
+                let line = self.slots[i].guide.point_at(self.slots[i].s);
+                m.grounded > 0.0 && m.position.y - line.y > OFF_ROUTE_HEIGHT * 0.8
+            }) && motion
+                .as_ref()
+                .is_some_and(|m| self.on_moving_ground(m.position));
             let slot = &mut self.slots[i];
             let finite = motion.as_ref().is_some_and(|m| {
                 m.position.is_finite() && m.linear_velocity.is_finite() && m.rotation.is_finite()
@@ -1449,7 +1457,9 @@ impl DrivingEnv {
                     // A car in the air over its line is jumping, not
                     // lost: a San Francisco crest at speed puts one a
                     // long way above the road.
-                    || (off.y.abs() > OFF_ROUTE_HEIGHT && (off.y < 0.0 || motion.grounded > 0.0))
+                    || (off.y.abs() > OFF_ROUTE_HEIGHT
+                        && (off.y < 0.0 || motion.grounded > 0.0)
+                        && !carried)
                 {
                     end = Some(End::OffRoute);
                 } else if slot.upended as f32 > UPENDED_SECONDS * HZ as f32 {
