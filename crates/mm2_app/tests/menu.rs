@@ -6114,6 +6114,68 @@ fn any_connected_pad_navigates_the_main_menu_through_hot_plug() {
     assert_ne!(shell(&app).screen, menu::Screen::Options);
 }
 
+/// Holding the d-pad down or the stick runs the list like key repeat:
+/// one step on the press, a pause, then a step every ~0.1 s — and a
+/// release stops it. Left/right never repeat. Updates advance 1/60 s.
+#[test]
+fn a_held_pad_direction_repeats_up_and_down_after_a_delay() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    let pad = spawn_pad(&mut app);
+    let start = shell(&app).focus;
+    assert!(shell(&app).rows.len() >= start + 6, "room to run the list");
+
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .digital_mut()
+        .press(GamepadButton::DPadDown);
+    app.update();
+    assert_eq!(shell(&app).focus, start + 1, "the press steps once");
+    // Bevy clears `just_pressed` each frame; the button stays held.
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .digital_mut()
+        .clear();
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(shell(&app).focus, start + 1, "no repeat inside the delay");
+    for _ in 0..30 {
+        app.update();
+    }
+    let held = shell(&app).focus;
+    assert!(held >= start + 4, "repeating after the delay, got {held}");
+
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .digital_mut()
+        .release(GamepadButton::DPadDown);
+    app.update();
+    for _ in 0..30 {
+        app.update();
+    }
+    assert!(shell(&app).focus <= held + 1, "release stops the repeat");
+
+    // The stick repeats the same way.
+    let before = shell(&app).focus;
+    app.world_mut()
+        .get_mut::<Gamepad>(pad)
+        .unwrap()
+        .analog_mut()
+        .set(GamepadAxis::LeftStickY, 1.0);
+    for _ in 0..40 {
+        app.update();
+    }
+    assert!(
+        shell(&app).focus + 3 <= before,
+        "a held stick moves the focus up repeatedly"
+    );
+}
+
 /// A stick held down when its pad is unplugged must not leave a stale
 /// latch: the next pad pushing down fires its own edge.
 #[test]

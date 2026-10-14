@@ -88,7 +88,7 @@ use mm2_game::{
 use tracing::{info, warn};
 
 use crate::controls::{ControlItem, ControlSettings, DriveAction, PadItem, SLOTS};
-use crate::input::pad_nav;
+use crate::input::{PadRepeat, pad_nav};
 use crate::pad_map::PadAction;
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
@@ -549,8 +549,8 @@ pub struct MenuShell {
     /// to this action; the pad twin of [`Self::capture`] (never both).
     pub pad_capture: Option<PadAction>,
     dirty: bool,
-    /// Last gamepad nav-axis reading — edge detection for stick moves.
-    pad_axis: f32,
+    /// Hold state of the up/down pad directions (edge + key-style repeat).
+    pad_repeat: PadRepeat,
 }
 
 /// Cached domain data the screens read. The VFS never changes at
@@ -885,7 +885,7 @@ impl MenuShell {
             capture: None,
             pad_capture: None,
             dirty: true,
-            pad_axis: 0.0,
+            pad_repeat: PadRepeat::default(),
         }
     }
 
@@ -3312,10 +3312,14 @@ pub struct MenuTarget<'w, 's> {
 /// `active` true only at `Menu`, but a one-frame straddle (the shell
 /// closed this update while the phase still reads `Menu`... or vice
 /// versa) must never let a menu `Back` reach `Exit` inside a session.
+// One more than clippy's limit: the clock the pad's hold-repeat reads is a
+// distinct input beside keys, key events, pads and the shell state.
+#[allow(clippy::too_many_arguments)]
 pub fn menu_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut key_events: MessageReader<KeyboardInput>,
     pads: Query<&Gamepad>,
+    time: Res<Time<Real>>,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
     vfs: Res<Mm2Vfs>,
@@ -3357,10 +3361,10 @@ pub fn menu_input(
             }
         }
     }
-    // Every connected pad answers (`input::pad_nav`); the stick latch is
+    // Every connected pad answers (`input::pad_nav`); the stick hold state is
     // read on every screen so a held stick never fires a stale edge when
     // the screen changes under it.
-    let nav = pad_nav(pads.iter(), &mut shell.pad_axis);
+    let nav = pad_nav(pads.iter(), &mut shell.pad_repeat, time.delta_secs());
     if pad_capturing {
         // The gamepad-buttons screen is waiting for a pad button: the
         // first one pressed this frame is the candidate. `Start` and

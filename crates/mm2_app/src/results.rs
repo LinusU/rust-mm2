@@ -50,7 +50,7 @@ use mm2_game::{
 use crate::cnr::{CnrHost, participant_id};
 use crate::cnrhud::{match_view, result_lines};
 use crate::cnrnet::CnrReplica;
-use crate::input::pad_nav;
+use crate::input::{PadRepeat, pad_nav};
 use crate::lesson::LessonDriver;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::netdrive::NetPlayer;
@@ -150,9 +150,8 @@ pub struct ResultsMenu {
     /// Set by `results_input` whenever the state changed; cleared by
     /// `results_present` after redrawing.
     dirty: bool,
-    /// Last gamepad nav-axis reading — edge detection for stick moves,
-    /// same latch `MenuShell::pad_axis`/`PauseMenu` use.
-    pad_axis: f32,
+    /// Hold state of the up/down pad directions (edge + key-style repeat).
+    pad_repeat: PadRepeat,
 }
 
 impl Default for ResultsMenu {
@@ -160,7 +159,7 @@ impl Default for ResultsMenu {
         Self {
             focus: 0,
             dirty: true,
-            pad_axis: 0.0,
+            pad_repeat: PadRepeat::default(),
         }
     }
 }
@@ -180,6 +179,7 @@ pub struct ResultsUi;
 pub fn results_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    time: Res<Time<Real>>,
     session: Res<Session>,
     mut control: ResMut<SessionControl>,
     mut results: ResMut<ResultsMenu>,
@@ -208,7 +208,7 @@ pub fn results_input(
     if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
         cmds.push(MenuCommand::Back);
     }
-    let nav = pad_nav(pads.iter(), &mut results.pad_axis);
+    let nav = pad_nav(pads.iter(), &mut results.pad_repeat, time.delta_secs());
     for (pressed, cmd) in [
         (nav.up, MenuCommand::Up),
         (nav.down, MenuCommand::Down),

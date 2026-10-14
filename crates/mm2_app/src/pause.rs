@@ -48,7 +48,7 @@ use bevy::prelude::*;
 use mm2_game::{HudMap, Session, SessionEntity, SessionPhase};
 
 use crate::controls::{ControlItem, ControlSettings, ControlsSave, DriveAction, PadItem, SLOTS};
-use crate::input::pad_nav;
+use crate::input::{PadRepeat, pad_nav};
 use crate::menu::{MenuCommand, MenuShell};
 use crate::pad_map::PadAction;
 use crate::session::SessionControl;
@@ -333,9 +333,8 @@ pub struct PauseMenu {
     /// Set by `pause_input` whenever the state changed; cleared by
     /// `pause_present` after redrawing.
     dirty: bool,
-    /// Last gamepad nav-axis reading — edge detection for stick moves,
-    /// same latch `MenuShell::pad_axis` uses.
-    pad_axis: f32,
+    /// Hold state of the up/down pad directions (edge + key-style repeat).
+    pad_repeat: PadRepeat,
 }
 
 impl Default for PauseMenu {
@@ -348,7 +347,7 @@ impl Default for PauseMenu {
             pad_capture: None,
             alt: false,
             dirty: true,
-            pad_axis: 0.0,
+            pad_repeat: PadRepeat::default(),
         }
     }
 }
@@ -390,6 +389,7 @@ pub struct PauseView<'w> {
 pub fn pause_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    time: Res<Time<Real>>,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     mut pause: ResMut<PauseMenu>,
@@ -412,7 +412,7 @@ pub fn pause_input(
     }
     let has_menu = graphics.menu_shell.is_some();
     let mut cmds = Vec::new();
-    let nav = pad_nav(pads.iter(), &mut pause.pad_axis);
+    let nav = pad_nav(pads.iter(), &mut pause.pad_repeat, time.delta_secs());
     if pause.pad_capture.is_some() {
         // The gamepad-buttons page is waiting for a pad button: the first
         // one pressed this frame is the candidate; `Esc` and `Start`

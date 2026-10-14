@@ -149,18 +149,68 @@ pub struct PadNav {
     pub start: bool,
 }
 
-/// Read the pad edges from every connected pad. `latch` is the screen's
-/// stored last stick Y: the stick navigates on *edge* transitions so
-/// holding it doesn't run the list. The strongest deflection among the
-/// pads is the stick value, and with no pad connected the latch resets
-/// to neutral — a pad plugged in with the stick already held then fires
-/// once, never a stale suppressed edge.
-pub fn pad_nav<'a>(pads: impl IntoIterator<Item = &'a Gamepad>, latch: &mut f32) -> PadNav {
+/// Seconds a menu direction must be held before it starts repeating.
+const NAV_REPEAT_DELAY: f32 = 0.4;
+/// Seconds between repeats once a held direction is repeating.
+const NAV_REPEAT_INTERVAL: f32 = 0.1;
+
+/// One direction's hold state: `Some(t)` while held, `t` the seconds
+/// until the next repeat.
+type Hold = Option<f32>;
+
+/// A screen's stored hold state for the vertical pad directions, so a
+/// held d-pad or stick runs the list like a keyboard's key repeat: one
+/// step on the press, then after [`NAV_REPEAT_DELAY`] a step every
+/// [`NAV_REPEAT_INTERVAL`]. Only up/down repeat — left/right adjust a
+/// value and stay one step per press.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PadRepeat {
+    up: Hold,
+    down: Hold,
+}
+
+/// Advance one direction's hold; true when it steps this frame. `edge`
+/// is a fresh press (a press-and-release inside one frame still counts).
+fn step_hold(hold: &mut Hold, held: bool, edge: bool, dt: f32) -> bool {
+    if !held && !edge {
+        *hold = None;
+        return false;
+    }
+    match hold {
+        Some(left) if !edge => {
+            *left -= dt;
+            if *left <= 0.0 {
+                *left += NAV_REPEAT_INTERVAL;
+                return true;
+            }
+            false
+        }
+        _ => {
+            *hold = Some(NAV_REPEAT_DELAY);
+            true
+        }
+    }
+}
+
+/// Read the pad edges from every connected pad. `repeat` is the screen's
+/// stored hold state and `dt` the real seconds since the last read: the
+/// d-pad and left stick step up/down on the press and then repeat while
+/// held. The strongest stick deflection among the pads counts, and with
+/// no pad connected the hold resets — a pad plugged in with the stick
+/// already held then fires once, never a stale suppressed edge.
+pub fn pad_nav<'a>(
+    pads: impl IntoIterator<Item = &'a Gamepad>,
+    repeat: &mut PadRepeat,
+    dt: f32,
+) -> PadNav {
     let mut nav = PadNav::default();
     let mut y = 0.0_f32;
+    let (mut up_held, mut up_edge, mut down_held, mut down_edge) = (false, false, false, false);
     for pad in pads {
-        nav.up |= pad.just_pressed(GamepadButton::DPadUp);
-        nav.down |= pad.just_pressed(GamepadButton::DPadDown);
+        up_held |= pad.pressed(GamepadButton::DPadUp);
+        up_edge |= pad.just_pressed(GamepadButton::DPadUp);
+        down_held |= pad.pressed(GamepadButton::DPadDown);
+        down_edge |= pad.just_pressed(GamepadButton::DPadDown);
         nav.left |= pad.just_pressed(GamepadButton::DPadLeft);
         nav.right |= pad.just_pressed(GamepadButton::DPadRight);
         nav.accept |= pad.just_pressed(GamepadButton::South);
@@ -172,12 +222,12 @@ pub fn pad_nav<'a>(pads: impl IntoIterator<Item = &'a Gamepad>, latch: &mut f32)
             y = pad_y;
         }
     }
-    if y > NAV_STICK && *latch <= NAV_STICK {
-        nav.up = true;
-    } else if y < -NAV_STICK && *latch >= -NAV_STICK {
-        nav.down = true;
-    }
-    *latch = y;
+    // A stick push is held, not an edge: its first frame is the edge the
+    // hold state itself detects (`None` → held).
+    up_held |= y > NAV_STICK;
+    down_held |= y < -NAV_STICK;
+    nav.up = step_hold(&mut repeat.up, up_held, up_edge, dt);
+    nav.down = step_hold(&mut repeat.down, down_held, down_edge, dt);
     nav
 }
 
