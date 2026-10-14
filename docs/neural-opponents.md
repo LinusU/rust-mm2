@@ -79,6 +79,15 @@ negative, capped at the authored `maxThrottle`) and the handbrake. The
 policy decides at 20 Hz — every third physics step — and holds its
 action in between.
 
+### What it costs to run
+
+One decision is 45 µs of network on one core — 100,000 multiply-adds —
+and some thirty short rays into the collision world. A car decides
+twenty times a second, so a field of eight spends under 1 % of a core
+on being driven. Nothing here needs a GPU, a thread of its own or an
+inference library: the weights are a 400 kB file compiled into the
+binary and the forward pass is forty lines of Rust.
+
 ### What stays conventional
 
 - **Routes.** Authored, as the original's are.
@@ -152,8 +161,63 @@ a corner driven badly. Resuming takes any `--workers` count; the run keeps its
 own copy of the environment binary, so rebuilding the repository does
 not disturb it.
 
-Changing the observation layout (`OBS_VERSION`) or what the
-environment does to the car invalidates trained weights: retrain.
+Changing what the environment does to the car invalidates trained
+weights: retrain. A change to the observation layout (`OBS_VERSION`)
+need not: `mm2rl.reshape` carries a checkpoint over, new columns
+starting at zero, and training goes on from where it was.
+
+### The two policies
+
+Professional is the policy trained on the reward above and nothing
+else: as fast as it can get its car round the course.
+
+Amateur is a second network, not the first held back. It is
+fine-tuned from the professional one with two more terms in its
+reward — a cost on speed above 40 m/s and on cornering harder than
+9 m/s² — so it learns a driver's worth of caution: it lifts earlier,
+corners inside the tyres, hits less, and is beaten on pace rather than
+by being made to brake at random.
+
+```sh
+uv run python -m mm2rl.train --run amateur --init runs/pro/latest.pt \
+    --configure '{"rewards": {"speed": 0.002, "speed_free": 40.0,
+                              "lateral": 0.002, "lateral_free": 9.0}}'
+```
+
+A run does not remember `--configure`; give it again when resuming.
+The two costs are the dial. Tighter ones (31 m/s and 6 m/s² at twice
+the cornering weight) made a driver whose winners took 1.4 times the
+professional's time; these give about 1.15. Ship a policy by copying
+its `latest.mm2p` over the file in `crates/mm2_app/policies/`.
+
+## Results
+
+Every race of both cities at both difficulties, the player parked on
+the grid, until the field is home or twelve minutes are up
+(`scripts/opponent_sweep.sh`), 2026-10-14:
+
+| Opponents | Difficulty | Finished | Races with every car home | Re-anchors | Mean speed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Scripted (before) | Amateur | 149/256 (58 %) | 13/44 | 1071 | 12.4 m/s |
+| Scripted (before) | Professional | 128/261 (49 %) | 8/44 | 1311 | 12.0 m/s |
+| Neural | Amateur | 256/256 (100 %) | 44/44 | 233 | 25.3 m/s |
+| Neural | Professional | 261/261 (100 %) | 44/44 | 436 | 28.0 m/s |
+
+An Amateur race is won in a median 1.12 times the Professional
+winner's time over the same course, the middle of the field 1.06; the
+Amateur field also hits less and is re-anchored half as often. Speed is
+distance over time for every car on the course, stalls and all; the
+fastest drive `sf race11`'s 8 km at 40 m/s.
+
+The professional policy is 178 M decisions of training (about 400 M
+counting the runs it continues), the amateur one 20 M more from it —
+about ten hours of one 18-core machine in all.
+
+Where it is still weak: London's tight, tree-lined blocks and the
+debris other cars leave in them (`london circuit8`, `race6` and
+`circuit4` take the most re-anchors, up to a dozen a car). Cops &
+Robbers police still drive the scripted chase (DSN-66): the policy
+drives any guide, but a chase is a moving target and was not trained.
 
 ## Judging a policy
 
