@@ -13,6 +13,7 @@ mod cablecar;
 mod camframe_retail;
 mod camtrack;
 mod chunked_city;
+mod cnr_variants;
 mod cnrvoice;
 mod contracts;
 mod crowd;
