@@ -144,7 +144,10 @@ A run lives in `training/runs/<name>/` (not checked in): `latest.pt`
 to resume from, `latest.mm2p` the exported policy, numbered snapshots
 every 25 M steps, `log.jsonl`, and `lines.json` — per opponent line,
 how the last ten minutes' episodes ended and where on the line the
-failures were. Resuming takes any `--workers` count; the run keeps its
+failures were. `uv run python -m mm2rl.hot runs/<name>/lines.json`
+ranks the events by it; a stretch of line that collects failures out
+of proportion has more than once been a line drawn wrong rather than
+a corner driven badly. Resuming takes any `--workers` count; the run keeps its
 own copy of the environment binary, so rebuilding the repository does
 not disturb it.
 
