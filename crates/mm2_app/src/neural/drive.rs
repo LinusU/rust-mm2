@@ -311,7 +311,10 @@ impl NeuralState {
         self.last_pos = pos;
         self.action = [0.0; ACT_DIM];
         self.hold = 0;
+        // A fresh start on its back-ups, the count of them kept.
+        let count = self.unstick.count;
         self.unstick = Unstick::default();
+        self.unstick.count = count;
         self.idle = 0;
     }
 
