@@ -1797,6 +1797,42 @@ it), `CORRECTION_SNAP_DIST`
 (1 s) bounds ask rate. The proxy's `MAX_QUEUED` (4096/lane) is harness
 state, not protocol.
 
+### Soak measurement (F25-AC06)
+
+*Measured evidence — three real `mm2` processes (synthetic integration,
+dev world, no retail data).* `net_drive`'s
+`a_long_impaired_three_process_soak_stays_bounded_and_finite` runs an
+in-app host and two `--join --headless` clients (bob 60,000 updates,
+alice 70,000, ~1,000 s of simulated driving each) through a seeded
+`ImpairProxy` armed both ways with 40 ms + 30 ms jitter, 5% loss, 10%
+duplicate, 10% reorder, once the first snap has applied. A side thread
+samples each process's RSS (`ps -o rss=`) and the relay's `LinkStats`
+every 2 s. One recorded run (~80 s wall):
+
+| measure | value |
+|---|---|
+| RSS host, early → late quarter | 70.8 → 71.0 MiB |
+| RSS alice | 70.9 → 70.9 MiB |
+| RSS bob | 71.0 → 71.2 MiB |
+| upstream (`Input`, relay `bytes_in`) | ≈35 KB/s, ≈1,530 frames/s |
+| downstream (`Snap`, all clients) | ≈532 KB/s, ≈1,570 frames/s |
+| client stale-snap drops | 103,845 (publish-cadence redundancy + dup/reorder) |
+| relay `overflowed` (up and down) | 0 |
+| client `finite=` | true (smoke fails a non-finite pose) |
+
+Asserted: RSS growth early→late quarter under 64 MiB per process
+(measured < 0.3 MiB — a leak guard, not a target); the relay's bounded
+queue never overflows; mean frame size ≤ 64 B up and ≤ the 4,814 B
+`Snap` ceiling down; both clients end `status=pass` with `finite=true`
+and the expected remote copies. Bandwidth is the unthrottled headless
+cadence (see "Update rates"), not a windowed 60 Hz figure.
+
+*Not measured:* the mailbox / pending-impact queue depths are not
+exposed in the smoke record, so their caps (256 rows, 512-entry dedup
+window) stay analytic; the dev cruise sends no impact rows. Remote
+poses are checked finite only through the client's own record, not per
+replicated entry.
+
 ### Remote-copy drift (F25-AC02/AC03)
 
 *Measured evidence — in-process apps over real loopback.*

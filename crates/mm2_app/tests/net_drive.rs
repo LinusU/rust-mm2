@@ -3026,3 +3026,170 @@ fn a_rematch_on_a_retail_city_restamps_the_world_for_the_same_client() {
     assert_eq!(parked_cars(&rec), 0, "{rec}");
     assert_eq!(parked_cars(&host_rec), 0, "{host_rec}");
 }
+
+/// One periodic sample of the soak: seconds into the window, each
+/// process's RSS (host, alice, bob) and the relay's counters.
+struct SoakSample {
+    at: Duration,
+    rss_kib: [u64; 3],
+    up: LinkStats,
+    down: LinkStats,
+}
+
+/// How long the soak's sampler waits between samples.
+const SOAK_SAMPLE_EVERY: Duration = Duration::from_secs(2);
+
+/// RSS growth, early to late window, the soak tolerates per process.
+/// Measured growth is recorded in `docs/research/net.md` ("Soak
+/// measurement"); the bound is a leak guard with headroom for allocator
+/// noise, not a target.
+const SOAK_RSS_GROWTH_KIB: u64 = 64 * 1024;
+
+/// Largest `Snap` frame on the wire: the documented worst case
+/// (4,810 B payload, `docs/research/net.md` "Data-plane budget") plus
+/// its 4-byte length prefix.
+const SNAP_WIRE_CEILING: u64 = 4_810 + 4;
+
+/// F25-AC06: a long headless soak — an in-app host and two `--join`
+/// clients through a seeded impaired relay — samples every process's
+/// RSS and the relay's byte/frame counters while the session drives,
+/// then asserts the receiver bounds held: the relay's bounded queue
+/// never overflowed, per-frame sizes stay inside the documented
+/// budget, RSS growth between the early and late windows stays under
+/// [`SOAK_RSS_GROWTH_KIB`], and every client's record reports
+/// `finite=true` (the smoke driver fails a non-finite pose outright).
+/// The samples print as `soak sample` lines for the measured table.
+#[test]
+fn a_long_impaired_three_process_soak_stays_bounded_and_finite() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
+    let addr = listening_addr(&host);
+    let proxy = ImpairProxy::loopback_seeded(addr, 0x50A4).unwrap();
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.05,
+        duplicate: 0.10,
+        reorder: 0.10,
+    };
+    let alice = Proc::spawn(
+        MM2_EXE,
+        &join_args(install.path(), proxy.addr(), "alice", 70_000),
+    );
+    let bob = Proc::spawn(
+        MM2_EXE,
+        &join_args(install.path(), proxy.addr(), "bob", 60_000),
+    );
+    start_when_ready(&mut host, 2);
+    until_live(&alice);
+    until_live(&bob);
+    proxy.set(LinkDir::Up, recipe);
+    proxy.set(LinkDir::Down, recipe);
+
+    // Sample on a side thread until bob's record lands (his shorter
+    // cap ends first): the main thread blocks on the record channel.
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let pids = [host.pid(), alice.pid(), bob.pid()];
+    let (samples, bob_rec) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            let mut samples = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                if let [Some(h), Some(a), Some(b)] = pids.map(support::rss_kib_of) {
+                    samples.push(SoakSample {
+                        at: started.elapsed(),
+                        rss_kib: [h, a, b],
+                        up: proxy.stats(LinkDir::Up),
+                        down: proxy.stats(LinkDir::Down),
+                    });
+                }
+                std::thread::sleep(SOAK_SAMPLE_EVERY);
+            }
+            samples
+        });
+        let rec = bob.until_within("smoke=headless-physics", Duration::from_secs(1800));
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        (sampler.join().unwrap(), rec)
+    });
+    let alice_rec = alice.until_within("smoke=headless-physics", Duration::from_secs(1800));
+    let bob_net = assert_client_drove(&bob_rec, 2);
+    println!("soak bob: {bob_rec}\nsoak alice: {alice_rec}");
+    let alice_net = assert_client_drove(&alice_rec, 1);
+    for rec in [&alice_rec, &bob_rec] {
+        assert_eq!(field(rec, "finite"), "true", "{rec}");
+        assert!(!rec.contains("non-finite"), "{rec}");
+    }
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    std::thread::sleep(Duration::from_millis(300));
+    let up = proxy.stats(LinkDir::Up);
+    let down = proxy.stats(LinkDir::Down);
+    drop(proxy);
+    for _ in 0..2 {
+        host.until("event=left");
+    }
+    quit_and_assert_host_drove(host);
+
+    assert!(
+        samples.len() >= 6,
+        "too few soak samples: {}",
+        samples.len()
+    );
+    for s in &samples {
+        println!(
+            "soak sample t={:.0}s rss_mib=host{}/alice{}/bob{} up={}f/{}B down={}f/{}B",
+            s.at.as_secs_f64(),
+            s.rss_kib[0] / 1024,
+            s.rss_kib[1] / 1024,
+            s.rss_kib[2] / 1024,
+            s.up.frames_in,
+            s.up.bytes_in,
+            s.down.frames_in,
+            s.down.bytes_in,
+        );
+    }
+    // Memory: mean of the first quarter against mean of the last.
+    let q = (samples.len() / 4).max(1);
+    for (i, who) in ["host", "alice", "bob"].iter().enumerate() {
+        let mean = |w: &[SoakSample]| w.iter().map(|s| s.rss_kib[i]).sum::<u64>() / w.len() as u64;
+        let early = mean(&samples[..q]);
+        let late = mean(&samples[samples.len() - q..]);
+        println!("soak rss {who} early={early}KiB late={late}KiB");
+        assert!(
+            late <= early + SOAK_RSS_GROWTH_KIB,
+            "{who} RSS grew {early} -> {late} KiB over the soak"
+        );
+    }
+    // Bandwidth and the relay's bounded queue.
+    let span = samples.last().unwrap().at - samples[0].at;
+    let secs = span.as_secs_f64().max(1.0);
+    let (f0, fl) = (&samples[0], samples.last().unwrap());
+    let rate = |a: u64, b: u64| (b - a) as f64 / secs;
+    println!(
+        "soak rate up={:.0}B/s {:.0}f/s down={:.0}B/s {:.0}f/s over {secs:.0}s; client inputs sent {} snaps applied {} staled {}",
+        rate(f0.up.bytes_in, fl.up.bytes_in),
+        rate(f0.up.frames_in, fl.up.frames_in),
+        rate(f0.down.bytes_in, fl.down.bytes_in),
+        rate(f0.down.frames_in, fl.down.frames_in),
+        alice_net.inputs_sent + bob_net.inputs_sent,
+        alice_net.snaps_applied + bob_net.snaps_applied,
+        alice_net.snaps_staled + bob_net.snaps_staled,
+    );
+    assert_eq!(up.overflowed, 0, "the relay's up queue overflowed: {up:?}");
+    assert_eq!(
+        down.overflowed, 0,
+        "the relay's down queue overflowed: {down:?}"
+    );
+    assert!(up.frames_in > 0 && down.frames_in > 0);
+    // Every frame fits the documented budget: Input is 21 B + prefix
+    // (a ready/lobby verb may be larger but stays small); a Snap is
+    // under its worst case.
+    assert!(
+        up.bytes_in / up.frames_in <= 64,
+        "upstream frames averaged over the Input budget: {up:?}"
+    );
+    assert!(
+        down.bytes_in / down.frames_in <= SNAP_WIRE_CEILING,
+        "downstream frames averaged over the Snap ceiling: {down:?}"
+    );
+}

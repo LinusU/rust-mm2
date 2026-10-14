@@ -383,6 +383,18 @@ impl Proc {
         let _ = self.child.kill();
     }
 
+    /// Resident set size of the child in KiB, from `ps` — `None` once
+    /// the child is gone. Only this `Proc`'s own PID is queried.
+    pub fn rss_kib(&self) -> Option<u64> {
+        rss_kib_of(self.pid())
+    }
+
+    /// The child's PID, for a sampler thread (`Proc` itself is not
+    /// `Sync`).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// SIGSTOP the child: it keeps its sockets open but stops
     /// speaking — a dead-but-open peer, which no socket close can model.
     /// The signal goes to the PID this `Proc` spawned and no other;
@@ -1120,4 +1132,13 @@ pub fn city_install() -> tempfile::TempDir {
     ambient_assets(d, "va_test_a");
     ambient_assets(d, "va_test_b");
     tmp
+}
+
+/// Resident set size in KiB of `pid` from `ps`, `None` once it is gone.
+pub fn rss_kib_of(pid: u32) -> Option<u64> {
+    let out = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .expect("failed to run ps");
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
