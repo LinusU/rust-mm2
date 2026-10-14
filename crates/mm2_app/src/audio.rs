@@ -158,7 +158,7 @@ use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_sample_sentinel};
 use mm2_formats::creaturedata::{VoiceSample, VoiceTable};
-use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
+use mm2_formats::spchdata::{AnnouncerIndex, CpointIndex, CueTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EmergencyLights, EngineLoopSpec, EngineMix,
@@ -1091,6 +1091,11 @@ const RESULTS_POOR_SECTION: &str = "RESULTSPOOR";
 /// the instructor's intro line — the same cue-type string the
 /// event-kind tables use for their pre-race line.
 const PRERACE_SECTION: &str = "PRERACE";
+/// The `header` section of `cc_cpoint_waveinfo.csv` that pools the
+/// per-gate location call-outs — the exe's cue-type string
+/// (`0x51bf30` maps `CHECKPOINT` to the cue pool it draws the call-out
+/// from).
+const CALLOUT_SECTION: &str = "CHECKPOINT";
 
 /// How well the local participant's race ended — which of the
 /// table's `RESULTS*` sections the announcer reads (DSN-87). The
@@ -1175,6 +1180,20 @@ impl EventCue {
     }
 }
 
+/// The Crash Course per-gate call-out binding, resolved once from the
+/// lesson's two `cc_cpoint_*` tables: the `CHECKPOINT` cue's wave
+/// prefix and `add` (its wave list runs suffix `add + 1 ..= end`) and
+/// the authored per-gate index list.
+struct LessonCallouts {
+    /// The `CHECKPOINT` cue row's wave prefix (`CCLLOCATION`).
+    prefix: String,
+    /// The row's `sufix add value` — the wave list's first suffix is
+    /// `add + 1`.
+    add: i64,
+    /// `cc_cpoint_indexinfo.csv`, one value per line.
+    index: Vec<i64>,
+}
+
 /// Session-scoped environmental commentary (F18-B.5): inserted by
 /// `load_session_world` on every city session — the bound registry
 /// path plus the two `<stem>_prerace` cue tables the effective
@@ -1211,6 +1230,17 @@ pub struct CommentaryAudio {
     /// instructor, not the city announcer, so this binding is
     /// independent of the registry draw.
     lesson_table: Option<String>,
+    /// The lesson's per-gate call-out tables as `(waveinfo,
+    /// indexinfo)` (see [`mm2_game::lesson_callout_tables`]);
+    /// `None` when the lesson's row authors none, or outside a lesson.
+    callout_tables: Option<(String, String)>,
+    /// The call-out binding resolved from `callout_tables`, once.
+    callouts: Option<LessonCallouts>,
+    /// Whether the call-out tables were resolved (or their failure
+    /// counted once).
+    callouts_resolved: bool,
+    /// Course row indices passed gates asked for, awaiting resolution.
+    pending_callouts: Vec<usize>,
     /// The speaker dir the pre-race resolve drew (`as1`) — every
     /// later cue of the session is that announcer's.
     speaker: Option<String>,
@@ -1239,6 +1269,10 @@ impl CommentaryAudio {
             rng: NavRng::new(seed.wrapping_add(COMMENTARY_DOMAIN)),
             event_table: None,
             lesson_table: None,
+            callout_tables: None,
+            callouts: None,
+            callouts_resolved: false,
+            pending_callouts: Vec::new(),
             speaker: None,
             requests: Vec::new(),
             asked: Vec::new(),
@@ -1261,6 +1295,32 @@ impl CommentaryAudio {
     pub fn with_lesson_table(mut self, table: Option<String>) -> Self {
         self.lesson_table = table;
         self
+    }
+
+    /// Bind a Crash Course lesson's per-gate call-out tables (the
+    /// `cc_cpoint_waveinfo.csv`/`cc_cpoint_indexinfo.csv` pair
+    /// [`mm2_game::lesson_callout_tables`] names, `None` for a lesson
+    /// whose row authors none). A passed gate then asks for the
+    /// location line its course row names through
+    /// [`CommentaryAudio::request_callout`].
+    pub fn with_callouts(mut self, tables: Option<(String, String)>) -> Self {
+        self.callout_tables = tables;
+        self
+    }
+
+    /// Ask for the per-gate call-out of course row `row`, where `row`
+    /// is the lesson course's array index (the number of gates cleared
+    /// after the gate just passed). Declines — without queueing — when
+    /// the lesson bound no call-out tables; unlike
+    /// [`CommentaryAudio::request`] a lesson may ask for the same gate
+    /// call-out repeatedly (each pass is its own line), so the caller
+    /// is the edge detector. Returns whether a request was queued.
+    pub fn request_callout(&mut self, row: usize) -> bool {
+        if self.callout_tables.is_none() {
+            return false;
+        }
+        self.pending_callouts.push(row);
+        true
     }
 
     /// Ask for a race announcement. Each kind of cue is accepted once per
@@ -3351,6 +3411,18 @@ pub fn commentary_voices(
     for cue in std::mem::take(&mut commentary.requests) {
         resolve_event_cue(commentary, cue, &vfs.0, &mut bank, &mut waves, &mut report);
     }
+    // F21-B: a passed course gate asks for its location call-out. The
+    // binding resolves on the first ask (a lesson that passes no gate
+    // resolves nothing), then each asked row queues its line.
+    if !commentary.pending_callouts.is_empty() {
+        if !commentary.callouts_resolved {
+            commentary.callouts_resolved = true;
+            resolve_callouts(commentary, &vfs.0, &mut report);
+        }
+        for row in std::mem::take(&mut commentary.pending_callouts) {
+            queue_callout(commentary, row, &vfs.0, &mut bank, &mut waves, &mut report);
+        }
+    }
     // Sequencing, priority and interruption belong to the arbiter: the
     // first line fires on the first live frame, later ones wait out the
     // clip in progress plus the gap.
@@ -3382,6 +3454,9 @@ pub fn commentary_systems()
         // F21-B.16: a Crash Course lesson's verdict line is asked for
         // just before the queue drains.
         crate::lesson::lesson_verdict_cue.before(commentary_voices),
+        // F21-B: a lesson's per-gate location call-outs are asked for
+        // the same way — the passed rows the driver recorded this frame.
+        crate::lesson::lesson_callout_cue.before(commentary_voices),
         commentary_voices,
         crate::cnrvoice::cnr_commentary_voices,
         // F08-B.2: the one place a dialogue voice is spawned.
@@ -3523,6 +3598,107 @@ fn resolve_event_cue(
         (&speaker, &path, cue.sections()),
         cue.priority(),
     );
+}
+
+/// Read a logical path as a lossy UTF-8 string, tagging a read failure
+/// with the path — the lesson tables are all text.
+fn read_text(vfs: &Vfs, path: &str) -> Result<String, String> {
+    vfs.read_logical(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Resolve the lesson's per-gate call-out binding once, from the two
+/// `cc_cpoint_*` tables [`CommentaryAudio::with_callouts`] bound: the
+/// `CHECKPOINT` cue of `cc_cpoint_waveinfo.csv` (its wave prefix and
+/// `sufix add value` — the wave list runs suffix `add + 1 ..= end`)
+/// and the index list of `cc_cpoint_indexinfo.csv`. Either miss counts
+/// one `failed` and leaves the binding unresolved — no substitute
+/// line, no invented suffix (F18-AC06). Called lazily the first time a
+/// gate asks for a call-out, so a lesson that passes no gate resolves
+/// nothing.
+fn resolve_callouts(commentary: &mut CommentaryAudio, vfs: &Vfs, report: &mut AudioReport) {
+    let fail = |report: &mut AudioReport, msg: String| {
+        report.failed += 1;
+        warn!("audio: {msg}");
+    };
+    let Some((waveinfo, indexinfo)) = commentary.callout_tables.clone() else {
+        return;
+    };
+    let table = read_text(vfs, &waveinfo)
+        .and_then(|text| CueTable::parse(&text).map_err(|e| format!("{waveinfo}: {e}")));
+    let table = match table {
+        Ok(table) => table,
+        Err(e) => {
+            fail(report, e);
+            return;
+        }
+    };
+    for d in table.diagnostics.iter().cloned().chain(table.validate()) {
+        report.cue_issues += 1;
+        warn!("audio: {waveinfo}:{}: {}", d.line, d.message);
+    }
+    let Some(row) = table
+        .section(CALLOUT_SECTION)
+        .and_then(|s| s.rows.iter().find(|r| r.problems().is_empty()))
+    else {
+        fail(
+            report,
+            format!("{waveinfo} authors no usable {CALLOUT_SECTION} cue"),
+        );
+        return;
+    };
+    let index = read_text(vfs, &indexinfo)
+        .and_then(|text| CpointIndex::parse(&text).map_err(|e| format!("{indexinfo}: {e}")));
+    let index = match index {
+        Ok(index) => index,
+        Err(e) => {
+            fail(report, e);
+            return;
+        }
+    };
+    for d in &index.diagnostics {
+        report.cue_issues += 1;
+        warn!("audio: {indexinfo}:{}: {}", d.line, d.message);
+    }
+    commentary.callouts = Some(LessonCallouts {
+        prefix: row.prefix.clone(),
+        add: row.add,
+        index: index.values,
+    });
+}
+
+/// Queue the per-gate call-out for lesson course row `row` (the
+/// lesson course's array index — the count of gates cleared after the
+/// gate just passed). [`mm2_game::callout_suffix`] turns the row's
+/// `indexinfo` entry into a wave suffix, or names nothing for the
+/// authored silence (the start line's `-1`, a row past the list) —
+/// that is the original's silence, not a failure, so it is not
+/// counted. A missing or undecodable wave is a failure and is.
+fn queue_callout(
+    commentary: &mut CommentaryAudio,
+    row: usize,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+) {
+    let Some(callouts) = commentary.callouts.as_ref() else {
+        return;
+    };
+    let Some(suffix) = mm2_game::callout_suffix(callouts.add, &callouts.index, row) else {
+        return;
+    };
+    let wave = cue_wave_stem("", &callouts.prefix, suffix);
+    match bank.load(vfs, waves, &wave) {
+        Ok(handle) => commentary
+            .queue
+            .push_back((wave, handle, SpeechPriority::Checkpoint)),
+        Err(e) => {
+            report.failed += 1;
+            warn!("audio: per-gate call-out {wave}: {e}");
+        }
+    }
 }
 
 /// Read one cue table, take the first named section it authors, draw

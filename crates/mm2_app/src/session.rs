@@ -1347,6 +1347,16 @@ pub fn load_session_world(
         }
         _ => None,
     };
+    // F21-B: only one lesson row authors the per-gate call-out tables
+    // (`cc_cpoint_waveinfo.csv`/`cc_cpoint_indexinfo.csv`); a cleared
+    // gate of that lesson plays its `cc*location*` line. Every other
+    // row — and every non-lesson mode — binds none.
+    let lesson_callouts = match &config.mode {
+        SessionMode::Event(event) if event.table == mm2_game::EventTableKind::CrashCourse => {
+            mm2_game::lesson_callout_tables(&event.city, event.index)
+        }
+        _ => None,
+    };
     // F08-B.1: the DirectMusic cue tables this mode would draw from,
     // bound only so the report can say music is unsupported.
     if let Some(music) = crate::music::MusicAudio::bind(siren_city, &config.mode) {
@@ -1358,7 +1368,8 @@ pub fn load_session_world(
         commands.insert_resource(
             commentary
                 .with_event_table(event_table)
-                .with_lesson_table(lesson_table),
+                .with_lesson_table(lesson_table)
+                .with_callouts(lesson_callouts),
         );
     }
     if world_ok {

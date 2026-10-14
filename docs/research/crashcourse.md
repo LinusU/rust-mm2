@@ -392,6 +392,40 @@ for the same families ("Frequent Flyer" 205, "Straight, With Chaser"
 217, "River Dancing" 224, "Turn It Up!" 231, "Bonnie & Collide" 616,
 "Artful Dodging" 192) agree with the partition above.
 
+### Per-gate location call-outs (`0x51b950`, `0x51bd90`)
+
+The school-table loader `0x51b680(this, row, city)` picks `ccl`
+(london) or `ccs` (else) and reads
+`aud\spchdata\<school>\<school><row>.csv`. Only when `row == 4`
+(`0x51b736`, `cmp edi, 4`) does it additionally read two fixed-named
+tables in the same dir: `cc_cpoint_waveinfo.csv` (`0x51b740`) and
+`cc_cpoint_indexinfo.csv` (`0x51b74d`).
+
+`cc_cpoint_waveinfo.csv` is an ordinary cue table whose `CHECKPOINT`
+section names the call-out wave pool (`CCLLOCATION,22,0` on retail —
+suffixes `1..=22`). `cc_cpoint_indexinfo.csv` (`0x51bd90`) is a third
+grammar: a heading line (`SUFIX NUM FOR CPOINTS`) then one signed
+integer per line, each read with `strtok(line, ",")` + `atoi` (only the
+first field counts) — retail `-1, 15, 3, 6, 5, 10, 12, 13`.
+
+The gate-cleared routine `0x4360b0` increments the passed counter and
+calls `0x51b950(this, gate)` with `gate` the course array index
+(`[esi+0x24]`) and arg2 `0x3c23d70a` (0.01f). `0x51b950` refuses a
+`gate` at or past the list's count or one whose entry is `-1` (silence),
+then draws entry `indexinfo[gate]` from the `CHECKPOINT` cue's wave
+list: `0x513e00` builds that list for suffixes `add + 1 ..= end`, so
+list entry `k` names suffix `add + 1 + k` (`0x513fd0` returns
+`[[cue+0x18] + 4*k]`). For London's single `map` lesson (course array
+row 0 the start line, rows 1..8 the eight gates) the mapping is
+`1→16, 2→4, 3→7, 4→6, 5→11, 6→13, 7→14`; row 8 is past the
+eight-entry list and row 0 is the `-1` start line, both silent. Only
+London ships the tables (`ccs` ships none), so only this lesson can
+speak a call-out.
+
+Unrecovered: the `0.01f` argument's meaning (a scheduled-cue delay or
+gain, routed `0x5105e0`→`0x5103d0`), the exact cue timing, and whether
+any other sub-event of the lesson fires a call-out.
+
 ### What the port does with it
 
 - `mm2_game::LegRule` is the pure rule per family; `LegReport::
@@ -428,6 +462,17 @@ for the same families ("Frequent Flyer" 205, "Straight, With Chaser"
   after 3 s) policy for follow, cop chase and stop, which
   `WreckPolicy` reports but nothing yet acts on versus
   `DisabledOutcome::RestartEvent`.
+- **Per-gate call-outs (F21-B):** `mm2_game::lesson_callout_tables`
+  binds the `cc_cpoint_*` pair for the `row == 4` lesson and
+  `mm2_game::callout_suffix(add, indexinfo, row)` maps a cleared course
+  row (the definition's checkpoint `j` is course row `j + 1`) to a wave
+  suffix, or `None` for the authored silence (the `-1` sentinel, a row
+  past the list). `CommentaryAudio` resolves the pair on the first ask
+  and `drive_lesson` records each newly cleared gate on the driver,
+  which `lesson::lesson_callout_cue` hands to the commentary as
+  `Checkpoint`-priority lines. Retail validation: only London's `map`
+  lesson resolves the pair and all seven named waves ship
+  (`only_the_retail_map_lesson_binds_per_gate_callouts`).
 
 ## Open questions
 
@@ -451,7 +496,10 @@ for the same families ("Frequent Flyer" 205, "Straight, With Chaser"
   tables points at instruction content; where lesson *text* lives is
   unrecovered. The lesson *messages* are the `mmlang.dll` ids above;
   the *voice* lines are `aud/spchdata/<ccl|ccs>/<school><row>.csv`
-  (`DSN-92`), and the per-gate call-outs (`ccllocation01..22`,
-  `cc_cpoint_*`) and mid-exam lines stay unbound.
+  (`DSN-92`); the per-gate call-outs are the `cc_cpoint_*` tables
+  covered above. The mid-exam `*firstexam*`/`*thirdexam*` lines are
+  authored inside their rows' `PRERACE`/`RESULTSPOOR` sections
+  (`ccl3`/`ccl7`/`ccl11`/`ccl12`) and are already bound; only their
+  on-screen subtitle text is unrecovered.
 - Professional `TimeofDay`/`Weather` divergence — deliberate harder
   conditions or revision drift.

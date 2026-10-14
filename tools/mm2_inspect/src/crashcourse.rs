@@ -22,7 +22,7 @@ use mm2_content::{
     CourseCatalog, CrashLesson, EventCatalog, LessonTableRole, RuleEvidence, VehicleCatalog,
     lesson_legs,
 };
-use mm2_game::{Difficulty, lesson_speech_table};
+use mm2_game::{Difficulty, lesson_callout_tables, lesson_speech_table};
 
 use crate::build_vfs;
 
@@ -247,6 +247,9 @@ struct LessonCoverage {
     police: [usize; 2],
     /// The school's instructor cue table resolves through the VFS.
     instructor: bool,
+    /// The school's per-gate call-out tables resolve through the VFS —
+    /// `false` for a lesson whose row authors none (`row != 4`).
+    callouts: bool,
 }
 
 impl LessonCoverage {
@@ -292,6 +295,8 @@ fn lesson_coverage(
         police: [0, 1].map(|i| wired(i).map_or(0, |w| w.police)),
         instructor: lesson_speech_table(city, lesson.event_ref.index)
             .is_some_and(|t| vfs.resolve(&t).is_some()),
+        callouts: lesson_callout_tables(city, lesson.event_ref.index)
+            .is_some_and(|(w, i)| vfs.resolve(&w).is_some() && vfs.resolve(&i).is_some()),
     }
 }
 
@@ -308,7 +313,7 @@ fn print_coverage(city: &str, rows: &[LessonCoverage]) {
             Err(_) => "FAIL".into(),
         };
         println!(
-            "    {:<8} playable={:<3} legs am/pro={}/{} rule={:<12} families={} lead am/pro={}/{} police am/pro={}/{} instructor={}",
+            "    {:<8} playable={:<3} legs am/pro={}/{} rule={:<12} families={} lead am/pro={}/{} police am/pro={}/{} instructor={} callouts={}",
             r.stem,
             if r.playable() { "yes" } else { "no" },
             legs(&r.legs[0]),
@@ -320,6 +325,7 @@ fn print_coverage(city: &str, rows: &[LessonCoverage]) {
             r.police[0],
             r.police[1],
             if r.instructor { "yes" } else { "no" },
+            if r.callouts { "yes" } else { "no" },
         );
     }
     let count = |e: RuleEvidence| rows.iter().filter(|r| r.rule == e).count();
@@ -562,6 +568,8 @@ mod tests {
         assert_eq!(c.lead_cars, [1, 0]);
         assert_eq!(c.police, [0, 0]);
         assert!(c.instructor);
+        // The synthetic lesson is crash row 0 — no call-out row.
+        assert!(!c.callouts);
     }
 
     #[test]

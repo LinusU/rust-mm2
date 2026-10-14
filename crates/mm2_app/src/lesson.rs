@@ -109,6 +109,14 @@ pub struct LessonDriver {
     /// applied to the lead (the original sets `MaxDamage` once, when the
     /// race goes). Reset on every leg advance.
     stop_lead_armed: bool,
+    /// The leg in play's cleared-gate mask at the last observation — the
+    /// edge base for the per-gate location call-outs (F21-B). Reset on
+    /// every leg advance, like the rule state.
+    callout_mask: u64,
+    /// Course rows a cleared gate has named, awaiting the call-out voice
+    /// ([`lesson_callout_cue`]). Appended by [`drive_lesson`] on the
+    /// clearing tick and drained the same frame.
+    pending_callouts: Vec<usize>,
 }
 
 impl LessonDriver {
@@ -121,6 +129,8 @@ impl LessonDriver {
             pass: None,
             rule_state: RuleState::default(),
             stop_lead_armed: false,
+            callout_mask: 0,
+            pending_callouts: Vec::new(),
         }
     }
 
@@ -288,6 +298,7 @@ impl LessonDriver {
             ReportEffect::Advanced { next_leg } => {
                 self.rule_state = RuleState::default();
                 self.stop_lead_armed = false;
+                self.callout_mask = 0;
                 LegStep::Next { leg: next_leg }
             }
             ReportEffect::Passed => {
@@ -389,6 +400,21 @@ pub fn drive_lesson(
             .iter()
             .any(|cop| cop_sight_clear(&spatial, cop.0, position.0, PURSUER_SIGHT_RANGE_M)),
     };
+    // F21-B: a gate clearing is the edge a lesson's per-gate location
+    // call-out rides. Diff the cleared mask against the last
+    // observation; checkpoint `j` of a leg's definition is course row
+    // `j + 1` (the definition's checkpoints are the waypoint rows after
+    // the start row, and the original's `indexinfo` is keyed by course
+    // row). Read before `observe`, which resets the base when the leg
+    // advances.
+    let mask = progress.cleared_mask();
+    let mut newly = mask & !driver.callout_mask;
+    driver.callout_mask = mask;
+    while newly != 0 {
+        let gate = newly.trailing_zeros() as usize;
+        driver.pending_callouts.push(gate + 1);
+        newly &= newly - 1;
+    }
     let ticks = race.clock;
     match driver.observe(&progress.state, &obs, ticks) {
         LegStep::Next { leg } => {
@@ -502,6 +528,28 @@ pub fn lesson_verdict_cue(
     }
 }
 
+/// Ask the instructor for the per-gate location call-out of every course
+/// gate a leg cleared since the last frame (F21-B): [`drive_lesson`]
+/// records the passed rows on the driver and this hands them to the
+/// commentary right before the queue drains. A lesson whose row authors
+/// no call-out tables (every retail row but London's map lesson)
+/// declines silently — the tables are simply not bound. A retry rebuilds
+/// the driver, so the base resets with the session.
+pub fn lesson_callout_cue(
+    driver: Option<ResMut<LessonDriver>>,
+    commentary: Option<ResMut<CommentaryAudio>>,
+) {
+    let (Some(mut driver), Some(mut commentary)) = (driver, commentary) else {
+        return;
+    };
+    if driver.pending_callouts.is_empty() {
+        return;
+    }
+    for row in std::mem::take(&mut driver.pending_callouts) {
+        commentary.request_callout(row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +595,8 @@ mod tests {
             pass: None,
             rule_state: mm2_game::RuleState::default(),
             stop_lead_armed: false,
+            callout_mask: 0,
+            pending_callouts: Vec::new(),
         }
     }
 

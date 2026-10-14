@@ -586,8 +586,14 @@ Measured authored quirks kept verbatim, never normalized: `al5`'s
 waves — a dead cue family on that one speaker; every
 `weacldy_prerace.csv` authors `WEACLD` (the wave stems match the
 row, not the filename); `ccl/cc_cpoint_indexinfo.csv` is a
-third bare-index grammar (`Crash Course Index`/`Past Index`) the
-parser diagnoses rather than force-fits. The race-kind tables
+third bare-index grammar (the exe's `Crash Course Index`/`Past Index`
+strings) — a heading then one signed integer per line, read by the
+dedicated `mm2_formats::spchdata::CpointIndex` (the outer cue-table
+parser diagnoses it rather than dropping it). That file with
+`ccl/cc_cpoint_waveinfo.csv` is the Crash Course per-gate location
+call-out binding (`docs/research/crashcourse.md`, F21-B), read at
+runtime through `mm2_game::lesson_callout_tables`/`callout_suffix`. The
+race-kind tables
 (`checkpoint.csv`/`circuit.csv`/`blitz.csv`) author `PRERACE` /
 `FINALCHECKPOINT` / `RESULTS*` sections: only `FINALCHECKPOINT`
 (`RACECHECK`, `end` 3-4) and the `RESULTS{POOR,MID,WIN}` tiers
@@ -688,9 +694,12 @@ The spchdata census enumerates every wave a usable row can draw
 in `ccl/`/`ccs/` author whole stems and take no speaker): 1905 drawable
 clips, 1815 shipped, 90 authored draws with no wave (the `RACELAPS01`
 rows, `cruisedamage`/`racedamage` ranges longer than the shipped takes, a
-few result/unlock rows). The one unsupported file is the nonconforming
-`ccl/cc_cpoint_indexinfo.csv` integer list. Missing draws are authored
-data, reported — never substituted. Music is parsed, not played:
+few result/unlock rows). The nonconforming
+`ccl/cc_cpoint_indexinfo.csv` integer list is read by its own
+`CpointIndex` grammar (not a cue table); its paired
+`cc_cpoint_waveinfo.csv`, the Crash Course per-gate call-out pool, is a
+normal cue table. Missing draws are authored data, reported — never
+substituted. Music is parsed, not played:
 DirectMusic has no synthesizer, so both music rows count `unsupported`.
 
 `the_retail_soundscape_capture_separates_ambience_voice_ui_and_music`

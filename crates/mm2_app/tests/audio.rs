@@ -4952,6 +4952,107 @@ fn every_retail_lesson_resolves_its_instructor_lines() {
     assert_eq!(missing.len(), 3, "{missing:#?}");
 }
 
+/// Original-content validation (opt-in: `MM2_RETAIL`): of the 26 retail
+/// Crash Course rows only London's map lesson (row 4) authors the
+/// per-gate call-out tables, and every suffix its authored index list
+/// names resolves to a shipped `ccllocationNN` wave. The authored `-1`
+/// sentinel and the row past the list are the original's silence.
+#[test]
+fn only_the_retail_map_lesson_binds_per_gate_callouts() {
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_formats::spchdata::{CpointIndex, CueTable};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("MM2_RETAIL unset: retail call-out sweep NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves = Assets::<PcmAudio>::default();
+
+    let mut bound: Vec<(String, usize)> = Vec::new();
+    let mut london = None;
+    for city in ["london", "sf"] {
+        let catalog = mm2_content::EventCatalog::scan(&vfs, city);
+        for e in catalog
+            .events
+            .iter()
+            .filter(|e| e.event_ref.table == mm2_game::EventTableKind::CrashCourse)
+        {
+            if let Some((waveinfo, indexinfo)) =
+                mm2_game::lesson_callout_tables(city, e.event_ref.index)
+            {
+                bound.push((city.to_string(), e.event_ref.index));
+                if city == "london" {
+                    london = Some((waveinfo, indexinfo));
+                }
+            }
+        }
+    }
+    // The loader binds the call-out tables for `row == 4` in every
+    // school (`0x51b736`); both cities have such a row. Only London
+    // ships the files, so only London's lesson can speak a call-out.
+    assert_eq!(
+        bound,
+        vec![("london".to_string(), 4), ("sf".to_string(), 4)],
+        "the row-4 binding is shared by both schools"
+    );
+    let (waveinfo, indexinfo) = london.expect("London row 4 binds the tables");
+    assert!(
+        vfs.read_logical("aud/spchdata/ccs/cc_cpoint_waveinfo.csv")
+            .is_err(),
+        "SF ships no call-out tables"
+    );
+
+    let table = CueTable::parse(&String::from_utf8_lossy(
+        &vfs.read_logical(&waveinfo).unwrap(),
+    ))
+    .unwrap();
+    let cue = table
+        .section("CHECKPOINT")
+        .and_then(|s| s.rows.first())
+        .expect("the call-out table authors a CHECKPOINT cue");
+    let index = CpointIndex::parse(&String::from_utf8_lossy(
+        &vfs.read_logical(&indexinfo).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(index.values, vec![-1, 15, 3, 6, 5, 10, 12, 13]);
+
+    // `callout_suffix` names a wave for every list entry but the `-1`
+    // sentinel and nothing for the row past the list (the 9th course
+    // row); every named wave must ship.
+    assert!(mm2_game::callout_suffix(cue.add, &index.values, 0).is_none());
+    assert!(mm2_game::callout_suffix(cue.add, &index.values, 8).is_none());
+    let mut named = Vec::new();
+    for r in 0..=index.values.len() {
+        let Some(suffix) = mm2_game::callout_suffix(cue.add, &index.values, r) else {
+            continue;
+        };
+        let stem = mm2_game::cue_wave_stem("", &cue.prefix, suffix);
+        bank.load(&vfs, &mut waves, &stem)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        named.push((r, stem));
+    }
+    assert_eq!(
+        named,
+        vec![
+            (1, "ccllocation16".to_string()),
+            (2, "ccllocation04".to_string()),
+            (3, "ccllocation07".to_string()),
+            (4, "ccllocation06".to_string()),
+            (5, "ccllocation11".to_string()),
+            (6, "ccllocation13".to_string()),
+            (7, "ccllocation14".to_string()),
+        ]
+    );
+    eprintln!(
+        "retail per-gate call-outs: london row 4, {}/{} list entries name a shipped wave",
+        named.len(),
+        index.values.len()
+    );
+}
+
 /// Each race-end cue is asked for once: a second tier is refused.
 #[test]
 fn a_results_request_is_accepted_once_whatever_the_tier() {
@@ -4975,6 +5076,24 @@ fn a_final_checkpoint_request_is_accepted_once_and_only_when_bound() {
     assert!(!bound.request(EventCue::FinalCheckpoint));
     let mut unbound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7).unwrap();
     assert!(!unbound.request(EventCue::FinalCheckpoint));
+}
+
+/// `request_callout` declines without bound call-out tables; with them
+/// it accepts, and — unlike `request` — the same row twice, since each
+/// pass of a gate is its own line.
+#[test]
+fn a_callout_request_needs_bound_tables_and_accepts_each_pass() {
+    let mut unbound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7).unwrap();
+    assert!(!unbound.request_callout(1));
+
+    let mut bound = CommentaryAudio::bind(Some("sf"), commentary_conditions(), 7)
+        .unwrap()
+        .with_callouts(Some((
+            "aud/spchdata/ccs/cc_cpoint_waveinfo.csv".into(),
+            "aud/spchdata/ccs/cc_cpoint_indexinfo.csv".into(),
+        )));
+    assert!(bound.request_callout(1));
+    assert!(bound.request_callout(1));
 }
 
 fn race_effect_app(dir: &Path) -> (App, Entity) {

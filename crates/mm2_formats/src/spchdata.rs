@@ -20,10 +20,12 @@
 //!   speaker-directory count (`aud\spchdata\as%d`/`al%d` in the exe)
 //!   and the directory/wave stem prefix (`AS`/`AL`).
 //!
-//! One file fits neither schema: `ccl/cc_cpoint_indexinfo.csv` is a
-//! bare signed-integer list under a `SUFIX NUM FOR CPOINTS` heading.
-//! Parsed as a cue table it yields diagnostics and no sections —
-//! honest, not silently skipped.
+//! A third file fits neither schema: `ccl/cc_cpoint_indexinfo.csv`,
+//! the Crash Course per-gate call-out index list. It is a heading line
+//! (`SUFIX NUM FOR CPOINTS` on retail) followed by one signed integer
+//! per line — [`CpointIndex`] parses it. (Read as a cue table it
+//! yields diagnostics and no sections; the explicit parser is the
+//! honest reading.)
 //!
 //! All semantics beyond the grammar (cue trigger, speaker-index draw,
 //! suffix-draw shape) are unrecovered — this module only reads the
@@ -68,6 +70,55 @@ pub struct CueRow {
     pub extra: Vec<i64>,
     /// 1-based line number in the source file.
     pub line: u32,
+}
+
+/// A parsed `ccl/cc_cpoint_indexinfo.csv` — the Crash Course per-gate
+/// call-out index list (exe string `cc_cpoint_indexinfo`, loader
+/// `0x51bd90`). The first non-blank line is a heading (`SUFIX NUM FOR
+/// CPOINTS` on retail) and is discarded; every following non-blank
+/// line contributes one signed value. The exe reads only the line's
+/// first comma-separated field (`strtok(line, ",")` then `atoi`), so
+/// trailing columns are ignored here too.
+#[derive(Debug, Clone)]
+pub struct CpointIndex {
+    /// One value per authored line after the heading, in file order.
+    /// `-1` is the authored "no call-out for this gate" sentinel.
+    pub values: Vec<i64>,
+    /// Recoverable problems (a line whose first field is not an
+    /// integer).
+    pub diagnostics: Vec<TableDiagnostic>,
+}
+
+impl CpointIndex {
+    /// Parse an index list. `Err` only on empty input; a non-integral
+    /// line degrades to a [`TableDiagnostic`] and the remaining lines
+    /// still parse (the list keeps its denominator).
+    pub fn parse(input: &str) -> Result<Self, crate::FormatError> {
+        let mut lines = input
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty());
+        let Some((_, _heading)) = lines.next() else {
+            return Err(crate::FormatError::parse(0, "empty cpoint index list"));
+        };
+        let mut values = Vec::new();
+        let mut diagnostics = Vec::new();
+        for (idx, raw) in lines {
+            let line = (idx + 1) as u32;
+            let first = raw.split(',').next().unwrap_or("").trim();
+            match first.parse::<i64>() {
+                Ok(v) => values.push(v),
+                Err(_) => diagnostics.push(TableDiagnostic {
+                    line,
+                    message: format!("non-integral cpoint index {first:?}"),
+                }),
+            }
+        }
+        Ok(CpointIndex {
+            values,
+            diagnostics,
+        })
+    }
 }
 
 /// A city's `aud/spchdata/<city>.csv` announcer registry: how many
@@ -411,11 +462,38 @@ mod tests {
     fn tolerates_the_bare_index_table_as_diagnostics() {
         // ccl/cc_cpoint_indexinfo.csv is a different grammar — a bare
         // integer list. Parsed as a cue table it surfaces diagnostics
-        // and no sections rather than vanishing.
+        // and no sections rather than vanishing; CpointIndex parses it.
         let text = "SUFIX NUM FOR CPOINTS\n-1\n15\n3\n";
         let table = CueTable::parse(text).unwrap();
         assert!(table.sections.is_empty());
         assert_eq!(table.diagnostics.len(), 5); // header + 4 orphan rows
+    }
+
+    #[test]
+    fn parses_the_cpoint_index_list() {
+        // The retail `ccl/cc_cpoint_indexinfo.csv`, verbatim: a heading
+        // then one signed value per line.
+        let text = "SUFIX NUM FOR CPOINTS\r\n-1\r\n15\r\n3\r\n6\r\n5\r\n10\r\n12\r\n13\r\n";
+        let index = CpointIndex::parse(text).unwrap();
+        assert!(index.diagnostics.is_empty(), "{:?}", index.diagnostics);
+        assert_eq!(index.values, vec![-1, 15, 3, 6, 5, 10, 12, 13]);
+    }
+
+    #[test]
+    fn a_cpoint_index_reads_only_the_first_field_of_a_line() {
+        // The loader takes `strtok(line, ",")` then `atoi`, so anything
+        // after the first comma is ignored.
+        let index = CpointIndex::parse("SUFIX NUM FOR CPOINTS\n7,extra,columns\n").unwrap();
+        assert_eq!(index.values, vec![7]);
+    }
+
+    #[test]
+    fn a_non_integral_cpoint_index_is_a_diagnostic() {
+        let index = CpointIndex::parse("SUFIX NUM FOR CPOINTS\n1\ntwo\n3\n").unwrap();
+        assert_eq!(index.values, vec![1, 3]);
+        assert_eq!(index.diagnostics.len(), 1);
+        assert!(index.diagnostics[0].message.contains("two"));
+        assert!(CpointIndex::parse("  \n").is_err());
     }
 
     #[test]

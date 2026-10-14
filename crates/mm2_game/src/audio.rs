@@ -841,6 +841,18 @@ pub fn event_speech_table(table: EventTableKind) -> Option<&'static str> {
     }
 }
 
+/// The school directory a city's Crash Course speech lives in — `ccl`
+/// for London's cab course, `ccs` for San Francisco's stunt course
+/// (the exe's `aud\spchdata\ccl`/`\ccs` strings); `None` for a city
+/// with no lesson school (a mod city).
+fn lesson_school(city: &str) -> Option<&'static str> {
+    match city {
+        "london" => Some("ccl"),
+        "sf" => Some("ccs"),
+        _ => None,
+    }
+}
+
 /// The cue table a Crash Course lesson speaks from (F21-B.16):
 /// `aud/spchdata/<school>/<school><row>.csv`, where the school dir is
 /// `ccl` for London's cab course and `ccs` for San Francisco's stunt
@@ -856,12 +868,52 @@ pub fn event_speech_table(table: EventTableKind) -> Option<&'static str> {
 /// its lesson number looks swapped (London row 1 speaks `CCL03`, row
 /// 2 `CCL02`). `None` for a city with no lesson school (a mod city).
 pub fn lesson_speech_table(city: &str, row: usize) -> Option<String> {
-    let school = match city {
-        "london" => "ccl",
-        "sf" => "ccs",
-        _ => return None,
-    };
+    let school = lesson_school(city)?;
     Some(format!("aud/spchdata/{school}/{school}{row}.csv"))
+}
+
+/// The Crash Course row whose lesson binds the per-gate call-out
+/// tables — the school-table loader loads them only for `row == 4`
+/// (`0x51b736`, `cmp edi, 4`). Every other row binds none.
+pub const LESSON_CALLOUT_ROW: usize = 4;
+
+/// The two per-gate call-out tables a Crash Course lesson binds, as
+/// `(waveinfo, indexinfo)`, or `None` when the lesson's row does not
+/// author them — the exe loads them only for [`LESSON_CALLOUT_ROW`]
+/// (`0x51b740`/`0x51b74d`). Both live in the lesson's school dir:
+/// `cc_cpoint_waveinfo.csv` is a cue table whose `CHECKPOINT` section
+/// holds the pool of location call-outs and `cc_cpoint_indexinfo.csv`
+/// the bare index list ([`mm2_formats::spchdata::CpointIndex`]).
+pub fn lesson_callout_tables(city: &str, row: usize) -> Option<(String, String)> {
+    if row != LESSON_CALLOUT_ROW {
+        return None;
+    }
+    let school = lesson_school(city)?;
+    Some((
+        format!("aud/spchdata/{school}/cc_cpoint_waveinfo.csv"),
+        format!("aud/spchdata/{school}/cc_cpoint_indexinfo.csv"),
+    ))
+}
+
+/// The wave suffix (the `NN` in `<prefix><NN>`) the per-gate call-out
+/// for course row `row` names, or `None` for silence.
+///
+/// `row` is the lesson course's *array index*: row 0 is the start gate
+/// and is never passed (`0x4358d2` starts the current gate at 1), so
+/// the port's cleared-gate count is exactly the index of the gate just
+/// passed. `indexinfo[row]` (parsed from `cc_cpoint_indexinfo.csv`)
+/// selects an entry of the `CHECKPOINT` cue's wave list, which the cue
+/// constructor builds for suffixes `add + 1 ..= end` — entry `k`
+/// names suffix `add + 1 + k` (`0x513e00`). The authored `-1` is the
+/// "no call-out" sentinel, and a `row` past the list names nothing
+/// (`0x51b959`). `None` on any non-naming case, never a guess; the
+/// sum is checked so a modded `i64`-scale value cannot overflow.
+pub fn callout_suffix(add: i64, indexinfo: &[i64], row: usize) -> Option<i64> {
+    let k = *indexinfo.get(row)?;
+    if k < 0 {
+        return None;
+    }
+    add.checked_add(1)?.checked_add(k)
 }
 
 /// Draw a speaker index inside the authored `Num announcers` domain —
@@ -946,6 +998,54 @@ mod tests {
             Some("aud/spchdata/ccs/ccs12.csv")
         );
         assert_eq!(lesson_speech_table("modcity", 0), None);
+    }
+
+    #[test]
+    fn only_the_callout_lesson_row_binds_the_cpoint_tables() {
+        assert_eq!(
+            lesson_callout_tables("london", LESSON_CALLOUT_ROW),
+            Some((
+                "aud/spchdata/ccl/cc_cpoint_waveinfo.csv".into(),
+                "aud/spchdata/ccl/cc_cpoint_indexinfo.csv".into(),
+            ))
+        );
+        assert_eq!(
+            lesson_callout_tables("sf", 4).map(|(w, _)| w).as_deref(),
+            Some("aud/spchdata/ccs/cc_cpoint_waveinfo.csv")
+        );
+        // Every other lesson row binds none, and a schoolless city
+        // binds none.
+        assert_eq!(lesson_callout_tables("london", 3), None);
+        assert_eq!(lesson_callout_tables("modcity", 4), None);
+    }
+
+    #[test]
+    fn a_callout_suffix_is_the_list_entry_offset_by_the_cue_add() {
+        // The retail `cc_cpoint_indexinfo.csv` under the `CCLLOCATION`
+        // row's `add` of 0: gate row 0 is the start line and never
+        // passed, and row 8 (a ninth course row) is past the list.
+        let retail = [-1, 15, 3, 6, 5, 10, 12, 13];
+        let suffixes: Vec<_> = (0..9).map(|row| callout_suffix(0, &retail, row)).collect();
+        assert_eq!(
+            suffixes,
+            vec![
+                None,
+                Some(16),
+                Some(4),
+                Some(7),
+                Some(6),
+                Some(11),
+                Some(13),
+                Some(14),
+                None,
+            ]
+        );
+        // A nonzero `add` shifts every list entry; an empty list names
+        // nothing.
+        assert_eq!(callout_suffix(4, &[0, 1], 1), Some(6));
+        assert_eq!(callout_suffix(0, &[], 0), None);
+        // A modded `i64::MAX` add cannot overflow into a panic.
+        assert_eq!(callout_suffix(i64::MAX, &[1], 0), None);
     }
 
     use super::*;

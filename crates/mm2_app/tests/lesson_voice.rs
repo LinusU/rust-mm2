@@ -35,6 +35,9 @@ const CRASHDATA: &str =
     "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
 /// The lesson table for London crash row 0.
 const TABLE: &str = "aud/spchdata/ccl/ccl0.csv";
+/// The lesson table for London crash row 4 — the only row that authors
+/// the per-gate call-out tables.
+const TABLE4: &str = "aud/spchdata/ccl/ccl4.csv";
 
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
@@ -200,13 +203,87 @@ fn lesson_install(time_limit: u32) -> tempfile::TempDir {
     tmp
 }
 
+/// One lesson at London crash row 4 — the only row that authors the
+/// per-gate call-out tables — an eight-gate `map` lesson together with
+/// the `cc_cpoint_*` tables and the `ccllocationNN` wave pool. Mirrors
+/// `lesson_install` but at the call-out row; the gates sit at x = 50 …
+/// 400 along z = 5, so a car swept in +x crosses them in order.
+fn callout_install(time_limit: u32) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", city_psdl());
+    write(
+        d,
+        "texture/test_road.png",
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    );
+    // Five `mmcrashdata` rows; only row 4 is the lesson this test runs.
+    let mut mm = String::from(MM_HEADER);
+    mm.push('\n');
+    for row in 0..5 {
+        let name = if row == 4 { "midtrm1" } else { "filler" };
+        mm.push_str(&format!("{name},0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n"));
+    }
+    write(d, "race/london/mmcrashdata.csv", mm);
+    write(d, "race/london/crash4.aimap", "[Opponent]\n0\n");
+    for suffix in ["data", "data_p"] {
+        write(
+            d,
+            &format!("race/london/crash4{suffix}.csv"),
+            format!("{CRASHDATA}map,9,8,{time_limit},0.05,0,0,0,0,0,0\n"),
+        );
+    }
+    // Start row plus eight gates, in +x order.
+    let mut wp = String::from(WP_HEADER);
+    for i in 0..9 {
+        wp.push_str(&format!("{},1,5,90,15,0,0,0,\n", 50 * i));
+    }
+    write(d, "race/london/map.csv", wp);
+    write(
+        d,
+        TABLE4,
+        "Name prefix/type header,end sufix value,sufix add value\n\
+         PRERACE header,,\nCCL04INTRO,2,0\n\
+         RESULTSPOOR header,,\nCCL04FAIL,2,0\n\
+         RESULTSWIN header,,\nCCL04SUCC,2,0\n",
+    );
+    write(
+        d,
+        "aud/spchdata/ccl/cc_cpoint_waveinfo.csv",
+        "Name prefix/type header,end sufix value,sufix add value\n\
+         CHECKPOINT header,,\nCCLLOCATION,22,0\n",
+    );
+    write(
+        d,
+        "aud/spchdata/ccl/cc_cpoint_indexinfo.csv",
+        "SUFIX NUM FOR CPOINTS\n-1\n15\n3\n6\n5\n10\n12\n13\n",
+    );
+    for (name, count) in [("intro", 2), ("fail", 2), ("succ", 2)] {
+        for n in 1..=count {
+            write(
+                d,
+                &format!("aud/aud11/ccl/ccl04{name}{n:02}.11k.wav"),
+                pcm_wav(11025, 256),
+            );
+        }
+    }
+    for n in 1..=22 {
+        write(
+            d,
+            &format!("aud/aud11/ccl/ccllocation{n:02}.11k.wav"),
+            pcm_wav(11025, 256),
+        );
+    }
+    tmp
+}
+
 fn vfs_of(dir: &Path) -> Vfs {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
     vfs
 }
 
-fn lesson_config() -> SessionConfig {
+fn lesson_config(index: usize) -> SessionConfig {
     SessionConfig {
         world: WorldMode::City {
             psdl: "city/test.psdl".into(),
@@ -214,7 +291,7 @@ fn lesson_config() -> SessionConfig {
         mode: SessionMode::Event(EventRef {
             city: "london".into(),
             table: EventTableKind::CrashCourse,
-            index: 0,
+            index,
         }),
         ..SessionConfig::default()
     }
@@ -222,14 +299,14 @@ fn lesson_config() -> SessionConfig {
 
 /// The session wiring `lesson_launch` runs, plus the audio resources
 /// and the shared commentary chain.
-fn lesson_app(vfs: Vfs) -> App {
+fn lesson_app(vfs: Vfs, index: usize) -> App {
     let selected = session::SelectedCar {
         def: None,
         paint: 0,
     };
     let tuned = VehicleConfig::default();
     let mut session = Session::new();
-    session.begin(lesson_config()).unwrap();
+    session.begin(lesson_config(index)).unwrap();
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -342,8 +419,16 @@ fn stems(app: &mut App, generation: u64, prefix: &str) -> Vec<String> {
 
 /// Launch to the first countdown frame and let the pre-race window open.
 fn launched(time_limit: u32) -> (App, tempfile::TempDir) {
-    let tmp = lesson_install(time_limit);
-    let mut app = lesson_app(vfs_of(tmp.path()));
+    launch(lesson_install(time_limit), 0)
+}
+
+/// The same for the call-out lesson at crash row 4.
+fn callout_launched(time_limit: u32) -> (App, tempfile::TempDir) {
+    launch(callout_install(time_limit), 4)
+}
+
+fn launch(tmp: tempfile::TempDir, index: usize) -> (App, tempfile::TempDir) {
+    let mut app = lesson_app(vfs_of(tmp.path()), index);
     run_until(&mut app, 20, "Countdown", |a| {
         phase(a) == SessionPhase::Countdown
     });
@@ -415,6 +500,64 @@ fn a_cleared_lesson_speaks_its_pass_line_once_while_the_results_stand() {
     );
     assert!(stems(&mut app, gen_, "ccl00fail").is_empty());
     assert_eq!(stems(&mut app, gen_, "ccl00intro").len(), 1);
+}
+
+#[test]
+fn a_gate_cleared_in_the_callout_lesson_speaks_its_location_line_in_order() {
+    let (mut app, _tmp) = callout_launched(60);
+    let gen_ = generation(&app);
+    running(&mut app);
+    let centers: Vec<Vec3> = app
+        .world()
+        .resource::<RaceState>()
+        .definition
+        .checkpoints
+        .iter()
+        .map(|c| c.center)
+        .collect();
+    assert_eq!(
+        centers.len(),
+        8,
+        "the synthetic map lesson authors eight gates"
+    );
+    let car = player(&mut app);
+    // Anchor the swept segment on the course's start row.
+    place(&mut app, car, Vec3::new(0.0, 1.0, 5.0));
+    app.update();
+
+    // Course rows 1..7 name `ccllocation16/04/07/06/11/13/14` (the
+    // authored index list `-1,15,3,6,5,10,12,13` offset by the cue's
+    // `add + 1`); row 8 is past the list, so the eighth gate is silent.
+    let expected = [
+        "ccllocation16",
+        "ccllocation04",
+        "ccllocation07",
+        "ccllocation06",
+        "ccllocation11",
+        "ccllocation13",
+        "ccllocation14",
+    ];
+    for (i, want) in expected.iter().enumerate() {
+        place(&mut app, car, centers[i]);
+        run_until(&mut app, 600, want, |a| {
+            stems(a, gen_, "ccllocation").iter().any(|s| s == want)
+        });
+        // Anchor at the gate before the next sweep.
+        place(&mut app, car, centers[i]);
+        app.update();
+    }
+
+    // The final gate completes the course but names no call-out.
+    place(&mut app, car, centers[7]);
+    run_until(&mut app, 600, "the lesson to pass", |a| {
+        a.world().resource::<LessonDriver>().run().phase() == LessonPhase::Passed
+    });
+    let heard = stems(&mut app, gen_, "ccllocation");
+    assert_eq!(heard.len(), 7, "{:?}", voices(&mut app));
+    assert!(
+        heard.iter().all(|s| expected.contains(&s.as_str())),
+        "{heard:?}"
+    );
 }
 
 #[test]

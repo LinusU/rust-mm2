@@ -47,11 +47,11 @@ pub mod texel;
 pub mod traffic;
 
 pub use audio::{
-    AmbientAudio, AmbientEngineSpec, EngineLoopSpec, EngineMix, ImpactPick, RollingSpec,
-    SIREN_FLAG, SirenPlayback, SirenSampleSpec, SirenSpec, SirenTransition, SkidPick, SkidSpec,
-    SkidUnit, SurfaceSpec, SurfaceVariant, VehicleAudio, cue_wave_stem, draw_cue_suffix,
-    draw_speaker, event_speech_table, impact_category, lesson_speech_table, pick_impact,
-    prerace_tod_stem, prerace_weather_stem, tire_slippage,
+    AmbientAudio, AmbientEngineSpec, EngineLoopSpec, EngineMix, ImpactPick, LESSON_CALLOUT_ROW,
+    RollingSpec, SIREN_FLAG, SirenPlayback, SirenSampleSpec, SirenSpec, SirenTransition, SkidPick,
+    SkidSpec, SkidUnit, SurfaceSpec, SurfaceVariant, VehicleAudio, callout_suffix, cue_wave_stem,
+    draw_cue_suffix, draw_speaker, event_speech_table, impact_category, lesson_callout_tables,
+    lesson_speech_table, pick_impact, prerace_tod_stem, prerace_weather_stem, tire_slippage,
 };
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerFragment, BangerPhase, BangerPool, BangerSite,
