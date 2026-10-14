@@ -489,9 +489,90 @@ pub fn reanchor_teleported_participants(
     }
 }
 
+/// Holds an event's countdown until the window shows it.
+///
+/// The race clock is fixed-step, and the fixed loop catches up on
+/// whatever wall time a frame took. The first frames of a session are
+/// slow — pipelines compiling, textures uploading — so the clock ran
+/// two of the three countdown seconds before the picture was steady:
+/// a player saw `1`, then `GO!`, with the field already away. While
+/// held, the countdown does not tick; it starts once
+/// [`STEADY_FRAMES`] frames in a row have each taken under
+/// [`STEADY_FRAME`], or after [`HOLD_LIMIT`] whatever the frame rate.
+/// Only an interactive window inserts it — a headless run or a
+/// `--frames` capture has no one watching to wait for.
+#[derive(Resource, Debug)]
+pub struct CountdownHold {
+    /// Whether the countdown is held.
+    pub held: bool,
+    /// Steady frames in a row so far.
+    steady: u32,
+    /// Real time spent holding (s).
+    waited: f32,
+}
+
+impl CountdownHold {
+    /// One rendered frame that took `frame` seconds, the session
+    /// `counting_down` or not.
+    pub fn observe(&mut self, counting_down: bool, frame: f32) {
+        if !counting_down {
+            *self = Self::default();
+            return;
+        }
+        if !self.held {
+            return;
+        }
+        self.waited += frame;
+        self.steady = if frame < STEADY_FRAME {
+            self.steady + 1
+        } else {
+            0
+        };
+        if self.steady >= STEADY_FRAMES || self.waited >= HOLD_LIMIT {
+            self.held = false;
+        }
+    }
+}
+
+impl Default for CountdownHold {
+    fn default() -> Self {
+        Self {
+            held: true,
+            steady: 0,
+            waited: 0.0,
+        }
+    }
+}
+
+/// Consecutive steady frames that release a held countdown — a third
+/// of a second at 60 frames a second.
+pub const STEADY_FRAMES: u32 = 20;
+/// Longest frame (s) that counts as steady.
+pub const STEADY_FRAME: f32 = 1.0 / 30.0;
+/// Longest a countdown is held (s), however slow the machine.
+pub const HOLD_LIMIT: f32 = 5.0;
+
+/// Per-frame watch for [`CountdownHold`]: re-armed whenever the
+/// session is not counting down, released by steady frames once it
+/// is.
+pub fn watch_countdown_hold(
+    time: Res<Time<Real>>,
+    session: Res<Session>,
+    hold: Option<ResMut<CountdownHold>>,
+) {
+    if let Some(mut hold) = hold {
+        hold.observe(
+            *session.phase() == SessionPhase::Countdown,
+            time.delta_secs(),
+        );
+    }
+}
+
 /// Fixed-step race driver — see module docs.
+#[allow(clippy::too_many_arguments)] // Bevy system: the race clock threads the session handles it advances
 pub fn advance_race(
     race: Option<ResMut<RaceState>>,
+    hold: Option<Res<CountdownHold>>,
     lesson: Option<Res<crate::lesson::LessonDriver>>,
     mut session: ResMut<Session>,
     mut ledger: ResMut<ResultLedger>,
@@ -518,6 +599,7 @@ pub fn advance_race(
         _ => return,
     }
     match &mut race.phase {
+        RacePhase::Countdown { .. } if hold.is_some_and(|h| h.held) => {}
         RacePhase::Countdown { remaining } => {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -923,6 +1005,45 @@ pub fn update_race_warning(
                 };
             }
             _ => *vis = Visibility::Hidden,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_countdown_is_held_until_the_picture_is_steady() {
+        let mut hold = CountdownHold::default();
+        // Loading frames: half a second each.
+        for _ in 0..4 {
+            hold.observe(true, 0.5);
+            assert!(hold.held);
+        }
+        // Steady frames, one short of the release, then a hitch.
+        for _ in 0..STEADY_FRAMES - 1 {
+            hold.observe(true, 1.0 / 60.0);
+        }
+        hold.observe(true, 0.2);
+        assert!(hold.held, "a hitch starts the count again");
+        for _ in 0..STEADY_FRAMES {
+            hold.observe(true, 1.0 / 60.0);
+        }
+        assert!(!hold.held, "released after a steady run");
+        // Out of the countdown it re-arms for the next one.
+        hold.observe(false, 1.0 / 60.0);
+        assert!(hold.held);
+    }
+
+    #[test]
+    fn a_slow_machine_is_not_held_forever() {
+        let mut hold = CountdownHold::default();
+        let mut waited = 0.0;
+        while hold.held {
+            hold.observe(true, 0.1);
+            waited += 0.1;
+            assert!(waited <= HOLD_LIMIT + 0.11, "held {waited} s");
         }
     }
 }

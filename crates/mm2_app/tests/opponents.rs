@@ -829,6 +829,32 @@ fn countdown_locks_opponent_input() {
     }
 }
 
+/// A held countdown holds the whole field: the window has not yet
+/// shown it, so nobody may be away (`race::CountdownHold`).
+#[test]
+fn a_held_countdown_holds_the_field() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.init_resource::<mm2_app::race::CountdownHold>();
+    app.update();
+    let start: Vec<Vec3> = opponents(&mut app)
+        .into_iter()
+        .map(|e| app.world().get::<Position>(e).unwrap().0)
+        .collect();
+    run(&mut app, 400); // twice the countdown
+    assert_eq!(phase(&app), SessionPhase::Countdown, "still counting down");
+    for (e, from) in opponents(&mut app).into_iter().zip(start) {
+        let at = app.world().get::<Position>(e).unwrap().0;
+        assert!(at.distance(from) < 0.5, "an opponent left at {from} → {at}");
+    }
+    // Released, the countdown runs and the race starts.
+    app.world_mut()
+        .resource_mut::<mm2_app::race::CountdownHold>()
+        .held = false;
+    run(&mut app, 300);
+    assert_eq!(phase(&app), SessionPhase::Playing);
+}
+
 /// Opponents drive their authored `.opp` routes through real physics and
 /// earn progress through the shared `advance_race` path: both clear the
 /// course's gates, cross the finish and record exactly one result each

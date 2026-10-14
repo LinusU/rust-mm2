@@ -1946,6 +1946,7 @@ fn main() {
                 navarrow::update_nav_arrow,
                 race::update_race_warning,
                 race::update_countdown_banner,
+                race::watch_countdown_hold,
             ),
             hud::update_hud,
         ),
@@ -2376,6 +2377,12 @@ fn main() {
     // channel the headless smoke's own app reads.
     if let Some(slot) = active_profile {
         app.insert_resource(slot);
+    }
+    // A countdown waits for a steady picture when someone is watching
+    // it; a `--frames` capture keeps the clock it has always had, so
+    // the same command still frames the same moment.
+    if cli.screenshot.is_none() && cli.frames.is_none() {
+        app.init_resource::<race::CountdownHold>();
     }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
