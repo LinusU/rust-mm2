@@ -874,6 +874,150 @@ fn cruise_launches_then_quit_returns_to_the_menu() {
     );
 }
 
+/// The cardata rows `engine_rigs` turns into loops: the canonical
+/// fade-window header, one row per wave `install_with_engine` writes.
+const ENGINE_CARDATA: &str = "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,2,REV,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\nEIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\nEDRIVE,0.55,0.9,500,2800,6500,10000,0.6,2.5,500,12000\n";
+
+/// [`install`] plus an authored player engine rig — `vpt` gains a
+/// cardata table with two loop rows and their waves, so a launched
+/// session spawns real `VoiceKind::Engine` loops.
+fn install_with_engine() -> tempfile::TempDir {
+    let tmp = install();
+    let d = tmp.path();
+    write(d, "aud/cardata/player/vpt.csv", ENGINE_CARDATA);
+    for stem in ["eidle", "edrive"] {
+        write(d, &format!("aud/aud22/engines/{stem}.22k.wav"), ui_wav());
+    }
+    tmp
+}
+
+/// `menu_app` with the engine-rig systems the binary runs after
+/// `drive_session`, so session audio is observable.
+fn audio_menu_app(dir: &Path) -> App {
+    use mm2_app::audio::{self, AudioReport, PcmAudio, WaveBank};
+    let mut app = menu_app(dir, None);
+    let bank = WaveBank::index(&app.world().resource::<Mm2Vfs>().0);
+    app.insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(
+            Update,
+            (audio::engine_rigs, audio::engine_drive)
+                .chain()
+                .after(session::drive_session),
+        );
+    mm2_app::lobby_systems::add_client_systems(&mut app, never_capturing);
+    mm2_app::lobby_systems::add_host_systems(&mut app, never_capturing);
+    app
+}
+
+/// Every looping audio voice alive in the world.
+fn audio_loops(app: &mut App) -> usize {
+    use mm2_app::audio::AudioVoice;
+    let world = app.world_mut();
+    world
+        .query::<(&AudioVoice, &AudioPlayer<mm2_app::audio::PcmAudio>)>()
+        .iter(world)
+        .count()
+}
+
+/// F17-AC06 audio leg: repeated menu → play → menu cycles leave
+/// exactly one engine loop set while playing and none in the menu —
+/// a session teardown must not leak the previous run's loops.
+#[test]
+fn repeated_session_cycles_leave_one_audio_loop_set() {
+    let tmp = install_with_engine();
+    let mut app = audio_menu_app(tmp.path());
+    app.update();
+    assert_eq!(audio_loops(&mut app), 0, "the menu is silent");
+
+    let mut playing_loops = None;
+    for cycle in 0..4 {
+        activate_row(&mut app, "Cruise");
+        activate_row(&mut app, "testcity");
+        assert!(
+            run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing),
+            "cycle {cycle} never reached Playing: {:?}",
+            phase(&app)
+        );
+        // The rig builds on the frame after the car spawns.
+        app.update();
+        app.update();
+        let loops = audio_loops(&mut app);
+        assert_eq!(loops, 2, "cycle {cycle}: one loop per authored row");
+        assert_eq!(*playing_loops.get_or_insert(loops), loops);
+        assert_eq!(players(&mut app), 1);
+
+        quit_session(&mut app);
+        assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+        app.update();
+        app.update();
+        assert_eq!(
+            audio_loops(&mut app),
+            0,
+            "cycle {cycle}: no loop outlives its session"
+        );
+        assert_eq!(menu_roots(&mut app), 1);
+        assert_eq!(menu_cameras(&mut app), 1);
+    }
+}
+
+/// F17-AC06 resize leg: a window resized while the session is still
+/// `Loading` neither stalls the load nor duplicates the player, the
+/// menu camera or any menu root.
+#[test]
+fn a_window_resize_during_loading_survives_the_launch() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    spawn_window(&mut app);
+    app.update();
+
+    activate_row(&mut app, "Cruise");
+    focus_row(&mut app, "testcity");
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    // Resize in the same frame the launch row is confirmed, then keep
+    // resizing every frame until the load finishes.
+    let mut saw_loading = false;
+    let mut size = 0.0;
+    for _ in 0..12 {
+        let w = app
+            .world_mut()
+            .query_filtered::<&mut Window, With<PrimaryWindow>>()
+            .single_mut(app.world_mut())
+            .map(|mut w| {
+                size += 37.0;
+                w.resolution.set(640.0 + size, 480.0 + size / 2.0);
+            });
+        assert!(w.is_ok(), "the primary window exists");
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        saw_loading |= phase(&app) == SessionPhase::Loading;
+        if phase(&app) == SessionPhase::Playing {
+            break;
+        }
+    }
+    assert!(saw_loading, "the test never observed the Loading phase");
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "the resized load finished"
+    );
+    assert_eq!(players(&mut app), 1);
+    assert_eq!(menu_roots(&mut app), 0);
+    assert_eq!(menu_cameras(&mut app), 0);
+
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    assert_eq!(menu_roots(&mut app), 1);
+    assert_eq!(menu_cameras(&mut app), 1);
+    assert_eq!(players(&mut app), 0);
+}
+
 /// The Events path enforces availability: a gated row is listed but
 /// refuses activation with its reason, an incomplete row reports its
 /// missing files, and an open row launches the real `EventRef`.

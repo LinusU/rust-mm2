@@ -101,8 +101,8 @@ a menu and a `--city sf --nav` capture print `status=unavailable` and exit
 | F17-AC03 | `any_connected_pad_navigates_the_main_menu_through_hot_plug`, `the_pause_menu_answers_any_pad`, `results_rows_answer_any_connected_pad` (`tests/results.rs`); Esc/back: `a_right_click_backs_out_without_clobbering_the_restored_focus`. Visible focus unchecked by eye | open: rendered |
 | F17-AC04 | `a_failed_launch_returns_to_the_menu_with_the_reason`, `an_empty_install_reports_instead_of_faking`, `unresolvable_records_stay_listed_with_their_reasons` | synthetic only |
 | F17-AC05 | the capability tables above; remaining rows are `tracked`/`open` | open: Driver's Stats, Multiplayer, help "?", original art |
-| F17-AC06 | `cruise_launches_then_quit_returns_to_the_menu` (two cycles: one menu root, one camera, one player, no leaked rows); audio loops not covered | partial |
+| F17-AC06 | `cruise_launches_then_quit_returns_to_the_menu` (two cycles: one menu root, one camera, one player, no leaked rows); `repeated_session_cycles_leave_one_audio_loop_set` (four cycles over an authored two-row engine rig: two loops while playing, none back in the menu); `a_window_resize_during_loading_survives_the_launch` (window resized every frame through `Loading`, one player, no menu leak) | synthetic only |
 
 Not yet covered: a rendered capture of each screen at normal and
-high-DPI sizes, a window resized during loading, and a duplicate-audio
-check across repeated transitions.
+high-DPI sizes. The headless resize test changes the `Window` resolution
+only; no renderer or swapchain is involved.
