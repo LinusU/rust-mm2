@@ -2840,12 +2840,32 @@ fn run_shove_trio(
     // seat agree whatever their local throughput. Frames stay only the
     // ceiling.
     let (alice_flags, bob_flags) = if host_rams {
+        // A client that stops leaves the session, and the authority's
+        // roster removal then reaches the *other* client, which loses
+        // that seat from its own record if it has not stopped yet (the
+        // two links are impaired independently, so which client applies
+        // the settle tick first is not fixed: measured on CI, bob's
+        // record held two seats because alice had already left). Alice
+        // therefore stops `ALICE_LINGER_SECS` of authority time after
+        // bob, so bob has stopped and printed while she is still
+        // seated. The shoved field is at rest by then, so her
+        // later record is the same settled pose; she keeps the host's
+        // and her own seat (all the checks read), only bob's copy is
+        // gone by her stop. A mid-pursuit leg compares moving seats at
+        // one instant and keeps the shared tick.
+        const ALICE_LINGER_SECS: u64 = 8;
+        let linger = if settle_secs == SHOVE_SETTLE_SECS {
+            ALICE_LINGER_SECS * mm2_game::RACE_TICK_HZ as u64
+        } else {
+            0
+        };
         let driven = |driver: &str| {
             let mut flags = join_args(install, join_addr, driver, HOST_FRAME_CEILING);
             flags.push("--parked".into());
+            let stop_tick = settle_tick + if driver == "alice" { linger } else { 0 };
             flags.extend([
                 "--until-snap-tick".to_string(),
-                settle_tick.to_string(),
+                stop_tick.to_string(),
                 "--deadline".to_string(),
                 DEADLINE.as_secs().to_string(),
             ]);
@@ -3025,9 +3045,10 @@ fn assert_shove_converged(control_bob: &str, alice: &str, bob: &str) {
         "the control holds all three seats: {control_bob}"
     );
 
-    // Bob printed while alice was connected, so he holds all three
-    // seats; alice holds the host's, her own, and bob's (both records
-    // ended on the same authority tick, before either client left).
+    // Bob printed while alice was connected (she stops later on
+    // purpose, see `run_shove_trio`), so he holds all three seats;
+    // alice holds the host's and her own, and bob's too unless he had
+    // already left by her later stop.
     assert_eq!(seat_poses(bob).len(), 3, "{bob}");
     assert!(at(alice, 0).is_some() && at(alice, 1).is_some(), "{alice}");
 
