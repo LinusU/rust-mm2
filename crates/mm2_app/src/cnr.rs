@@ -1222,6 +1222,85 @@ mod tests {
         assert!(r.app.world().get::<GoldLoadApplied>(r.a).is_none());
     }
 
+    fn fresh_match(r: &Rig, gold: ObjectId) -> GoldMatch {
+        let session = r.app.world().resource::<Session>();
+        GoldMatch::new(
+            session.generation(),
+            gold,
+            rules(EndRule::None),
+            pool(),
+            5,
+            &[(A, Side::Solo), (B, Side::Solo)],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_carrier_who_leaves_sheds_the_load() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.mass(r.a), MASS + 250.0);
+        r.app
+            .world_mut()
+            .resource_mut::<CnrHost>()
+            .game
+            .leave(A, g)
+            .unwrap();
+        r.step();
+        assert_eq!(r.mass(r.a), MASS, "a leaver keeps no load");
+        assert!(r.app.world().get::<GoldLoadApplied>(r.a).is_none());
+    }
+
+    #[test]
+    fn a_round_restart_swaps_the_match_and_the_old_load_does_not_survive() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        let gold = r.game().gold_id();
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.mass(r.a), MASS + 250.0);
+        // The restart replaces the host with a fresh, uncarried match
+        // while the same car entity lives on.
+        let game = fresh_match(&r, gold);
+        r.app.insert_resource(CnrHost::new(game));
+        r.put(r.a, Vec3::new(5000.0, 0.0, 5000.0));
+        r.step();
+        assert_eq!(r.game().carrier(), None);
+        assert_eq!(r.mass(r.a), MASS, "the restart starts from the base");
+        assert_eq!(
+            r.app.world().get::<AngularInertia>(r.a).unwrap().principal,
+            INERTIA
+        );
+        assert!(r.app.world().get::<GoldLoadApplied>(r.a).is_none());
+    }
+
+    #[test]
+    fn a_later_race_on_the_same_car_loads_from_the_base_not_the_old_load() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        let gold = r.game().gold_id();
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.mass(r.a), MASS + 250.0);
+        // Session teardown removes the host; a later race inserts a new
+        // one and the same car picks up the gold again.
+        r.app.world_mut().remove_resource::<CnrHost>();
+        r.step();
+        let game = fresh_match(&r, gold);
+        r.app.insert_resource(CnrHost::new(game));
+        let g2 = r.gold_at();
+        r.put(r.a, g2);
+        for _ in 0..5 {
+            r.step();
+        }
+        assert_eq!(r.game().carrier(), Some(A));
+        assert_eq!(r.mass(r.a), MASS + 250.0, "250 kg once, not 500");
+        let applied = *r.app.world().get::<GoldLoadApplied>(r.a).unwrap();
+        assert_eq!(applied.base_mass, MASS, "the base was restored in between");
+    }
+
     #[test]
     fn a_non_finite_car_position_is_ignored_and_does_not_eject_the_player() {
         let mut r = rig(EndRule::None, &[A, B]);
