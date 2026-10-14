@@ -88,10 +88,14 @@ action in between.
 - **Backing up.** A car that has held the throttle for 1.5 s without
   moving a metre is reversed for about a second, nose swung toward its
   line — the original's stuck remedy. A driver rewarded for progress
-  almost never discovers reversing on its own.
-- **Re-anchoring.** The bounded last resort: 15 s inside one 8 m bubble
+  almost never discovers reversing on its own. Stopped at the same
+  thing again it reverses on full lock, one side and then the other,
+  to come at it from a new angle.
+- **Re-anchoring.** The bounded last resort: 9 s inside one 8 m bubble
   teleports the car back onto its route, disclosed in the race record
-  (`opp_rec=`).
+  (`opp_rec=`). Stuck again at the same place, it is put down past
+  whatever is there instead — a parked car one racer wrecks settles
+  into a static body on the line of every racer behind.
 
 ## Training
 

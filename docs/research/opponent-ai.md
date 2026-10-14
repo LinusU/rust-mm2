@@ -283,8 +283,9 @@ Where it still diverges:
 - None of the physics interventions are made: no yaw damping while
   braking, no momentum edits around a back-up, no orientation snap, no
   halved grip against the player.
-- A car nothing frees is re-anchored onto its route after 15 s, a
-  disclosed teleport (ledger DSN-14); the original leaves it stuck, and
-  a car that falls out of the world out of the race.
+- A car nothing frees is re-anchored onto its route after 9 s, a
+  disclosed teleport (ledger DSN-14) — behind where it stuck, or past
+  it the second time; the original leaves it stuck, and a car that
+  falls out of the world out of the race.
 - Opponents keep gate-by-gate progress for the standings; the original
   credits an opponent no gates at all.
