@@ -2284,8 +2284,8 @@ existing `smoke=` counters only, comparing the clients with the
 authority's terminal record:
 
 - **Impact rows / sounds / sparks / splats:** bob's `imp…a` (rows applied)
-  never exceeds the host's `imp…s` (rows sent); his `spk=` bursts and
-  `txl=` impacts each equal the rows applied exactly, and the impact
+  never exceeds the host's `imp…s` (rows sent); his `spk=` bursts equal the rows applied exactly and his `txl=`
+  splats never exceed them (a row can skip its splat), and the impact
   voices (`aud …/Ni`) plus scrape-held re-contacts (`/NS`) stay within it.
   Voices are also bounded by `MAX_IMPACT_VOICES` and sub-floor touches are
   authored silence, so the voice check is an upper bound, not equality.
@@ -2296,8 +2296,8 @@ authority's terminal record:
 - **Fragments:** a client's broken-prop count in `bng=` never exceeds the
   host's.
 
-Measured once (seed `0xF25AC04`): host 65 rows sent, bob 51 applied with
-51 spark bursts and 51 splats. Not covered: a client-side fragment-spawn
+Measured (seed `0xF25AC04`): bob applied 300 rows with
+300 spark bursts and 299 splats. Not covered: a client-side fragment-spawn
 counter (the prop census is a state count, not an event count), and an
 exact voice-equals-rows check, which the voice cap prevents. Evidence
 level: synthetic integration on loopback with retail content; the relay is
