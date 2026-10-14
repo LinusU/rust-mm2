@@ -449,6 +449,13 @@ struct Cli {
     #[arg(long)]
     bot: bool,
 
+    /// With `--bot` in a Cops & Robbers match: play the thief — hold
+    /// still until someone else picks the gold up, then chase that
+    /// carrier, take what its impact knocks loose and deliver it (the
+    /// contested-transfer leg of the F27 process evidence).
+    #[arg(long, requires = "bot")]
+    bot_thief: bool,
+
     /// Limit the evidence driver's forward speed (m/s), using throttle/brake inputs.
     #[arg(long, requires = "bot", value_parser = parse_bot_speed)]
     bot_speed: Option<f32>,
@@ -1221,6 +1228,7 @@ fn main() {
             wreck_at: cli.wreck_at,
             wreck_seat: cli.wreck_seat,
             bot_speed: cli.bot_speed,
+            bot_thief: cli.bot_thief,
             bot_route: cli.bot_route.clone(),
             opponent_policy: cli.opponent_policy.clone(),
             no_pvs: cli.no_pvs,

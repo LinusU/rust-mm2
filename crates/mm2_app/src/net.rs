@@ -1358,13 +1358,15 @@ pub fn describe_host_event(event: &HostEvent) -> String {
 /// leaving the rest for [`advertise`] to refuse. Only the authority's
 /// own replicated state qualifies: `--wreck-at` destroys a car the
 /// host simulates and the damage byte carries the result to every
-/// peer, so nothing a client predicts depends on it. A physics pin
+/// peer, so nothing a client predicts depends on it; `--bot-thief` only
+/// picks which objective the host seat's own evidence driver chases. A physics pin
 /// (`--traction`, `--spawn`, ...) is the opposite — peers could never
 /// agree on it — and stays refused.
 fn host_local_dev(dev: &mut DevOverrides) -> DevOverrides {
     DevOverrides {
         wreck_at: dev.wreck_at.take(),
         wreck_seat: dev.wreck_seat.take(),
+        bot_thief: std::mem::take(&mut dev.bot_thief),
         ..DevOverrides::default()
     }
 }

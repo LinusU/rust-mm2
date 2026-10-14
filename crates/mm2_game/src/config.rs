@@ -753,6 +753,10 @@ pub struct DevOverrides {
     pub wreck_seat: Option<u16>,
     /// Optional evidence-driver speed ceiling in m/s; never changes vehicle handling.
     pub bot_speed: Option<f32>,
+    /// `--bot-thief`: the scripted driver plays the Cops & Robbers thief
+    /// (waits for a carrier, chases it, takes what falls). An evidence
+    /// driver choice only; it never touches handling.
+    pub bot_thief: bool,
     /// Explicit `.opp` evidence guide for the scripted player; no opponent is spawned.
     /// Gameplay-affecting diagnostic input, so results are record-ineligible.
     pub bot_route: Option<PathBuf>,

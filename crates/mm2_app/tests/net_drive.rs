@@ -3567,3 +3567,142 @@ fn a_scheduled_reset_comes_back_on_every_impairment_recipe() {
         );
     }
 }
+
+/// F27-AC01's contested-transfer cycle over three real processes: a
+/// hosted retail sf free-for-all to 100 pts, the host seat a `--bot
+/// --bot-thief`, wire seat 2 (bob) a `--bot` held to 6 m/s, wire seat 1
+/// (alice) parked. Bob drives to the gold and *picks it up*; the thief
+/// waits for exactly that, runs him down and *rams* him (a car-on-car
+/// impact above `DEFAULT_DISLODGE_SEVERITY` is how the host's rules
+/// knock a carrier's gold loose); the dropper is locked out, so the
+/// thief *recovers* what fell and *delivers* it. The host's own log
+/// names each step and who took it, and both clients' replicas must
+/// read the same decided match: the thief's win, the same per-seat
+/// scores, every seat seated. Retail sf, seed 1291 (the seed the
+/// host-driven delivery test uses). Skipped without `MM2_RETAIL=<dir>`.
+///
+/// Honest limits: the robbed carrier is a speed-capped bot and the
+/// thief is the host seat, because the road-graph `--bot` does not
+/// reliably deliver from a client seat on sf's hillside (see
+/// `a_joined_clients_bot_picks_up_the_gold`) — so the *client-driven
+/// delivery* leg stays open, as do packet loss and a second contender
+/// for the same pickup (F27-AC02/AC05). The thief rule is
+/// `scripted::thief_target`; nothing teleports.
+#[test]
+fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
+    const SEED: u64 = 1291;
+    const STEP: Duration = Duration::from_secs(60);
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 60_000);
+    host_args.retain(|a| a != "--dev-world");
+    let seed = host_args.iter().position(|a| a == "--seed").unwrap();
+    host_args[seed + 1] = SEED.to_string();
+    host_args.extend(
+        [
+            "--city",
+            "sf",
+            "--cnr",
+            "ffa",
+            "--cnr-limit",
+            "100pts",
+            "--bot",
+            "--bot-thief",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    // Join order fixes the wire seats: alice 1, bob 2.
+    let mut alice_args = join_args(&retail, addr, "alice", 25_000);
+    alice_args.push("--parked".into());
+    let alice = Proc::spawn(MM2_EXE, &alice_args);
+    host.until_within("ready=true", STEP);
+    let mut bob_args = join_args(&retail, addr, "bob", 25_000);
+    bob_args.extend(["--bot".into(), "--bot-speed".into(), "6".into()]);
+    let bob = Proc::spawn(MM2_EXE, &bob_args);
+    host.until_within("ready=true", STEP);
+    host.cmd("start");
+    host.until_within("event=started generation=1", STEP);
+
+    // The host's own log is the authority's account of the cycle.
+    let bound = Duration::from_secs(300);
+    let picked = host.until_within("Picked {", bound);
+    let dropped = host.until_within("Dropped {", bound);
+    let recovered = host.until_within("Picked {", bound);
+    let delivered = host.until_within("Delivered {", bound);
+    let ended = host.until_within("Ended(", bound);
+    for line in [&picked, &dropped, &recovered, &delivered, &ended] {
+        eprintln!("host   {line}");
+    }
+    assert!(picked.contains("player: PlayerId(2)"), "{picked}");
+    assert!(picked.contains("recovered: false"), "{picked}");
+    assert!(dropped.contains("player: PlayerId(2)"), "{dropped}");
+    assert!(
+        dropped.contains("cause: Knocked { by: Some(PlayerId(0)) }"),
+        "the gold was not rammed loose by the thief: {dropped}"
+    );
+    assert!(recovered.contains("player: PlayerId(0)"), "{recovered}");
+    assert!(recovered.contains("recovered: true"), "{recovered}");
+    assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    assert!(ended.contains("reason: PointLimit"), "{ended}");
+    assert!(ended.contains("winner: Player(PlayerId(0))"), "{ended}");
+
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    alice.wait_success("alice", &alice_rec);
+    bob.wait_success("bob", &bob_rec);
+    host.cmd("quit");
+    host.until_within("smoke=headless-physics", bound);
+    eprintln!("alice  {alice_rec}\nbob    {bob_rec}");
+
+    for (who, rec) in [("alice", &alice_rec), ("bob", &bob_rec)] {
+        assert_eq!(field(rec, "status"), "pass", "{who}: {rec}");
+        let cell =
+            |prefix: &str| cnr_cell(rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+        assert_eq!(cell("ref"), 0, "{who} refused the host's match: {rec}");
+        assert_eq!(cell("seats"), 3, "{who}: {rec}");
+        assert_eq!(cell("dec"), 1, "{who} never read the verdict: {rec}");
+        assert!(
+            field(rec, "cnr").split(',').any(|c| c == "win=p0"),
+            "{who}'s winner differs from the host's: {rec}"
+        );
+        assert_eq!(field(rec, "phase"), "results", "{who}: {rec}");
+        // The announcer voiced what each replica read: the pickup, the
+        // robbery, the recovery and the stash.
+        assert!(cell("say") >= 3, "{who} heard too few calls: {rec}");
+    }
+    // Both replicas hold the same board, and it credits the thief with
+    // the delivery the host logged.
+    let pts = |rec: &str| {
+        field(rec, "cnr")
+            .split(',')
+            .find_map(|c| c.strip_prefix("pts="))
+            .unwrap_or_else(|| panic!("no pts: {rec}"))
+            .to_string()
+    };
+    assert_eq!(pts(&alice_rec), pts(&bob_rec), "the boards differ");
+    // The board is the sum of what the host logged: the thief's recovery
+    // and its delivery, and the robbed carrier's one pickup.
+    let points = |line: &str| {
+        let at = line.find("points: ").expect("an event with points") + "points: ".len();
+        leading_u64(&line[at..])
+    };
+    let board = pts(&alice_rec);
+    let seat = |id: u16| {
+        board
+            .split('/')
+            .find_map(|c| c.strip_prefix(&format!("{id}:")).map(str::to_string))
+            .unwrap_or_else(|| panic!("seat {id} is not on the board {board}"))
+    };
+    assert_eq!(
+        seat(0),
+        (points(&recovered) + points(&delivered)).to_string(),
+        "the thief's score: {board}"
+    );
+    assert_eq!(seat(2), points(&picked).to_string(), "bob's score: {board}");
+    assert_eq!(seat(1), "0", "alice never touched the gold: {board}");
+}

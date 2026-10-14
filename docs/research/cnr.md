@@ -254,3 +254,16 @@ teleport onto the objective would fake a delivery, so a stuck car keeps only the
 ordinary reverse-and-turn escapes. A hosted session's `--host --seed <n>` selects the
 draw (a local session always uses seed 0). It is an evidence tool, not a
 gameplay feature.
+
+`--bot-thief` (with `--bot`) is the contested-transfer role (F27-AC01): the car
+holds still while the gold lies untouched at its site, then — once another seat
+carries it — follows the road graph to the carrier, and inside 40 m drives
+straight through it (the road line brakes into its last point, and a ram has to
+arrive above `DEFAULT_DISLODGE_SEVERITY`). It takes the gold the impact knocks
+loose (the dropper is locked out for `drop_lockout_ticks`, the striker is not)
+and delivers it like any bot. The process-level test
+`a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief` runs it as
+the host seat against a `--bot --bot-speed 6` client carrier. Measured on retail
+sf, seed 1291: a *client-seat* `--bot` still does not reliably deliver (its
+predicted car leaves the elevated road on the route's hill and the guide, which
+never re-anchors, cannot recover), which is why the thief is the host seat.

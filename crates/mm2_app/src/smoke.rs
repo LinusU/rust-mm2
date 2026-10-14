@@ -1672,15 +1672,24 @@ fn run_headless(
                             Winner::Side(side) => format!(",win=s{side:?}"),
                             Winner::Tie => ",win=tie".to_string(),
                         });
+                        // Every seat's individual points (`pts=<id>:<n>/…`,
+                        // wire order), so two processes can be compared on
+                        // the score and not only on who won.
+                        let scores: Vec<String> = v
+                            .standings
+                            .iter()
+                            .map(|s| format!("{}:{}", s.player.0, s.score))
+                            .collect();
                         format!(
-                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}{winner}",
+                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}{winner},pts={}",
                             v.standings.len(),
                             on(Side::Solo),
                             on(Side::Robbers),
                             on(Side::Cops),
                             on(Side::Red),
                             on(Side::Blue),
-                            u8::from(v.outcome.is_some())
+                            u8::from(v.outcome.is_some()),
+                            scores.join("/")
                         )
                     })
                     .unwrap_or_default();

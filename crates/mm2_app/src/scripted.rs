@@ -819,6 +819,37 @@ pub fn cnr_target(view: &GoldView, me: PlayerId) -> Option<Vec3> {
     }
 }
 
+/// Where a `--bot-thief` driver wants to drive: the carrier while someone
+/// else holds the gold (`carrier_at` is that car's pose), nowhere while
+/// the gold lies untouched at its site — the thief lets the others go
+/// first — and [`cnr_target`]'s answer otherwise (a dropped gold, or
+/// its own carry to the delivery marker).
+pub fn thief_target(view: &GoldView, me: PlayerId, carrier_at: Option<Vec3>) -> Option<Vec3> {
+    match view.state {
+        GoldState::Resting { .. } if view.outcome.is_none() => None,
+        GoldState::Carried { by } if by != me && view.outcome.is_none() => carrier_at,
+        _ => cnr_target(view, me),
+    }
+}
+
+/// How close (m) a `--bot-thief` must be to its carrier to stop following
+/// the road graph and drive straight through it. The road line ends at
+/// the carrier, and a planned route brakes into its last point; a ram
+/// has to arrive fast enough to cross the dislodge severity.
+const RAM_RANGE: f32 = 40.0;
+
+/// How far (m) past the carrier the thief aims, so the throttle stays
+/// down through the contact instead of easing off as the target nears.
+const RAM_OVERSHOOT: f32 = 25.0;
+
+/// The point a thief within [`RAM_RANGE`] of the `carrier` drives at:
+/// beyond it, on the line from the thief. `None` when the carrier is too
+/// far for a straight run (the road-graph plan chases it instead).
+fn ram_point(from: Vec3, carrier: Vec3) -> Option<Vec3> {
+    let gap = Vec3::new(carrier.x - from.x, 0.0, carrier.z - from.z);
+    (gap.length() < RAM_RANGE).then(|| carrier + gap.normalize_or_zero() * RAM_OVERSHOOT)
+}
+
 /// Write [`VehicleInput`] on the player vehicle from the live race
 /// objective every frame. Scheduled `after` [`crate::input::vehicle_input`]
 /// and gated on [`ScriptedDrive`], so while `--bot` is on the bot
@@ -866,8 +897,9 @@ pub fn scripted_drive(
         ),
         With<PlayerVehicle>,
     >,
-    participants: Query<&Position, With<Player>>,
+    participants: Query<(&Player, Option<&NetPlayer>, &Position)>,
 ) {
+    let thief = session.config().is_some_and(|c| c.dev.bot_thief);
     let race = race
         .as_deref()
         .filter(|r| !r.is_stale(session.generation()));
@@ -877,7 +909,7 @@ pub fn scripted_drive(
     // itself included, so a beached one does not teleport back onto
     // itself), the same set `opponent_drive`'s `traffic` holds
     // (F15-B.11 parity).
-    let occupants: Vec<Vec3> = participants.iter().map(|p| p.0).collect();
+    let occupants: Vec<Vec3> = participants.iter().map(|(_, _, p)| p.0).collect();
     // Poses a re-anchor already claimed this frame — the snapshot
     // predates the loop and cannot see a same-frame teleport.
     let mut claimed: Vec<Vec3> = Vec::new();
@@ -916,6 +948,7 @@ pub fn scripted_drive(
         });
         // The live objective — a race gate — or, for a cruise session,
         // the straight-line point far ahead of the nose.
+        let mut ramming = false;
         let gate = if !session.is_playing() || locked {
             None
         } else if let Some(race) = race {
@@ -925,7 +958,26 @@ pub fn scripted_drive(
                 None
             }
         } else if let Some(view) = &cnr_view {
-            cnr_target(view, participant_id(player, net))
+            let me = participant_id(player, net);
+            if thief {
+                let carrier_at = match view.state {
+                    GoldState::Carried { by } => participants
+                        .iter()
+                        .find(|(p, n, _)| participant_id(p, *n) == by)
+                        .map(|(_, _, at)| at.0),
+                    _ => None,
+                };
+                let aim = thief_target(view, me, carrier_at);
+                match carrier_at.and_then(|c| ram_point(pos.0, c)) {
+                    Some(through) if aim == carrier_at => {
+                        ramming = true;
+                        Some(through)
+                    }
+                    _ => aim,
+                }
+            } else {
+                cnr_target(view, me)
+            }
         } else {
             Some(pos.0 + rot.0 * Vec3::NEG_Z * 200.0)
         };
@@ -947,7 +999,15 @@ pub fn scripted_drive(
         // A Cops & Robbers objective is planned over the road graph
         // and bound as the car's guide; the plan holds until the
         // objective moves (a delivery, a drop, a new round).
-        if race.is_none() && cnr_view.is_some() && guide_stale(bot_route.as_deref(), gate) {
+        if ramming && bot_route.is_some() {
+            commands.entity(entity).remove::<ScriptedRoute>();
+            bot_route = None;
+        }
+        if race.is_none()
+            && cnr_view.is_some()
+            && !ramming
+            && guide_stale(bot_route.as_deref(), gate)
+        {
             let replan = nav_replan(&mut bot.plan_wait, || {
                 let graph = routing_graph(&mut nav, vfs.as_deref(), &session)?;
                 let route = plan_nav_route(graph, pos.0, gate)?;
@@ -1281,6 +1341,55 @@ mod cnr_target_tests {
             outcome: None,
             standings: vec![row(ME, me_side), row(OTHER, Side::Cops)],
         }
+    }
+
+    /// The thief lets the gold lie until someone takes it, chases the
+    /// carrier, takes what falls, and stops once the match is decided.
+    #[test]
+    fn the_thief_waits_chases_and_recovers() {
+        let at = Vec3::new(5.0, 1.0, 5.0);
+        let carrier = Some(Vec3::new(40.0, 0.0, 9.0));
+        let v = |state| view(CnrVariant::FreeForAll, state, Side::Solo);
+        assert_eq!(
+            thief_target(&v(GoldState::Resting { at }), ME, carrier),
+            None
+        );
+        let carried = v(GoldState::Carried { by: OTHER });
+        assert_eq!(thief_target(&carried, ME, carrier), carrier);
+        assert_eq!(thief_target(&carried, ME, None), None);
+        let dropped = v(GoldState::Dropped {
+            at,
+            by: Some(OTHER),
+            free_at: 0,
+        });
+        assert_eq!(thief_target(&dropped, ME, None), Some(at));
+        // Its own carry goes to its marker, as for any bot.
+        let mine = v(GoldState::Carried { by: ME });
+        assert_eq!(thief_target(&mine, ME, None), cnr_target(&mine, ME));
+        let mut decided = v(GoldState::Carried { by: OTHER });
+        decided.outcome = Some(Outcome {
+            reason: EndReason::PointLimit,
+            winner: Winner::Player(OTHER),
+            at_tick: 9,
+        });
+        assert_eq!(thief_target(&decided, ME, carrier), None);
+    }
+
+    /// The straight run through a carrier starts inside [`RAM_RANGE`]
+    /// and aims past it, level with the ground it drives on.
+    #[test]
+    fn the_ram_aims_past_a_near_carrier_only() {
+        let from = Vec3::new(0.0, 5.0, 0.0);
+        let near = Vec3::new(20.0, 9.0, 0.0);
+        let through = ram_point(from, near).expect("inside the range");
+        assert!(
+            (through.x - (20.0 + RAM_OVERSHOOT)).abs() < 1e-4,
+            "{through}"
+        );
+        assert_eq!(through.y, near.y);
+        assert_eq!(ram_point(from, Vec3::new(RAM_RANGE + 1.0, 5.0, 0.0)), None);
+        // A carrier on top of the thief has no direction to aim past.
+        assert_eq!(ram_point(from, from), Some(from));
     }
 
     /// Free gold is the objective, whether it rests or was dropped.
