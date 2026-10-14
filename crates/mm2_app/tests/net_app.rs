@@ -11244,30 +11244,37 @@ fn a_cops_and_robbers_frame_lands_as_a_replica_and_stale_or_foreign_ones_do_not(
     assert!(replica(&app).is_none(), "no match outlives its session");
 }
 
-/// F27-AC02 and AC03 over the real wire path, in one process: a hosted
-/// Cops & Robbers match with two joined peers whose cars (the host's
-/// remote seats, wire ids 1 and 2) reach the gold on the same step.
-/// The host's rules give it to exactly one — the lower id when the
-/// distance ties — pay one pickup, load only that car, and both peers
-/// decode the same carrier off the socket. Then the carrier's
-/// connection drops: the gold falls where its car last stood, is
-/// neither lost nor duplicated, and the remaining peer in reach takes
-/// it as a recovery with the load moved, not stacked.
-///
-/// Synthetic pool and dev cars, cars placed by hand (no physics runs in
-/// this app): the rule path and the wire are real, the driving is not —
-/// the process-level contested legs stay open.
-#[test]
-fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_carrier_frees_it() {
-    use avian3d::prelude::{Mass, Position};
-    use mm2_app::cnr::{CnrEvent, CnrHost, cnr_host_step, reconcile_gold_load};
-    use mm2_app::cnrnet::decode_view;
-    use mm2_game::PlayerId;
-    use mm2_game::gold::{
-        CarrierLoad, CnrVariant, DropCause, EndRule, GoldEvent, GoldMatch, GoldRules, Side,
-    };
+/// A hosted Cops & Robbers match (free-for-all, no end rule) with two
+/// joined peers, eve (wire seat 1) and fay (wire seat 2), already
+/// `Playing`. Synthetic pool and dev cars, placed by hand (no physics
+/// runs in this app): the rules path and the wire are real, the driving
+/// is not.
+struct CnrPair {
+    _install: tempfile::TempDir,
+    app: App,
+    eve: Client,
+    fay: Client,
+    car1: Entity,
+    car2: Entity,
+    gold: Vec3,
+}
 
-    const LOAD_KG: f32 = 250.0;
+/// The host's remote seats as `(wire id, entity)`, sorted by id.
+fn remote_seats(app: &mut App) -> Vec<(u16, Entity)> {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(Entity, &NetPlayer), With<RemotePick>>();
+    let mut seats: Vec<_> = q.iter(app.world()).map(|(e, n)| (n.0, e)).collect();
+    seats.sort();
+    seats
+}
+
+const CNR_LOAD_KG: f32 = 250.0;
+
+fn cnr_pair() -> CnrPair {
+    use mm2_app::cnr::{CnrEvent, CnrHost, cnr_host_step, reconcile_gold_load};
+    use mm2_game::PlayerId;
+    use mm2_game::gold::{CarrierLoad, CnrVariant, EndRule, GoldMatch, GoldRules, Side};
     let install = tempfile::tempdir().unwrap();
     let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
     let addr = link.addr();
@@ -11281,8 +11288,8 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
                 .after(netdrive::reconcile_remote_players)
                 .before(mm2_app::cnrnet::publish_cnr),
         );
-    let mut eve = ready_peer(addr, "eve", fp);
-    let mut fay = ready_peer(addr, "fay", fp);
+    let eve = ready_peer(addr, "eve", fp);
+    let fay = ready_peer(addr, "fay", fp);
     spin(&mut app, |a| {
         a.world()
             .resource::<LobbyState>()
@@ -11293,16 +11300,8 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
             == 2
     });
     let generation = hosted_playing(&mut app);
-    let seats = |app: &mut App| -> Vec<(u16, Entity)> {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<(Entity, &NetPlayer), With<RemotePick>>();
-        let mut seats: Vec<_> = q.iter(app.world()).map(|(e, n)| (n.0, e)).collect();
-        seats.sort();
-        seats
-    };
-    spin_mut(&mut app, |a| seats(a).len() == 2);
-    let seats_now = seats(&mut app);
+    spin_mut(&mut app, |a| remote_seats(a).len() == 2);
+    let seats_now = remote_seats(&mut app);
     assert_eq!(seats_now.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 2]);
     let (car1, car2) = (seats_now[0].1, seats_now[1].1);
 
@@ -11316,7 +11315,7 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
             variant: CnrVariant::FreeForAll,
             end: EndRule::None,
             load: CarrierLoad {
-                added_mass_kg: LOAD_KG,
+                added_mass_kg: CNR_LOAD_KG,
                 handling_scalar: 1.0,
             },
             pickup_points: 25,
@@ -11338,6 +11337,48 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
     .unwrap();
     let gold = game.gold_position().unwrap();
     app.insert_resource(CnrHost::new(game));
+    CnrPair {
+        _install: install,
+        app,
+        eve,
+        fay,
+        car1,
+        car2,
+        gold,
+    }
+}
+
+/// F27-AC02 and AC03 over the real wire path, in one process: a hosted
+/// Cops & Robbers match with two joined peers whose cars (the host's
+/// remote seats, wire ids 1 and 2) reach the gold on the same step.
+/// The host's rules give it to exactly one — the lower id when the
+/// distance ties — pay one pickup, load only that car, and both peers
+/// decode the same carrier off the socket. Then the carrier's
+/// connection drops: the gold falls where its car last stood, is
+/// neither lost nor duplicated, and the remaining peer in reach takes
+/// it as a recovery with the load moved, not stacked.
+///
+/// Synthetic pool and dev cars, cars placed by hand (no physics runs in
+/// this app): the rule path and the wire are real, the driving is not —
+/// the process-level contested legs stay open.
+#[test]
+fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_carrier_frees_it() {
+    use avian3d::prelude::{Mass, Position};
+    use mm2_app::cnr::{CnrEvent, CnrHost};
+    use mm2_app::cnrnet::decode_view;
+    use mm2_game::PlayerId;
+    use mm2_game::gold::{DropCause, GoldEvent};
+
+    const LOAD_KG: f32 = CNR_LOAD_KG;
+    let CnrPair {
+        mut app,
+        mut eve,
+        mut fay,
+        car1,
+        car2,
+        gold,
+        ..
+    } = cnr_pair();
     let put =
         |app: &mut App, e: Entity, at: Vec3| app.world_mut().get_mut::<Position>(e).unwrap().0 = at;
     let mass = |app: &App, e: Entity| app.world().get::<Mass>(e).unwrap().0;
@@ -11417,7 +11458,7 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
     // the car stood and the peer still in reach takes it back.
     let last = gold + Vec3::X * 2.0;
     drop(eve);
-    spin_mut(&mut app, |a| seats(a).len() == 1);
+    spin_mut(&mut app, |a| remote_seats(a).len() == 1);
     for _ in 0..3 {
         app.update();
     }
@@ -11467,6 +11508,143 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
         scores.contains(&(PlayerId(1), 25, false)) && scores.contains(&(PlayerId(2), 25, true)),
         "{scores:?}"
     );
+    let Message::Cnr {
+        generation: g,
+        frame,
+    } = until_wire(&mut fay, |m| {
+        matches!(m, Message::Cnr { generation: g, frame }
+            if decode_view(*g, frame).is_ok_and(|v| v.carrier() == Some(PlayerId(2))))
+    })
+    else {
+        unreachable!()
+    };
+    assert_eq!(decode_view(g, &frame).unwrap().carrier(), Some(PlayerId(2)));
+}
+
+/// F27-AC03's out-of-bounds leg over the real wire path, in one process
+/// (the sibling of the contested-pickup test above, same host and two
+/// peers): a carrier falls below the world floor and its connection
+/// drops there, so the gold lands out of bounds. The host re-places it
+/// on another site of the pool with no score for anyone, the objective
+/// is not lost, both peers decode the re-placed, uncarried gold, and the
+/// peer still connected takes it from its new site for one more award.
+///
+/// Synthetic pool, floor and cars placed by hand, as above: the rules
+/// path and the wire are real, the fall is not physics.
+#[test]
+fn gold_dropped_below_the_world_floor_is_replaced_without_score_and_still_playable() {
+    use avian3d::prelude::Position;
+    use mm2_app::city::WorldFloor;
+    use mm2_app::cnr::{CnrEvent, CnrHost};
+    use mm2_app::cnrnet::decode_view;
+    use mm2_game::PlayerId;
+    use mm2_game::gold::{DropCause, GoldEvent, LossCause};
+
+    const FLOOR: f32 = -50.0;
+    let CnrPair {
+        mut app,
+        eve,
+        mut fay,
+        car1,
+        car2,
+        gold,
+        ..
+    } = cnr_pair();
+    app.insert_resource(WorldFloor(FLOOR));
+    let put =
+        |app: &mut App, e: Entity, at: Vec3| app.world_mut().get_mut::<Position>(e).unwrap().0 = at;
+    let view = |a: &App| a.world().resource::<CnrHost>().game.view();
+    let total = |a: &App| -> u32 { view(a).standings.iter().map(|s| s.score).sum() };
+    let events = |app: &mut App| -> Vec<GoldEvent> {
+        app.world_mut()
+            .resource_mut::<Messages<CnrEvent>>()
+            .drain()
+            .map(|e| e.0)
+            .collect()
+    };
+
+    // Eve takes the gold alone; fay waits far away.
+    put(&mut app, car2, gold + Vec3::X * 500.0);
+    put(&mut app, car1, gold + Vec3::X * 2.0);
+    app.update();
+    assert_eq!(view(&app).carrier(), Some(PlayerId(1)));
+    assert_eq!(total(&app), 25);
+    events(&mut app);
+
+    // Eve's car goes under the floor; carried gold is not "out of
+    // bounds" (it moves with its carrier), so nothing is re-placed yet.
+    let fell = Vec3::new(gold.x, FLOOR - 30.0, gold.z);
+    put(&mut app, car1, fell);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(view(&app).carrier(), Some(PlayerId(1)));
+    assert!(events(&mut app).is_empty());
+
+    // Her connection drops down there: the gold lands below the floor
+    // and is re-placed within the same step.
+    drop(eve);
+    spin_mut(&mut app, |a| remote_seats(a).len() == 1);
+    for _ in 0..3 {
+        app.update();
+    }
+    let log = events(&mut app);
+    assert!(
+        log.iter().any(|e| matches!(
+            e,
+            GoldEvent::Dropped { player: PlayerId(1), at, cause: DropCause::Disconnected, .. }
+                if at.distance(fell) < 0.01
+        )),
+        "the gold fell where the car last stood: {log:?}"
+    );
+    let replaced: Vec<Vec3> = log
+        .iter()
+        .filter_map(|e| match e {
+            GoldEvent::Lost {
+                cause: LossCause::OutOfBounds,
+                gold,
+                ..
+            } => Some(*gold),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replaced.len(), 1, "re-placed exactly once: {log:?}");
+    let site = replaced[0];
+    // (The rules may draw the same site again: only the hideout and the
+    // bank are excluded, so the site is not compared with the old one.)
+    assert!(site.y >= FLOOR, "{site:?}");
+    assert!(
+        !log.iter().any(|e| matches!(e, GoldEvent::Picked { .. })),
+        "nobody scored the re-placement: {log:?}"
+    );
+    assert_eq!(view(&app).carrier(), None);
+    assert_eq!(view(&app).gold_position(), Some(site));
+    assert_eq!(total(&app), 25, "the loss scored nothing");
+
+    // Fay's socket decodes the re-placed, uncarried gold.
+    let Message::Cnr {
+        generation: g,
+        frame,
+    } = until_wire(&mut fay, |m| {
+        matches!(m, Message::Cnr { generation: g, frame }
+            if decode_view(*g, frame)
+                .is_ok_and(|v| v.carrier().is_none() && v.gold_position() == Some(site)))
+    })
+    else {
+        unreachable!()
+    };
+    let replica = decode_view(g, &frame).unwrap();
+    assert_eq!(
+        replica.standings.iter().map(|s| s.score).sum::<u32>(),
+        25,
+        "the replica agrees nothing was scored"
+    );
+
+    // The objective is not lost: fay reaches the new site and takes it.
+    put(&mut app, car2, site + Vec3::X);
+    app.update();
+    assert_eq!(view(&app).carrier(), Some(PlayerId(2)));
+    assert_eq!(total(&app), 50);
     let Message::Cnr {
         generation: g,
         frame,
