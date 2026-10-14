@@ -12,7 +12,9 @@ use mm2_formats::{
     camtrack::{TrackCamSpec, usable1},
     dash::PovCamSpec,
 };
-use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleTelemetry};
+use mm2_game::{
+    PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleTelemetry, WheelTelemetry,
+};
 use mm2_vehicle::vehicle::VehicleInput;
 
 use crate::input::control_just_pressed;
@@ -108,6 +110,16 @@ pub struct ChaseLens {
     /// back to 0. `RevDelay` is never read by the retail camera.
     pub rev_on_app: f32,
     pub rev_off_app: f32,
+    /// `HillMin`/`HillMax` — ground-slope pitch bias limits (recovered,
+    /// UNK-36; ctor −0.56 / 0.56). The bias is one half of a `sin`/`cos`
+    /// ease of the slope angle; see [`hill_bias`].
+    pub hill_min: f32,
+    pub hill_max: f32,
+    /// `HillLerp` — per-60 Hz-frame low-pass of the slope normal
+    /// (`0x51dec0` + `0x170`), clamped to `[0, 1]` in the port (a record
+    /// value above 1 would make the port's frame-rate-independent
+    /// low-pass take a negative base into a fractional power — NaN).
+    pub hill_lerp: f32,
     /// `TrackBreak` (`0x51dc50`): 1 breaks tracking while the body's up
     /// axis has `y < 0.35`, 2 always; anything else never.
     pub track_break: u8,
@@ -165,6 +177,9 @@ mod ctor {
     pub const VERT_OFFSET: f32 = 0.6;
     pub const REV_ON_APP: f32 = 2.0;
     pub const REV_OFF_APP: f32 = 4.0;
+    pub const HILL_MIN: f32 = -0.56;
+    pub const HILL_MAX: f32 = 0.56;
+    pub const HILL_LERP: f32 = 0.05;
 }
 
 impl ChaseLens {
@@ -213,6 +228,11 @@ impl ChaseLens {
             reverse_on: spec.reverse_mode(),
             rev_on_app: rate(spec.rev_on_app, ctor::REV_ON_APP),
             rev_off_app: rate(spec.rev_off_app, ctor::REV_OFF_APP),
+            hill_min: usable1(spec.hill_min).unwrap_or(ctor::HILL_MIN),
+            hill_max: usable1(spec.hill_max).unwrap_or(ctor::HILL_MAX),
+            hill_lerp: usable1(spec.hill_lerp)
+                .unwrap_or(ctor::HILL_LERP)
+                .clamp(0.0, 1.0),
             track_break: spec.track_break_mode(),
             collide: CollideKind::from_mode(spec.collide_mode()),
             min_max: spec.min_max_gated(),
@@ -250,6 +270,9 @@ impl ChaseLens {
             reverse_on: 1,
             rev_on_app: ctor::REV_ON_APP,
             rev_off_app: ctor::REV_OFF_APP,
+            hill_min: ctor::HILL_MIN,
+            hill_max: ctor::HILL_MAX,
+            hill_lerp: ctor::HILL_LERP,
             track_break: 0,
             collide: CollideKind::Off,
             min_max: false,
@@ -300,6 +323,11 @@ pub struct FollowState {
     /// `CollideType 2`'s eased squared eye–aim distance (`0x264`);
     /// `None` while the original's active flag (`0x258`) is clear.
     pub collide_sq: Option<f32>,
+    /// The low-passed ground-slope normal (`0x228`, `0x51dec0`): the unit
+    /// normal the hill-bias angle is measured against. `None` until the
+    /// first tracked frame snaps it (the reset flag `0xc8`), which always
+    /// clears on a `jumped` frame.
+    pub hill: Option<Vec3>,
     /// The reverse swing (`0x248`/`0x24c`/`0x250` and the angle slot).
     pub swing: ReverseSwing,
     /// `TrackBreak` verdict of the last frame (`0x194`). Recorded only:
@@ -487,6 +515,116 @@ pub fn approach_axis(
     };
     let step = (*state * rate * dt).min(gap.abs());
     eye + step * gap.signum()
+}
+
+/// `0x5af358` — a wheel group's averaged hit normal counts only when its
+/// squared length clears this (`0.01`).
+const HILL_GROUP_MIN_LEN2: f32 = 0.01;
+
+/// The ground normal `0x51dec0` low-passes and the hill bias measures
+/// against. The grounded wheels are split into front/rear axle groups by
+/// their car-space `z` either side of the grounded wheels' mid `z`
+/// (forward is `-Z`); the retail build instead pairs the fixed wheel slots
+/// `0/1` and `2/3`, which a four-wheel car makes the same split. Each
+/// group averages its grounded hit normals (`carsim` wheel `+0xcc`, the
+/// port's `contact_normal`) and counts only when that mean clears
+/// [`HILL_GROUP_MIN_LEN2`]. Both groups present → their mean; one group →
+/// that group's mean; neither → world up.
+pub fn hill_mid(veh_pos: Vec3, veh_rot: Quat, wheels: &[WheelTelemetry]) -> Vec3 {
+    let inv = veh_rot.inverse();
+    let grounded: Vec<(f32, Vec3)> = wheels
+        .iter()
+        .filter(|w| w.grounded)
+        .map(|w| ((inv * (w.contact_point - veh_pos)).z, w.contact_normal))
+        .collect();
+    let (mut front, mut n_front) = (Vec3::ZERO, 0u32);
+    let (mut rear, mut n_rear) = (Vec3::ZERO, 0u32);
+    if !grounded.is_empty() {
+        let z_min = grounded.iter().map(|(z, _)| *z).fold(f32::MAX, f32::min);
+        let z_max = grounded.iter().map(|(z, _)| *z).fold(f32::MIN, f32::max);
+        let z_mid = (z_min + z_max) * 0.5;
+        for (z, n) in &grounded {
+            if *z < z_mid {
+                front += *n;
+                n_front += 1;
+            } else {
+                rear += *n;
+                n_rear += 1;
+            }
+        }
+    }
+    let group = |sum: Vec3, n: u32| {
+        (n > 0)
+            .then(|| sum / n as f32)
+            .filter(|v| v.length_squared() > HILL_GROUP_MIN_LEN2)
+    };
+    match (group(front, n_front), group(rear, n_rear)) {
+        (Some(f), Some(r)) => (f + r) * 0.5,
+        (Some(f), None) => f,
+        (None, Some(r)) => r,
+        (None, None) => Vec3::Y,
+    }
+}
+
+/// One step of the `0x51dec0` slope-normal low-pass. On a `snap` frame
+/// (the original's reset flag `0xc8`) the state is set straight to `mid`;
+/// otherwise it eases toward `mid` at `HillLerp`, applied as
+/// `1 − (1 − HillLerp)^(60·dt)` so the result is frame-rate independent and
+/// identical at 60 Hz. The state is normalised in both paths, as the
+/// original normalises it in place.
+pub fn hill_normal(prev: Option<Vec3>, mid: Vec3, lerp: f32, dt: f32, snap: bool) -> Vec3 {
+    let lerp = lerp.clamp(0.0, 1.0);
+    let next = match (snap, prev) {
+        (true, _) | (false, None) => mid,
+        (false, Some(prev)) => prev + (mid - prev) * (1.0 - (1.0 - lerp).powf(60.0 * dt)),
+    };
+    next.try_normalize().unwrap_or(Vec3::ZERO)
+}
+
+/// The `0x51dec0` pitch-bias slope chain, returning the radians stored at
+/// `0x1b4`. `hill` is the low-passed ground normal ([`hill_normal`]);
+/// `car_right` the car's world right axis (`veh_rot * X`, unit). Recovered
+/// sign chain: `θ = acos(up·hill)` (`0x4c0420`), `c = up × hill`, the eased
+/// `v` ramps `θ` over `π/4`, `s = v·(car_right·c)` picks the fore/aft
+/// sense, and the `sin`/`cos` ease on `s` gives `u` (`0.5` on the flat).
+/// The bias is `−HillMin·(1−2u)` for `u < 0.5` and `−HillMax·(2u−1)` for
+/// `u ≥ 0.5`, so a front-up uphill tilts the eye down and a front-down
+/// downhill raises it.
+pub fn hill_bias(lens: &ChaseLens, hill: Vec3, car_right: Vec3) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let Some(hill) = hill.try_normalize() else {
+        return 0.0;
+    };
+    let theta = Vec3::Y.dot(hill).clamp(-1.0, 1.0).acos();
+    let c = Vec3::Y.cross(hill).try_normalize().unwrap_or(Vec3::ZERO);
+    let v = if theta < FRAC_PI_4 {
+        theta * (4.0 / PI)
+    } else {
+        1.0
+    };
+    let s = v * car_right.dot(c);
+    let u = if s > 0.0 {
+        1.0 - ((2.0 * s).min(1.0) * FRAC_PI_2).cos() * 0.5
+    } else if s < 0.0 {
+        ((1.0 - (2.0 * s.abs()).min(1.0)) * FRAC_PI_2).sin() * 0.5
+    } else {
+        0.5
+    };
+    if u < 0.5 {
+        -lens.hill_min * (1.0 - 2.0 * u)
+    } else {
+        -lens.hill_max * (2.0 * u - 1.0)
+    }
+}
+
+/// The angle `0x51e3e0` rotates the eye by about the camera's right axis:
+/// the hill bias scaled by `1 − 2f`, where `f = |swing_angle|/π` clamped to
+/// `[0, 1]`. The bias therefore **flips sign** at a full reverse swing
+/// (`f = 1`), rather than fading out. `swing_angle` is the live
+/// [`ReverseSwing`] orbit angle.
+pub fn hill_pitch(lens: &ChaseLens, hill: Vec3, car_right: Vec3, swing_angle: f32) -> f32 {
+    let f = (swing_angle.abs() / std::f32::consts::PI).clamp(0.0, 1.0);
+    hill_bias(lens, hill, car_right) * (1.0 - 2.0 * f)
 }
 
 /// The authored chase-lens pair for one vehicle — `_near` and `_far`
@@ -982,10 +1120,25 @@ pub fn chase_follow(
         if zero_rate && !jumped {
             cam.follow.app_xz = Some(0.0);
         }
-        let (aim, desired) = desired_eye(veh_pos, veh_rot, &lens);
+        let (aim, base) = desired_eye(veh_pos, veh_rot, &lens);
+        // Hill bias (`0x51dec0`/`0x51e3e0`): the low-passed ground normal
+        // tilts the boom about the camera's right axis before the reverse
+        // swing. `jumped` covers the original's reset flag `0xc8` (snap,
+        // not low-pass) — it is set on the first tracked frame and every
+        // reset/re-anchor teleport.
+        let mid = telemetry.map_or(Vec3::Y, |t| hill_mid(veh_pos, veh_rot, &t.wheels));
+        let hill = hill_normal(cam.follow.hill, mid, lens.hill_lerp, dt, jumped);
+        cam.follow.hill = Some(hill);
         // The swing orbits the desired eye round the aim point about up
         // (`0x51e3e0`); the eye then approaches the swung position.
         cam.follow.swing.ramp(&lens, dt);
+        let pitch = hill_pitch(&lens, hill, veh_rot * Vec3::X, cam.follow.swing.angle);
+        // Rotate about the camera's right axis (`up × boom`), pivoting on
+        // `T`, by `−pitch` — the recovered `0x4bce50` call's angle sign.
+        let desired = match Vec3::Y.cross(base - aim).try_normalize() {
+            Some(axis) if pitch != 0.0 => aim + Quat::from_axis_angle(axis, -pitch) * (base - aim),
+            _ => base,
+        };
         let desired =
             aim + Quat::from_axis_angle(Vec3::Y, cam.follow.swing.angle) * (desired - aim);
         let rate_target = follow_rate_target(&lens, speed);

@@ -10,7 +10,8 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
     CameraMode, ChaseCamera, ChaseLens, CollideKind, DriverState, FreeCamera, ReverseSwing,
     TrackReport, approach_axis, chase_follow, desired_eye, dev_cam_cycle_at, follow_rate_target,
-    load_track_cams, slew_follow_rate, toggle_camera, track_broken,
+    hill_bias, hill_mid, hill_normal, hill_pitch, load_track_cams, slew_follow_rate, toggle_camera,
+    track_broken,
 };
 use mm2_app::dash::CockpitCamera;
 use mm2_app::input::vehicle_input;
@@ -19,7 +20,7 @@ use mm2_assets::Vfs;
 use mm2_formats::camtrack::TrackCamSpec;
 use mm2_game::{
     AuthorityRole, DevOverrides, ObjectId, PlayerVehicle, Session, SessionConfig, SessionPhase,
-    VehicleTelemetry,
+    VehicleTelemetry, WheelTelemetry,
 };
 use mm2_vehicle::VehicleInput;
 use std::time::Duration;
@@ -1767,5 +1768,216 @@ fn reversing_car_swings_the_chase_boom_round_and_back() {
         (eye_z(&app) - 4.0).abs() < 1e-3,
         "back behind: {}",
         eye_z(&app)
+    );
+}
+
+/// A grounded wheel at car-space `local` with world hit normal `n`.
+fn wheel(local: Vec3, n: Vec3) -> WheelTelemetry {
+    WheelTelemetry {
+        grounded: true,
+        contact_point: local,
+        contact_normal: n,
+        ..Default::default()
+    }
+}
+
+/// A stationary telemetry snapshot carrying `wheels`, at the origin.
+fn hill_telemetry(wheels: Vec<WheelTelemetry>) -> VehicleTelemetry {
+    VehicleTelemetry {
+        object: ObjectId {
+            generation: 0,
+            slot: 1,
+        },
+        tick: 0,
+        authority: AuthorityRole::Authority,
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::ZERO,
+        forward_speed: 0.0,
+        rpm: 0.0,
+        engine_load: 0.0,
+        gear: 0,
+        reverse: false,
+        shifting: false,
+        wheels,
+        damage: Default::default(),
+    }
+}
+
+/// A lens with the stock hill authoring and no approach smoothing.
+fn hill_lens() -> ChaseLens {
+    ChaseLens::authored(
+        &TrackCamSpec::parse(
+            "type: a\ncamTrackCS {\n  Offset 0.0 1.0 4.0\n  TrackTo 0.0 1.7 0.0\n  ApproachOn 0\n  HillMin -0.28\n  HillMax 0.28\n  HillLerp 0.05\n}\n",
+        )
+        .unwrap(),
+    )
+}
+
+/// `HillMin`/`HillMax`/`HillLerp` bind from the record; a record that
+/// omits them (and the sized fallback) keeps the constructor defaults
+/// −0.56 / 0.56 / 0.05, and the low-pass factor is clamped to `[0, 1]`.
+#[test]
+fn hill_fields_bind_from_the_record_and_the_ctor() {
+    let lens = hill_lens();
+    assert_eq!(
+        (lens.hill_min, lens.hill_max, lens.hill_lerp),
+        (-0.28, 0.28, 0.05)
+    );
+    let bare = ChaseLens::authored(
+        &TrackCamSpec::parse("type: a\ncamTrackCS {\n  Offset 0 1 4\n}\n").unwrap(),
+    );
+    assert_eq!(
+        (bare.hill_min, bare.hill_max, bare.hill_lerp),
+        (-0.56, 0.56, 0.05)
+    );
+    let sized = ChaseLens::sized(2.0, 4.5);
+    assert_eq!(
+        (sized.hill_min, sized.hill_max, sized.hill_lerp),
+        (-0.56, 0.56, 0.05)
+    );
+
+    let mut spec =
+        TrackCamSpec::parse("type: a\ncamTrackCS {\n  Offset 0 1 4\n  HillLerp -3\n}\n").unwrap();
+    assert_eq!(ChaseLens::authored(&spec).hill_lerp, 0.0);
+    spec.hill_lerp = Some(4.0);
+    assert_eq!(ChaseLens::authored(&spec).hill_lerp, 1.0);
+    spec.hill_lerp = Some(f32::NAN);
+    assert_eq!(ChaseLens::authored(&spec).hill_lerp, 0.05);
+}
+
+/// `0x51dec0`: the slope normal is the mean of the grounded front- and
+/// rear-axle hit normals; a group whose mean cancels is dropped, and
+/// nothing grounded reads as world up.
+#[test]
+fn hill_mid_averages_grounded_axle_hit_normals() {
+    let tilt = Vec3::new(0.0, 0.98, 0.2).normalize();
+    let mut wheels = vec![
+        wheel(Vec3::new(-0.8, 0.0, -1.5), tilt),
+        wheel(Vec3::new(0.8, 0.0, -1.5), tilt),
+        wheel(Vec3::new(-0.8, 0.0, 1.5), tilt),
+        wheel(Vec3::new(0.8, 0.0, 1.5), tilt),
+    ];
+    let mid = hill_mid(Vec3::ZERO, Quat::IDENTITY, &wheels);
+    assert!((mid - tilt).length() < 1e-5, "{mid:?}");
+
+    // Rear pair airborne → the front mean stands alone.
+    wheels[2].grounded = false;
+    wheels[3].grounded = false;
+    let mid = hill_mid(Vec3::ZERO, Quat::IDENTITY, &wheels);
+    assert!((mid - tilt).length() < 1e-5, "{mid:?}");
+
+    // A front pair that cancels drops the group and the rear pair wins.
+    wheels[0].contact_normal = Vec3::X;
+    wheels[1].contact_normal = Vec3::NEG_X;
+    wheels[2].grounded = true;
+    wheels[3].grounded = true;
+    let mid = hill_mid(Vec3::ZERO, Quat::IDENTITY, &wheels);
+    assert!((mid - tilt).length() < 1e-5, "front cancel → rear: {mid:?}");
+
+    // Nothing grounded → world up.
+    for w in &mut wheels {
+        w.grounded = false;
+    }
+    assert_eq!(hill_mid(Vec3::ZERO, Quat::IDENTITY, &wheels), Vec3::Y);
+}
+
+/// The recovered sign chain: flat ground reads 0; a front-up uphill tilts
+/// the eye down (negative bias) and a front-down downhill raises it
+/// (positive), each bounded by `HillMin`/`HillMax`; a side-on slope has no
+/// fore/aft sense.
+#[test]
+fn hill_bias_is_zero_flat_and_signs_with_the_slope() {
+    let lens = hill_lens();
+    assert_eq!(hill_bias(&lens, Vec3::Y, Vec3::X), 0.0);
+
+    let phi = 0.35f32; // ~20°
+    let uphill = Vec3::new(0.0, phi.cos(), phi.sin());
+    let downhill = Vec3::new(0.0, phi.cos(), -phi.sin());
+    let up_bias = hill_bias(&lens, uphill, Vec3::X);
+    let down_bias = hill_bias(&lens, downhill, Vec3::X);
+    assert!(up_bias < 0.0, "uphill lowers the eye: {up_bias}");
+    assert!(down_bias > 0.0, "downhill raises it: {down_bias}");
+    assert!(
+        up_bias >= lens.hill_min - 1e-6 && down_bias <= lens.hill_max + 1e-6,
+        "bounded by HillMin/HillMax: {up_bias} {down_bias}"
+    );
+
+    let lateral = Vec3::new(phi.sin(), phi.cos(), 0.0);
+    assert!(hill_bias(&lens, lateral, Vec3::X).abs() < 1e-5);
+}
+
+/// `0x51e3e0`: the reverse swing scales the bias by `1 − 2f`,
+/// `f = |angle|/π` clamped, so a full swing flips its sign.
+#[test]
+fn hill_pitch_flips_sign_at_a_full_reverse_swing() {
+    let lens = hill_lens();
+    let uphill = Vec3::new(0.0, 0.94, 0.34);
+    let bias = hill_bias(&lens, uphill, Vec3::X);
+    assert!(bias < 0.0);
+    assert!((hill_pitch(&lens, uphill, Vec3::X, 0.0) - bias).abs() < 1e-6);
+    assert!(hill_pitch(&lens, uphill, Vec3::X, std::f32::consts::PI) > 0.0);
+    assert!(hill_pitch(&lens, uphill, Vec3::X, std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    // Beyond a full turn the factor is clamped, not wrapped.
+    assert!((hill_pitch(&lens, uphill, Vec3::X, 3.0 * std::f32::consts::PI) + bias).abs() < 1e-6);
+}
+
+/// `HillLerp` low-passes the slope normal, snapping on the reset frame and
+/// easing frame-rate independently at 60 Hz.
+#[test]
+fn hill_normal_snaps_then_low_passes() {
+    let tilt = Vec3::new(0.0, 0.94, 0.34).normalize();
+    // First tracked frame (`prev` None) and a reset frame both snap.
+    assert!((hill_normal(None, tilt, 0.05, 1.0 / 60.0, false) - tilt).length() < 1e-6);
+    assert!((hill_normal(Some(Vec3::Y), tilt, 0.05, 1.0 / 60.0, true) - tilt).length() < 1e-6);
+
+    let one = hill_normal(Some(Vec3::Y), tilt, 0.05, 1.0 / 60.0, false);
+    let want = (Vec3::Y + (tilt - Vec3::Y) * 0.05).normalize();
+    assert!((one - want).length() < 1e-6, "{one:?} vs {want:?}");
+
+    let s1 = hill_normal(Some(Vec3::Y), tilt, 0.05, 1.0 / 120.0, false);
+    let two = hill_normal(Some(s1), tilt, 0.05, 1.0 / 120.0, false);
+    assert!(
+        (two - one).length() < 1e-4,
+        "frame-rate independent: {two:?} vs {one:?}"
+    );
+}
+
+/// End to end through `chase_follow`: on a slope the low-passed wheel hit
+/// normals tilt the boom about the car's right axis — lower on an uphill,
+/// higher on a downhill — and the flat case is untouched.
+#[test]
+fn chase_follow_tilts_the_boom_on_a_slope() {
+    let lens = hill_lens();
+    let eye_y = |n: Vec3| {
+        let mut app = base_app(CameraMode::Chase);
+        app.add_systems(Update, chase_follow);
+        let car = spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+        app.world_mut().entity_mut(car).insert(hill_telemetry(vec![
+            wheel(Vec3::new(-0.8, 0.0, -1.5), n),
+            wheel(Vec3::new(0.8, 0.0, -1.5), n),
+            wheel(Vec3::new(-0.8, 0.0, 1.5), n),
+            wheel(Vec3::new(0.8, 0.0, 1.5), n),
+        ]));
+        let cam = spawn_chase(
+            &mut app,
+            ChaseCamera {
+                near: lens.clone(),
+                ..default()
+            },
+            true,
+        );
+        app.update();
+        app.world().get::<Transform>(cam).unwrap().translation.y
+    };
+    let phi = 0.35f32;
+    let flat = eye_y(Vec3::Y);
+    let up = eye_y(Vec3::new(0.0, phi.cos(), phi.sin()));
+    let down = eye_y(Vec3::new(0.0, phi.cos(), -phi.sin()));
+    assert!(flat - up > 0.05, "uphill eye lower: flat {flat} up {up}");
+    assert!(
+        down - flat > 0.05,
+        "downhill eye higher: flat {flat} down {down}"
     );
 }

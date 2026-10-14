@@ -157,19 +157,29 @@ the pre-update. While airborne the eye keeps its offset from the previous
 aim point instead of re-deriving it from the car's heading. The exact role
 of the `0x2250000` (`0x5b3f08`) speed² test is unresolved (see below).
 
-### 4. Hill bias (verified_original arithmetic)
+### 4. Hill bias (verified_original arithmetic, bound)
 
-`0x51dec0` builds the mean ground contact point of the front and rear wheel
-pairs (`carsim+0x584/0x7f0` front, `+0xa5c/0xcc8` rear, averaging both
-wheels when both touch), takes the slope direction between them, low-passes
-it with `HillLerp` (snapping when the reset flag `0xc8` is set), measures its
-elevation angle `θ` from the horizontal, shapes it through a
-`sin`/`cos` ease on `|θ|/(π/4)`, and stores a pitch bias at `0x1b4`:
-`−HillMin·(1−2u)` for `u < 0.5`, `−HillMax·(2u−1)` for `u ≥ 0.5`
-(`u` the eased value). `0x51e3e0` adds this bias to the camera's
-height/pitch slot (`[0x184]+0xc`) and fades it out as the reverse swing
-approaches π (below). `HillMin/HillMax` are radians in the stock data
-(−1…0.007 / up to 1).
+`0x51dec0` averages the grounded hit normals (`carsim` wheel `+0xcc` in
+the port, `contact_normal`) of the front and rear wheel pairs
+(`carsim+0x584/0x7f0` front, `+0xa5c/0xcc8` rear; a group counts when its
+mean clears `len² > 0.01`, `0x5af358`), combines the two groups (both →
+their mean, one → that group, neither → `(0,1,0)`), low-passes the result
+with `HillLerp` (`0x170`; snapping to the group mean while the reset flag
+`0xc8` is set), and normalises it in place. The vector `n` is the surface
+normal the wheels sit on, **not** a mean ground contact point or a "slope
+direction" between the axles: the pairwise means are taken in normal
+space only. With `θ = acos(clamp(up·n))` (`0x4c0420`), `c = up × n`, the
+eased `v = θ·4/π` for `θ < π/4` else 1, and `s = v·(carX·c)` (`carX` = the
+car matrix's row 0, the car's right axis), a `sin`/`cos` ease gives
+`u = 1 − cos(min(1,2s)·π/2)/2` for `s > 0`, `u = sin((1−min(1,2|s|))·π/2)/2`
+for `s < 0`, and `u = 0.5` at `s = 0`. The pitch bias stored at `0x1b4` is
+`−HillMin·(1−2u)` for `u < 0.5` and `−HillMax·(2u−1)` for `u ≥ 0.5`, so it
+is `0` on the flat, lowers the eye on a front-up uphill and raises it on a
+front-down downhill. `HillMin/HillMax` are radians in the stock data
+(−1…0.007 / up to 1). The port binds the whole chain in
+`mm2_app`'s `camera::hill_mid` / `hill_normal` / `hill_bias` /
+`hill_pitch`, pairing the axles by car-space `z` (the retail fixed wheel
+slots `0/1` and `2/3` are the same split for a four-wheel car).
 
 ### 5. Reverse swing (verified_original arithmetic)
 
@@ -198,17 +208,21 @@ fixed `dt`. `ReverseOn == −1` instead sets the flag in every frame and
 pins the angle at π while it is set (0 otherwise). The desired eye is
 rotated about the aim point round the world-up axis by that angle (the
 eye minus `T` goes through `0x4bce50`, then `T` is added back), and the
-eye approaches the swung position as usual. The *sign convention* of
-`0x4bce50` is not read: the port rotates right-handed about +Y, so the
-direction the boom sweeps is **inferred**; that it ends in front of the
-car is not.
-The blend factor `f = |angle|/π` (0 at 0, 1 at ≥ π) enters the hill
-bias as `HillBias·(1 − 2f)` — it **flips the sign** at a full swing
-rather than fading it out — added to the pitch slot `[0x184]+0xc`,
-which rotates the eye about the camera's right axis. Applying it needs
-the engine's rotation sign convention and the `0x51dec0` slope
-geometry (a `0x4c0420` call is unresolved), so the hill bias stays
-**unbound**; `HillMin/Max/Lerp` are parsed and validated only.
+eye approaches the swung position as usual. `0x4bce50` is
+`this = this · R(axis, angle)` — a row-vector rotation with the axis
+normalised inside the builder `0x4bcf90` (`0x4bd085` divides by `|axis|`) —
+so the port's right-handed `Quat::from_axis_angle(up, angle)` reproduces
+it; that the boom ends in front of the car is recovered, not inferred.
+The blend factor `f = |angle|/π` (0 at 0, 1 at ≥ π, clamped) enters the
+hill bias as `HillBias·(1 − 2f)` and is added to the pitch slot
+`[0x184]+0xc`, so the bias **flips the sign** at a full swing rather than
+fading out. `0x51e3e0` then rotates the eye about the aim point `T` by
+that angle about the camera's right axis: `eye − T` goes through `0x4bce50`
+with `axis = up × w` (`w` the cached boom direction at `+0x64`, the port
+recomputing it as `desired − T`) and angle `−P`, then `T` is added back,
+*before* the world-up swing rotation. The port applies the recovered bias
+term only; the `[0x184]+0xc` pitch-slot accumulator the original adds to it
+is not modelled (the port re-derives the look each frame).
 **`RevDelay` (`0x174`) is never read** — the 2.0 s is a constant, so
 editing the field changes nothing in the retail build.
 
