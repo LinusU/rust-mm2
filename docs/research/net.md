@@ -2024,6 +2024,30 @@ wire actually moved rather than an in-process mailbox's contents.
   isolation. Loopback, dev world, one recipe; the other seven cells
   are not run against a collision.
 
+- **Collision/reset across every recipe, and while moving (F25-C.7,
+  AC02 × AC03).** Three legs in `net_drive.rs` run the process-level
+  trio/pair under each of the matrix's eight recipes
+  (`support::impair_cells`, loopback, dev world, seeded `ImpairProxy`
+  armed on both directions after `Start`):
+  `a_shoved_seat_converges_on_every_impairment_recipe` (rest pose),
+  `a_scheduled_reset_comes_back_on_every_impairment_recipe`, and
+  `seat_disagreement_while_moving_is_measured_on_every_recipe`.
+  *Measured* (one run each, 2026-10-14; single samples, not
+  distributions): at rest after the shove, the two clients' copies of
+  the shared seats differ by at most 0.32 m (latency; 0.00–0.14 m
+  elsewhere) — inside the 1.0 m assertion. The reset is granted once and
+  comes back on every recipe; loss 20 % took 3 asks, loss 60 % took 2,
+  the rest 1, and the host dropped none. *Moving*: both clients stop on
+  the same authority tick mid-pursuit (6 s and 12 s of sim, the ram
+  driving from z≈−26 to z≈−8) and the seats are compared: peak
+  disagreement 0.00–0.30 m at 6 s and 0.00–0.95 m at 12 s, worst on the
+  delay recipes (latency 0.73 m, jitter 0.92 m, combined 0.95 m) — the
+  interpolation lag of a moving copy, as expected. *Designed, not
+  measured*: no bound exists for moving seats; the leg asserts only a
+  40 m sanity ceiling, and the printed `moving-divergence` /
+  `shove-matrix` / `reset-matrix` lines are the measurement. Still open:
+  more seeds per cell, higher closing speeds, and a real network.
+
 - **Shove trio after the tick-rate change (NET-SHOVE-AFTER-HANDLING,
   #1283).** `b991eb8` moved `FIXED_HZ` 120 → 60, and the leg's
   `bob_frames = 2500` settling "span" became a *local step* budget while

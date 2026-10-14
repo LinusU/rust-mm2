@@ -2621,6 +2621,9 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
         .collect()
 }
 
+/// The shove's settle span in simulated seconds (see `run_shove_trio`).
+const SHOVE_SETTLE_SECS: u64 = 43;
+
 /// One lobby of three processes on the dev world where the *host*
 /// drives (`--ram`, or `--parked` for the control) at the neighbouring
 /// grid seat, and two parked clients join in a fixed order — alice
@@ -2636,6 +2639,7 @@ fn run_shove_trio(
     install: &std::path::Path,
     host_rams: bool,
     impair: Option<Impair>,
+    settle_secs: u64,
 ) -> (String, String, Option<(LinkStats, LinkStats)>) {
     // Each lifecycle step is waited on for an observed line, bounded and
     // named in the failure (a loaded runner is slow, not wrong).
@@ -2654,8 +2658,9 @@ fn run_shove_trio(
     // runner's lag nor the impaired link's delay can end a record
     // before the authority's sim has settled the shove — the failure a
     // frame budget could not avoid once `b991eb8` moved the tick rate.
-    const SETTLE_SECS: u64 = 43;
-    let settle_tick = SETTLE_SECS * mm2_game::RACE_TICK_HZ as u64;
+    // A shorter `settle_secs` stops both records mid-pursuit instead, to
+    // measure the seats' disagreement while the cars move.
+    let settle_tick = settle_secs * mm2_game::RACE_TICK_HZ as u64;
     // The all-parked control never moves, so its nominal grid is seated
     // from the start; a short fixed span captures it and keeps the leg
     // cheap. It has no wire condition to wait for.
@@ -2748,7 +2753,7 @@ fn run_shove_trio(
         // recipe "may cost the route, never the pose"; requiring a
         // best-effort row here would test reliable delivery over an
         // unreliable channel, not the shove.
-        if impair.is_none() {
+        if impair.is_none() && settle_secs == SHOVE_SETTLE_SECS {
             assert!(net_field(&alice_rec).impacts_applied > 0, "{alice_rec}");
             assert!(net_field(&bob_rec).impacts_applied > 0, "{bob_rec}");
         }
@@ -2763,7 +2768,7 @@ fn run_shove_trio(
         host.until_within("event=left", STEP);
     }
     let host_net = quit_and_assert_host_drove(host);
-    if host_rams {
+    if host_rams && settle_secs == SHOVE_SETTLE_SECS {
         // The authority simulated the contact and put its impact rows on
         // the wire, on both links. This is the loss-robust half of the
         // impaired leg's impact pin: the rows are counted as they leave
@@ -2774,7 +2779,7 @@ fn run_shove_trio(
             host_net.impacts_sent > 0,
             "the authority published no impact for the shove: {host_net:?}"
         );
-    } else {
+    } else if !host_rams {
         // The control's all-parked grid collides with nothing, so the
         // authority publishes no impact — every impact asserted above is
         // the ram's, never a spawn-landing jostle.
@@ -2797,8 +2802,8 @@ fn run_shove_trio(
 #[test]
 fn a_shoved_seat_converges_across_three_processes() {
     let install = tempfile::tempdir().unwrap();
-    let (_, control_bob, _) = run_shove_trio(install.path(), false, None);
-    let (alice, bob, _) = run_shove_trio(install.path(), true, None);
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, None, SHOVE_SETTLE_SECS);
+    let (alice, bob, _) = run_shove_trio(install.path(), true, None, SHOVE_SETTLE_SECS);
     eprintln!("shove control bob={control_bob}\nshove ram alice={alice}\n bob={bob}");
     assert_shove_converged(&control_bob, &alice, &bob);
 }
@@ -2820,8 +2825,8 @@ fn a_shoved_seat_converges_across_three_processes_on_an_impaired_link() {
         duplicate: 0.10,
         reorder: 0.10,
     };
-    let (_, control_bob, _) = run_shove_trio(install.path(), false, None);
-    let (alice, bob, link) = run_shove_trio(install.path(), true, Some(recipe));
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, None, SHOVE_SETTLE_SECS);
+    let (alice, bob, link) = run_shove_trio(install.path(), true, Some(recipe), SHOVE_SETTLE_SECS);
     eprintln!("impaired shove control bob={control_bob}\n ram alice={alice}\n bob={bob}");
     // The convergence below only means something if the link really
     // misbehaved while the shove played out: both directions carried
@@ -3447,4 +3452,118 @@ fn a_long_impaired_three_process_soak_stays_bounded_and_finite() {
         down.bytes_in / down.frames_in <= SNAP_WIRE_CEILING,
         "downstream frames averaged over the Snap ceiling: {down:?}"
     );
+}
+
+/// Largest and mean distance between the two clients' copies of every
+/// seat both hold, in metres.
+fn seat_disagreement(alice: &str, bob: &str) -> (f64, f64) {
+    let bob_poses = seat_poses(bob);
+    let apart: Vec<f64> = seat_poses(alice)
+        .into_iter()
+        .filter_map(|(id, x, z)| {
+            let (_, bx, bz) = bob_poses.iter().find(|(i, ..)| *i == id)?;
+            Some(((x - bx).powi(2) + (z - bz).powi(2)).sqrt())
+        })
+        .collect();
+    assert!(!apart.is_empty(), "no shared seat:\n {alice}\n {bob}");
+    let peak = apart.iter().copied().fold(0.0, f64::max);
+    (peak, apart.iter().sum::<f64>() / apart.len() as f64)
+}
+
+/// F25-AC02 x AC03: the shove at rest under every named recipe of the
+/// impairment matrix (not just `combined`). Each cell must still show
+/// the recipe biting on both directions and end with the seats off their
+/// slots and in agreement. Prints a `shove-matrix cell=` line per recipe.
+#[test]
+fn a_shoved_seat_converges_on_every_impairment_recipe() {
+    let install = tempfile::tempdir().unwrap();
+    let (_, control_bob, _) = run_shove_trio(install.path(), false, None, SHOVE_SETTLE_SECS);
+    for (name, recipe) in support::impair_cells()
+        .into_iter()
+        .filter(|(name, _)| *name != "clean")
+    {
+        let (alice, bob, link) =
+            run_shove_trio(install.path(), true, Some(recipe), SHOVE_SETTLE_SECS);
+        let (up, down) = link.expect("the impaired run reports its proxy counters");
+        for (dir, stats) in [("up", up), ("down", down)] {
+            assert!(
+                stats.frames_in > 0,
+                "{name} {dir} carried nothing: {stats:?}"
+            );
+        }
+        let (peak, mean) = seat_disagreement(&alice, &bob);
+        eprintln!(
+            "shove-matrix cell={name} settled-peak={peak:.3}m settled-mean={mean:.3}m \
+             up={up:?} down={down:?}\n alice={alice}\n bob={bob}"
+        );
+        assert_shove_converged(&control_bob, &alice, &bob);
+    }
+}
+
+/// F25-AC02 x AC03, while moving: both clients stop on the same
+/// authority tick *during* the ram's pursuit (the cars are in motion,
+/// not at rest) and the seats they hold are compared. There is no
+/// designed bound for moving seats (the interpolated copies lag by
+/// design), so this is a measurement: it prints a `moving-divergence`
+/// line per recipe and only asserts the poses are finite and the
+/// disagreement stays inside a loose sanity ceiling.
+#[test]
+fn seat_disagreement_while_moving_is_measured_on_every_recipe() {
+    // Mid-pursuit sample points, in simulated seconds from the start.
+    const MOVING_SECS: [u64; 2] = [6, 12];
+    // A sanity ceiling, not a designed bound: a car at speed covers this
+    // in about a second, so only a seat that is lost or wildly wrong
+    // exceeds it.
+    const SANITY_CEILING_M: f64 = 40.0;
+    let install = tempfile::tempdir().unwrap();
+    for (name, recipe) in support::impair_cells() {
+        let impair = (name != "clean").then_some(recipe);
+        for secs in MOVING_SECS {
+            let (alice, bob, _) = run_shove_trio(install.path(), true, impair, secs);
+            let (peak, mean) = seat_disagreement(&alice, &bob);
+            eprintln!(
+                "moving-divergence cell={name} at={secs}s peak={peak:.3}m mean={mean:.3}m\n alice={alice}\n bob={bob}"
+            );
+            assert!(
+                peak.is_finite() && peak < SANITY_CEILING_M,
+                "{name}@{secs}s: {peak} m"
+            );
+        }
+    }
+}
+
+/// F25-AC02 x AC03: the scheduled reset under every named recipe. The
+/// ask is retried, so heavy loss costs time, not the outcome. Prints a
+/// `reset-matrix cell=` line per recipe.
+#[test]
+fn a_scheduled_reset_comes_back_on_every_impairment_recipe() {
+    let install = tempfile::tempdir().unwrap();
+    for (name, recipe) in support::impair_cells()
+        .into_iter()
+        .filter(|(name, _)| *name != "clean")
+    {
+        let (alice_rec, bob_rec, host_rec, link) = run_reset_pair(install.path(), Some(recipe));
+        let (up, down) = link.expect("the impaired run reports its proxy counters");
+        let alice_net = net_field(&alice_rec);
+        let host_net = net_field(&host_rec);
+        eprintln!(
+            "reset-matrix cell={name} asks={} granted={} dropped={} resets={} up={up:?} down={down:?}\n alice={alice_rec}\n host={host_rec}",
+            alice_net.requests_sent,
+            host_net.requests_granted,
+            host_net.requests_dropped,
+            alice_net.resets
+        );
+        assert_eq!(field(&bob_rec, "status"), "pass", "{name}: {bob_rec}");
+        assert_eq!(field(&alice_rec, "stop"), "resets", "{name}: {alice_rec}");
+        assert_eq!(field(&alice_rec, "status"), "pass", "{name}: {alice_rec}");
+        assert!(
+            alice_net.requests_sent >= 1 && alice_net.resets >= 1,
+            "{name}: {alice_rec}"
+        );
+        assert!(moved_m(&alice_rec) < 5.0, "{name}: {alice_rec}");
+        assert!(
+            host_net.requests_granted >= 1 && host_net.resets >= 1,
+            "{name}: {host_rec}"
+        );
+    }
 }
