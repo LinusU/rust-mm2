@@ -54,14 +54,14 @@ bad driving was one of them going wrong:
 `mm2_gym audit` walks every line and lists where it still cannot be
 driven as drawn.
 
-One observation is 126 floats in the car's own heading frame, scaled
+One observation is 132 floats in the car's own heading frame, scaled
 to about unit size (`observe.rs` is the reference):
 
 | Block | Size | Contents |
 | --- | ---: | --- |
 | car | 11 | size, mass, power, top speed, steering lock, grip, the driver's throttle ceiling |
 | motion | 15 | velocity, spin, tilt, steering angle, wheel contact, reverse, last action |
-| guide | 34 | offset and heading against the line, then the line at ten distances from 5 m to 170 m |
+| guide | 40 | offset and heading against the line, then the line at twelve distances from 5 m to 340 m — braking distance for the fastest cars |
 | rays | 24 | free distance to the world: three down the corridor the car is about to sweep, then a fan, close-set ahead and wide to the sides and rear |
 | floor | 6 | where the ground ahead is against where level ground would be — a quay, a crest, a raised bridge leaf |
 | neighbours | 36 | the four nearest other vehicles: position, relative velocity, heading, size |

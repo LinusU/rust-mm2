@@ -23,10 +23,18 @@ use mm2_vehicle::{HandlingMetrics, VehicleConfig, VehicleInput};
 use super::guide::Guide;
 
 /// Layout version, recorded with trained weights by the trainer.
-pub const OBS_VERSION: u32 = 3;
+pub const OBS_VERSION: u32 = 4;
 
 /// Distances (m) down the guide at which the line ahead is sampled.
-pub const LOOKAHEAD: [f32; 10] = [5.0, 10.0, 16.0, 24.0, 34.0, 48.0, 66.0, 90.0, 125.0, 170.0];
+///
+/// The far end is braking distance, not sight: the fastest cars reach
+/// 77 m/s, and from there to a 25 m/s corner is some 200 m of hard
+/// braking. With the line shown 170 m out a driver met every bend
+/// after a long straight too late to slow for it, and could only learn
+/// to hold back on all of them.
+pub const LOOKAHEAD: [f32; 12] = [
+    5.0, 10.0, 16.0, 24.0, 34.0, 48.0, 66.0, 90.0, 125.0, 170.0, 240.0, 340.0,
+];
 
 /// World rays: angle off the nose (degrees, positive right), reach
 /// (m) and where across the car the ray starts, in half-widths from its
@@ -527,8 +535,10 @@ mod tests {
         let g = Guide::new([Vec3::ZERO, Vec3::new(0.0, 0.0, -20.0)], false).unwrap();
         let o = see(&motion(), &g, 10.0, &[], |_, _, _| None);
         let last = &o[GUIDE_AT + 4 + 3 * (LOOKAHEAD.len() - 1)..][..3];
-        // 170 m ahead of arc 10 is 180 m down −Z; the car is at 0.
-        assert!((last[1] - 180.0 / 170.0).abs() < 1e-4, "{last:?}");
+        // The far sample, that far ahead of arc 10, is 10 m further
+        // down −Z than its distance; the car is at 0.
+        let far = LOOKAHEAD[LOOKAHEAD.len() - 1];
+        assert!((last[1] - (far + 10.0) / far).abs() < 1e-4, "{last:?}");
     }
 
     #[test]

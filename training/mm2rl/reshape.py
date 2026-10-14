@@ -13,6 +13,11 @@ columns 60–75 became 24:
 
     uv run python -m mm2rl.reshape v3.pt v4.pt 126 \\
         0-59 x 60 x 61 62 x2 63 64 x2 65 66 67 68 x2 69-75 76-117
+
+and layout 3 to layout 4 (132), which samples the guide at two more
+distances, six columns after the old guide block's last:
+
+    uv run python -m mm2rl.reshape v4.pt v5.pt 132 0-59 x6 60-125
 """
 
 from __future__ import annotations
