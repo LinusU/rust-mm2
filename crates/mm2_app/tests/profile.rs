@@ -500,7 +500,18 @@ fn choose_launch_uses_the_remembered_difficulty_over_rank() {
     let (_, _, diff) = choose_launch(None, None, false, Some(&p));
     assert_eq!(diff, Difficulty::Professional);
 
-    // --pro still wins outright.
+    // The rank is only the fallback: a profile created Professional
+    // that later picked Amateur launches Amateur...
+    let mut q = store_profile("bob", Difficulty::Professional);
+    q.set_difficulty(Difficulty::Amateur);
+    assert_eq!(q.chosen_difficulty(), Difficulty::Amateur);
+    let (_, _, diff) = choose_launch(None, None, false, Some(&q));
+    assert_eq!(diff, Difficulty::Amateur);
+
+    // ...and `--pro` still wins outright, over that remembered pick
+    // *and* over the Amateur rank.
+    let (_, _, diff) = choose_launch(None, None, true, Some(&q));
+    assert_eq!(diff, Difficulty::Professional);
     let (_, _, diff) = choose_launch(None, None, true, Some(&p));
     assert_eq!(diff, Difficulty::Professional);
 }

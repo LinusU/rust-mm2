@@ -1191,8 +1191,9 @@ fn main() {
             (None, Some(settings)) => mm2_game::SessionMode::CopsAndRobbers(settings),
             (None, None) => mm2_game::SessionMode::Cruise,
         },
-        // The bound profile's rank supplies the difficulty unless
-        // `--pro` overrides (DRV-2/3); no profile keeps Amateur.
+        // The bound profile's remembered difficulty (its last pick,
+        // else its rank, DRV-2) supplies the difficulty unless `--pro`
+        // overrides (DRV-3); no profile keeps Amateur.
         difficulty,
         // The cruise/dev conditions fallback (F18-A) — an authored
         // event's own conditions take precedence while it runs (RACE-2).
@@ -2277,9 +2278,9 @@ fn main() {
     );
     if menu_mode {
         // The shell seeds from the same launch resolution a direct
-        // boot uses (`--car`/remembered/default vehicle, `--pro`/rank
-        // difficulty) — the menu refines the pick, it doesn't
-        // re-derive it. `menu_input` runs `Session::begin` on launch
+        // boot uses (`--car`/remembered/default vehicle, `--pro`/the
+        // profile's remembered difficulty, else its rank) — the menu
+        // refines the pick, it doesn't re-derive it. `menu_input` runs `Session::begin` on launch
         // rows and `menu_watch` reopens the shell whenever the session
         // returns to `Menu`, so quitting a menu-launched session
         // comes back here instead of exiting.

@@ -1951,6 +1951,22 @@ fn difficulty_is_persisted_per_profile() {
     app.update();
     press(&mut app, KeyCode::Escape);
     assert_eq!(shell(&app).difficulty, Difficulty::Professional);
+
+    // The displayed pick is what actually runs: launching a cruise now
+    // begins a session whose config carries Professional — the race
+    // configuration stays synchronized with the row, not just the row's
+    // own state.
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert_eq!(
+        app.world()
+            .resource::<Session>()
+            .config()
+            .expect("the launch began a session")
+            .difficulty,
+        Difficulty::Professional,
+    );
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
 }
 
 /// The name-entry screen owns the keyboard: typed characters append,
