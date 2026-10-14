@@ -17,7 +17,7 @@ const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 /// Simulated frames per leg.
 const FRAMES: &str = "3000";
 
-/// The stuck window an opponent may spend before recovery (900 driving
+/// The stuck window an opponent may spend before recovery (540 driving
 /// frames, DSN-14) plus the escape/landing margin; a longer spell means
 /// recovery did not fire.
 const STUCK_BOUND: u32 = 1500;

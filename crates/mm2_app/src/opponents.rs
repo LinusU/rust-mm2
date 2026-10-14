@@ -35,7 +35,7 @@
 //!   [`OpponentSpec`] and unconsumed.
 //! - **Bounded re-anchor (F15-B.3).** A car nothing frees — penned,
 //!   beached on its hull, knocked somewhere its route cannot be
-//!   regained — gets a disclosed last resort after [`REANCHOR_FRAMES`]
+//!   regained — gets a disclosed last resort after [`OPPONENT_REANCHOR_FRAMES`]
 //!   without [`REANCHOR_DIST`] of displacement: a `ResetVehicle`
 //!   teleport back to where its guide last had it, walked back out of
 //!   un-cleared checkpoint triggers and kept [`REANCHOR_CLEAR`] off
@@ -108,10 +108,16 @@ pub(crate) const SPAWN_LIFT: f32 = 0.25;
 /// uses. Generous enough that a crawling queue keeps resetting.
 /// Shared with the scripted bot's re-anchor (`crate::scripted`).
 pub(crate) const REANCHOR_DIST: f32 = 8.0;
-/// Frames (60 Hz updates) inside the bubble before the bounded last
-/// resort fires — about 15 s, so the reverse-and-turn escapes (~3.5 s
-/// a cycle) and the pass stall/ban cycle get their turns first.
+/// Frames (60 Hz updates) inside the bubble before the scripted
+/// player's bounded last resort fires (`crate::scripted`) — about 15 s,
+/// so its reverse-and-turn escapes (~3.5 s a cycle) get their turns
+/// first.
 pub const REANCHOR_FRAMES: u32 = 900;
+/// The same for an opponent — 9 s: a back-up straight out and two
+/// swings on full lock (`neural::unstick`, 2.6 s and 3 s a cycle) get
+/// their turns first, and a car they have not freed is not going to
+/// free itself.
+pub const OPPONENT_REANCHOR_FRAMES: u32 = 540;
 /// Step back (m) along the route polyline the re-anchor takes —
 /// re-approach the point it failed at instead of landing inside it —
 /// and the stride each further step takes while the candidate still
@@ -140,6 +146,9 @@ const REANCHOR_MAX_STEPS: usize = 16384;
 /// half-length; the walk-back consumes the same [`REANCHOR_WALK`]
 /// budget, so a route jammed solid still lands bounded (disclosed).
 pub const REANCHOR_CLEAR: f32 = 8.0;
+/// How far ahead on its guide (m) a car re-anchored twice at one place
+/// may be put down, nearest first: past a wreck, not past a corner.
+const REANCHOR_PAST: [f32; 5] = [12.0, 18.0, 25.0, 35.0, 50.0];
 /// Vertical band (m) the clearance applies within — a car on the
 /// street below an elevated leg does not block a landing on it.
 const REANCHOR_CLEAR_Y: f32 = 4.0;
@@ -222,14 +231,14 @@ pub struct OpponentDriver {
     /// high-centred car can roll without ever leaving the bubble.
     pub stuck_pos: Vec3,
     /// Frames spent inside [`REANCHOR_DIST`] of `stuck_pos` while the
-    /// car should be driving — at [`REANCHOR_FRAMES`] the bounded
+    /// car should be driving — at [`OPPONENT_REANCHOR_FRAMES`] the bounded
     /// re-anchor fires (F15-B.3, AC03).
     pub stuck_frames: u32,
     /// The largest `stuck_frames` count ever reached — the longest
     /// continuous spell inside one displacement bubble (F15 req 6's
     /// stuck duration). A progressing car's window re-seats every
     /// [`REANCHOR_DIST`] of travel, so its peak stays a handful of
-    /// frames; a penned one runs to [`REANCHOR_FRAMES`]. Unlike
+    /// frames; a penned one runs to [`OPPONENT_REANCHOR_FRAMES`]. Unlike
     /// `stuck_frames` it survives the window reset and a re-anchor.
     pub stuck_peak: u32,
     /// Re-anchors this participant has taken this session — the
@@ -1192,7 +1201,7 @@ fn spawn_roster(
 /// The bounded last resort (F15-B.3): backing up answers an ordinary
 /// stall, but a car penned where every escape lands back in the same
 /// pocket, beached on its hull, or knocked somewhere its route cannot
-/// be regained would sit forever. [`REANCHOR_FRAMES`] without
+/// be regained would sit forever. [`OPPONENT_REANCHOR_FRAMES`] without
 /// [`REANCHOR_DIST`] of displacement therefore re-anchors it through
 /// the production [`ResetVehicle`] path — the same disclosed teleport
 /// the player's reset uses, so `Teleported` breaks the swept segment —
@@ -1406,7 +1415,7 @@ pub fn opponent_drive(
                 d.stuck_frames += 1;
                 d.stuck_peak = d.stuck_peak.max(d.stuck_frames);
             }
-            if d.stuck_frames >= REANCHOR_FRAMES
+            if d.stuck_frames >= OPPONENT_REANCHOR_FRAMES
                 && let Some(route) = d.route.clone()
                 && let Some(neural) = d.neural.as_mut()
             {
@@ -1460,6 +1469,78 @@ pub fn opponent_drive(
                         )
                     })
                 };
+                // Re-anchored here a moment ago and stuck again: what
+                // stopped the car stands on its line and will stop it
+                // every time it is put down behind it — the settled
+                // wreck of a parked car is a static body. This once
+                // the landing is past it: the first place ahead where
+                // the car can stand, nobody else does, and the next
+                // few metres are open.
+                let past = neural.reanchored_here_before().then(|| {
+                    let sq = spatial.as_ref()?;
+                    let guide = neural.guide.clone();
+                    let filter = SpatialQueryFilter::default();
+                    REANCHOR_PAST.into_iter().find_map(|ahead| {
+                        if guide
+                            .remaining(neural.arc)
+                            .is_some_and(|left| left < ahead + 5.0)
+                        {
+                            return None;
+                        }
+                        let arc = guide.normalize(neural.arc + ahead);
+                        let (p, t) = (guide.point_at(arc), guide.tangent_at(arc));
+                        let pyaw = (-t.x).atan2(-t.z);
+                        let in_gate = gates
+                            .iter()
+                            .any(|g| (p.x - g.center.x).hypot(p.z - g.center.z) < g.radius);
+                        if in_gate || occupied(p) {
+                            return None;
+                        }
+                        let clear = crate::neural::guide::way_open(
+                            p - t * 3.0,
+                            p + t * 10.0,
+                            false,
+                            1.3,
+                            |from, dir, reach| {
+                                sq.cast_ray_predicate(
+                                    from,
+                                    Dir3::new(dir).ok()?,
+                                    reach,
+                                    true,
+                                    &filter,
+                                    &|e| !cars.contains(colliders.get(e).map_or(e, |c| c.body)),
+                                )
+                                .map(|hit| (hit.distance, hit.normal))
+                            },
+                            |_| None,
+                        );
+                        let seated = seat(p, pyaw)?;
+                        clear.then_some((arc, seated, pyaw))
+                    })
+                });
+                if let Some(Some((arc, pose, ryaw))) = past {
+                    resets.write(ResetVehicle {
+                        entity: Some(entity),
+                        position: pose,
+                        yaw: ryaw,
+                    });
+                    d.next = neural.guide.chase_index(arc);
+                    neural.pass_to(arc, pose);
+                    d.stuck_frames = 0;
+                    d.stuck_pos = pose;
+                    d.reanchors += 1;
+                    d.stats.last_pos = None;
+                    claimed.push(pose);
+                    info!(
+                        vehicle = %d.spec.vehicle,
+                        reanchors = d.reanchors,
+                        from = ?pos.0,
+                        to = ?pose,
+                        "opponent re-anchored past what blocks its route"
+                    );
+                    *input = VehicleInput::default();
+                    continue;
+                }
                 // Back to where the guide last had the car, not to
                 // wherever it was knocked: the landing can then never
                 // sit further along the route than the car drove.

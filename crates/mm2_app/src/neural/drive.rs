@@ -172,6 +172,9 @@ pub struct NeuralState {
     /// Whether the guide has been laid on the world's ground
     /// ([`NeuralState::ground`]).
     grounded: bool,
+    /// Where on the guide the car was the last time it was
+    /// re-anchored.
+    last_reanchor: Option<f32>,
 }
 
 impl NeuralState {
@@ -191,6 +194,7 @@ impl NeuralState {
             hold: 0,
             unstick: Unstick::default(),
             grounded: false,
+            last_reanchor: None,
         }
     }
 
@@ -251,6 +255,32 @@ impl NeuralState {
         self.arc = arc;
         self.last_pos = pos;
         self.guide.remaining(self.arc)
+    }
+
+    /// Note a re-anchor at the car's place, and say whether the last
+    /// one was at the same place — within [`REANCHOR_SAME`] of guide.
+    /// Whatever stopped the car then is still there, and still in the
+    /// way.
+    pub fn reanchored_here_before(&mut self) -> bool {
+        let before = self
+            .last_reanchor
+            .is_some_and(|last| self.guide.delta(last, self.arc).abs() <= REANCHOR_SAME);
+        self.last_reanchor = Some(self.arc);
+        before
+    }
+
+    /// Put the car's place at `arc`, ahead of where it was: a
+    /// re-anchor that lands it past what it could not get round
+    /// (`opponents::opponent_drive`). The guide between counts as
+    /// driven — the one case in which being moved takes a car along
+    /// its route — so the gates on it are not left behind uncleared.
+    pub fn pass_to(&mut self, arc: f32, pos: Vec3) {
+        self.driven += self.guide.delta(self.arc, arc);
+        self.arc = arc;
+        self.last_pos = pos;
+        self.action = [0.0; ACT_DIM];
+        self.hold = 0;
+        self.unstick = Unstick::default();
     }
 
     /// Find the car on its guide again after it was moved rather than

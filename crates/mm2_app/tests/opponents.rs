@@ -15,8 +15,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
-    DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, circuit_lap, driving_route,
-    initial_route_index, opponent_drive, reanchor_pose, reanchor_pose_with_progress,
+    DriveStats, OPPONENT_REANCHOR_FRAMES, OpponentDriver, REANCHOR_CLEAR, circuit_lap,
+    driving_route, initial_route_index, opponent_drive, reanchor_pose, reanchor_pose_with_progress,
     route_is_closed, spawn_pose, trim_behind_staging,
 };
 use mm2_app::session::{self, SessionControl};
@@ -1538,7 +1538,7 @@ fn permanently_stuck_opponent_reanchors_and_resumes() {
         let d = app.world().get::<OpponentDriver>(vpt).unwrap();
         if d.reanchors > 0 {
             assert!(
-                d.stuck_peak >= REANCHOR_FRAMES,
+                d.stuck_peak >= OPPONENT_REANCHOR_FRAMES,
                 "the spent window is the recorded stuck duration: {}",
                 d.stuck_peak
             );
@@ -1623,7 +1623,7 @@ fn reanchor_dispatches_through_the_production_reset_path() {
     {
         let mut d = app.world_mut().get_mut::<OpponentDriver>(vpt).unwrap();
         d.stuck_pos = before;
-        d.stuck_frames = REANCHOR_FRAMES - 1; // one driving update short of the bound
+        d.stuck_frames = OPPONENT_REANCHOR_FRAMES - 1; // one driving update short of the bound
     }
     run(&mut app, 4);
 
@@ -1635,7 +1635,7 @@ fn reanchor_dispatches_through_the_production_reset_path() {
     // The peak survives the reset — the session's longest stuck spell
     // stays on the record even though the live window re-anchored.
     assert!(
-        d.stuck_peak >= REANCHOR_FRAMES,
+        d.stuck_peak >= OPPONENT_REANCHOR_FRAMES,
         "stuck_peak={}",
         d.stuck_peak
     );
@@ -1663,7 +1663,7 @@ fn reanchor_landing(extra: impl FnOnce(&mut App, Vec3)) -> Vec3 {
     {
         let mut d = app.world_mut().get_mut::<OpponentDriver>(vpt).unwrap();
         d.stuck_pos = before;
-        d.stuck_frames = REANCHOR_FRAMES - 1;
+        d.stuck_frames = OPPONENT_REANCHOR_FRAMES - 1;
     }
     // The landing is the pose of the reset, before the car settles.
     for _ in 0..8 {
@@ -1730,7 +1730,7 @@ fn progressing_opponents_never_reanchor() {
         // positive count, nowhere near the bound.
         assert!(peak > 0, "opponent {e:?} never left a bubble reading");
         assert!(
-            peak < REANCHOR_FRAMES,
+            peak < OPPONENT_REANCHOR_FRAMES,
             "opponent {e:?} peaked at {peak} while progressing"
         );
     }
@@ -1927,7 +1927,7 @@ fn an_overturned_opponent_self_rights_and_resumes() {
         }
     }
     assert!(
-        righted_at.is_some_and(|u| u < REANCHOR_FRAMES),
+        righted_at.is_some_and(|u| u < OPPONENT_REANCHOR_FRAMES),
         "the upended car never self-righted"
     );
     assert_eq!(
@@ -2446,7 +2446,7 @@ fn native_reanchor_preserves_revisited_street_occurrence() {
         let neural = d.neural.as_mut().expect("a routed entry has a driver");
         neural.arc = neural.guide.source_arc(6) + 25.0;
         d.stuck_pos = before;
-        d.stuck_frames = REANCHOR_FRAMES - 1;
+        d.stuck_frames = OPPONENT_REANCHOR_FRAMES - 1;
     }
     let cleared = app
         .world()
