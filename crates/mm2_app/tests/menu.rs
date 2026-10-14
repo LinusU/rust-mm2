@@ -6995,3 +6995,118 @@ fn the_lobby_screen_shows_roster_picks_and_readiness_on_both_ends() {
         screen(&mut client)
     );
 }
+
+/// F18-AC04: the cruise weather/time-of-day a standard profile picked
+/// is recorded at session start and, after a restart, seeds the cruise
+/// options and a plain cruise launch. A sandbox profile neither writes
+/// nor reads it.
+#[test]
+fn cruise_conditions_survive_a_restart() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let sandbox = store
+        .create("Dev", Difficulty::Amateur, ProfileKind::Sandbox)
+        .unwrap();
+
+    // Session 1: pick cloudy + noon in the cruise options and start.
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Cruise");
+    open_options(&mut app, "testcity");
+    focus_row(&mut app, "Weather:");
+    press(&mut app, KeyCode::ArrowRight);
+    focus_row(&mut app, "Time of day:");
+    press(&mut app, KeyCode::ArrowRight);
+    activate_row(&mut app, "Start cruise");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    let saved = store_dir_reopen(&store_dir, &alice.id);
+    let picked = saved
+        .selections
+        .conditions
+        .expect("a cruise records its conditions");
+    assert_eq!((picked.weather.get(), picked.time_of_day.get()), (1, 1));
+    assert_eq!(saved.selections.customization, None);
+    drop(app);
+
+    // Session 2 (restart): the options open on the remembered picks, and
+    // a plain cruise launch runs them.
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Cruise");
+    open_options(&mut app, "testcity");
+    let menu::Screen::Customize {
+        conditions,
+        seed_conditions,
+        ..
+    } = &shell(&app).screen
+    else {
+        panic!("expected the cruise options screen");
+    };
+    assert_eq!((*conditions, *seed_conditions), (picked, picked));
+    press(&mut app, KeyCode::Escape);
+    // Back lands on the options entry; step off it to the city itself.
+    press(&mut app, KeyCode::ArrowLeft);
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    assert_eq!(config.conditions, picked);
+    assert_eq!(
+        config.customization, None,
+        "unchanged picks are not a customized run"
+    );
+    drop(app);
+
+    // A sandbox profile neither writes nor restores the picks.
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Dev");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    assert_eq!(config.conditions, mm2_game::SessionConditions::default());
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    assert_eq!(
+        store_dir_reopen(&store_dir, &sandbox.id)
+            .selections
+            .conditions,
+        None
+    );
+}

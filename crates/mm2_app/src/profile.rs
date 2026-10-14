@@ -23,6 +23,10 @@
 //!   the driven vehicle and the event's stable [`EventKey`] — and saves
 //!   immediately, so a crash mid-session cannot lose them. A dev-car
 //!   session leaves a remembered vehicle untouched.
+//! - [`remembered_conditions`] / [`launch_conditions`] restore the last
+//!   cruise weather/time-of-day pick (F18-AC04), which `note_session_start`
+//!   writes for a cruise on a standard profile; an explicit
+//!   `--weather`/`--time-of-day` wins per field.
 //!
 //! Create/select/delete *flows* with UI confirmation stay F17 scope;
 //! these flags are the store's interim flow primitives. Progress
@@ -34,7 +38,7 @@ use std::path::PathBuf;
 use bevy::prelude::Resource;
 use mm2_game::{
     Difficulty, EventKey, PlayerProfile, ProfileError, ProfileId, ProfileKind, ProfileStore,
-    SessionCustomization, VehicleChoice,
+    SessionConditions, SessionCustomization, TimeOfDay, VehicleChoice, Weather,
 };
 use tracing::{info, warn};
 
@@ -291,6 +295,31 @@ pub fn vehicle_gate_note(
     None
 }
 
+/// The cruise conditions a standard profile last picked (F18-AC04).
+/// A sandbox profile neither records nor restores them: its runs are
+/// dev runs and must not steer a driver's defaults.
+pub fn remembered_conditions(profile: Option<&PlayerProfile>) -> Option<SessionConditions> {
+    profile
+        .filter(|p| p.records_progress())
+        .and_then(|p| p.selections.conditions)
+}
+
+/// The session's cruise conditions at launch: each of an explicit
+/// `--weather`/`--time-of-day` wins, the profile's remembered pick
+/// fills a flag that was not given, and the authored clear-morning
+/// default fills the rest.
+pub fn launch_conditions(
+    weather: Option<Weather>,
+    time_of_day: Option<TimeOfDay>,
+    profile: Option<&PlayerProfile>,
+) -> SessionConditions {
+    let remembered = remembered_conditions(profile).unwrap_or_default();
+    SessionConditions {
+        time_of_day: time_of_day.unwrap_or(remembered.time_of_day),
+        weather: weather.unwrap_or(remembered.weather),
+    }
+}
+
 /// Record the session's selections on the bound profile and persist
 /// immediately — at session start, not exit, so a crash mid-session
 /// cannot lose them.
@@ -301,13 +330,17 @@ pub fn vehicle_gate_note(
 /// car (`remember_vehicle` false) never replaces the remembered one;
 /// `last_event` and `customization` are
 /// only written by an event session (a cruise does not erase the last
-/// played event or its picks). Save failures are logged, never fatal —
+/// played event or its picks). `cruise_conditions` — the weather and
+/// time of day a cruise actually runs with, never an event's authored
+/// ones — is written only by a cruise on a standard profile
+/// (F18-AC04); it is a designed "remember the last pick" policy. Save failures are logged, never fatal —
 /// profile I/O must never sink a session.
 pub fn note_session_start(
     slot: &mut ActiveProfile,
     selected: &SelectedCar,
     event_key: Option<&EventKey>,
     customization: Option<SessionCustomization>,
+    cruise_conditions: Option<SessionConditions>,
     remember_vehicle: bool,
 ) {
     if let Some(def) = selected.def.as_ref().filter(|_| remember_vehicle) {
@@ -323,6 +356,9 @@ pub fn note_session_start(
         // event launch writes `None`, clearing the previous event's
         // picks instead of leaking them onto this one.
         slot.profile.selections.customization = customization;
+    }
+    if let Some(conditions) = cruise_conditions.filter(|_| slot.profile.records_progress()) {
+        slot.profile.selections.conditions = Some(conditions);
     }
     if let Err(e) = slot.store.save(&mut slot.profile) {
         warn!(profile = %slot.profile.id, error = %e, "profile save failed");
@@ -397,5 +433,49 @@ mod guard_tests {
         let guards = protected_dirs(Some(&install), None, None);
         let err = guarded_store_root(Some(install.join("saves")), &guards, None).unwrap_err();
         assert_eq!(err.inside.label, "original installation");
+    }
+}
+
+#[cfg(test)]
+mod conditions_tests {
+    use super::*;
+
+    fn profile(kind: ProfileKind, picked: SessionConditions) -> PlayerProfile {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(dir.path()).unwrap();
+        let mut p = store.create("Ann", Difficulty::Amateur, kind).unwrap();
+        p.selections.conditions = Some(picked);
+        p
+    }
+
+    fn picked() -> SessionConditions {
+        SessionConditions {
+            time_of_day: TimeOfDay::new(2).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_flag_wins_per_field_and_the_remembered_pick_fills_the_rest() {
+        let p = profile(ProfileKind::Standard, picked());
+        let w = Weather::new(1).unwrap();
+        let got = launch_conditions(Some(w), None, Some(&p));
+        assert_eq!(got.weather, w);
+        assert_eq!(got.time_of_day, picked().time_of_day);
+        assert_eq!(launch_conditions(None, None, Some(&p)), picked());
+        assert_eq!(
+            launch_conditions(None, None, None),
+            SessionConditions::default()
+        );
+    }
+
+    #[test]
+    fn a_sandbox_profile_restores_nothing() {
+        let p = profile(ProfileKind::Sandbox, picked());
+        assert_eq!(remembered_conditions(Some(&p)), None);
+        assert_eq!(
+            launch_conditions(None, None, Some(&p)),
+            SessionConditions::default()
+        );
     }
 }

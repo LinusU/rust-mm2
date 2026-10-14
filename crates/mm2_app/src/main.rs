@@ -687,15 +687,15 @@ fn main() {
     // authored event's own conditions take precedence while it runs
     // (RACE-2), so the flags only feed the fallback there. Out-of-range
     // selectors are usage errors, never a clamp.
-    let weather = match cli.weather.map(mm2_game::Weather::new).transpose() {
-        Ok(w) => w.unwrap_or_default(),
+    let weather_pick = match cli.weather.map(mm2_game::Weather::new).transpose() {
+        Ok(w) => w,
         Err(e) => {
             error!("invalid --weather: {e}");
             std::process::exit(2);
         }
     };
-    let time_of_day = match cli.time_of_day.map(mm2_game::TimeOfDay::new).transpose() {
-        Ok(t) => t.unwrap_or_default(),
+    let time_of_day_pick = match cli.time_of_day.map(mm2_game::TimeOfDay::new).transpose() {
+        Ok(t) => t,
         Err(e) => {
             error!("invalid --time-of-day: {e}");
             std::process::exit(2);
@@ -1204,10 +1204,13 @@ fn main() {
         difficulty,
         // The cruise/dev conditions fallback (F18-A) — an authored
         // event's own conditions take precedence while it runs (RACE-2).
-        conditions: mm2_game::SessionConditions {
-            time_of_day,
-            weather,
-        },
+        // F18-AC04: a flag not given falls back to the bound standard
+        // profile's last cruise pick, then to the clear morning.
+        conditions: profile::launch_conditions(
+            weather_pick,
+            time_of_day_pick,
+            active_profile.as_ref().map(|s| &s.profile),
+        ),
         vehicle: VehicleSelection {
             id: selected.as_ref().map(|d| d.id.clone()),
             paint,

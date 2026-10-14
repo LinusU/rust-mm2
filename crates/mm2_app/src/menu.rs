@@ -1759,7 +1759,14 @@ impl MenuShell {
         effects: &mut Vec<MenuEffect>,
     ) {
         let vehicle = self.launch_vehicle(data, &mode, &city);
+        // F18-AC04: a cruise that picked nothing runs the profile's
+        // last cruise conditions, matching what its options screen shows.
+        let conditions = match mode {
+            SessionMode::Cruise => remembered_cruise_conditions(data),
+            _ => SessionConditions::default(),
+        };
         let config = SessionConfig {
+            conditions,
             world: WorldMode::City {
                 psdl: format!("city/{city}.psdl"),
             },
@@ -1848,6 +1855,12 @@ impl MenuShell {
     }
 }
 
+/// The bound standard profile's last cruise conditions, else the
+/// authored defaults (F18-AC04).
+fn remembered_cruise_conditions(data: &MenuData) -> SessionConditions {
+    crate::profile::remembered_conditions(data.bound.as_ref()).unwrap_or_default()
+}
+
 /// Display name for an event table.
 fn table_name(table: EventTableKind) -> &'static str {
     match table {
@@ -1885,16 +1898,17 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     enabled: enabled.clone(),
                     action: Action::LaunchCruise { city: city.clone() },
                     won: None,
-                    // RACE-4: cruise condition options are always open.
+                    // RACE-4: cruise condition options are always open,
+                    // seeded with the profile's last pick (F18-AC04).
                     side: Some(Box::new(Row {
                         text: OPTIONS.to_string(),
                         enabled,
                         action: Action::Push(Screen::Customize {
                             target: CustomizeTarget::Cruise { city: city.clone() },
-                            conditions: SessionConditions::default(),
+                            conditions: remembered_cruise_conditions(data),
                             densities: Densities::DEFAULT,
                             race: None,
-                            seed_conditions: SessionConditions::default(),
+                            seed_conditions: remembered_cruise_conditions(data),
                             seed_densities: Densities::DEFAULT,
                             seed_race: None,
                         }),

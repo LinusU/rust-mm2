@@ -2091,6 +2091,8 @@ pub fn load_session_world(
             &selected,
             event_key.as_ref(),
             config.customization,
+            matches!(config.mode, mm2_game::SessionMode::Cruise)
+                .then(|| mm2_game::effective_conditions(&config, None)),
             !lesson_installed,
         );
     }
