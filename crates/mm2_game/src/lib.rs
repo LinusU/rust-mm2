@@ -124,12 +124,12 @@ pub use props::{
     stamp_content_offset, stamp_space_verts, walk_prop_rules, walkable_surfaces, yawed_basis,
 };
 pub use race::{
-    CUSTOMIZE_LAP_MAX, CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT,
-    DEFAULT_COUNTDOWN_TICKS, EventParams, NavTarget, ParticipantState, ProgressOutcome,
-    RACE_TICK_HZ, RaceDefinition, RaceError, RacePhase, RacePicksReport, RaceProgress, RaceStart,
-    RaceStarted, RaceState, RouteGateLine, TargetSelection, apply_race_picks, catch_up_factor,
-    course_progress, cycle_target, effective_conditions, live_order, mean_gate_spacing,
-    navigation_target, relative_bearing,
+    CUSTOMIZE_LAP_MAX, CarFootprint, CatchUpPolicy, Checkpoint, CheckpointRule,
+    DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams, NavTarget, ParticipantState,
+    ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError, RacePhase, RacePicksReport,
+    RaceProgress, RaceStart, RaceStarted, RaceState, RouteGateLine, TargetSelection,
+    apply_race_picks, catch_up_factor, course_progress, cycle_target, effective_conditions,
+    live_order, mean_gate_spacing, navigation_target, relative_bearing,
 };
 pub use recovery::{
     GroundContact, RecoveryCause, RecoveryEvent, RecoveryPolicy, RecoveryVerdict, VehicleRecovery,

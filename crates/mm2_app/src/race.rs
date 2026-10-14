@@ -55,12 +55,12 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl, ProgressOutcome,
-    RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger,
-    RouteGateLine, Session, SessionAuthority, SessionEntity, SessionOutcome, SessionPhase,
-    SessionResult,
+    CarFootprint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl,
+    ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState,
+    ResultLedger, RouteGateLine, Session, SessionAuthority, SessionEntity, SessionOutcome,
+    SessionPhase, SessionResult,
 };
-use mm2_vehicle::Teleported;
+use mm2_vehicle::{StrikeBound, Teleported};
 use tracing::warn;
 
 /// Why an `EventRef` cannot become a live race.
@@ -568,6 +568,33 @@ pub fn watch_countdown_hold(
     }
 }
 
+/// The oriented ground footprint of a vehicle from its rotation and
+/// authored bound: the bound's local box about the body origin, so a
+/// model origin off the bound's centre is carried in the offset.
+fn car_footprint(rotation: Quat, bound: &Collider) -> CarFootprint {
+    let aabb = bound.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let (min, max) = (aabb.min, aabb.max);
+    let ground = |axis: Vec3| (rotation * axis).xz().normalize_or_zero();
+    CarFootprint {
+        axis_x: ground(Vec3::X),
+        axis_z: ground(Vec3::Z),
+        offset: Vec2::new((min.x + max.x) * 0.5, (min.z + max.z) * 0.5),
+        half_width: (max.x - min.x) * 0.5,
+        half_length: (max.z - min.z) * 0.5,
+    }
+}
+
+/// What the race driver reads of each participant: identity, pose,
+/// progress, its route-bound gate line and, when it has a body, the
+/// rotation and authored bound that give its gate footprint.
+type RaceParticipant = (
+    &'static Player,
+    &'static Position,
+    &'static mut RaceProgress,
+    Option<&'static RouteGateLine>,
+    Option<(&'static Rotation, &'static StrikeBound)>,
+);
+
 /// Fixed-step race driver — see module docs.
 #[allow(clippy::too_many_arguments)] // Bevy system: the race clock threads the session handles it advances
 pub fn advance_race(
@@ -577,12 +604,7 @@ pub fn advance_race(
     mut session: ResMut<Session>,
     mut ledger: ResMut<ResultLedger>,
     mut started: MessageWriter<RaceStarted>,
-    mut participants: Query<(
-        &Player,
-        &Position,
-        &mut RaceProgress,
-        Option<&RouteGateLine>,
-    )>,
+    mut participants: Query<RaceParticipant>,
 ) {
     let Some(mut race) = race else {
         return;
@@ -608,7 +630,7 @@ pub fn advance_race(
                 return;
             }
             race.phase = RacePhase::Running;
-            for (_, _, mut progress, _) in &mut participants {
+            for (_, _, mut progress, _, _) in &mut participants {
                 if progress.state == ParticipantState::AwaitingStart {
                     progress.state = ParticipantState::Racing;
                 }
@@ -629,7 +651,7 @@ pub fn advance_race(
             }
             race.clock += 1;
             let mut pending = false;
-            for (player, position, mut progress, line) in &mut participants {
+            for (player, position, mut progress, line, body) in &mut participants {
                 // A wire seat spawned after the countdown's release
                 // flip — the reconcile's spawn lands on the next
                 // command flush, which can sit past the releasing
@@ -652,7 +674,9 @@ pub fn advance_race(
                 if !matches!(progress.state, ParticipantState::Racing) {
                     continue;
                 }
-                let mut outcome = progress.advance(&race.definition, position.0);
+                let footprint = body.map(|(rotation, bound)| car_footprint(rotation.0, &bound.0));
+                let mut outcome =
+                    progress.advance_body(&race.definition, position.0, footprint.as_ref());
                 // Route-bound Ordered progress (DSN-45): an AI
                 // participant whose authored line never threads a
                 // gate's cylinder still earns it by driving past the
@@ -698,7 +722,7 @@ pub fn advance_race(
                 .time_limit_ticks
                 .is_some_and(|limit| race.clock >= u64::from(limit))
             {
-                for (player, _, mut progress, _) in &mut participants {
+                for (player, _, mut progress, _, _) in &mut participants {
                     if matches!(
                         progress.state,
                         ParticipantState::Racing | ParticipantState::AwaitingStart
@@ -765,7 +789,7 @@ pub fn advance_race(
         let hosted = session
             .config()
             .is_some_and(|c| c.authority == SessionAuthority::Host);
-        let local_done = participants.iter().any(|(player, _, progress, _)| {
+        let local_done = participants.iter().any(|(player, _, progress, _, _)| {
             player.control == PlayerControl::Local
                 && matches!(
                     progress.state,
@@ -773,7 +797,7 @@ pub fn advance_race(
                 )
         });
         let wire_open = hosted
-            && participants.iter().any(|(player, _, progress, _)| {
+            && participants.iter().any(|(player, _, progress, _, _)| {
                 player.control == PlayerControl::Remote
                     && matches!(
                         progress.state,
@@ -786,7 +810,7 @@ pub fn advance_race(
         // session playing while a rule leg waits, `is_over` ends it once
         // the rule (or the gate run) has decided the lesson.
         let lesson_continues = lesson.as_ref().is_some_and(|lesson| {
-            participants.iter().any(|(player, _, progress, _)| {
+            participants.iter().any(|(player, _, progress, _, _)| {
                 player.control == PlayerControl::Local && lesson.holds_results(&progress.state)
             })
         });

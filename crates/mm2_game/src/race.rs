@@ -91,13 +91,29 @@ impl Checkpoint {
     /// the gantry, dwelling on it, or driving alongside it earns nothing.
     /// The entire segment is tested so high speed cannot skip the line.
     pub fn crossed(&self, from: Vec3, to: Vec3) -> bool {
-        self.crossing_time(from, to).is_some()
+        self.crossing_time(from, to, None).is_some()
+    }
+
+    /// [`Self::crossed`] for a car with a body: the gate counts when any
+    /// part of the car's footprint lies within the gate's width as the
+    /// car's centre passes through the plane.
+    pub fn crossed_by(&self, from: Vec3, to: Vec3, car: &CarFootprint) -> bool {
+        self.crossing_time(from, to, Some(car)).is_some()
     }
 
     /// Fraction along the sweep at the plane, used to consume ordered gates
     /// in travel order without reusing the same line crossing for a new lap.
-    fn crossing_time(&self, from: Vec3, to: Vec3) -> Option<f32> {
+    ///
+    /// With a `car`, the swept point is the footprint's centre and the
+    /// lateral test uses the footprint's exact chord on the gate plane at
+    /// that moment (designed rule: any overlap with the finite gate
+    /// credits; no tolerance is added, so a car wholly outside misses).
+    fn crossing_time(&self, from: Vec3, to: Vec3, car: Option<&CarFootprint>) -> Option<f32> {
         let normal = self.forward();
+        let (from, to) = match car {
+            Some(car) => (car.centre_of(from), car.centre_of(to)),
+            None => (from, to),
+        };
         let relative = |p: Vec3| Vec2::new(p.x - self.center.x, p.z - self.center.z);
         let start = relative(from).dot(normal);
         let end = relative(to).dot(normal);
@@ -116,10 +132,58 @@ impl Checkpoint {
         let t = start / (start - end);
         let p = from.lerp(to, t);
         let across = relative(p).dot(Vec2::new(normal.y, -normal.x));
-        if across.abs() > self.radius + EPSILON || (p.y - self.center.y).abs() > self.height {
+        let reach = car.map_or(0.0, |car| car.chord_half(Vec2::new(normal.y, -normal.x)));
+        if across.abs() > self.radius + reach + EPSILON || (p.y - self.center.y).abs() > self.height
+        {
             return None;
         }
         Some(t)
+    }
+}
+
+/// A car's oriented ground footprint — a rectangle about the point the
+/// vehicle's position tracks, for gate overlap tests. Built by the
+/// producer from the vehicle's authored bound and rotation; the rules
+/// crate holds no physics types.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarFootprint {
+    /// World XZ image of the body's local +X (right) axis, unit length.
+    pub axis_x: Vec2,
+    /// World XZ image of the body's local +Z (length) axis, unit length.
+    pub axis_z: Vec2,
+    /// Rectangle centre in body space (x, z) relative to the position —
+    /// authored bounds need not be centred on the model origin.
+    pub offset: Vec2,
+    /// Half extent along the body's X axis.
+    pub half_width: f32,
+    /// Half extent along the body's Z axis.
+    pub half_length: f32,
+}
+
+impl CarFootprint {
+    /// The world position of the footprint's centre for a vehicle at `p`.
+    fn centre_of(&self, p: Vec3) -> Vec3 {
+        let o = self.axis_x * self.offset.x + self.axis_z * self.offset.y;
+        Vec3::new(p.x + o.x, p.y, p.z + o.y)
+    }
+
+    /// Half the length of the footprint's chord along the unit ground
+    /// direction `d` through its centre.
+    fn chord_half(&self, d: Vec2) -> f32 {
+        let (dx, dz) = (d.dot(self.axis_x).abs(), d.dot(self.axis_z).abs());
+        let along_x = if dx > 1e-6 {
+            self.half_width / dx
+        } else {
+            f32::INFINITY
+        };
+        let along_z = if dz > 1e-6 {
+            self.half_length / dz
+        } else {
+            f32::INFINITY
+        };
+        // A degenerate (non-finite or axis-less) footprint credits nothing extra.
+        let chord = along_x.min(along_z);
+        if chord.is_finite() { chord } else { 0.0 }
     }
 }
 
@@ -694,6 +758,18 @@ impl RaceProgress {
     /// once-only-result rule is a contract property, not a caller
     /// discipline).
     pub fn advance(&mut self, definition: &RaceDefinition, to: Vec3) -> ProgressOutcome {
+        self.advance_body(definition, to, None)
+    }
+
+    /// [`Self::advance`] for a car with a body: each gate also credits
+    /// when only part of the footprint is within it
+    /// ([`Checkpoint::crossed_by`]).
+    pub fn advance_body(
+        &mut self,
+        definition: &RaceDefinition,
+        to: Vec3,
+        car: Option<&CarFootprint>,
+    ) -> ProgressOutcome {
         if self.state != ParticipantState::Racing {
             self.last_position = Some(to);
             return ProgressOutcome::Racing;
@@ -706,7 +782,7 @@ impl RaceProgress {
         match definition.rule {
             CheckpointRule::AnyOrder => {
                 for (i, cp) in definition.checkpoints.iter().enumerate() {
-                    if !self.cleared[i] && cp.crossed(from, to) {
+                    if !self.cleared[i] && cp.crossing_time(from, to, car).is_some() {
                         self.cleared[i] = true;
                         self.crossings += 1;
                     }
@@ -716,7 +792,7 @@ impl RaceProgress {
                         // RACE-7: the finish trigger is inert until
                         // every checkpoint is cleared — including the
                         // segment that clears the last one.
-                        Some(f) => f.crossed(from, to),
+                        Some(f) => f.crossing_time(from, to, car).is_some(),
                         None => true,
                     };
                     if finished {
@@ -727,7 +803,7 @@ impl RaceProgress {
             CheckpointRule::Ordered => {
                 let mut last_crossing = -1.0;
                 while let Some(cp) = definition.checkpoints.get(self.next) {
-                    let Some(t) = cp.crossing_time(from, to) else {
+                    let Some(t) = cp.crossing_time(from, to, car) else {
                         break;
                     };
                     if t <= last_crossing {

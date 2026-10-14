@@ -25,7 +25,7 @@ use mm2_game::{
     SessionOutcome, SessionPhase, TargetSelection, advance_session_tick, despawn_session_entities,
     live_order,
 };
-use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
+use mm2_vehicle::{ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleConfig, VehicleState};
 
 /// The smallest faithful `hudarrow01` fixture: one flat XZ triangle
 /// (tip −Z, the authored up-at-bearing-0 direction) with the authored
@@ -424,6 +424,134 @@ fn high_speed_crossing_cannot_be_skipped() {
     // segment — the AnyOrder race with no finish trigger is done.
     assert!(matches!(p.state, ParticipantState::Finished { .. }));
     assert_eq!(race(&app).phase, RacePhase::Complete);
+}
+
+/// A participant with an authored-bound footprint: a `half_width` ×
+/// `half_length` box (local X × Z) yawed `yaw` radians, whose model
+/// origin sits `shift` (local x, z) off the bound's centre.
+fn spawn_bodied(
+    app: &mut App,
+    def: &RaceDefinition,
+    pos: Vec3,
+    yaw: f32,
+    half: (f32, f32),
+    shift: (f32, f32),
+) -> Entity {
+    let (car, _) = spawn_participant(app, def, pos);
+    let rotation = Quat::from_rotation_y(yaw);
+    let hull = Collider::convex_hull(
+        [-1.0f32, 1.0]
+            .into_iter()
+            .flat_map(|sx| {
+                [-1.0f32, 1.0].into_iter().flat_map(move |sz| {
+                    [0.0f32, 1.0]
+                        .map(move |y| Vec3::new(sx * half.0 + shift.0, y, sz * half.1 + shift.1))
+                })
+            })
+            .collect(),
+    )
+    .unwrap();
+    app.world_mut()
+        .entity_mut(car)
+        .insert((StrikeBound(hull), Rotation(rotation)));
+    app.world_mut().get_mut::<Transform>(car).unwrap().rotation = rotation;
+    car
+}
+
+/// Drive a bodied car along +X through gate 0 (normal +X, half-width
+/// 15) at lateral offset `z` and report the gate-0 crossing count.
+fn gate_crossings(z: f32, yaw: f32, half: (f32, f32), shift: (f32, f32)) -> u32 {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let car = spawn_bodied(&mut app, &def, Vec3::new(-10.0, 0.0, z), yaw, half, shift);
+    run(&mut app, 2);
+    // Several ticks of overlap: the exactly-once check.
+    for x in [-3.0, 3.0, 6.0, 9.0] {
+        set_position(&mut app, car, Vec3::new(x, 0.0, z));
+        run(&mut app, 1);
+    }
+    progress(&app, car).crossings
+}
+
+/// Length along the travel direction: yaw 90° maps body +Z onto +X.
+const ALONG_X: f32 = std::f32::consts::FRAC_PI_2;
+
+/// Part of the car inside the gate with the centre outside clears the
+/// gate once, on either edge (F-checkpoint edge crossings).
+#[test]
+fn car_overlapping_either_gate_edge_clears_it_once() {
+    for z in [15.6, -15.6] {
+        assert_eq!(
+            gate_crossings(z, ALONG_X, (1.0, 2.0), (0.0, 0.0)),
+            1,
+            "z={z}"
+        );
+    }
+    // A centred crossing is unchanged.
+    assert_eq!(gate_crossings(0.0, ALONG_X, (1.0, 2.0), (0.0, 0.0)), 1);
+}
+
+/// A car wholly outside the gate misses it, on either side.
+#[test]
+fn car_wholly_outside_the_gate_misses_it() {
+    for z in [16.5, -16.5] {
+        assert_eq!(
+            gate_crossings(z, ALONG_X, (1.0, 2.0), (0.0, 0.0)),
+            0,
+            "z={z}"
+        );
+    }
+}
+
+/// The overlap follows the car's size and heading: a car crossing
+/// broadside reaches its half-length, a 45° car its diagonal chord.
+#[test]
+fn gate_overlap_follows_car_size_and_orientation() {
+    // Broadside (length across the gate): reach 2.0 (1.0 × 2.0 box).
+    assert_eq!(gate_crossings(16.8, 0.0, (1.0, 2.0), (0.0, 0.0)), 1);
+    assert_eq!(gate_crossings(17.2, 0.0, (1.0, 2.0), (0.0, 0.0)), 0);
+    // A longer car reaches further.
+    assert_eq!(gate_crossings(17.8, 0.0, (1.0, 3.0), (0.0, 0.0)), 1);
+    // 45°: the chord along the gate is √2 for this box.
+    assert_eq!(
+        gate_crossings(16.3, ALONG_X / 2.0, (1.0, 2.0), (0.0, 0.0)),
+        1
+    );
+    assert_eq!(
+        gate_crossings(16.5, ALONG_X / 2.0, (1.0, 2.0), (0.0, 0.0)),
+        0
+    );
+}
+
+/// A bound off the model origin shifts the footprint with the car:
+/// the bound centre sits 1 m toward +Z of the origin, broadside.
+#[test]
+fn gate_overlap_uses_the_bound_not_the_model_origin() {
+    // Body +Z maps to world +Z at yaw 0, so the bound centre is at z+1.
+    assert_eq!(gate_crossings(14.0, 0.0, (1.0, 2.0), (0.0, 1.0)), 1);
+    assert_eq!(gate_crossings(13.5, 0.0, (1.0, 2.0), (0.0, -1.0)), 1);
+    assert_eq!(gate_crossings(18.5, 0.0, (1.0, 2.0), (0.0, -1.0)), 0);
+}
+
+/// A fast step over the gate edge is swept, and counts once.
+#[test]
+fn fast_edge_crossing_by_a_body_is_not_skipped() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let z = 15.6;
+    let car = spawn_bodied(
+        &mut app,
+        &def,
+        Vec3::new(-50.0, 0.0, z),
+        ALONG_X,
+        (1.0, 2.0),
+        (0.0, 0.0),
+    );
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(30.0, 0.0, z));
+    run(&mut app, 1);
+    assert!(progress(&app, car).is_cleared(0));
+    assert_eq!(progress(&app, car).crossings, 1);
 }
 
 /// AC02 wrong-height case: flying over the trigger's vertical band does
