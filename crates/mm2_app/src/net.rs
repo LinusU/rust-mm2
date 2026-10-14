@@ -1933,9 +1933,12 @@ pub fn spawn_host_text(commands: &mut Commands) {
 /// Close a menu-hosted lobby once it has come down (`Esc`, `quit`, or a
 /// dead host loop): at `Menu`, with the lobby leaving and nothing left
 /// to start, the link and everything that existed only for it go, and
-/// `menu_watch` reopens the shell. Only acts under a [`MenuShell`] — a
-/// `--host` app has no menu to return to and exits through
-/// [`drive_host`] instead.
+/// `menu_watch` reopens the shell. The lobby's closing notice (its
+/// last gate notice, or the bare `closed the lobby`) is handed to the
+/// menu first, exactly as [`close_menu_join`] does for a joined lobby —
+/// a dead host loop is a named return, not a frozen lobby. Only acts
+/// under a [`MenuShell`] — a `--host` app has no menu to return to and
+/// exits through [`drive_host`] instead.
 #[allow(clippy::too_many_arguments)] // the resources a hosted lobby owns, by name
 pub fn close_menu_host(
     mut commands: Commands,

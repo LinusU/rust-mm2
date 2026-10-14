@@ -4503,6 +4503,11 @@ fn the_menu_hosts_a_cops_and_robbers_lobby_and_returns_when_it_closes() {
     assert!(app.world().get_resource::<LobbyState>().is_none());
     app.update();
     assert!(shell(&app).active, "the menu returns once the lobby closes");
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("closed the lobby"),
+        "a clean stop names the return on the status line"
+    );
 }
 
 /// F27-C: a second player joins the lobby the menu opened. The raw wire
