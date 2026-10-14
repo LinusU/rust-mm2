@@ -87,20 +87,28 @@ pub struct Guide {
 
 /// The height of the ground at `p`'s place in plan, of the levels
 /// there the one nearest `p`'s own: `cast` sends a ray straight down
-/// from a point and answers with how far it went before it met ground.
+/// from a point and answers with how far it went before it met ground,
+/// and whether that ground is fixed.
 ///
 /// Ground just under or over the point is taken as it is. Failing that
 /// the point may be buried — a line drawn straight through a hill — so
 /// the ground above it is looked for too, and the nearer of the two
-/// wins. `None` over a void.
-pub fn ground_near(p: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<f32>) -> Option<f32> {
-    let below = cast(p + Vec3::Y * GROUND_ABOVE, GROUND_ABOVE + GROUND_BELOW)
-        .map(|d| p.y + GROUND_ABOVE - d);
+/// wins. `None` over a void, and over ground that moves: a drawbridge
+/// leaf is where it is for now, and says nothing about where a line
+/// across it should lie.
+pub fn ground_near(p: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<(f32, bool)>) -> Option<f32> {
+    let mut level = |above: f32, reach: f32| -> Result<Option<f32>, ()> {
+        match cast(p + Vec3::Y * above, reach) {
+            Some((_, false)) => Err(()),
+            Some((d, true)) => Ok(Some(p.y + above - d)),
+            None => Ok(None),
+        }
+    };
+    let below = level(GROUND_ABOVE, GROUND_ABOVE + GROUND_BELOW).ok()?;
     if below.is_some_and(|y| (y - p.y).abs() <= GROUND_CLOSE) {
         return below;
     }
-    let above = cast(p + Vec3::Y * GROUND_BURIED, GROUND_BURIED - GROUND_ABOVE)
-        .map(|d| p.y + GROUND_BURIED - d);
+    let above = level(GROUND_BURIED, GROUND_BURIED - GROUND_ABOVE).ok()?;
     match (below, above) {
         (Some(b), Some(a)) => Some(if (a - p.y).abs() < (b - p.y).abs() {
             a
@@ -604,14 +612,14 @@ mod tests {
 
     /// Flat ground at `y = 0` with a 9 m deep, 30 m wide cutting across
     /// `x = 35..65`, as a ray straight down sees it.
-    fn cutting(from: Vec3, reach: f32) -> Option<f32> {
+    fn cutting(from: Vec3, reach: f32) -> Option<(f32, bool)> {
         let ground = if (35.0..=65.0).contains(&from.x) {
             -9.0
         } else {
             0.0
         };
         let d = from.y - ground;
-        (0.0..=reach).contains(&d).then_some(d)
+        (0.0..=reach).contains(&d).then_some((d, true))
     }
 
     #[test]
@@ -632,8 +640,12 @@ mod tests {
                 .into_iter()
                 .map(|level| from.y - level)
                 .find(|d| (0.0..=reach).contains(d))
+                .map(|d| (d, true))
         };
         assert_eq!(ground_near(Vec3::ZERO, stacked), Some(-2.0));
+        // A raised drawbridge leaf is nobody's ground.
+        let leaf = |from: Vec3, _: f32| Some((from.y - 3.0, false));
+        assert_eq!(ground_near(Vec3::ZERO, leaf), None);
     }
 
     #[test]
@@ -671,6 +683,7 @@ mod tests {
                 .chain([0.0])
                 .map(|level| from.y - level)
                 .find(|d| (0.0..=reach).contains(d))
+                .map(|d| (d, true))
         };
         let spiked = Guide::new(
             (0..=20).map(|i| {

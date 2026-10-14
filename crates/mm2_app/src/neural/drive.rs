@@ -190,7 +190,7 @@ impl NeuralState {
     /// ground under the car at `pos` itself, which is when the world
     /// has arrived. A car over a void waits; a line corrected nowhere
     /// costs one pass of rays.
-    pub fn ground(&mut self, pos: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<f32>) {
+    pub fn ground(&mut self, pos: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<(f32, bool)>) {
         if self.grounded || super::guide::ground_near(pos, &mut cast).is_none() {
             return;
         }

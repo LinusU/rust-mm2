@@ -1292,8 +1292,9 @@ pub fn opponent_drive(
         let d = &mut *driver;
         // The line's heights between roads are a guess until the world
         // is there to ask: lay it on the ground before the start.
-        // Ground is whatever stands still under a car — a drawbridge
-        // leaf, but not a car or a lamp post.
+        // A ray stops at whatever a car could stand on — not a car or
+        // a lamp post — and only fixed ground is believed: a drawbridge
+        // leaf says nothing of where the line across it should lie.
         if let Some(sq) = spatial.as_ref()
             && let Some(neural) = d.neural.as_mut()
         {
@@ -1312,7 +1313,10 @@ pub fn opponent_drive(
                     &SpatialQueryFilter::default(),
                     &ground,
                 )
-                .map(|hit| hit.distance)
+                .map(|hit| {
+                    let body = colliders.get(hit.entity).map_or(hit.entity, |c| c.body);
+                    (hit.distance, bodies.get(body).is_ok_and(|b| b.is_static()))
+                })
             });
         }
         // A lesson's lead car carries no progress: it drives while the

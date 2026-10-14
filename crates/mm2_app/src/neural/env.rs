@@ -818,11 +818,40 @@ impl DrivingEnv {
                 super::guide::ground_near(p, |from, reach| {
                     spatial
                         .cast_ray_predicate(from, Dir3::NEG_Y, reach, false, &filter, &ground)
-                        .map(|hit| hit.distance)
+                        .map(|hit| {
+                            let body = colliders.get(hit.entity).map_or(hit.entity, |c| c.body);
+                            (hit.distance, bodies.get(body).is_ok_and(|b| b.is_static()))
+                        })
                 })
             });
             line.guide = Arc::new(grounded);
         }
+    }
+
+    /// Whether the ground a car at `pos` stands on is a moving part of
+    /// the world: a drawbridge leaf, not the road.
+    fn on_moving_ground(&mut self, pos: Vec3) -> bool {
+        let Ok((spatial, bodies, colliders, vehicles)) = self.probe.get(self.app.world()) else {
+            return false;
+        };
+        let body_of = |e: Entity| colliders.get(e).map_or(e, |c| c.body);
+        let ground = |e: Entity| {
+            !vehicles.contains(body_of(e)) && bodies.get(body_of(e)).is_ok_and(|b| !b.is_dynamic())
+        };
+        spatial
+            .cast_ray_predicate(
+                pos + Vec3::Y,
+                Dir3::NEG_Y,
+                5.0,
+                false,
+                &SpatialQueryFilter::default(),
+                &ground,
+            )
+            .is_some_and(|hit| {
+                bodies
+                    .get(body_of(hit.entity))
+                    .is_ok_and(|b| b.is_kinematic())
+            })
     }
 
     /// The cars this environment draws from.
