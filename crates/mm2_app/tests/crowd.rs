@@ -834,6 +834,56 @@ fn a_car_passing_in_its_lane_or_standing_still_does_not_disturb_the_crowd() {
     assert_eq!((crowd.alerts, crowd.dives), (0, 0));
 }
 
+/// F19/UNK-43 (`0x54ba4a`): the walker senses only the nearest
+/// player-controlled car, so a parked car beside it hides a car bearing
+/// down from farther away; an AI car is not in the table at all.
+#[test]
+fn a_walker_senses_only_the_nearest_player_car() {
+    let tmp = reactive();
+    // Drive a car at the first walker from 50 m with `extra` placed at
+    // `offset` from it; report whether that walker (alerted, dived).
+    let run_with = |extra: Option<(Vec3, PlayerControl)>| {
+        let mut app = app(tmp.path(), 7, Some(0.1));
+        run(&mut app, 3);
+        let walker = first_walker(&mut app);
+        let start = at(&app, walker).translation;
+        let car = spawn_car(
+            &mut app,
+            start + Vec3::new(0.0, 0.0, -50.0),
+            Vec3::new(0.0, 0.0, 15.0),
+        );
+        if let Some((offset, control)) = extra {
+            let parked = spawn_car(&mut app, start + offset, Vec3::ZERO);
+            app.world_mut().entity_mut(parked).insert(Player {
+                id: PlayerId(2),
+                control,
+            });
+        }
+        // Other walkers far from the parked car still sense the mover.
+        let mut dived = false;
+        let mut alerted = false;
+        // Stop with the mover still 7.5 m out, farther than the 4 m
+        // parked car: past that it would become the nearest.
+        for _ in 0..170 {
+            step_car(&mut app, car);
+            app.update();
+            let p = phase(&app, walker);
+            alerted |= p != Phase::Walking;
+            dived |= p == Phase::Diving;
+        }
+        (alerted, dived)
+    };
+    let off = Vec3::new(0.0, 0.0, 4.0);
+    assert_eq!(run_with(None), (true, true), "control: a real threat");
+    assert_eq!(run_with(Some((off, PlayerControl::Local))), (false, false));
+    assert_eq!(run_with(Some((off, PlayerControl::Remote))), (false, false));
+    assert_eq!(
+        run_with(Some((off, PlayerControl::Ai))),
+        (true, true),
+        "an AI car is not sensed"
+    );
+}
+
 #[test]
 fn an_archetype_without_the_reaction_states_walks_on_obliviously() {
     let tmp = install();

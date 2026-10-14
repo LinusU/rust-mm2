@@ -62,7 +62,7 @@ use avian3d::prelude::{LinearVelocity, Position};
 use bevy::prelude::*;
 use mm2_content::PedArchetype;
 use mm2_game::pedreact::{
-    Approacher, DiveSide, Order, Phase, ReactPolicy, Reaction, most_urgent, rejoin_step,
+    Approacher, DiveSide, Order, Phase, ReactPolicy, Reaction, rejoin_step, sensed_threat,
 };
 use mm2_game::pedwalk::{
     SidewalkNet, WalkPolicy, Walker, candidate_curves, crossings_from_psdl, draw_pedestrian,
@@ -476,7 +476,7 @@ pub fn react_pedestrians(
             .normalize_or_zero();
         let threat = match react.reaction.phase {
             Phase::Walking | Phase::Wary => {
-                most_urgent(at.translation, approachers.iter().copied(), &policy)
+                sensed_threat(at.translation, approachers.iter().copied(), &policy)
             }
             Phase::Diving | Phase::Rejoining => None,
         };

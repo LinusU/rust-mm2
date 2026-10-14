@@ -263,20 +263,31 @@ pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threa
     })
 }
 
-/// The most pressing threat among `cars`: an imminent one over an
-/// alert, then the soonest contact.
-pub fn most_urgent(
+/// The car the walker senses: the nearest of `cars` by horizontal
+/// squared distance to its centre, with no speed or corridor
+/// pre-filter. The first of equals wins (retail replaces the pick only
+/// when strictly nearer, `Midtown2.exe` `0x54ba4a`, UNK-43). A
+/// non-finite position never wins.
+pub fn nearest_car(ped: Vec3, cars: impl IntoIterator<Item = Approacher>) -> Option<Approacher> {
+    let mut best: Option<(f32, Approacher)> = None;
+    for car in cars {
+        let d = flat(ped - car.position).length_squared();
+        if d.is_finite() && best.is_none_or(|(b, _)| d < b) {
+            best = Some((d, car));
+        }
+    }
+    best.map(|(_, car)| car)
+}
+
+/// The threat the walker's one sensed car poses: the nearest car is
+/// picked first ([`nearest_car`]) and only it is assessed, so a nearer
+/// harmless car hides a farther dangerous one, as in retail.
+pub fn sensed_threat(
     ped: Vec3,
     cars: impl IntoIterator<Item = Approacher>,
     policy: &ReactPolicy,
 ) -> Option<Threat> {
-    cars.into_iter()
-        .filter_map(|c| assess(ped, &c, policy))
-        .min_by(|a, b| {
-            b.alarm
-                .cmp(&a.alarm)
-                .then(a.time_to_contact.total_cmp(&b.time_to_contact))
-        })
+    assess(ped, &nearest_car(ped, cars)?, policy)
 }
 
 /// Which way a walker dives, in its own frame.

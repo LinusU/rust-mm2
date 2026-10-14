@@ -6,7 +6,7 @@ use bevy::prelude::Vec3;
 use mm2_game::ped::PedAnimState;
 use mm2_game::pedreact::{
     Alarm, Approacher, DiveSide, Order, Phase, ReactPolicy, Reaction, assess, dive_lateral,
-    most_urgent, rejoin_step,
+    nearest_car, rejoin_step, sensed_threat,
 };
 
 const POLICY: ReactPolicy = ReactPolicy {
@@ -166,36 +166,50 @@ fn the_dive_direction_is_across_the_cars_line_on_the_walkers_side() {
 }
 
 #[test]
-fn the_most_urgent_car_wins() {
-    // The nearer car is only in the far corridor (a lateral offset past
-    // the near margin), so it is a wary alert; the farther one is in the
-    // near corridor and imminent. The imminent threat wins.
-    let near_alert = Approacher {
-        position: Vec3::new(-10.0, 0.0, 4.0),
-        ..car(10.0)
-    };
-    let strike = Approacher {
-        position: Vec3::new(-12.0, 0.0, 0.0),
-        ..car(10.0)
-    };
+fn only_the_nearest_car_is_assessed() {
     let ped = Vec3::ZERO;
-    // Hold the premises so the test cannot silently rot into two
-    // imminent cars again.
-    assert!(
-        near_alert.position.length() < strike.position.length(),
-        "the alert car is the nearer one"
-    );
+    // 9 m back on the walker's line and about to strike.
+    let strike = Approacher {
+        position: Vec3::new(-9.0, 0.0, 0.0),
+        ..car(10.0)
+    };
+    // Nearer (3 m to the side) but parked: no threat of its own.
+    let parked = Approacher {
+        position: Vec3::new(0.0, 0.0, 3.0),
+        velocity: Vec3::ZERO,
+        ..car(10.0)
+    };
+    // Nearer and moving, but its line clears the walker.
+    let off_line = Approacher {
+        position: Vec3::new(-4.0, 0.0, 6.0),
+        ..car(10.0)
+    };
     assert_eq!(
-        assess(ped, &near_alert, &POLICY).unwrap().alarm,
-        Alarm::Alert
-    );
-    assert_eq!(
-        assess(ped, &strike, &POLICY).unwrap().alarm,
+        sensed_threat(ped, [strike], &POLICY).unwrap().alarm,
         Alarm::Imminent
     );
-    let t = most_urgent(ped, [near_alert, strike], &POLICY).unwrap();
-    assert_eq!(t.alarm, Alarm::Imminent);
-    assert!(most_urgent(ped, [], &POLICY).is_none());
+    assert!(sensed_threat(ped, [strike, parked], &POLICY).is_none());
+    assert!(sensed_threat(ped, [parked, strike], &POLICY).is_none());
+    assert!(sensed_threat(ped, [strike, off_line], &POLICY).is_none());
+    assert!(sensed_threat(ped, [], &POLICY).is_none());
+}
+
+#[test]
+fn the_nearest_car_is_by_horizontal_distance_and_the_first_of_equals() {
+    let ped = Vec3::new(0.0, 5.0, 0.0);
+    let at = |x: f32, y: f32, z: f32| Approacher {
+        position: Vec3::new(x, y, z),
+        ..car(10.0)
+    };
+    // Height is ignored: the 20 m-high car at 2 m horizontal wins.
+    let n = nearest_car(ped, [at(5.0, 0.0, 0.0), at(2.0, 20.0, 0.0)]).unwrap();
+    assert_eq!(n.position, Vec3::new(2.0, 20.0, 0.0));
+    // Equal distance keeps the first.
+    let n = nearest_car(ped, [at(3.0, 0.0, 0.0), at(0.0, 0.0, 3.0)]).unwrap();
+    assert_eq!(n.position, Vec3::new(3.0, 0.0, 0.0));
+    // A non-finite position never wins.
+    let n = nearest_car(ped, [at(f32::NAN, 0.0, 0.0), at(9.0, 0.0, 0.0)]).unwrap();
+    assert_eq!(n.position, Vec3::new(9.0, 0.0, 0.0));
 }
 
 #[test]

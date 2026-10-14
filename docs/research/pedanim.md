@@ -381,10 +381,11 @@ names are resolved at `0x54b200..` (`WALK_STAND`, `STAND_ANTIC`,
   `PlayerControl::Ai`); and the steering-based dive side
   (`DIVE_STEER`). Not modelled: the +0x304 direction flag's second sign
   convention (the port senses forward motion), and whether a diver can
-  land in traffic stays unknown. Also not yet bound: the loop's
-  *nearest-car* selection — the port keeps the most urgent threat among
-  the player cars rather than the literally nearest node it walks
-  (designed deviation, #1428).
+  land in traffic stays unknown. Car selection (#1428): `nearest_car` keeps the nearest player car by
+  horizontal squared distance to its centre (first of equals, as
+  `0x54ba4a` replaces only when strictly nearer, no speed or corridor
+  pre-filter) and `sensed_threat` assesses only that car, so a nearer
+  parked or off-line car hides a farther threatening one.
 
 ## Car contact (F19-B.8, read from `Midtown2.exe`)
 
