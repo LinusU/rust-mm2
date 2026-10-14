@@ -14,21 +14,20 @@ const POLICY: ReactPolicy = ReactPolicy {
     min_speed: 2.0,
     alert_time: 3.0,
     dive_time: 1.2,
-    alert_margin: 1.5,
-    dive_margin: 0.5,
     clear_hold: 1.0,
     max_wary: 8.0,
     max_dive: 6.0,
     rejoin_radius: 0.25,
 };
 
-/// A 4.4 × 1.85 m car at the origin driving +X at `speed`.
+/// A 4.4 × 1.85 m car at the origin driving +X at `speed`, straight.
 fn car(speed: f32) -> Approacher {
     Approacher {
         position: Vec3::ZERO,
         velocity: Vec3::new(speed, 0.0, 0.0),
         half_length: 2.2,
         half_width: 0.925,
+        steering: 0.0,
     }
 }
 
@@ -48,26 +47,90 @@ fn state(x_offset: f32, x_distance: f32, first: u32, last: u32) -> PedAnimState 
 
 #[test]
 fn a_car_heading_for_a_walker_is_imminent_then_alert_by_distance() {
-    // 10 m/s: the nose is 20 m - 2.2 m away => 1.78 s, alert only.
+    // 10 m/s: the walker 20 m ahead is past the 20 m near corridor, so
+    // the far one stops it — (20 - 2)/10 = 1.8 s.
     let t = assess(Vec3::new(20.0, 0.0, 0.2), &car(10.0), &POLICY).unwrap();
     assert_eq!(t.alarm, Alarm::Alert);
-    assert!((t.time_to_contact - 1.78).abs() < 1e-3);
-    // 10 m ahead: 0.78 s => dive.
+    assert!((t.time_to_contact - 1.8).abs() < 1e-3);
+    // 10 m ahead inside the near corridor: (10 - 2)/10 = 0.8 s => dive.
     let t = assess(Vec3::new(10.0, 0.0, 0.2), &car(10.0), &POLICY).unwrap();
     assert_eq!(t.alarm, Alarm::Imminent);
-    // Beyond three seconds nothing happens.
+    // Beyond the 35 m sense range nothing happens.
     assert!(assess(Vec3::new(40.0, 0.0, 0.0), &car(10.0), &POLICY).is_none());
 }
 
 #[test]
+fn the_corridors_are_the_recovered_retail_windows() {
+    // Behind the nose — 0.25 of the car's length = 0.5 half-lengths
+    // ahead of its centre — is no threat.
+    assert!(assess(Vec3::new(1.0, 0.0, 0.0), &car(10.0), &POLICY).is_none());
+    assert!(assess(Vec3::new(1.2, 0.0, 0.0), &car(10.0), &POLICY).is_some());
+    // Along the axis the near window ends at 20 m, the far one at 35 m.
+    assert_eq!(
+        assess(Vec3::new(20.0, 0.0, 0.0), &car(10.0), &POLICY)
+            .unwrap()
+            .alarm,
+        Alarm::Alert
+    );
+    assert!(assess(Vec3::new(34.0, 0.0, 0.0), &car(60.0), &POLICY).is_some());
+    assert!(assess(Vec3::new(35.0, 0.0, 0.0), &car(60.0), &POLICY).is_none());
+    // Lateral: half-width + 2 for the near corridor, + 4 for the far.
+    let c = car(10.0);
+    assert!(assess(Vec3::new(10.0, 0.0, 0.925 + 2.5), &c, &POLICY).is_some());
+    assert!(assess(Vec3::new(10.0, 0.0, 0.925 + 4.5), &c, &POLICY).is_none());
+}
+
+#[test]
 fn a_car_passing_in_its_lane_or_already_past_is_no_threat() {
-    // 4 m to the side of a car in its lane: clear of the 0.925 + 1.5 band.
-    assert!(assess(Vec3::new(10.0, 0.0, 4.0), &car(10.0), &POLICY).is_none());
-    // Inside the alert band but outside the strike band.
-    let t = assess(Vec3::new(10.0, 0.0, 2.0), &car(10.0), &POLICY).unwrap();
+    // 5.5 m to the side: clear of both corridors (half-width + 4).
+    assert!(assess(Vec3::new(10.0, 0.0, 5.5), &car(10.0), &POLICY).is_none());
+    // 4 m out is inside the far corridor only: wary, never a dive.
+    let t = assess(Vec3::new(10.0, 0.0, 4.0), &car(10.0), &POLICY).unwrap();
+    assert_eq!(t.alarm, Alarm::Alert);
+    // Inside the near corridor, past the dive time: alert only.
+    let t = assess(Vec3::new(14.0, 0.0, 2.0), &car(10.0), &POLICY).unwrap();
     assert_eq!(t.alarm, Alarm::Alert);
     // The car's centre is past the walker.
     assert!(assess(Vec3::new(-1.0, 0.0, 0.0), &car(10.0), &POLICY).is_none());
+}
+
+#[test]
+fn a_hard_steering_car_picks_the_dive_side() {
+    // The walker's own right is +Z in the car's frame.
+    let right = Vec3::Z;
+    let right_of_line = Vec3::new(8.0, 0.0, 0.3);
+    let left_of_line = Vec3::new(8.0, 0.0, -0.3);
+    // A car past full right lock (`> 0.85`) sends the walker right
+    // regardless of which side of the line it stands on (retail
+    // `0x54dc3f` compares strictly).
+    let mut c = car(10.0);
+    c.steering = 0.86;
+    assert_eq!(
+        assess(left_of_line, &c, &POLICY).unwrap().dive_side(right),
+        DiveSide::Right
+    );
+    // Exactly 0.85 is not past full lock: the walker falls back to its
+    // own side of the line (left).
+    c.steering = 0.85;
+    assert_eq!(
+        assess(left_of_line, &c, &POLICY).unwrap().dive_side(right),
+        DiveSide::Left
+    );
+    c.steering = -0.86;
+    assert_eq!(
+        assess(right_of_line, &c, &POLICY).unwrap().dive_side(right),
+        DiveSide::Left
+    );
+    // Below the gate each walker dives to its own side of the line.
+    c.steering = 0.5;
+    assert_eq!(
+        assess(right_of_line, &c, &POLICY).unwrap().dive_side(right),
+        DiveSide::Right
+    );
+    assert_eq!(
+        assess(left_of_line, &c, &POLICY).unwrap().dive_side(right),
+        DiveSide::Left
+    );
 }
 
 #[test]
@@ -78,6 +141,9 @@ fn slow_stopped_and_hostile_cars_are_ignored() {
     assert!(assess(Vec3::new(f32::INFINITY, 0.0, 0.0), &car(10.0), &POLICY).is_none());
     let mut c = car(10.0);
     c.half_width = f32::NAN;
+    assert!(assess(Vec3::new(5.0, 0.0, 0.0), &c, &POLICY).is_none());
+    let mut c = car(10.0);
+    c.steering = f32::NAN;
     assert!(assess(Vec3::new(5.0, 0.0, 0.0), &c, &POLICY).is_none());
     // Vertical speed alone is not approach.
     let mut up = car(0.0);
@@ -168,6 +234,7 @@ fn threat(alarm: Alarm) -> mm2_game::pedreact::Threat {
         time_to_contact: 1.0,
         toward: Vec3::X,
         away: Vec3::Z,
+        steering: 0.0,
     }
 }
 

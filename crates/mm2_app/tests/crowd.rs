@@ -24,7 +24,7 @@ use mm2_game::{
 
 use mm2_game::pedreact::Phase;
 use mm2_vehicle::vehicle::Vehicle;
-use mm2_vehicle::{VehicleConfig, vehicle_bundle};
+use mm2_vehicle::{VehicleConfig, VehicleInput, vehicle_bundle};
 
 use crate::pedestrian::{
     CONTACT_CSV, REACTIVE_CSV, install, install_flat, install_solid, install_with,
@@ -464,12 +464,18 @@ fn reactive() -> tempfile::TempDir {
     install_with(&REACTIVE_CSV.replace("WALK,xwalk,1,4,0,1,", "WALK,xwalk,1,4,0,0.4,"))
 }
 
-/// A car (default chassis, 1.85 × 4.4 m) the test steps by hand.
+/// A car (default chassis, 1.85 × 4.4 m) the test steps by hand. It is
+/// a player-driven car, so walkers sense it (F19/UNK-43).
 fn spawn_car(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
     app.world_mut()
         .spawn((
             Vehicle {
                 config: Default::default(),
+            },
+            VehicleInput::default(),
+            Player {
+                id: PlayerId(0),
+                control: PlayerControl::Local,
             },
             Position(at),
             LinearVelocity(velocity),
@@ -488,12 +494,17 @@ fn step_car(app: &mut App, car: Entity) {
 /// integrate: the production bundle plus a `Transform` (for rendering
 /// and propagated bounds) and a `Position`. The initial velocity is set
 /// through a follow-up insert because the bundle already carries
-/// `LinearVelocity::ZERO`.
+/// `LinearVelocity::ZERO`. It carries the player markers, so walkers
+/// sense it (F19/UNK-43).
 fn spawn_physics_car(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
     let car = app
         .world_mut()
         .spawn((
             vehicle_bundle(&VehicleConfig::default()),
+            Player {
+                id: PlayerId(0),
+                control: PlayerControl::Local,
+            },
             Transform::from_translation(at),
             Position(at),
             Rotation(Quat::IDENTITY),

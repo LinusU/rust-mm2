@@ -330,38 +330,58 @@ Addresses are this executable's. The walker class's per-frame update is
 names are resolved at `0x54b200..` (`WALK_STAND`, `STAND_ANTIC`,
 `ANTIC*`, `ANTIC_{L,R}DIVE`, `WALK_{L,R}DIVE`, `RUN`, `BACKUP`, ...).
 
-- **Which cars**: the loop at `0x54ba4a` walks a linked list of items
-  of the four-slot table at `0x6b1df0` (stride 0x30, accessor
-  `0x534ad0`) and keeps the nearest by horizontal (x,z) squared
-  distance. AI/traffic cars are *inferred* to be absent from the table
-  (it is indexed by player slot); not proven.
+- **Which cars**: the loop at `0x54ba4a` walks the linked list headed
+  at the global `0x6b1f60` (the manager at `0x6b1df0` +0x170) through
+  each node's +0x2c, keeping the nearest by horizontal (x,z) squared
+  distance. A node's car actor is at +0x14 and its player index word at
+  +0x8 — the index into the four-slot player table at `0x6b1df0` +0xb0
+  (stride 0x30) that the accessor `0x534ad0` returns (it asserts
+  `Returning a NULL Player. Idx: %d`, `0x5d652c`). The walker therefore
+  senses **player-driven cars only**: AI opponents sit in separate
+  managers (the opponent accessors `0x534920`/`0x534970`) and ambient
+  traffic has no player slot, so neither is ever a node.
 - **Range and speed**: nothing happens at squared distance ≥ 1225
   (35 m) (`0x54bc1a`); the car's speed (its vtable +8) must exceed 1.0
-  (`0x54bc65`).
-- **Corridor tests**: `0x54e660` — along-axis distance `L` of the walker
+  (`0x54bc65`, `0x5af364`).
+- **Corridors**: `0x54e660` — along-axis distance `L` of the walker
   from the car, signed by a direction flag at car-sim +0x304, must lie
-  in (0.25·field(+0x224), 20); lateral offset must lie inside
-  ±(0.5·field(+0x21c)+2). `0x54e8a0` is the same shape with `L` in
-  (0.25·field(+0x224), 35) and lateral ±(0.5·field(+0x21c)+4). Failing,
-  the distance output is 10000. The field names are not recovered.
-- **Time value**: `0x54e630` = (stored per-car factor at +0x24) ×
-  (`L` − 2). Treated as seconds to contact; the factor was not traced.
-- **Decision**: first test passes → value < 0.75 ⇒ dive, else < 2.3 ⇒
-  wary; second test passes → value < 2.3 ⇒ wary (never a dive); else
-  walking.
+  in (0.25·field(+0x224), 20) (`0x5af584` = 0.25, `0x5d716c` = 20);
+  lateral offset must lie inside ±(0.5·field(+0x21c) + 2) (`0x5af360` =
+  0.5, `0x5af578` = 2). `0x54e8a0` is the same shape with `L` in
+  (0.25·field(+0x224), 35) (`0x5d7170` = 35) and lateral
+  ±(0.5·field(+0x21c) + 4). Failing, the distance output is 10000
+  (`0x461c3c00`). The two fields are the car's box **full** size — the
+  length at +0x224, the width at +0x21c — the same `(2,1,3)` default
+  as the `InertiaBox` at +0x228.
+- **Time value**: `0x54e630` = (per-car factor at entry +0x24) ×
+  (`L` − 2) (`0x5af578` = 2). The factor is `1.0 / speed`: `0x53f400`
+  stores `1.0 / sim+0x248` once the speed exceeds `0x5b0d38` = 0.001,
+  else 0. The value is therefore seconds, `(L − 2)/speed`.
+- **Decision**: near corridor passes → value < 0.75 (`0x5b0854`) ⇒ dive,
+  else < 2.3 (`0x5b486c`) ⇒ wary; far corridor passes → value < 2.3 ⇒
+  wary (never a dive); else walking.
 - **Wary (`0x54d0e0`)**: turns the walker to face the car (`atan2` of
   car − walker) and plays `ANTIC`; a sidewalk probe (`0x468e30`) decides
   between walking on along the curve and stopping.
-- **Dive (`0x54d8b0`)**: on entry the heading is set from the car's
-  axis and a side value = dot(car axis, walker − car) is stored. If the
-  car's field +0x1554 (inferred steering input) > 0.85 the walker plays
-  `*_RDIVE`, if < −0.85 `*_LDIVE`, otherwise side value ≤ 0 ⇒ R, > 0 ⇒
-  L. `WALK_*DIVE` when the walker's current clip is `WALK`, else
-  `ANTIC_*DIVE`.
+- **Dive (`0x54d8b0`)** (2026-10-14, #1285): on entry the walker's
+  heading is set from the car's axis (`0x54dc09`) and a side value
+  (dot of the car's axes with walker − car) is stored at walker +0x30.
+  The side (`0x54dc3f`): the car's steering field +0x1554 (`+1` right)
+  > 0.85 (`0x5b1e34`) ⇒ `*_RDIVE`, < −0.85 (`0x5b4880`) ⇒ `*_LDIVE`
+  (both strict, so exactly 0.85 falls through), else the stored side
+  value at walker +0x30 > 0 ⇒ `*_LDIVE`, ≤ 0 ⇒ `*_RDIVE`. `WALK_*DIVE`
+  when the walker's current clip is `WALK`, else `ANTIC_*DIVE`; the
+  state ids are the strings resolved at `0x54b200..` (`WALK_RDIVE`,
+  `ANTIC_RDIVE`, ...).
 - **Bound in the port**: `ReactPolicy` sense range 35 m, min speed
-  1 m/s, alert 2.3 s, dive 0.75 s. Not bound: the corridor geometry,
-  player-only filtering and the steering-based side choice (each needs
-  a field or table identity the disassembly did not settle).
+  1 m/s, alert 2.3 s, dive 0.75 s; both corridor shapes with their
+  recovered margins and the nose fraction (`NEAR_RANGE`, `FAR_RANGE`,
+  `NEAR_MARGIN`, `FAR_MARGIN`, `NOSE_FRACTION`, `TIME_OFFSET` in
+  `mm2_game::pedreact`); player-driven filtering (`Player` without
+  `PlayerControl::Ai`); and the steering-based dive side
+  (`DIVE_STEER`). Not modelled: the +0x304 direction flag's second sign
+  convention (the port senses forward motion), and whether a diver can
+  land in traffic stays unknown.
 
 ## Car contact (F19-B.8, read from `Midtown2.exe`)
 

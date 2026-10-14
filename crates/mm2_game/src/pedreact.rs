@@ -9,12 +9,20 @@
 //! chaining through `*_GROUNDL/R` and `GROUND_STAND*` back to `STAND`,
 //! with the lateral travel of each window in the `X AXIS` columns
 //! (±2.2 m per leg, ≈4.4 m across the chain). *When* the original
-//! switches between them, and how it senses a car, is **unrecovered**
-//! (UNK-43) only in part: the retail sensing gate (35 m), speed floor
-//! (1 m/s) and the 2.3 s wary / 0.75 s dive time thresholds are
-//! recovered and bound in [`ReactPolicy`]; the time-to-contact is still
-//! a constant-velocity test against the car's footprint, which is
-//! designed, not the original's corridor test.
+//! switches between them, and how it senses a car, is recovered from
+//! `Midtown2.exe` (UNK-43): a walker senses only player-driven cars
+//! within 35 m moving faster than 1 m/s whose own driven axis meets one
+//! of the two corridors — the near one (`0x54e660`: from 0.25 of the
+//! car's length out to 20 m ahead, within half-width + 2 m) can stop or
+//! dive, the far one (`0x54e8a0`: out to 35 m, within half-width + 4 m)
+//! can only stop. The value compared to the timing bounds is
+//! `(L − 2)/speed` seconds. The dive side follows the sensed car's own
+//! steering when it is past full lock (`> 0.85` right, `< −0.85` left),
+//! else the walker's side of the car's line. The timing bounds stay
+//! tunable in [`ReactPolicy`];
+//! the corridor geometry is the recovered constants [`NEAR_RANGE`],
+//! [`FAR_RANGE`], [`NEAR_MARGIN`], [`FAR_MARGIN`], [`NOSE_FRACTION`] and
+//! [`TIME_OFFSET`] below.
 //!
 //! The decision is a four-phase machine ([`Phase`]):
 //! `Walking → Wary → Diving → Rejoining → Walking`.
@@ -43,10 +51,37 @@ use bevy::prelude::Vec3;
 
 use crate::ped::PedAnimState;
 
+/// The near corridor's along-axis end (m): a walker farther ahead than
+/// this is not in the stop-or-dive corridor. Retail `0x5d716c`.
+pub const NEAR_RANGE: f32 = 20.0;
+/// The far corridor's along-axis end (m): it reaches as far as the
+/// radial sense range. Retail `0x5d7170` (= 35, the same value as the
+/// 1225 m² distance gate).
+pub const FAR_RANGE: f32 = 35.0;
+/// Lateral clearance (m) beyond the car's half-width for the near
+/// corridor (`0x54e850`: `0.5·width + 2`).
+pub const NEAR_MARGIN: f32 = 2.0;
+/// Lateral clearance (m) beyond the car's half-width for the far
+/// corridor (`0x54e850`-pair `+ 4`).
+pub const FAR_MARGIN: f32 = 4.0;
+/// The along-axis offset (m) the time value is measured short by
+/// (`0x5af578` = 2): value = (L − 2)/speed.
+pub const TIME_OFFSET: f32 = 2.0;
+/// The near corridor starts at this fraction of the car's **full**
+/// length ahead of its centre (`0x5af584` = 0.25), i.e. half a
+/// half-length.
+pub const NOSE_FRACTION: f32 = 0.25;
+/// Steering input (`carsim+0x1554`, `+1` right) past which (right), or
+/// below whose negative (left), a walker dives *with* the sensed car's
+/// steer instead of to its own side of the car's line (retail `0x5b1e34`
+/// = 0.85 compared strictly, the negative mirror at `0x5b4880`).
+pub const DIVE_STEER: f32 = 0.85;
+
 /// Sensing and timing bounds. `sense_range`, `min_speed`, `alert_time`
 /// and `dive_time` are the retail constants recovered from
 /// `Midtown2.exe` (UNK-43, `docs/research/pedanim.md` "Car sensing");
-/// the margins and the wary/dive/rejoin timers are designed bounds.
+/// the wary/dive/rejoin timers are designed bounds. The corridor
+/// geometry is the recovered constants above, not policy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReactPolicy {
     /// Horizontal distance (m) from the car beyond which a walker does
@@ -55,17 +90,12 @@ pub struct ReactPolicy {
     /// A car slower than this (m/s) is not a threat: stopped, parked
     /// and crawling traffic does not scare anyone.
     pub min_speed: f32,
-    /// Time to contact (s) inside which a car on a collision course
-    /// makes a walker wary.
+    /// Time value (s) inside which a car in a corridor makes a walker
+    /// wary (retail: 2.3).
     pub alert_time: f32,
-    /// Time to contact (s) inside which a walker dives.
+    /// Time value (s) inside which the near corridor makes a walker
+    /// dive (retail: 0.75; the far corridor never dives).
     pub dive_time: f32,
-    /// Clearance (m) beyond the car's half-width inside which the car's
-    /// line counts as heading for the walker (alert).
-    pub alert_margin: f32,
-    /// Clearance (m) beyond the car's half-width inside which the car
-    /// would actually strike the walker (dive).
-    pub dive_margin: f32,
     /// Seconds without a threat before a wary walker walks on.
     pub clear_hold: f32,
     /// A wary walker walks on after this long whatever it sees (s).
@@ -85,8 +115,6 @@ impl Default for ReactPolicy {
             min_speed: 1.0,
             alert_time: 2.3,
             dive_time: 0.75,
-            alert_margin: 1.5,
-            dive_margin: 0.5,
             clear_hold: 1.0,
             max_wary: 8.0,
             max_dive: 6.0,
@@ -106,6 +134,10 @@ pub struct Approacher {
     pub half_length: f32,
     /// Half the footprint's width (m).
     pub half_width: f32,
+    /// The driver's steering input, `−1..1` (`+` right) — the car's own
+    /// `carsim+0x1554`. A hard-steering car picks the walker's dive
+    /// side; `0` when the driver's input is unknown.
+    pub steering: f32,
 }
 
 /// How urgent a threat is.
@@ -122,14 +154,40 @@ pub enum Alarm {
 pub struct Threat {
     /// How urgent.
     pub alarm: Alarm,
-    /// Seconds until the car's nose reaches the walker's position at
-    /// constant velocity (0 once it is alongside).
+    /// The retail time value: seconds `(L − 2)/speed` to the walker
+    /// along the car's axis (0 once alongside). Read from the near
+    /// corridor (`0x54e630`), shared by both corridors.
     pub time_to_contact: f32,
     /// Horizontal unit vector from the walker toward the car.
     pub toward: Vec3,
     /// Horizontal unit vector across the car's line, on the walker's
     /// side — the way to dive.
     pub away: Vec3,
+    /// The sensed car's steering input, `−1..1` (`+` right), carried out
+    /// of [`assess`] for [`Threat::dive_side`].
+    pub steering: f32,
+}
+
+impl Threat {
+    /// Which of its own sides the walker dives for this threat.
+    ///
+    /// The original reads the *sensed car's* steering (`carsim+0x1554`,
+    /// `+1` right): past full lock — `> 0.85` right or `< −0.85` left
+    /// (`0x54dc3f`, both strict, so exactly 0.85 falls through) — the
+    /// walker dives with the steering; otherwise it dives to its own
+    /// side of the car's line (`0x54dccf`, the sign of the stored side
+    /// value, which the port already renders as `away`). A walker dead
+    /// on the line is measure-zero and keeps the fixed right tie of
+    /// [`DiveSide::toward`].
+    pub fn dive_side(&self, right: Vec3) -> DiveSide {
+        if self.steering > DIVE_STEER {
+            DiveSide::Right
+        } else if self.steering < -DIVE_STEER {
+            DiveSide::Left
+        } else {
+            DiveSide::toward(right, self.away)
+        }
+    }
 }
 
 fn flat(v: Vec3) -> Vec3 {
@@ -138,11 +196,16 @@ fn flat(v: Vec3) -> Vec3 {
 
 /// The threat `car` poses a walker standing at `ped`, if any.
 ///
-/// The car is taken to keep its velocity: the walker is threatened
-/// when it is ahead of the car's centre, within the car's width plus a
-/// clearance of the line it is travelling on, and the time to reach it
-/// is inside the policy. Non-finite inputs and cars below
-/// [`ReactPolicy::min_speed`] are not threats.
+/// The car is taken to keep its velocity. The walker must be ahead of
+/// the car's nose (past `NOSE_FRACTION` of the car's length) and inside
+/// one of the original's two corridors along the car's axis: the near
+/// corridor (to [`NEAR_RANGE`], within half-width + [`NEAR_MARGIN`])
+/// stops the walker, or dives it when the time value is inside
+/// [`ReactPolicy::dive_time`]; the far corridor (to [`FAR_RANGE`],
+/// within half-width + [`FAR_MARGIN`]) only stops it. The time value is
+/// `(L − `[`TIME_OFFSET`]`)/speed` seconds, and the walker must be
+/// inside [`ReactPolicy::alert_time`] of contact. Non-finite inputs and
+/// cars below [`ReactPolicy::min_speed`] are not threats.
 pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threat> {
     let v = flat(car.velocity);
     let speed = v.length();
@@ -150,7 +213,8 @@ pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threa
         && car.position.is_finite()
         && v.is_finite()
         && car.half_length.is_finite()
-        && car.half_width.is_finite();
+        && car.half_width.is_finite()
+        && car.steering.is_finite();
     if !inputs_finite || speed < policy.min_speed {
         return None;
     }
@@ -162,24 +226,26 @@ pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threa
     let rel = flat(ped - car.position);
     let along = rel.dot(dir);
     let side = rel.dot(perp);
-    // The car's centre has already passed the walker.
-    if along < 0.0 {
-        return None;
-    }
-    let reach = (along - car.half_length).max(0.0);
-    let time_to_contact = reach / speed;
-    if time_to_contact > policy.alert_time {
+    // Ahead of the car's nose: past `0.25·length` — half a half-length
+    // (`0x54e7f3`). Behind it, or alongside, is no threat.
+    let nose = NOSE_FRACTION * car.half_length * 2.0;
+    if along <= nose {
         return None;
     }
     let lateral = side.abs();
-    let alarm =
-        if lateral <= car.half_width + policy.dive_margin && time_to_contact <= policy.dive_time {
-            Alarm::Imminent
-        } else if lateral <= car.half_width + policy.alert_margin {
-            Alarm::Alert
-        } else {
-            return None;
-        };
+    // The near corridor (`0x54e660`) may dive; the far one (`0x54e8a0`)
+    // only stops. Both share the time value (`0x54e630`).
+    let near = along < NEAR_RANGE && lateral < car.half_width + NEAR_MARGIN;
+    let far = along < FAR_RANGE && lateral < car.half_width + FAR_MARGIN;
+    let time_to_contact = (along - TIME_OFFSET) / speed;
+    if time_to_contact >= policy.alert_time || !(near || far) {
+        return None;
+    }
+    let alarm = if near && time_to_contact < policy.dive_time {
+        Alarm::Imminent
+    } else {
+        Alarm::Alert
+    };
     let toward = if rel.length_squared() > 1e-6 {
         -rel.normalize()
     } else {
@@ -193,6 +259,7 @@ pub fn assess(ped: Vec3, car: &Approacher, policy: &ReactPolicy) -> Option<Threa
         time_to_contact,
         toward,
         away,
+        steering: car.steering,
     })
 }
 

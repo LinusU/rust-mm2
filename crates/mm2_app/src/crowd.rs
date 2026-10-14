@@ -51,8 +51,10 @@
 //!   different walkers; that is a designed trade (DSN-90) for keeping
 //!   the snapshot stream free of a population no rule reads.
 //!
-//! Not done here, deliberately: crossings (UNK-42), the original's
-//! sensing rule (UNK-43), and pedestrian audio.
+//! The original's sensing rule is bound (UNK-43, F19-B.7): a walker
+//! senses only player-driven cars, inside the recovered corridors, and
+//! dives with a hard-steering car. Not done here, deliberately:
+//! crossings (UNK-42), and pedestrian audio.
 
 use std::sync::Arc;
 
@@ -67,10 +69,10 @@ use mm2_game::pedwalk::{
     target_population,
 };
 use mm2_game::{
-    Mm2Vfs, NavGraph, NavOverrides, NavRng, Player, Session, SessionConfig, SessionEntity,
-    WorldMode,
+    Mm2Vfs, NavGraph, NavOverrides, NavRng, Player, PlayerControl, Session, SessionConfig,
+    SessionEntity, WorldMode,
 };
-use mm2_vehicle::vehicle::Vehicle;
+use mm2_vehicle::vehicle::{Vehicle, VehicleInput};
 
 use crate::pedestrian::{LAB_ARCHETYPES, MAX_PED_ACTORS, PedActor, PedShape, spawn_pedestrian};
 
@@ -428,7 +430,7 @@ pub fn react_pedestrians(
     time: Res<Time>,
     session: Res<Session>,
     crowd: Option<ResMut<PedCrowd>>,
-    cars: Query<(&Position, &LinearVelocity, &Vehicle)>,
+    cars: Query<(&Position, &LinearVelocity, &Vehicle, &VehicleInput, &Player)>,
     mut walkers: Query<(
         Entity,
         &PedWalk,
@@ -451,13 +453,18 @@ pub fn react_pedestrians(
     let dt = time.delta_secs();
     let ease = (dt * TURN_RATE).min(1.0);
     let policy = crowd.react;
+    // Only player-driven cars are sensed: the original walks the
+    // player-slot table (`0x6b1df0`), not ambient traffic or AI
+    // opponents (F19/UNK-43).
     let approachers: Vec<Approacher> = cars
         .iter()
-        .map(|(pos, vel, vehicle)| Approacher {
+        .filter(|(_, _, _, _, player)| player.control != PlayerControl::Ai)
+        .map(|(pos, vel, vehicle, input, _)| Approacher {
             position: pos.0,
             velocity: vel.0,
             half_length: vehicle.config.chassis_size[2] * 0.5,
             half_width: vehicle.config.chassis_size[0] * 0.5,
+            steering: input.steering,
         })
         .collect();
     for (walker, walk, mut react, mut actor, mut at) in &mut walkers {
@@ -473,7 +480,9 @@ pub fn react_pedestrians(
             }
             Phase::Diving | Phase::Rejoining => None,
         };
-        let side = threat.map_or(DiveSide::Right, |t| DiveSide::toward(right, t.away));
+        // The original dives with the sensed car's hard steering, else
+        // to the walker's own side of the car's line.
+        let side = threat.map_or(DiveSide::Right, |t| t.dive_side(right));
         // F19-B.9/AUD-15: the walker's own voice, keyed on its archetype
         // stem — retail picks the female/male loader from a byte on the
         // walker (designed mapping).
