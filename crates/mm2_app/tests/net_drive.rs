@@ -568,6 +568,123 @@ fn a_scheduled_reset_comes_back_across_two_processes_on_an_impaired_link() {
     );
 }
 
+/// The `trl=live<n>,remote<m>,reseat<k>` cell (F25-AC05): trailers
+/// alive, remote copies among them, rows that reseated one on its
+/// seat's reset epoch. `None` while the process never saw a trailer.
+fn trailer_cells(line: &str) -> Option<(u64, u64, u64)> {
+    let cells: Vec<u64> = line
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("trl="))?
+        .split(',')
+        .map(|c| leading_u64(c.trim_start_matches(|ch: char| ch.is_ascii_alphabetic())))
+        .collect();
+    Some((cells[0], cells[1], cells[2]))
+}
+
+/// F25-AC05's trailer rig reset at process level: alice picks the
+/// retail `vpsemi` (a tractor with a trailer), drives, and asks the
+/// host for a reset with `--reset-at`; bob, the control, watches her
+/// rig from a second process. The authority reseats the whole rig on
+/// her epoch (`reseat_towed_trailers`), the trailer row rides the same
+/// snap, and bob's kinematic trailer copy applies it (`tsyn`) and
+/// reseats it on her epoch (`trl=…reseat`). When alice leaves, her
+/// trailer copy must go with her seat — no stale replica (`remote0`).
+/// A trailer's brake is the tractor's (`trailer_input`) and the wire
+/// carries no trailer reverse bit (`SnapTrailer::flags` keeps only
+/// grounded), so reverse presentation is not asserted here.
+#[test]
+fn a_reset_trailer_rig_reseats_on_the_other_client_and_leaves_no_replica() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host = Proc::spawn(MM2_EXE, &host_args(&retail, HOST_FRAME_CEILING));
+    let addr = listening_addr(&host);
+    let mut alice_args = join_args(&retail, addr, "alice", 6000);
+    alice_args.extend(
+        [
+            "--car",
+            "vpsemi",
+            "--reset-at",
+            "300",
+            "--until-snap-tick",
+            "700",
+            "--deadline",
+            "90",
+        ]
+        .map(String::from),
+    );
+    let alice = Proc::spawn(MM2_EXE, &alice_args);
+    let mut bob_args = join_args(&retail, addr, "bob", 6000);
+    bob_args.extend(["--until-snap-tick", "1500", "--deadline", "90"].map(String::from));
+    let bob = Proc::spawn(MM2_EXE, &bob_args);
+    start_when_ready(&mut host, 2);
+
+    let bound = Duration::from_secs(90 + 60);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    alice.wait_success("alice", &alice_rec);
+    bob.wait_success("bob", &bob_rec);
+    for _ in 0..2 {
+        host.until("event=left");
+    }
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    assert!(host.wait().success(), "mm2 --host did not exit cleanly");
+
+    // Alice: one ask, one epoch back, and her own real trailer reseated
+    // with her (no kinematic copy of herself).
+    assert_eq!(field(&alice_rec, "stop"), "snap-tick", "{alice_rec}");
+    let alice_net = net_field(&alice_rec);
+    assert_eq!(alice_net.requests_sent, 1, "{alice_rec}");
+    assert!(alice_net.resets >= 1, "{alice_rec}");
+    let (alice_live, alice_remote, alice_reseat) =
+        trailer_cells(&alice_rec).unwrap_or_else(|| panic!("alice tows no trailer: {alice_rec}"));
+    assert_eq!(
+        (alice_live, alice_remote),
+        (1, 0),
+        "alice holds her own real trailer, no copy: {alice_rec}"
+    );
+    assert!(
+        alice_reseat >= 1,
+        "her own trailer reseated on her epoch: {alice_rec}"
+    );
+
+    // Bob: applied her trailer rows, reseated the copy on her epoch,
+    // and holds no replica once she has left.
+    assert_eq!(field(&bob_rec, "stop"), "snap-tick", "{bob_rec}");
+    let bob_net = net_field(&bob_rec);
+    assert_eq!(bob_net.requests_sent, 0, "{bob_rec}");
+    assert!(
+        bob_net.trailers_synced > 0,
+        "bob applied trailer rows for alice's rig: {bob_rec}"
+    );
+    let (bob_live, bob_remote, bob_reseat) =
+        trailer_cells(&bob_rec).unwrap_or_else(|| panic!("bob saw no trailer: {bob_rec}"));
+    assert!(
+        bob_reseat >= 1,
+        "bob's copy of alice's trailer reseated on her epoch: {bob_rec}"
+    );
+    assert_eq!(
+        (bob_live, bob_remote),
+        (0, 0),
+        "no stale trailer copy outlives alice's seat: {bob_rec}"
+    );
+
+    // The authority simulated her real rig and let it go with her seat.
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+    let host_net = net_field(&host_rec);
+    assert!(
+        host_net.requests_granted >= 1 && host_net.resets >= 1,
+        "{host_rec}"
+    );
+    let (host_live, ..) = trailer_cells(&host_rec).unwrap_or((0, 0, 0));
+    assert_eq!(
+        host_live, 0,
+        "the authority kept alice's trailer: {host_rec}"
+    );
+}
+
 /// F26-AC05's rematch leg at process level: one lobby, two sessions.
 /// The host closes round 1 with `cancel` (the roster returns to the
 /// lobby and every ready flag clears), the client — which asked for

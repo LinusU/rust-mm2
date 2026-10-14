@@ -1534,6 +1534,22 @@ fn run_headless(
             }
         })
         .unwrap_or_default();
+    // F25-AC05 trailer evidence: `trl=` is the trailer entities alive
+    // at the last reconcile (own rig included) and the remote copies
+    // among them, plus the rows that reseated one on its seat's reset
+    // epoch. Absent until a trailer existed or a row landed, so every
+    // trailer-free record stays bit-identical; a leaver's copy shows as
+    // `remote0` once the record outlives it.
+    let trl_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .filter(|r| r.trailers_synced > 0 || r.trailers_live > 0)
+        .map(|r| {
+            format!(
+                " trl=live{},remote{},reseat{}",
+                r.trailers_live, r.trailers_remote_live, r.trailers_reseated
+            )
+        })
+        .unwrap_or_default();
     // F26-A world-prop evidence: `props=` names this process's own
     // stamped world (placement count and digest, the v18 `SiteTable`)
     // and, on a client, the rows that landed or were refused for a
@@ -2649,7 +2665,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

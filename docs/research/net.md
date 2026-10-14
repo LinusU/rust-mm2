@@ -2064,6 +2064,30 @@ wire actually moved rather than an in-process mailbox's contents.
   Not covered here: see F25-C.5 for the impaired link; a trailer rig
   reset at process level (the dev car tows nothing) and the
   reset-while-moving divergence window stay open; loopback, dev world.
+- **Trailer rig reset across processes (F25-AC05).** The smoke record
+  gained `trl=live<n>,remote<m>,reseat<k>` (printed once a trailer
+  existed or a row landed): trailer entities alive at the last
+  reconcile and the kinematic copies among them, and the `Snap.trailers`
+  rows that reseated a trailer because its towing seat's epoch advanced.
+  `a_reset_trailer_rig_reseats_on_the_other_client_and_leaves_no_
+  replica` (retail install, `MM2_RETAIL`): host + alice (`--car vpsemi
+  --reset-at 300 --until-snap-tick 700`) + bob (`--until-snap-tick
+  1500`). Alice asked once; her own real trailer reseated on her epoch
+  (`reseat≥1`, `live1,remote0`); bob applied her trailer rows (`tsyn`
+  in the hundreds), reseated the copy on her epoch (`reseat≥1`) and
+  held no replica after she left (`live0,remote0`); the host granted
+  the ask and kept no trailer either. 4/4 isolated passes (~6 s).
+  Method note: the legs stop on the authority's snap tick, not
+  `--until-resets`, because the host's idle retail default car is
+  righted by the stuck recovery around sim 13 s and that reset counts
+  too. Not covered, and why: **reverse presentation** — a trailer row
+  carries only the grounded bit (`SnapTrailer::flags`), brake/handbrake
+  ride the tractor's input through `trailer_input`, and the copy has no
+  reverse state of its own, so there is nothing to assert; the
+  tractor's own reverse bit is covered by the seat legs. **Extra-wheel
+  presentation** — the row's `spin` drives the copy's wheels (the `rspn`
+  counter is seat-wide), but there is no per-trailer-wheel counter yet.
+  Loopback, clean link; the lossy leg is open.
 - **Reset on an impaired link (F25-C.5).** The ask is one frame, and a
   lossy link may eat it — which the first leg could not survive. The
   scheduled ask now behaves like a driver whose `R` seemed to do
@@ -2096,8 +2120,8 @@ wire actually moved rather than an in-process mailbox's contents.
   `net_drive` module (19 process tests contending, ~86 s), including
   the clean leg's exact one-ask assertion — so that timing assumption
   (the reset returns well inside `RESET_RETRY`) held under CPU
-  contention too. Not covered: other recipes, a trailer rig reset,
-  reset-while-moving divergence; loopback, dev world.
+  contention too. Not covered: other recipes, a trailer rig reset on a
+  lossy link, reset-while-moving divergence; loopback, dev world.
 - **Reset ask lost five times running (NET-RESET-LOSSY).** Main CI
   failed the impaired leg once: the client sent 5 asks (`req5s`), the
   host saw none (`req0s/0g/0d`). Root cause: each ask is one

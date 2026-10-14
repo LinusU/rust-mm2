@@ -1026,6 +1026,16 @@ pub struct NetDriveReport {
     /// trailer on a declared reset; a session with no trailered seats
     /// never counts.
     pub trailers_synced: u64,
+    /// Of `trailers_synced`, the rows that reseated a trailer because
+    /// its towing seat's reset epoch advanced (F25-AC05) — a trailer
+    /// carries no epoch of its own, so this is how a rig reset shows on
+    /// a client.
+    pub trailers_reseated: u64,
+    /// Trailer entities alive at the last reconcile, every role (own
+    /// rig included), and the kinematic remote copies among them. A
+    /// leaver's or re-picker's copy must not outlive its seat.
+    pub trailers_live: usize,
+    pub trailers_remote_live: usize,
     /// `Snap.impacts` rows broadcast (authority side, protocol v10,
     /// F25-B) — one per participant side of each authority
     /// [`ImpactEvent`], after the per-snapshot cap.
@@ -1648,9 +1658,14 @@ pub fn reconcile_remote_players(
     mut materials: ResMut<Assets<StandardMaterial>>,
     remotes: Query<(Entity, &NetPlayer, &RemotePick)>,
     trailers: Query<(Entity, &car_visual::Trailer, &RemoteTrailer, &RemotePick)>,
+    census: Query<Has<RemoteTrailer>, With<car_visual::Trailer>>,
     local: Query<Entity, (With<PlayerVehicle>, Without<NetPlayer>)>,
     mut report: ResMut<NetDriveReport>,
 ) {
+    // Counted before any early return so the figure keeps tracking
+    // after the session winds down.
+    report.trailers_live = census.iter().count();
+    report.trailers_remote_live = census.iter().filter(|remote| *remote).count();
     let Some(self_wire) = self_wire(link.as_deref(), host.as_deref()) else {
         return;
     };
@@ -3582,6 +3597,9 @@ fn apply_snap_frame(
                 }
             }
             report.trailers_synced += 1;
+            if reset_owners.contains(&t.owner) {
+                report.trailers_reseated += 1;
+            }
             break;
         }
     }
