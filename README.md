@@ -196,6 +196,12 @@ cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --bot
 cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --parked
 #   --parked holds the handbrake all session — the stationary control
 #   leg: what the opponents do with no competing local driver.
+#   --until-opponents ends the run once every opponent has finished;
+#   scripts/opponent_sweep.sh does that for every race of both cities.
+cargo run -- --mm2-path <dir> --city sf --event race:0 --opponent-policy <file.mm2p>
+#   Drive the opponents with a policy that is not the shipped one — a
+#   training run's latest.mm2p (docs/neural-opponents.md). Results of
+#   such a session are not recorded.
 cargo run -- --mm2-path <dir> --dev-world --headless --ram --frames 600
 #   --ram holds throttle and steers at the nearest other vehicle (F25-C):
 #   a driven car-to-car collision for multi-process runs against
@@ -354,11 +360,14 @@ crates/
   mm2_app/      Bevy executable: bootstrap, input, cameras, city import
 tools/
   mm2_inspect/  CLI inspector — uses the same crates as the game
+training/       PPO trainer for the opponent driver (Python; not needed to build or play)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the dependency rules and
 the logical-asset pipeline, [docs/vehicle-handling.md](docs/vehicle-handling.md)
 for how MM2 tuning becomes a drivable car,
+[docs/neural-opponents.md](docs/neural-opponents.md) for the learned driver
+behind every race opponent and how it is trained,
 [docs/modding.md](docs/modding.md) for mod authoring, and
 [docs/research/](docs/research/) for format notes.
 
@@ -418,7 +427,7 @@ spawning. The route guides ordinary steering and throttle/brake inputs; gates,
 laps, countdown and time limits still use the event definition. These runs are
 record-ineligible, and existing bounded bot recovery behavior still applies.
 
-When a guide is bound, the evidence driver reuses the opponent planner's
+When a guide is bound, the evidence driver uses the scripted racing line's
 speed-scaled route projection, handling-derived steering and curvature braking.
 The live player's next checkpoint still bounds the aim, so lookahead never
 substitutes route traversal for crossing a gate. Unguided steering and the
@@ -436,7 +445,7 @@ ordinary static pose policy.
 
 Dense evidence guides use spacing-bounded anchor reach and adjacent segment
 projections to retain an upcoming corner in the speed plan until the car
-actually turns. Native opponent anchor reach remains unchanged.
+actually turns.
 
 ## License
 

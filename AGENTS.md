@@ -80,6 +80,13 @@ the build artefacts and the git stash stack are shared:
   from `Midtown2.exe`: time step, rigid body, tyres, suspension,
   drivetrain, assists, human and AI inputs, a port-ready recipe. Read
   it before changing how a car drives.
+- [docs/neural-opponents.md](docs/neural-opponents.md) — the learned
+  driver behind every race opponent: what it observes, what stays
+  conventional code around it, how it is trained (`training/`) and how
+  a policy is judged. Read it before changing `mm2_app::neural` — a
+  change to the observation layout or to what the environment does to
+  a car invalidates the shipped policies — and measure an opponent
+  change with `scripts/opponent_sweep.sh`, not by eye.
 - [docs/original-rules.md](docs/original-rules.md) — the original-rules
   ledger: every known retail-game rule classified verified_original /
   documented / inferred / designed / unknown with sources. Read it

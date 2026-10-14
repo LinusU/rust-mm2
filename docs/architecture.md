@@ -264,6 +264,21 @@ the physics step and only while the session is `Playing`:
   fixed-step tick and authority role. Presentation (the HUD) reads this
   snapshot, not the mutable `VehicleState`.
 
+## Opponent drivers
+
+Race opponents are driven by a learned policy, `mm2_app::neural`: a
+small MLP evaluated on the CPU that turns a car's view of its line, the
+world and the vehicles around it into steering and pedals. The network
+is the only learned part. Route choice (`opponents::driving_route` over
+`mm2_game::nav`), progress and finishing (`mm2_game::race`), the stalled
+car's back-up and the bounded re-anchor stay ordinary code around it,
+and the same module is the training environment — one race event's
+world with the production `VehiclePlugin` and nothing else — so the
+driver is trained on the simulation it races in.
+[neural-opponents.md](neural-opponents.md) has the observation layout,
+the trainer (`training/`, Python, development-time only) and how a
+policy is judged.
+
 ## City import
 
 `mm2_app::city` converts parsed data into Bevy assets at load time. The
