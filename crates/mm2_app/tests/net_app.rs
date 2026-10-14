@@ -11525,7 +11525,7 @@ fn two_remote_cars_reaching_the_gold_together_make_one_carrier_and_a_dropped_car
 /// (the sibling of the contested-pickup test above, same host and two
 /// peers): a carrier falls below the world floor and its connection
 /// drops there, so the gold lands out of bounds. The host re-places it
-/// on another site of the pool with no score for anyone, the objective
+/// on a site of the pool with no score for anyone, the objective
 /// is not lost, both peers decode the re-placed, uncarried gold, and the
 /// peer still connected takes it from its new site for one more award.
 ///
