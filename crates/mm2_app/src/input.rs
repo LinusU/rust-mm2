@@ -552,6 +552,8 @@ pub struct BufferedPlayerInput {
     keyboard_held: bool,
     keyboard: f32,
     gamepad: f32,
+    /// Seconds the stick has been held at its stop (retail's `pegged`).
+    pad_pegged: f32,
     pad_active: bool,
 }
 
@@ -565,7 +567,10 @@ impl BufferedPlayerInput {
             let use_pad = self.pad || (self.pad_active && !self.keyboard_held);
             let state = if use_pad { self.gamepad } else { self.keyboard };
             let (next, output) = if use_pad {
-                config.analog_step(input.steering, speed)
+                let (next, pegged, output) =
+                    config.joystick_step(state, self.pad_pegged, input.steering, speed, dt);
+                self.pad_pegged = pegged;
+                (next, output)
             } else {
                 config.discrete_step(state, input.steering, speed, dt)
             };
@@ -574,6 +579,7 @@ impl BufferedPlayerInput {
                 self.pad_active = next != 0.0;
             } else {
                 self.keyboard = next;
+                self.pad_pegged = 0.0;
             }
             input.steering = output;
         }

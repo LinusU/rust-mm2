@@ -18,6 +18,43 @@ pub struct PlayerSteeringConfig {
     /// remain unauthored rather than borrowing keyboard exponents.
     pub mouse_divisor: Option<[f32; 2]>,
     pub mouse_exponent: Option<[f32; 2]>,
+    /// Joystick/wheel tuning (`Joy*` tokens). Absent on a car without a
+    /// tune file: [`JoystickSteering::COMMON`] stands in.
+    #[serde(default)]
+    pub joystick: Option<JoystickSteering>,
+}
+
+/// The retail analog-stick shaper's per-car parameters (`mmPlayer`'s
+/// `Joy*` tokens, each interpolated by speed like the keyboard's).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct JoystickSteering {
+    /// `JoySensitivityLow/Hi`: the stick is divided by this, so with 2.5
+    /// the travel gives at most 40% of lock until it is pegged.
+    pub divisor: [f32; 2],
+    /// `JoySteerFilterLow/Hi`.
+    pub exponent: [f32; 2],
+    /// `JoyApp`: ramp the lock in while the stick is held at its stop.
+    pub approach: bool,
+    /// `JoySteerApproachOutLo/Hi`, `JoySteerApproachInLo/Hi` (1/s).
+    pub approach_out: [f32; 2],
+    pub approach_in: [f32; 2],
+    /// `JoySteerAppApp`: extra rate per second spent pegged.
+    pub approach_gain: f32,
+}
+
+impl JoystickSteering {
+    /// What every retail tune file that authors the block says (Mustang,
+    /// Beetle, cab …). The `mmPlayer` constructor's own defaults for a car
+    /// with no tune file are untranscribed, so this stands in for them —
+    /// a designed stand-in, not a recovered default.
+    pub const COMMON: Self = Self {
+        divisor: [2.5, 2.5],
+        exponent: [1.0, 1.1],
+        approach: true,
+        approach_out: [2.572, 2.572],
+        approach_in: [1.0, 1.0],
+        approach_gain: 0.127,
+    };
 }
 
 impl Default for PlayerSteeringConfig {
@@ -31,6 +68,7 @@ impl Default for PlayerSteeringConfig {
             exponent: [2.0, 1.0],
             mouse_divisor: None,
             mouse_exponent: None,
+            joystick: None,
         }
     }
 }
@@ -79,15 +117,51 @@ impl PlayerSteeringConfig {
         (next, sign(next) * next.abs().powf(exponent))
     }
 
-    /// An analog stick is already a position, not a key held down: it
-    /// skips the keyboard's rate ramp and takes only the shaping
-    /// exponent, so a partial tilt answers at once and a full tilt is the
-    /// same lock as the keyboard's. Returns the `(state, output)` pair
-    /// [`Self::discrete_step`] does; the state is the raw target.
-    pub fn analog_step(&self, target: f32, speed: f32) -> (f32, f32) {
-        let target = target.clamp(-1.0, 1.0);
-        let exponent = self.interpolate(self.exponent, speed).max(0.01);
-        (target, sign(target) * target.abs().powf(exponent))
+    /// Retail's joystick/wheel shaper (`mmPlayer::FilterSteering`,
+    /// 05-player-input.md): the stick is divided by `divisor`, so most of
+    /// its travel gives a fraction of lock and a small tilt stays small at
+    /// any speed; only a stick held at its stop (`pegged`) snaps toward
+    /// full lock, ramping in. Returns `(state, pegged, output)`.
+    pub fn joystick_step(
+        &self,
+        state: f32,
+        pegged: f32,
+        x: f32,
+        speed: f32,
+        dt: f32,
+    ) -> (f32, f32, f32) {
+        let joy = self.joystick.unwrap_or(JoystickSteering::COMMON);
+        let x = x.clamp(-1.0, 1.0);
+        let dt = dt.clamp(0.0001, 0.1);
+        let divisor = self.interpolate(joy.divisor, speed).max(0.01);
+        let exponent = self.interpolate(joy.exponent, speed).max(0.01);
+        let a = x.abs();
+        let pegged = if a > 0.99 { pegged + dt } else { 0.0 };
+        let v1 = if divisor <= 1.0 || a <= 0.99 {
+            (x / divisor).clamp(-1.0, 1.0)
+        } else {
+            sign(x)
+        };
+        if !joy.approach || pegged == 0.0 {
+            let out = sign(v1) * (v1.abs() * divisor).powf(exponent) / divisor;
+            return (v1, pegged, out.clamp(-1.0, 1.0));
+        }
+        let outward = v1.abs() >= state.abs() && sign(state) == sign(v1);
+        let rate = joy.approach_gain * pegged
+            + self
+                .interpolate(
+                    if outward {
+                        joy.approach_out
+                    } else {
+                        joy.approach_in
+                    },
+                    speed,
+                )
+                .max(0.0);
+        let step = rate * dt;
+        let next = state + (v1 - state).clamp(-step, step);
+        let out = sign(next) * next.abs().powf(exponent);
+        (next, pegged, out.clamp(-1.0, 1.0))
     }
 
     /// Mouse is an absolute position with a divisor and exponent, not
@@ -170,21 +244,29 @@ mod tests {
     }
 
     #[test]
-    fn a_stick_takes_the_exponent_without_the_keyboard_ramp() {
+    fn a_small_stick_tilt_stays_small_at_every_speed_and_a_pegged_one_reaches_full_lock() {
         let config = beetle();
-        let (state, out) = config.analog_step(0.5, 0.0);
-        assert_eq!(state, 0.5, "the target lands at once");
-        let (_, expected) = config.discrete_step(0.5, 0.5, 0.0, 0.016);
-        assert_eq!(out, expected, "same shaping as the settled keyboard law");
-        let (_, ramped) = config.discrete_step(0.0, 0.5, 0.0, 0.016);
-        assert!(out > ramped, "the ramp would still be near zero");
-        assert_eq!(
-            config.analog_step(1.0, 0.0).1,
-            1.0,
-            "full tilt is full lock"
-        );
-        assert_eq!(config.analog_step(-1.0, 0.0).1, -1.0);
-        assert_eq!(config.analog_step(0.0, 0.0), (0.0, 0.0));
+        for speed in [0.0, 20.0, 60.0] {
+            let (_, _, out) = config.joystick_step(0.0, 0.0, 0.2, speed, 0.016);
+            assert!(
+                out > 0.0 && out < 0.15,
+                "0.2 tilt at {speed} m/s gave {out}"
+            );
+            let (_, _, out) = config.joystick_step(0.0, 0.0, 0.9, speed, 0.016);
+            assert!(out < 0.45, "0.9 tilt is under half lock, got {out}");
+            let (_, _, out) = config.joystick_step(0.0, 0.0, -0.2, speed, 0.016);
+            assert!(out < 0.0, "negative is left");
+        }
+        // Held at the stop the lock ramps in to full and stays there.
+        let (mut state, mut pegged) = (0.0, 0.0);
+        let mut out = 0.0;
+        for _ in 0..120 {
+            (state, pegged, out) = config.joystick_step(state, pegged, 1.0, 0.0, 1.0 / 60.0);
+        }
+        assert_eq!(out, 1.0, "a pegged stick reaches full lock");
+        // Letting go returns to the unpegged law at once.
+        let (_, pegged, out) = config.joystick_step(state, pegged, 0.0, 0.0, 1.0 / 60.0);
+        assert_eq!((pegged, out), (0.0, 0.0));
     }
 
     #[test]

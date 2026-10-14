@@ -1350,6 +1350,36 @@ fn player_steering(asnode: Option<&AsNode>) -> mm2_vehicle::player_input::Player
     };
     out.mouse_divisor = optional_pair("MouseSensitivityLow", "MouseSensitivityHi");
     out.mouse_exponent = optional_pair("MouseSteerFilterLow", "MouseSteerFilterHi");
+    // The stick block is authored whole or not at all; a file carrying any
+    // of it keeps the common value for each token it leaves out.
+    if value("JoySensitivityLow").is_some() || value("JoySensitivityHi").is_some() {
+        use mm2_vehicle::player_input::JoystickSteering as Joy;
+        let common = Joy::COMMON;
+        let positive = |lo: &str, hi: &str, default: [f32; 2]| {
+            [
+                value(lo).filter(|v| *v > 0.0).unwrap_or(default[0]),
+                value(hi).filter(|v| *v > 0.0).unwrap_or(default[1]),
+            ]
+        };
+        out.joystick = Some(Joy {
+            divisor: positive("JoySensitivityLow", "JoySensitivityHi", common.divisor),
+            exponent: positive("JoySteerFilterLow", "JoySteerFilterHi", common.exponent),
+            approach: value("JoyApp").map_or(common.approach, |v| v != 0.0),
+            approach_out: pair(
+                "JoySteerApproachOutLo",
+                "JoySteerApproachOutHi",
+                common.approach_out,
+            ),
+            approach_in: pair(
+                "JoySteerApproachInLo",
+                "JoySteerApproachInHi",
+                common.approach_in,
+            ),
+            approach_gain: value("JoySteerAppApp")
+                .filter(|v| *v >= 0.0)
+                .unwrap_or(common.approach_gain),
+        });
+    }
     out
 }
 

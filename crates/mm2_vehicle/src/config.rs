@@ -1266,6 +1266,25 @@ impl VehicleConfig {
                     pair.iter().all(|v| finite(*v) && *v > 0.0)
                 );
             }
+            if let Some(j) = &p.joystick {
+                for (name, pair) in [
+                    ("joystick.divisor", j.divisor),
+                    ("joystick.exponent", j.exponent),
+                ] {
+                    check!(
+                        format!("player_steering.{name}"),
+                        pair.iter().all(|v| finite(*v) && *v > 0.0)
+                    );
+                }
+                check!(
+                    "player_steering.joystick.approach",
+                    j.approach_out
+                        .iter()
+                        .chain(&j.approach_in)
+                        .chain([&j.approach_gain])
+                        .all(|v| finite(*v) && *v >= 0.0)
+                );
+            }
             for (name, pair) in [
                 ("mouse_divisor", p.mouse_divisor),
                 ("mouse_exponent", p.mouse_exponent),
