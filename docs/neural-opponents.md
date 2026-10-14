@@ -54,8 +54,9 @@ bad driving was one of them going wrong:
    be pushed aside (`Guide::cleared`): a parked car in the kerb lane, a
    traffic light on a corner the line cuts.
 
-`mm2_gym audit` walks every line and lists where it still cannot be
-driven as drawn.
+The third step costs about 10 ms for an 8 km line, and the game does
+one opponent's a step during the countdown. `mm2_gym audit` walks every
+line and lists where it still cannot be driven as drawn.
 
 One observation is 132 floats in the car's own heading frame, scaled
 to about unit size (`observe.rs` is the reference):
