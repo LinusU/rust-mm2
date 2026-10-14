@@ -1706,6 +1706,7 @@ fn main() {
     .init_resource::<session::SessionNote>()
     .init_resource::<pause::PauseMenu>()
     .init_resource::<results::ResultsMenu>()
+    .init_resource::<results::NextRace>()
     .add_systems(FixedUpdate, advance_session_tick)
     // Sample the human steering ramp once per simulation tick. Update
     // collects devices; Avian advances bodies later in FixedPostUpdate.
@@ -2022,6 +2023,9 @@ fn main() {
             // Results owns the keyboard while `Results` — same
             // scheduling slot as the pause input so the session
             // control reader and the driver never re-read its keys.
+            results::next_race_update
+                .before(results::results_input)
+                .before(results::results_present),
             results::results_input
                 .after(session::session_control_input)
                 .before(session::drive_session)

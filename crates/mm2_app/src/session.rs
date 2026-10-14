@@ -117,6 +117,12 @@ pub struct SessionControl {
     /// consumes a non-`Local` restart intent at `Menu` without
     /// beginning anything.
     pub restart: bool,
+    /// With `restart`: begin this event instead of replaying the
+    /// retained config's own (the results screen's *Next race*). The
+    /// retained config's city, difficulty, vehicle and authority carry
+    /// over; the event is swapped and the race-shape picks (which
+    /// belong to the previous event) are dropped.
+    pub next_event: Option<mm2_game::EventRef>,
     /// `Playing → Paused` (F17-B). Only ever set for a live session
     /// whose authority allows pause — `session_control_input` falls
     /// back to `quit` when `allows_pause` is false (MP-6).
@@ -389,6 +395,7 @@ pub fn drive_session(
         SessionPhase::Menu => {
             if control.quit {
                 control.quit = false;
+                control.next_event = None;
                 // With a menu shell running, quit-to-menu lands back on
                 // the menu — the shell itself owns process exit (its
                 // Quit row / Esc at the root). The same goes for a
@@ -400,7 +407,12 @@ pub fn drive_session(
                 }
             } else if control.restart {
                 control.restart = false;
-                match session.config().cloned() {
+                let next_event = control.next_event.take();
+                match session
+                    .config()
+                    .cloned()
+                    .map(|config| restart_config(config, next_event))
+                {
                     Some(config) if config.authority == SessionAuthority::Local => {
                         if let Err(e) = session.begin(config) {
                             // The retained config already validated once;
@@ -465,6 +477,23 @@ pub fn drive_session(
         // — no queued intent handling here.
         _ => {}
     }
+}
+
+/// The config a restart begins: the retained one, or — for *Next race*
+/// — the retained one aimed at `next_event`. City, difficulty,
+/// vehicle, conditions and authority carry over; the race-shape picks
+/// belong to the event just left and are dropped, and so are the
+/// condition picks: they are only legal on an event the profile has
+/// beaten, which the next one may not be.
+pub(crate) fn restart_config(
+    mut config: mm2_game::SessionConfig,
+    next_event: Option<mm2_game::EventRef>,
+) -> mm2_game::SessionConfig {
+    if let Some(next) = next_event {
+        config.mode = SessionMode::Event(next);
+        config.customization = None;
+    }
+    config
 }
 
 /// `--restart` (quarantined `DevOverrides`, evidence runs only): queue

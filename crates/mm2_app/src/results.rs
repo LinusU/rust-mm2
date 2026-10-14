@@ -1,8 +1,10 @@
 //! Results screen (F17-B.2, UI-5): after the local participant
 //! resolves — `advance_race` transitions `Playing → Results` on a
 //! finish or a time-out — an overlay shows what the run produced and
-//! offers the two honest actions: continue (back to the menu, or exit
-//! when no `MenuShell` runs) or restart the event.
+//! offers the honest actions: continue (back to the menu, or exit
+//! when no `MenuShell` runs), restart the event, or — after a win with
+//! a following event in the same city and race type — start the next
+//! one ([`NextRace`]).
 //!
 //! The content is read-only presentation over authoritative state —
 //! the screen never mints results, applies rewards, or transitions the
@@ -41,10 +43,12 @@
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use mm2_content::EventCatalog;
 use mm2_game::{
-    CheckpointRule, LegFailure, LessonPhase, ParticipantState, Player, PlayerControl, RACE_TICK_HZ,
-    RaceDefinition, RaceProgress, RaceState, ResultLedger, Session, SessionAuthority,
-    SessionEntity, SessionOutcome, SessionPhase, navigation_target, ordinal,
+    CheckpointRule, EventKey, EventRef, EventTableKind, LegFailure, LessonPhase, Mm2Vfs,
+    ParticipantState, Player, PlayerControl, RACE_TICK_HZ, RaceDefinition, RaceProgress, RaceState,
+    ResultLedger, Session, SessionAuthority, SessionEntity, SessionMode, SessionOutcome,
+    SessionPhase, navigation_target, ordinal, place_requirement,
 };
 
 use crate::cnr::{CnrHost, participant_id};
@@ -55,7 +59,8 @@ use crate::lesson::LessonDriver;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::netdrive::NetPlayer;
 use crate::opponents::OpponentDriver;
-use crate::progression::SessionReport;
+use crate::profile::ActiveProfile;
+use crate::progression::{EventRewards, SessionReport};
 use crate::session::SessionControl;
 
 /// What a results row does when activated.
@@ -65,6 +70,8 @@ enum ResultsAction {
     Continue,
     /// The existing restart intent: `Unloading → Menu → begin`.
     Restart,
+    /// The restart intent aimed at the following event ([`NextRace`]).
+    Next,
 }
 
 /// One results-screen row.
@@ -117,14 +124,22 @@ impl ResultsKind {
 /// The results overlay's rows — `has_menu` only changes the continue
 /// row's label, same convention as the pause menu; `kind` names the
 /// restart row for what it replays (a networked match has none).
-fn results_rows(has_menu: bool, kind: ResultsKind) -> Vec<ResultsRow> {
+fn results_rows(has_menu: bool, kind: ResultsKind, next: bool) -> Vec<ResultsRow> {
     if kind == ResultsKind::CnrNetworked {
         return vec![ResultsRow {
             text: "Back to lobby".into(),
             action: ResultsAction::Continue,
         }];
     }
-    vec![
+    let mut rows = Vec::new();
+    // Only a race offers it — `next` is never set for the other kinds.
+    if next && kind == ResultsKind::Race {
+        rows.push(ResultsRow {
+            text: "Next race".into(),
+            action: ResultsAction::Next,
+        });
+    }
+    rows.extend([
         ResultsRow {
             text: if has_menu { "Continue to menu" } else { "Quit" }.into(),
             action: ResultsAction::Continue,
@@ -138,7 +153,134 @@ fn results_rows(has_menu: bool, kind: ResultsKind) -> Vec<ResultsRow> {
             .into(),
             action: ResultsAction::Restart,
         },
-    ]
+    ]);
+    rows
+}
+
+/// The event a win advances to — what [`results_rows`]' *Next race* row
+/// starts. Maintained by [`next_race_update`] while `Results`.
+#[derive(Resource, Default)]
+pub struct NextRace {
+    /// The generation `candidate` was looked up for.
+    generation: u64,
+    /// The authored row after the running event in its city and race
+    /// type, with its save identity — looked up once per session (a
+    /// catalog scan), whether or not the run won.
+    candidate: Option<(EventRef, EventKey)>,
+    /// `candidate`, once the run won and the profile may launch it.
+    /// `None` hides the row.
+    target: Option<EventRef>,
+}
+
+impl NextRace {
+    /// Whether the results screen offers *Next race*.
+    pub fn offered(&self) -> bool {
+        self.target.is_some()
+    }
+}
+
+/// The authored row immediately after `current` in its own city and
+/// race type: the lowest row index above it among `rows`' same-city,
+/// same-table events. Never crosses a city or table, and `None` for the
+/// last row. Crash Course rows are lessons with their own flow
+/// (`ResultsKind::Lesson`), not a race progression.
+fn following_in_type<'a>(
+    current: &EventRef,
+    rows: impl IntoIterator<Item = &'a EventRef>,
+) -> Option<&'a EventRef> {
+    if current.table == EventTableKind::CrashCourse {
+        return None;
+    }
+    rows.into_iter()
+        .filter(|r| {
+            r.city.eq_ignore_ascii_case(&current.city)
+                && r.table == current.table
+                && r.index > current.index
+        })
+        .min_by_key(|r| r.index)
+}
+
+/// The documented win criterion ([`place_requirement`], the one
+/// `record_finish` sets `beaten` by): a finish at or above the
+/// difficulty's required place. A time-out, an unplaced finish and an
+/// unresolved run are not wins.
+fn won_race(
+    state: &ParticipantState,
+    place: Option<u32>,
+    difficulty: mm2_game::Difficulty,
+) -> bool {
+    matches!(state, ParticipantState::Finished { .. })
+        && place.is_some_and(|p| p <= place_requirement(difficulty))
+}
+
+/// Keep [`NextRace`] current while `Results`: look up the following
+/// event once per generation, then offer it only after a win by a
+/// local-authority driver whose profile may launch it (the row is
+/// hidden, not disabled, while it is locked — `record_session_results`
+/// lands the win's unlock a frame after the screen opens, and this
+/// reruns every frame).
+#[allow(clippy::too_many_arguments)]
+pub fn next_race_update(
+    session: Res<Session>,
+    vfs: Option<Res<Mm2Vfs>>,
+    rewards: Option<Res<EventRewards>>,
+    profile: Option<Res<ActiveProfile>>,
+    ledger: Option<Res<ResultLedger>>,
+    cnr: Option<Res<CnrHost>>,
+    replica: Option<Res<CnrReplica>>,
+    lesson: Option<Res<LessonDriver>>,
+    participants: Query<(&Player, &RaceProgress)>,
+    mut next: ResMut<NextRace>,
+) {
+    let mut target = None;
+    if matches!(session.phase(), SessionPhase::Results)
+        && let Some(config) = session.config()
+        && config.authority == SessionAuthority::Local
+        && ResultsKind::of(&session, cnr.as_deref(), replica.as_deref()).or_lesson(lesson.is_some())
+            == ResultsKind::Race
+        && let SessionMode::Event(current) = &config.mode
+    {
+        let generation = session.generation();
+        if next.generation != generation {
+            next.generation = generation;
+            next.candidate = vfs.as_deref().and_then(|vfs| {
+                let catalog = EventCatalog::scan(&vfs.0, &current.city);
+                let following =
+                    following_in_type(current, catalog.events.iter().map(|e| &e.event_ref))?;
+                // An incomplete row cannot launch; the progression does
+                // not skip past it to a later one.
+                let event = catalog.resolve(following).ok()?;
+                let key = EventKey {
+                    city: event.event_ref.city.clone(),
+                    table: event.event_ref.table,
+                    stem: event.stem.clone(),
+                };
+                Some((event.event_ref.clone(), key))
+            });
+        }
+        let won = participants
+            .iter()
+            .find(|(p, _)| p.control == PlayerControl::Local)
+            .is_some_and(|(p, progress)| {
+                let place = ledger
+                    .as_ref()
+                    .and_then(|l| l.place_of_in(generation, p.id));
+                won_race(&progress.state, place, config.difficulty)
+            });
+        if won && let Some((event_ref, key)) = &next.candidate {
+            let avail = rewards.as_ref().and_then(|r| match &profile {
+                Some(p) => r.availability.of(&p.profile, key),
+                None => r.availability.of_unbound(key),
+            });
+            // No availability row means nothing gates the event.
+            if avail.is_none_or(|a| a.unlocked) {
+                target = Some(event_ref.clone());
+            }
+        }
+    }
+    if next.target != target {
+        next.target = target;
+    }
 }
 
 /// The results overlay's presentation state — focus and a redraw
@@ -187,13 +329,18 @@ pub fn results_input(
     cnr: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
     lesson: Option<Res<LessonDriver>>,
+    next: Option<Res<NextRace>>,
 ) {
     if !matches!(session.phase(), SessionPhase::Results) {
         return;
     }
     let kind =
         ResultsKind::of(&session, cnr.as_deref(), replica.as_deref()).or_lesson(lesson.is_some());
-    let rows = results_rows(menu_shell.is_some(), kind);
+    let rows = results_rows(
+        menu_shell.is_some(),
+        kind,
+        next.as_ref().is_some_and(|n| n.offered()),
+    );
     let mut cmds = Vec::new();
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         cmds.push(MenuCommand::Up);
@@ -228,6 +375,10 @@ pub fn results_input(
             MenuCommand::Activate => match rows.get(results.focus).map(|r| r.action) {
                 Some(ResultsAction::Continue) => control.quit = true,
                 Some(ResultsAction::Restart) => control.restart = true,
+                Some(ResultsAction::Next) => {
+                    control.next_event = next.as_ref().and_then(|n| n.target.clone());
+                    control.restart = true;
+                }
                 None => {}
             },
             MenuCommand::Back => control.quit = true,
@@ -434,6 +585,7 @@ pub fn results_present(
     cnr: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
     lesson: Option<Res<LessonDriver>>,
+    next: Option<Res<NextRace>>,
     cars: Query<(&Player, Option<&NetPlayer>)>,
     participants: Query<(&Player, &RaceProgress, Option<&OpponentDriver>)>,
     roots: Query<Entity, (With<ResultsUi>, Without<ChildOf>)>,
@@ -452,7 +604,12 @@ pub fn results_present(
     // behind the screen records its result (DSN-11).
     let report_changed = report.as_ref().is_some_and(|r| r.is_changed());
     let ledger_changed = ledger.as_ref().is_some_and(|l| l.is_changed());
-    if !results.dirty && !report_changed && !ledger_changed && !roots.is_empty() {
+    if !results.dirty
+        && !report_changed
+        && !ledger_changed
+        && !next.as_ref().is_some_and(|n| n.is_changed())
+        && !roots.is_empty()
+    {
         return;
     }
     results.dirty = false;
@@ -576,7 +733,14 @@ pub fn results_present(
         reward_lines(report.as_deref(), generation, &mut lines);
     }
     lines.push((String::new(), 8.0, Color::NONE));
-    for (i, row) in results_rows(menu_shell.is_some(), kind).iter().enumerate() {
+    for (i, row) in results_rows(
+        menu_shell.is_some(),
+        kind,
+        next.as_ref().is_some_and(|n| n.offered()),
+    )
+    .iter()
+    .enumerate()
+    {
         let (text, color) = if i == results.focus {
             // The bundled font has no `›` glyph — ASCII markers only
             // (same constraint as the root menu and pause overlay).
@@ -691,7 +855,7 @@ mod cnr_tests {
     #[test]
     fn the_rows_follow_who_owns_the_restart() {
         let labels = |kind| {
-            results_rows(true, kind)
+            results_rows(true, kind, false)
                 .into_iter()
                 .map(|r| r.text)
                 .collect::<Vec<_>>()
@@ -712,6 +876,143 @@ mod cnr_tests {
         // The lobby mints the next generation: one way on, no fake
         // "play again" that the lifecycle would swallow.
         assert_eq!(labels(ResultsKind::CnrNetworked), ["Back to lobby"]);
+    }
+
+    fn row(city: &str, table: EventTableKind, index: usize) -> EventRef {
+        EventRef {
+            city: city.into(),
+            table,
+            index,
+        }
+    }
+
+    #[test]
+    fn a_win_offers_the_next_row_of_the_same_city_and_type() {
+        use EventTableKind::{Blitz, Checkpoint, Circuit};
+        // A catalog as scanned: tables in order, interleaved cities
+        // are never mixed within one scan, but other tables are.
+        let catalog = [
+            row("sf", Blitz, 0),
+            row("sf", Blitz, 1),
+            row("sf", Checkpoint, 0),
+            row("sf", Checkpoint, 1),
+            row("sf", Checkpoint, 2),
+            row("sf", Circuit, 0),
+        ];
+        // San Francisco Checkpoint race 1 -> race 2.
+        assert_eq!(
+            following_in_type(&row("sf", Checkpoint, 0), &catalog),
+            Some(&row("sf", Checkpoint, 1))
+        );
+        // The final Checkpoint race has no next — it does not run on
+        // into the Circuit table.
+        assert_eq!(following_in_type(&row("sf", Checkpoint, 2), &catalog), None);
+        // Another type stays in its own table.
+        assert_eq!(
+            following_in_type(&row("sf", Blitz, 0), &catalog),
+            Some(&row("sf", Blitz, 1))
+        );
+        // A different city never matches, even at the same index.
+        let london = [row("london", Checkpoint, 1), row("sf", Checkpoint, 1)];
+        assert_eq!(
+            following_in_type(&row("london", Checkpoint, 0), &london),
+            Some(&row("london", Checkpoint, 1))
+        );
+        // Crash Course lessons are not a race progression.
+        let crash = [row("sf", EventTableKind::CrashCourse, 1)];
+        assert_eq!(
+            following_in_type(&row("sf", EventTableKind::CrashCourse, 0), &crash),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_win_counts() {
+        use mm2_game::{
+            Difficulty::{Amateur, Professional},
+            PlayerId, ResultId,
+        };
+        let id = ResultId {
+            generation: 1,
+            participant: PlayerId(0),
+            event: None,
+            sequence: 0,
+        };
+        let finished = ParticipantState::Finished {
+            race_ticks: 100,
+            result: id.clone(),
+        };
+        // Amateur needs the top three, Professional first place.
+        assert!(won_race(&finished, Some(3), Amateur));
+        assert!(!won_race(&finished, Some(4), Amateur));
+        assert!(won_race(&finished, Some(1), Professional));
+        assert!(!won_race(&finished, Some(2), Professional));
+        // A loss: out of time, still racing, or no placing at all.
+        let timed_out = ParticipantState::TimedOut {
+            race_ticks: 100,
+            result: id,
+        };
+        assert!(!won_race(&timed_out, Some(1), Amateur));
+        assert!(!won_race(&ParticipantState::Racing, Some(1), Amateur));
+        assert!(!won_race(&finished, None, Amateur));
+    }
+
+    #[test]
+    fn the_next_row_leads_only_when_offered() {
+        let labels = |kind, next| {
+            results_rows(true, kind, next)
+                .into_iter()
+                .map(|r| r.text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(ResultsKind::Race, true),
+            ["Next race", "Continue to menu", "Restart race"]
+        );
+        // Absent, not disabled, when nothing follows or the run lost.
+        assert_eq!(
+            labels(ResultsKind::Race, false),
+            ["Continue to menu", "Restart race"]
+        );
+        // Never on a lesson or a match screen, whatever the flag says.
+        assert_eq!(
+            labels(ResultsKind::Lesson, true),
+            ["Continue to menu", "Retry lesson"]
+        );
+        assert_eq!(
+            labels(ResultsKind::CnrLocal, true),
+            ["Continue to menu", "Play again"]
+        );
+    }
+
+    #[test]
+    fn next_race_restarts_into_the_following_event_keeping_the_context() {
+        use crate::session::restart_config;
+        use mm2_game::{Densities, Difficulty, SessionConditions, SessionCustomization};
+        let current = row("sf", EventTableKind::Checkpoint, 0);
+        let next = row("sf", EventTableKind::Checkpoint, 1);
+        let config = SessionConfig {
+            mode: SessionMode::Event(current),
+            difficulty: Difficulty::Professional,
+            seed: 7,
+            customization: Some(SessionCustomization {
+                conditions: SessionConditions::default(),
+                densities: Densities::default(),
+                race: None,
+            }),
+            ..SessionConfig::default()
+        };
+        // A plain restart replays the retained config untouched.
+        assert_eq!(
+            restart_config(config.clone(), None).mode,
+            config.mode.clone()
+        );
+        let began = restart_config(config.clone(), Some(next.clone()));
+        assert_eq!(began.mode, SessionMode::Event(next));
+        assert_eq!(began.difficulty, Difficulty::Professional);
+        assert_eq!(began.seed, 7);
+        assert_eq!(began.vehicle, config.vehicle);
+        assert!(began.customization.is_none());
     }
 
     #[test]
@@ -740,6 +1041,7 @@ mod cnr_tests {
         app.insert_resource(s)
             .insert_resource(replica)
             .init_resource::<ResultsMenu>()
+            .init_resource::<NextRace>()
             .add_systems(Update, results_present);
         app.update();
         let shown = shown(&mut app);

@@ -786,6 +786,7 @@ fn begin_wired(
     session.begin_generation(config, generation)?;
     control.quit = false;
     control.restart = false;
+    control.next_event = None;
     control.pause = false;
     Ok(())
 }
@@ -2688,6 +2689,7 @@ mod tests {
         let mut control = SessionControl {
             quit: true,
             restart: true,
+            next_event: None,
             pause: true,
         };
         begin_wired(&mut session, &mut control, SessionConfig::default(), 4).unwrap();
