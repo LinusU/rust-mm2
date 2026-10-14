@@ -1426,9 +1426,13 @@ pub fn opponent_drive(
             d.stats.last_pos = None;
             // A car that has finished pulls up, as the original's does
             // at its finish point; one waiting for the start, out of
-            // route or without one just holds no pedal.
+            // route or without one just holds no pedal. A car the
+            // countdown has not yet released takes the standing hold a
+            // stopped car takes — the original's stopped-hold, which
+            // only ever armed for the human driver — so a sloped
+            // starting grid cannot roll the field away before GO.
             *input = VehicleInput {
-                handbrake: if racing { 0.0 } else { 1.0 },
+                handbrake: if racing && !locked { 0.0 } else { 1.0 },
                 ..default()
             };
             continue;

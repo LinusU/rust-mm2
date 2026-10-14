@@ -89,6 +89,121 @@ fn rows(record: &str) -> Vec<Row> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// #1445 — a sloped starting grid must not roll the field away
+// ---------------------------------------------------------------------------
+
+/// Pre-start drift an opponent may show on a retail grid: the spawn's
+/// hull-lift settle, not a roll. The bug moved cars up to 16 m and left
+/// metres per second of velocity behind; a held field lands well under
+/// this.
+const RETAIL_HELD_DRIFT_M: f32 = 0.75;
+
+/// Frames to let the lifted spawns drop onto the grid before the staged
+/// pose is recorded, and to then watch the held field — together short
+/// of the 3 s countdown.
+const RETAIL_SETTLE: usize = 30;
+const RETAIL_HELD_WATCH: usize = 90;
+
+/// #1445 on authored data: on the real San Francisco checkpoint grids —
+/// Golden Hour's hill among them — no AI car rolls while the countdown
+/// holds the field, and none carries momentum into GO. The synthetic
+/// legs in `opponents.rs` prove the fix deterministically; this shows it
+/// on the shipped slopes. Opt-in (`MM2_RETAIL=<dir>`), skipped without
+/// the operator's install.
+#[test]
+fn retail_sloped_grids_hold_opponents_through_the_countdown() {
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position};
+    use bevy::prelude::*;
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::{
+        EventRef, EventTableKind, Player, PlayerControl, SessionConfig, SessionMode, SessionPhase,
+        WorldMode,
+    };
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; retail sloped-grid hold NOT run");
+        return;
+    };
+    let session_phase = |app: &App| app.world().resource::<mm2_game::Session>().phase().clone();
+    let mut checked = 0;
+    for index in 0..12 {
+        let mut vfs = mm2_assets::Vfs::new();
+        mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+        let config = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/sf.psdl".into(),
+            },
+            mode: SessionMode::Event(EventRef {
+                city: "sf".into(),
+                table: EventTableKind::Checkpoint,
+                index,
+            }),
+            ..SessionConfig::default()
+        };
+        let mut app = crate::opponents::event_app(config, vfs);
+        let mut reached = false;
+        for _ in 0..900 {
+            app.update();
+            if session_phase(&app) == SessionPhase::Countdown {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "sf checkpoint {index} never reached its countdown");
+
+        // Let the lifted spawns settle onto the grid, then treat those as
+        // the staged poses: it is the countdown's own drift that must be
+        // zero, not the spawn's initial drop.
+        for _ in 0..RETAIL_SETTLE {
+            app.update();
+        }
+        let mut ai = app.world_mut().query::<(Entity, &Player, &Position)>();
+        let staged: Vec<(Entity, Vec3)> = ai
+            .iter(app.world())
+            .filter(|(_, p, _)| p.control == PlayerControl::Ai)
+            .map(|(e, _, pos)| (e, pos.0))
+            .collect();
+        assert!(
+            !staged.is_empty(),
+            "sf checkpoint {index}: no AI on the grid"
+        );
+
+        for _ in 0..RETAIL_HELD_WATCH {
+            app.update();
+        }
+        assert_eq!(
+            session_phase(&app),
+            SessionPhase::Countdown,
+            "sf checkpoint {index}: countdown ended before the hold was checked"
+        );
+        for (e, from) in staged {
+            let at = app.world().get::<Position>(e).unwrap().0;
+            let drift = (at - from).with_y(0.0).length();
+            assert!(
+                drift < RETAIL_HELD_DRIFT_M,
+                "sf checkpoint {index}: opponent {e:?} rolled {drift:.2} m down the grid: {from:?} → {at:?}"
+            );
+            let v = app.world().get::<LinearVelocity>(e).unwrap().0;
+            assert!(
+                v.length() < 0.1,
+                "sf checkpoint {index}: opponent {e:?} carries {v:?} into GO"
+            );
+            let w = app.world().get::<AngularVelocity>(e).unwrap().0;
+            assert!(
+                w.length() < 0.1,
+                "sf checkpoint {index}: opponent {e:?} spins at {w:?} before GO"
+            );
+        }
+        checked += 1;
+    }
+    eprintln!("sf sloped grids held through the countdown: {checked}");
+    assert!(
+        checked >= 10,
+        "too few SF checkpoint grids exercised: {checked}"
+    );
+}
+
 #[test]
 fn retail_events_race_the_authored_lineup_finitely_with_bounded_stuck_spells() {
     let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {

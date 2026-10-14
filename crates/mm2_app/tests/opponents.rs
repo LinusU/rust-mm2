@@ -810,8 +810,10 @@ fn authored_staging_heading_faces_the_spawn() {
     );
 }
 
-/// The countdown's input lock holds opponents still — `VehicleInput`
-/// stays zeroed until the race releases.
+/// The countdown's input lock holds opponents still: no throttle, brake
+/// or steering reaches the sim, and the car stands on the handbrake —
+/// the original's not-drivable hold, so a sloped grid cannot roll the
+/// field away before GO (#1445).
 #[test]
 fn countdown_locks_opponent_input() {
     let tmp = roster_install("", &[]);
@@ -823,8 +825,8 @@ fn countdown_locks_opponent_input() {
         let input = app.world().get::<VehicleInput>(e).unwrap();
         assert_eq!(
             (input.throttle, input.brake, input.steering, input.handbrake),
-            (0.0, 0.0, 0.0, 0.0),
-            "countdown must hold opponent input"
+            (0.0, 0.0, 0.0, 1.0),
+            "countdown must hold opponent input on the standing handbrake"
         );
     }
 }
@@ -853,6 +855,214 @@ fn a_held_countdown_holds_the_field() {
         .held = false;
     run(&mut app, 300);
     assert_eq!(phase(&app), SessionPhase::Playing);
+}
+
+// ---------------------------------------------------------------------------
+// #1445 — a sloped starting grid must not roll the field away
+// ---------------------------------------------------------------------------
+
+/// The angle of the synthetic starting grid: the road climbs in +X, so a
+/// car held with no pedal rolls *backwards* (−X) down it. That is the bug
+/// #1445 reports, scaled down to a fixture the tests can drive.
+const GRID_SLOPE_DEG: f32 = 6.0;
+
+/// Where the sloped road meets the flat dev-world ground (y = 0): the
+/// staging at x = 70 already stands `GRID_SLOPE_FOOT_X` metres uphill, so
+/// a car that rolls off the hill has metres to fall, not a kerb.
+const GRID_SLOPE_FOOT_X: f32 = 20.0;
+
+/// The height the sloped road carries at `x`.
+fn grid_ground_y(x: f32) -> f32 {
+    (x - GRID_SLOPE_FOOT_X) * GRID_SLOPE_DEG.to_radians().tan()
+}
+
+/// `roster_install`'s course re-authored to climb the 6° road: the
+/// waypoints and both `.opp` routes carry the slope's height, so a car
+/// stages *on* the hill rather than in the air above it (a gate's ±8 m
+/// vertical extent would reject a car 17 m up at the finish).
+fn sloped_install() -> tempfile::TempDir {
+    let tmp = roster_install("", &[]);
+    for (rel, z) in [("race0-a-0.opp", 140.0_f32), ("race0-a-1.opp", 146.0)] {
+        let points: Vec<[f32; 3]> = [70.0, 110.0, 140.0, 165.0, 180.0]
+            .iter()
+            .map(|x| [*x, grid_ground_y(*x), z])
+            .collect();
+        write(
+            tmp.path(),
+            &format!("race/testcity/{rel}"),
+            opp_file(&points),
+        );
+    }
+    let mut wp = WAYPOINTS.to_string();
+    for x in [60.0, 110.0, 140.0, 165.0, 180.0] {
+        wp.push_str(&format!(
+            "{x},{},{},-90,15,0,0,0,\n",
+            grid_ground_y(x),
+            COURSE_Z
+        ));
+    }
+    write(tmp.path(), "race/testcity/race0waypoints.csv", wp);
+    tmp
+}
+
+/// The sloped event on a tilted static slab whose top face is the plane
+/// `y = grid_ground_y(x)` across the whole course. The dev world is flat
+/// here, so the slab supplies the hill; the flat ground lies metres below
+/// its downhill end, out of a rolling car's reach.
+fn sloped_grid_app() -> (tempfile::TempDir, App) {
+    let tmp = sloped_install();
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    let angle = GRID_SLOPE_DEG.to_radians();
+    let (width, thickness) = (240.0_f32, 0.5_f32);
+    let center_x = 100.0; // spans x ∈ [−20, 220] under the course
+    // The top face is offset by half the slab's thickness; solve its
+    // centre so the face sits exactly on the road plane.
+    let top_center_x = center_x - (thickness * 0.5) * angle.sin();
+    let center_y = grid_ground_y(top_center_x) - (thickness * 0.5) * angle.cos();
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(width, thickness, 80.0),
+        Transform {
+            translation: Vec3::new(center_x, center_y, 143.0),
+            rotation: Quat::from_rotation_z(angle),
+            ..default()
+        },
+    ));
+    app.update();
+    (tmp, app)
+}
+
+/// Run the session until its countdown begins.
+fn run_until_countdown(app: &mut App) {
+    for _ in 0..600 {
+        app.update();
+        if phase(app) == SessionPhase::Countdown {
+            return;
+        }
+    }
+    panic!("the session never reached its countdown");
+}
+
+/// Ticks left in the race's countdown, `None` once it has released.
+fn countdown_remaining(app: &App) -> Option<u32> {
+    match app.world().resource::<RaceState>().phase {
+        mm2_game::RacePhase::Countdown { remaining } => Some(remaining),
+        _ => None,
+    }
+}
+
+/// #1445: an AI car staged on a hill must not roll away while the
+/// countdown holds the field. The grid climbs 6°; with no pedal the car
+/// would slide backwards down it, so the held countdown must stand it on
+/// the handbrake and leave it at its grid pose with zero momentum.
+#[test]
+fn a_sloped_grid_holds_opponents_through_the_countdown() {
+    let (_tmp, mut app) = sloped_grid_app();
+    run_until_countdown(&mut app);
+    // Let the lifted spawn drop onto the hill before calling this pose
+    // the grid: the countdown drift is what must be zero, not the drop.
+    run(&mut app, 30);
+    let staged: Vec<(Entity, Vec3, Quat)> = opponents(&mut app)
+        .into_iter()
+        .map(|e| {
+            (
+                e,
+                app.world().get::<Position>(e).unwrap().0,
+                app.world().get::<Rotation>(e).unwrap().0,
+            )
+        })
+        .collect();
+    assert_eq!(staged.len(), 2, "the authored roster is staged");
+
+    run(&mut app, 90); // still well inside the ~180-tick countdown
+    assert_eq!(phase(&app), SessionPhase::Countdown, "still counting down");
+    for (e, from, rot) in staged {
+        let at = app.world().get::<Position>(e).unwrap().0;
+        let rolled = (at - from).with_y(0.0).length();
+        assert!(
+            rolled < 0.05,
+            "opponent {e:?} rolled {rolled:.3} m down the hill: {from:?} → {at:?}"
+        );
+        let v = app.world().get::<LinearVelocity>(e).unwrap().0;
+        assert!(v.length() < 0.02, "opponent {e:?} carries {v:?} into GO");
+        let w = app.world().get::<AngularVelocity>(e).unwrap().0;
+        assert!(w.length() < 0.02, "opponent {e:?} spins at {w:?} before GO");
+        let yawed = app.world().get::<Rotation>(e).unwrap().0.angle_between(rot);
+        assert!(yawed < 0.01, "opponent {e:?} yawed {yawed} rad on the hill");
+    }
+}
+
+/// #1445: released from the slope, each opponent leaves its grid spot
+/// forwards with no backwards roll stored up — the momentum the bug
+/// handed the field just before GO.
+#[test]
+fn opponents_release_from_a_sloped_grid_without_backward_momentum() {
+    let (_tmp, mut app) = sloped_grid_app();
+    run_until_countdown(&mut app);
+    run(&mut app, 30); // settle the spawn drop onto the hill
+    let staged: Vec<(Entity, Vec3)> = opponents(&mut app)
+        .into_iter()
+        .map(|e| (e, app.world().get::<Position>(e).unwrap().0))
+        .collect();
+    assert_eq!(staged.len(), 2, "the authored roster is staged");
+
+    // Count the countdown out to its last held tick and read the field
+    // there: it must carry no momentum into GO.
+    for _ in 0..300 {
+        if countdown_remaining(&app) == Some(1) {
+            break;
+        }
+        assert_eq!(phase(&app), SessionPhase::Countdown, "still counting down");
+        app.update();
+    }
+    assert_eq!(countdown_remaining(&app), Some(1), "reached the last tick");
+    for (e, from) in &staged {
+        let at = app.world().get::<Position>(*e).unwrap().0;
+        assert!(
+            (at - *from).with_y(0.0).length() < 0.05,
+            "opponent {e:?} drifted to {at:?} before GO"
+        );
+        let v = app.world().get::<LinearVelocity>(*e).unwrap().0;
+        assert!(v.length() < 0.02, "opponent {e:?} carries {v:?} into GO");
+    }
+
+    // GO: the countdown releases with no launch impulse ...
+    for _ in 0..5 {
+        app.update();
+        if phase(&app) != SessionPhase::Countdown {
+            break;
+        }
+    }
+    assert_eq!(phase(&app), SessionPhase::Playing, "the countdown released");
+    for (e, _) in &staged {
+        let v = app.world().get::<LinearVelocity>(*e).unwrap().0;
+        assert!(v.length() < 1.0, "opponent {e:?} launched at {v:?}");
+    }
+
+    // ... and each held car drives off forwards, never rolling back down
+    // the hill it was staged on.
+    let mut worst_back: Vec<f32> = vec![0.0; staged.len()];
+    for _ in 0..120 {
+        app.update();
+        for (i, (e, from)) in staged.iter().enumerate() {
+            let at = app.world().get::<Position>(*e).unwrap().0;
+            worst_back[i] = worst_back[i].min(at.x - from.x);
+        }
+    }
+    for (i, (e, from)) in staged.iter().enumerate() {
+        let at = app.world().get::<Position>(*e).unwrap().0;
+        let v = app.world().get::<LinearVelocity>(*e).unwrap().0;
+        assert!(v.x > 0.0, "opponent {e:?} is not driving forwards: {v:?}");
+        assert!(
+            (at - from).with_y(0.0).x > 1.0,
+            "opponent {e:?} did not leave the grid forwards: {from:?} → {at:?}"
+        );
+        assert!(
+            worst_back[i] > -0.5,
+            "opponent {e:?} rolled {:.3} m back down the hill",
+            worst_back[i]
+        );
+    }
 }
 
 /// Opponents drive their authored `.opp` routes through real physics and
