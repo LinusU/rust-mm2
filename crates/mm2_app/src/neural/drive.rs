@@ -138,9 +138,15 @@ impl DrivingPolicies {
 
 /// Mass (kg) from which a prop is something to drive round rather than
 /// through. Retail parked cars weigh 725–2200 kg, street lights and
-/// telephone poles 640–950, trees 450–1260; under 500 are barrels,
-/// carts, phone boxes and the checkpoint markers themselves.
-pub const HEAVY_PROP: f32 = 500.0;
+/// telephone poles 640–950 and trees 450–1260 — London's walled
+/// street trees are the lightest, and a line that grazed one at a
+/// corner wedged car after car against it. Under 400 are phone boxes,
+/// awnings, dumpsters and the checkpoint markers themselves.
+pub const HEAVY_PROP: f32 = 400.0;
+
+/// Guide distance (m) between two re-anchors within which the second
+/// is the first one's predicament again.
+pub const REANCHOR_SAME: f32 = 30.0;
 
 /// One car's neural-driver state.
 #[derive(Debug, Clone)]

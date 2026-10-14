@@ -67,17 +67,30 @@ const GROUND_CLOSE: f32 = 3.0;
 /// under the ground — inside a hill between two authored points.
 const GROUND_BURIED: f32 = 24.0;
 /// Sideways moves (m, positive right) [`Guide::cleared`] tries for a
-/// stretch something stands on, nearest first: half a lane, a lane, a
-/// lane and a half.
-const CLEAR_OFFSETS: [f32; 6] = [-1.5, 1.5, -3.0, 3.0, -4.5, 4.5];
+/// stretch something stands on, nearest first, out to a lane and a
+/// half.
+const CLEAR_OFFSETS: [f32; 12] = [
+    -0.75, 0.75, -1.5, 1.5, -2.25, 2.25, -3.0, 3.0, -3.75, 3.75, -4.5, 4.5,
+];
+/// How far above the way's own height (m) a moved line must be in
+/// plain sight of the line as drawn — over a parked car, under no
+/// wall. A clear stretch of floor the other side of a shop front is
+/// not a way round.
+const CLEAR_SIGHT: f32 = 2.0;
+/// A sideways move smaller than this (m) is not one.
+const CLEAR_LEAST: f32 = 0.15;
 /// Points before an obstructed one that take its sideways move too —
 /// the line is over before the car arrives.
 const CLEAR_LEAD: usize = 5;
 /// Points after it that keep the move.
 const CLEAR_TRAIL: usize = 2;
-/// Half the width (m) of the way [`way_open`] wants clear: a car and
-/// a little air either side.
+/// Half the width (m) of the way a car needs: itself and a little air
+/// either side.
 const CLEAR_HALF_WIDTH: f32 = 1.3;
+/// Half the width (m) of the way [`Guide::cleared`] would like: the
+/// line is where a car aims, not where it goes, and a car cutting a
+/// corner two metres inside its line met the tree the line had missed.
+const CLEAR_AIR: f32 = 2.4;
 /// Height (m) above the line at which the way is looked along: over a
 /// kerb, into a bumper.
 const CLEAR_HEIGHT: f32 = 0.8;
@@ -138,9 +151,9 @@ pub fn ground_near(p: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<(f32, bool
 }
 
 /// Whether a car can drive straight from `a` to `b`: nothing solid
-/// across a car's width of the way, and — where `beside` asks, because
-/// the way is one the line would be moved to — ground under both its
-/// edges at `b`, level with it.
+/// within `air` metres either side of the way, and — where `beside`
+/// asks, because the way is one the line would be moved to — ground
+/// under both edges of a car at `b`, level with it.
 ///
 /// `ray` looks from a point along a direction for a distance and
 /// answers with how far it went and the normal of what it met; a
@@ -151,6 +164,7 @@ pub fn way_open(
     a: Vec3,
     b: Vec3,
     beside: bool,
+    air: f32,
     mut ray: impl FnMut(Vec3, Vec3, f32) -> Option<(f32, Vec3)>,
     mut ground: impl FnMut(Vec3) -> Option<f32>,
 ) -> bool {
@@ -159,7 +173,7 @@ pub fn way_open(
         return true;
     };
     let right = Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
-    for across in [-CLEAR_HALF_WIDTH, 0.0, CLEAR_HALF_WIDTH] {
+    for across in [-air, -0.5 * air, 0.0, 0.5 * air, air] {
         let from = a + right * across + Vec3::Y * CLEAR_HEIGHT;
         if ray(from, dir, along.length()).is_some_and(|(_, normal)| normal.y < 0.7) {
             return false;
@@ -183,7 +197,9 @@ pub fn laid_on_world(
     mut ray: impl FnMut(Vec3, Vec3, f32) -> Option<(f32, Vec3)>,
 ) -> Guide {
     let grounded = guide.regrounded(|p| ground_near(p, &mut down));
-    grounded.cleared(|a, b, beside| way_open(a, b, beside, &mut ray, |p| ground_near(p, &mut down)))
+    grounded.cleared(|a, b, beside, air| {
+        way_open(a, b, beside, air, &mut ray, |p| ground_near(p, &mut down))
+    })
 }
 
 impl Guide {
@@ -195,19 +211,21 @@ impl Guide {
     /// round one; shown a line through forty it spends the street
     /// correcting, and the slow ones stall against a bumper.
     ///
-    /// `open(a, b, beside)` says whether a car can drive from `a` to
-    /// `b` ([`way_open`]). Each stretch between two points that it
-    /// cannot is tried [`CLEAR_OFFSETS`] to either side, nearest
-    /// first and the side of the last move before the other, and the
-    /// first open one is taken; a stretch with no way round keeps its
-    /// line. The move starts [`CLEAR_LEAD`] points early, holds
+    /// `open(a, b, beside, air)` says whether a car can drive from
+    /// `a` to `b` with `air` metres clear either side ([`way_open`]).
+    /// Each stretch between two points without [`CLEAR_AIR`] is tried
+    /// [`CLEAR_OFFSETS`] to either side, nearest first and the side of
+    /// the last move before the other, and the first with that much
+    /// air is taken. A street too narrow to give it settles for a
+    /// car's width ([`CLEAR_HALF_WIDTH`]), and a stretch with no way
+    /// round at all keeps its line. The move starts [`CLEAR_LEAD`] points early, holds
     /// [`CLEAR_TRAIL`] after, and is eased in and out — and a run of
     /// moved line that turns out to cross something itself is put
     /// back where it was.
     ///
     /// Like [`Guide::regrounded`] this moves points and leaves arc
     /// positions as they were.
-    pub fn cleared(&self, mut open: impl FnMut(Vec3, Vec3, bool) -> bool) -> Self {
+    pub fn cleared(&self, mut open: impl FnMut(Vec3, Vec3, bool, f32) -> bool) -> Self {
         let n = self.points.len();
         let wrap = |i: isize| -> usize {
             (if self.closed {
@@ -231,7 +249,7 @@ impl Guide {
         let mut any = false;
         for i in 0..n {
             let Some(j) = before(i) else { continue };
-            if open(at(j, 0.0), at(i, 0.0), false) {
+            if open(at(j, 0.0), at(i, 0.0), false, CLEAR_AIR) {
                 continue;
             }
             let mut tries = CLEAR_OFFSETS;
@@ -240,7 +258,30 @@ impl Guide {
                     .partial_cmp(&(y.abs(), y.signum() != side))
                     .unwrap()
             });
-            if let Some(o) = tries.into_iter().find(|&o| open(at(j, o), at(i, o), true)) {
+            let mut found = None;
+            // No such room anywhere: as drawn if a car fits, else
+            // wherever one does.
+            for air in [CLEAR_AIR, CLEAR_HALF_WIDTH] {
+                if air < CLEAR_AIR && open(at(j, 0.0), at(i, 0.0), false, air) {
+                    break;
+                }
+                found = tries.into_iter().find(|&o| {
+                    open(at(j, o), at(i, o), true, air)
+                        // …and is on this side of any wall: seen from
+                        // the line, over the roof of whatever is
+                        // parked on it.
+                        && open(
+                            at(i, 0.0) + Vec3::Y * CLEAR_SIGHT,
+                            at(i, o) + Vec3::Y * CLEAR_SIGHT,
+                            false,
+                            0.0,
+                        )
+                });
+                if found.is_some() {
+                    break;
+                }
+            }
+            if let Some(o) = found {
                 wanted[i] = o;
                 wanted[j] = if wanted[j].abs() < o.abs() {
                     o
@@ -281,17 +322,17 @@ impl Guide {
         // A moved run that is itself obstructed goes back.
         let mut i = 0;
         while i < n {
-            if moved[i].abs() < 0.05 {
+            if moved[i].abs() < CLEAR_LEAST {
                 moved[i] = 0.0;
                 i += 1;
                 continue;
             }
-            let end = (i..n).find(|&k| moved[k].abs() < 0.05).unwrap_or(n);
+            let end = (i..n).find(|&k| moved[k].abs() < CLEAR_LEAST).unwrap_or(n);
             // Worse than it was: shut where the line as drawn is open.
             let blocked = (i..end).any(|k| {
                 before(k).is_some_and(|j| {
-                    !open(at(j, moved[j]), at(k, moved[k]), true)
-                        && open(at(j, 0.0), at(k, 0.0), false)
+                    !open(at(j, moved[j]), at(k, moved[k]), true, CLEAR_HALF_WIDTH)
+                        && open(at(j, 0.0), at(k, 0.0), false, CLEAR_HALF_WIDTH)
                 })
             });
             if blocked {
@@ -887,11 +928,12 @@ mod tests {
             (-6.0..=6.0).contains(&p.z).then_some(0.0)
         }
 
-        fn open(&self, a: Vec3, b: Vec3, beside: bool) -> bool {
+        fn open(&self, a: Vec3, b: Vec3, beside: bool, air: f32) -> bool {
             way_open(
                 a,
                 b,
                 beside,
+                air,
                 |f, d, r| self.ray(f, d, r),
                 |p| self.ground(p),
             )
@@ -909,14 +951,18 @@ mod tests {
             boxes: vec![[50.0, 54.5, -1.0, 1.0]],
         };
         let p = |x: f32, z: f32| Vec3::new(x, 0.0, z);
-        assert!(street.open(p(40.0, 0.0), p(45.0, 0.0), false));
-        assert!(!street.open(p(45.0, 0.0), p(50.5, 0.0), false));
-        // Half a lane over still clips it; a lane over is clear.
-        assert!(!street.open(p(45.0, 1.5), p(50.5, 1.5), true));
-        assert!(street.open(p(45.0, 3.0), p(50.5, 3.0), true));
+        let car = CLEAR_HALF_WIDTH;
+        assert!(street.open(p(40.0, 0.0), p(45.0, 0.0), false, car));
+        assert!(!street.open(p(45.0, 0.0), p(50.5, 0.0), false, car));
+        // Half a lane over still clips it; a lane over is clear…
+        assert!(!street.open(p(45.0, 1.5), p(50.5, 1.5), true, car));
+        assert!(street.open(p(45.0, 3.0), p(50.5, 3.0), true, car));
+        // …by a car's width, not by room to spare.
+        assert!(!street.open(p(45.0, 3.0), p(50.5, 3.0), true, CLEAR_AIR));
+        assert!(street.open(p(45.0, 4.5), p(50.5, 4.5), true, CLEAR_AIR));
         // Off the edge of the quay is no way round, however clear.
-        assert!(!street.open(p(45.0, 5.5), p(50.5, 5.5), true));
-        assert!(street.open(p(45.0, 5.5), p(50.5, 5.5), false));
+        assert!(!street.open(p(45.0, 5.5), p(50.5, 5.5), true, car));
+        assert!(street.open(p(45.0, 5.5), p(50.5, 5.5), false, car));
     }
 
     #[test]
@@ -930,14 +976,14 @@ mod tests {
             ],
         };
         let line = along_x();
-        let clear = line.cleared(|a, b, beside| street.open(a, b, beside));
+        let clear = line.cleared(|a, b, beside, air| street.open(a, b, beside, air));
         // The whole way is open now, a car's width of it.
         for i in 0..40 {
             let (a, b) = (
                 clear.point_at(i as f32 * 5.0),
                 clear.point_at(i as f32 * 5.0 + 5.0),
             );
-            assert!(street.open(a, b, false), "blocked {a} → {b}");
+            assert!(street.open(a, b, false, CLEAR_AIR), "blocked {a} → {b}");
         }
         // It moved over before the first car and came back after the
         // last, and nowhere else.
@@ -945,12 +991,83 @@ mod tests {
         assert!(off(45.0) > 2.0 && off(55.0) > 2.9 && off(65.0) > 2.9);
         assert_eq!(off(0.0), 0.0);
         assert_eq!(off(110.0), 0.0);
-        assert!(off(30.0) < off(40.0), "eased in");
+        assert!(off(15.0) < off(25.0), "eased in");
         // Arc positions stand.
         assert_eq!(clear.length(), line.length());
         // A clear street is left alone.
         let empty = Street { boxes: vec![] };
-        assert_eq!(line.cleared(|a, b, beside| empty.open(a, b, beside)), line);
+        assert_eq!(
+            line.cleared(|a, b, beside, air| empty.open(a, b, beside, air)),
+            line
+        );
+    }
+
+    #[test]
+    fn a_cleared_guide_settles_for_a_cars_width_in_a_narrow_street() {
+        // Walls 3.6 m either side and a car parked against one: room
+        // to pass, none to spare.
+        let street = Street {
+            boxes: vec![
+                [0.0, 200.0, -12.0, -3.6],
+                [0.0, 200.0, 3.6, 12.0],
+                [50.0, 54.5, -3.6, -1.5],
+            ],
+        };
+        let line = along_x();
+        let clear = line.cleared(|a, b, beside, air| street.open(a, b, beside, air));
+        // The line as drawn passes the car by a car's width: it stays.
+        assert!(street.open(
+            line.point_at(45.0),
+            line.point_at(50.5),
+            false,
+            CLEAR_HALF_WIDTH
+        ));
+        assert_eq!(clear, line);
+        // Parked on the line itself, the line goes round it.
+        let street = Street {
+            boxes: vec![
+                [0.0, 200.0, -12.0, -3.6],
+                [0.0, 200.0, 3.6, 12.0],
+                [50.0, 54.5, -3.6, 0.5],
+            ],
+        };
+        let clear = line.cleared(|a, b, beside, air| street.open(a, b, beside, air));
+        assert!(clear.point_at(52.0).z > 1.0, "{}", clear.point_at(52.0));
+        for i in 0..40 {
+            let (a, b) = (
+                clear.point_at(i as f32 * 5.0),
+                clear.point_at(i as f32 * 5.0 + 5.0),
+            );
+            assert!(
+                street.open(a, b, false, CLEAR_HALF_WIDTH),
+                "blocked {a} → {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_guide_does_not_move_through_a_wall() {
+        // A car on the line, and the only clear ground a lane over is
+        // behind a wall no ray along the street meets: every sight line
+        // from the street to it is shut.
+        let street = Street {
+            boxes: vec![[50.0, 54.5, -1.0, 1.0]],
+        };
+        let line = along_x();
+        let walled = |a: Vec3, b: Vec3, beside: bool, air: f32| {
+            let sight = a.y > 1.0;
+            if sight {
+                // Sight lines run across the street; walls stand at
+                // z = ±2.
+                a.z.abs().max(b.z.abs()) < 2.0
+            } else {
+                street.open(a, b, beside, air)
+            }
+        };
+        let clear = line.cleared(walled);
+        for i in 0..=40 {
+            assert!(clear.point_at(i as f32 * 5.0).z.abs() < 2.0);
+        }
     }
 
     #[test]
@@ -960,7 +1077,10 @@ mod tests {
             boxes: vec![[50.0, 51.0, -6.0, 6.0]],
         };
         let line = along_x();
-        assert_eq!(line.cleared(|a, b, beside| street.open(a, b, beside)), line);
+        assert_eq!(
+            line.cleared(|a, b, beside, air| street.open(a, b, beside, air)),
+            line
+        );
     }
 
     #[test]
