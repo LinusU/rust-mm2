@@ -7,14 +7,14 @@
 # Writes one `<city>-<table>-<row>-<a|p>.txt` smoke record per race under
 # <out-dir>, then prints the totals: opponents finished / fielded and
 # re-anchor teleports, per difficulty. A race runs until its field has
-# finished or [frames] (default 21600, six minutes) are up. Copy the
-# binary somewhere stable first — rebuilding under a running sweep mixes
-# two builds.
+# finished or [frames] are up (default 43200, twelve minutes: a
+# three-lap circuit is 15 km). Copy the binary somewhere stable first —
+# rebuilding under a running sweep mixes two builds.
 set -eu
 bin=$1
 out=$2
 jobs=${3:-4}
-frames=${4:-21600}
+frames=${4:-43200}
 : "${MM2_RETAIL:?set MM2_RETAIL to the original install}"
 mkdir -p "$out"
 export MM2_BIN="$bin" MM2_OUT="$out" MM2_FRAMES="$frames"
