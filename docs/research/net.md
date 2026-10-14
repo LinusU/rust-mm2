@@ -2273,6 +2273,36 @@ sleep standing in for "the datum has crossed a socket or thread").
   impairment proxy, and `net_edge.rs::a_killed_host_ends_a_driving_client`
   waits on it before the kill instead of sleeping 2 s.
 
+### Side-effect dedup under reconciliation (F25-AC04)
+
+`net_drive::side_effects_are_applied_once_under_reconciliation_on_an_impaired_link`
+(retail, skipped without `MM2_RETAIL`) runs the host's bot through
+`--event checkpoint:0` on San Francisco while alice rams and bob parks,
+all through a seeded relay with 20% loss, 15% duplication and 15%
+reordering each way (the test asserts the relay did all three). It reads
+existing `smoke=` counters only, comparing the clients with the
+authority's terminal record:
+
+- **Impact rows / sounds / sparks / splats:** bob's `imp…a` (rows applied)
+  never exceeds the host's `imp…s` (rows sent); his `spk=` bursts and
+  `txl=` impacts each equal the rows applied exactly, and the impact
+  voices (`aud …/Ni`) plus scrape-held re-contacts (`/NS`) stay within it.
+  Voices are also bounded by `MAX_IMPACT_VOICES` and sub-floor touches are
+  authored silence, so the voice check is an upper bound, not equality.
+- **Damage:** the host's `dup=0`; a client has no pipeline `dmg=`
+  applications (its state arrives on the v8 damage byte).
+- **Checkpoints:** the host finishes `cp=6/6` with one result per seat
+  (`results=3`); no record counts past the course's end.
+- **Fragments:** a client's broken-prop count in `bng=` never exceeds the
+  host's.
+
+Measured once (seed `0xF25AC04`): host 65 rows sent, bob 51 applied with
+51 spark bursts and 51 splats. Not covered: a client-side fragment-spawn
+counter (the prop census is a state count, not an event count), and an
+exact voice-equals-rows check, which the voice cap prevents. Evidence
+level: synthetic integration on loopback with retail content; the relay is
+not a measured WAN.
+
 ## Evidence level
 
 Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real

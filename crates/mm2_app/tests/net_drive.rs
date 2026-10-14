@@ -3045,6 +3045,141 @@ fn a_networked_retail_race_agrees_across_an_impaired_link() {
     }
 }
 
+/// F25-AC04 at process level: three real processes race a checkpoint
+/// event on retail San Francisco through a relay that drops (20%),
+/// duplicates (15%) and reorders (15%) both directions. The host's bot
+/// drives the course, alice rams the nearest car and bob sits parked,
+/// so bob learns of every collision from the wire alone. Reads the
+/// existing `smoke=` counters: replicated impact rows present once (one
+/// spark burst, one texel splat, at most one voice per applied row, never
+/// more rows than the authority sent), a client's damage pipeline applies
+/// nothing for a hit it only heard about, the authority sees no duplicate
+/// damage delivery, the checkpoint course completes once (`cp=6/6`, one
+/// result per seat) and no client has more broken props than the
+/// authority. Skipped without `MM2_RETAIL=<dir>`.
+#[test]
+fn side_effects_are_applied_once_under_reconciliation_on_an_impaired_link() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 90_000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(
+        ["--city", "sf", "--event", "checkpoint:0", "--bot"]
+            .into_iter()
+            .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let proxy = ImpairProxy::loopback_seeded(addr, 0xF25_AC04).unwrap();
+    let mut alice_args = join_args(&retail, proxy.addr(), "alice", 45_000);
+    alice_args.push("--ram".into());
+    let mut bob_args = join_args(&retail, proxy.addr(), "bob", 45_000);
+    bob_args.push("--parked".into());
+    let alice = Proc::spawn(MM2_EXE, &alice_args);
+    let bob = Proc::spawn(MM2_EXE, &bob_args);
+    start_when_ready(&mut host, 2);
+    until_live(&alice);
+    until_live(&bob);
+    let recipe = Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.20,
+        duplicate: 0.15,
+        reorder: 0.15,
+    };
+    proxy.set(LinkDir::Up, recipe);
+    proxy.set(LinkDir::Down, recipe);
+    let bound = Duration::from_secs(600);
+    let bob_rec = bob.until_within("smoke=headless-physics", bound);
+    let alice_rec = alice.until_within("smoke=headless-physics", bound);
+    let host_rec = host.until_within("smoke=headless-physics", host.budget().unwrap_or(bound));
+    eprintln!("AC04 host   {host_rec}\nAC04 alice {alice_rec}\nAC04 bob   {bob_rec}");
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+    let (up, down) = (proxy.stats(LinkDir::Up), proxy.stats(LinkDir::Down));
+    for (dir, stats) in [("up", up), ("down", down)] {
+        assert!(
+            stats.dropped > 0 && stats.duplicated > 0 && stats.reordered > 0,
+            "{dir} did not drop, duplicate and reorder: {stats:?}"
+        );
+    }
+    drop(proxy);
+    for rec in [&host_rec, &alice_rec, &bob_rec] {
+        assert_eq!(field(rec, "status"), "pass", "{rec}");
+    }
+
+    // Impact rows: the authority published some, and a client that
+    // only listens applied no more than were sent, even though the
+    // relay duplicated and reordered the snaps carrying them.
+    let host = net_field(&host_rec);
+    let bob = net_field(&bob_rec);
+    assert!(host.impacts_sent > 0, "no impact was published: {host_rec}");
+    assert!(bob.impacts_applied > 0, "no impact reached bob: {bob_rec}");
+    assert!(
+        bob.impacts_applied <= host.impacts_sent,
+        "bob applied {} rows of the {} sent: {bob_rec}",
+        bob.impacts_applied,
+        host.impacts_sent
+    );
+    // Each applied row presents exactly once: one spark burst and one
+    // texel splat per row, so a replayed row would overshoot both.
+    let lead = |rec: &str, key: &str| leading_u64(field(rec, key));
+    assert_eq!(lead(&bob_rec, "spk"), bob.impacts_applied, "{bob_rec}");
+    assert_eq!(lead(&bob_rec, "txl"), bob.impacts_applied, "{bob_rec}");
+    // The impact voice is at most one per applied row: spawned voices
+    // plus scrape-held re-contacts never exceed the rows applied.
+    let aud = field(&bob_rec, "aud");
+    let cell = |suffix: char| -> u64 {
+        aud.split(['/', '+'])
+            .find(|c| c.ends_with(suffix) && c[..c.len() - 1].chars().all(|d| d.is_ascii_digit()))
+            .map_or(0, |c| c[..c.len() - 1].parse().unwrap())
+    };
+    assert!(
+        cell('i') + cell('S') <= bob.impacts_applied,
+        "bob voiced more impacts than it applied: {bob_rec}"
+    );
+    // The authority sparks and splats each of its own rows once too.
+    assert!(lead(&host_rec, "spk") >= host.impacts_sent, "{host_rec}");
+
+    // Damage: the authority's pipeline never saw a duplicate delivery,
+    // and a client's pipeline applied nothing for a hit it only heard
+    // about (its damage state rides the v8 byte instead).
+    assert_eq!(field(&host_rec, "dup"), "0", "{host_rec}");
+    for rec in [&alice_rec, &bob_rec] {
+        assert!(
+            !rec.contains(" dmg=") || lead(rec, "dmg") == 0,
+            "a client applied damage through the pipeline: {rec}"
+        );
+    }
+
+    // Checkpoints: every record counts against the same course, none
+    // past its end, and the finished host holds one result per seat.
+    for rec in [&host_rec, &alice_rec, &bob_rec] {
+        let cp = field(rec, "cp");
+        let (crossed, gates) = cp.split_once('/').unwrap();
+        assert!(
+            crossed.parse::<u64>().unwrap() <= gates.parse::<u64>().unwrap(),
+            "{rec}"
+        );
+        assert!(lead(rec, "results") <= 3, "more results than seats: {rec}");
+    }
+    assert_eq!(field(&host_rec, "cp"), "6/6", "{host_rec}");
+    assert_eq!(lead(&host_rec, "results"), 3, "{host_rec}");
+
+    // Fragments: a client never has more broken props than the
+    // authority that broke them.
+    let broken = |rec: &str| -> u64 {
+        let census = field(rec, "bng");
+        let b = census.split('/').nth(3).unwrap();
+        leading_u64(b)
+    };
+    for rec in [&alice_rec, &bob_rec] {
+        assert!(broken(rec) <= broken(&host_rec), "{host_rec}\n{rec}");
+    }
+}
+
 /// F26-AC05/AC02's rematch leg at process level on a retail city: the
 /// same two OS processes play two rounds of one lobby without
 /// reconnecting. Round one runs for a bounded wall-clock window — the
