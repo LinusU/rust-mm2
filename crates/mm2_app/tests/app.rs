@@ -28,6 +28,7 @@ mod hud;
 mod hudjourney;
 mod hudmap;
 mod hudmap_retail;
+mod hudmarkers;
 mod huge_texture;
 mod import_pipeline;
 mod input;
