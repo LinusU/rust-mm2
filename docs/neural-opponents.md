@@ -34,6 +34,26 @@ can equally be a nav-graph path to a Cops & Robbers objective, or the
 straight segment to a target. Route information is how a caller says
 where to drive, not something the driver needs to exist.
 
+A race guide is built in three steps, and most of what once looked like
+bad driving was one of them going wrong:
+
+1. **The roads.** Two consecutive rows of the record name two
+   intersections; the leg is the road they share, whichever way its
+   traffic flows (`NavGraph::race_leg`). Where the record skips an
+   intersection, the chain of roads between the two, along the race's
+   checkpoints (`NavGraph::race_path`). Only then the directed router,
+   and last the authored straight line.
+2. **The line.** Down the lanes that run the leg's way, heights from
+   the lanes, the few-metre jink at each junction smoothed out
+   (`Guide::from_route_on`).
+3. **The ground.** Once the collision world exists, every point more
+   than a metre off the ground under it is moved onto it
+   (`Guide::regrounded`) — a course crosses parks and terraces where
+   there are no lanes to take a height from.
+
+`mm2_gym audit` walks every line and lists where it still cannot be
+driven as drawn.
+
 One observation is 126 floats in the car's own heading frame, scaled
 to about unit size (`observe.rs` is the reference):
 
@@ -81,7 +101,10 @@ about 2,000–5,000 decisions a second on one core.
 
 Every car in the environment is an agent on one of the event's real
 opponent lines. An agent that finishes, wrecks or stalls is replaced
-at once somewhere else, so the field never empties. Around the agents
+at once somewhere else, so the field never empties — a quarter of the
+time a little way before a spot where an episode lately failed, so the
+one hairpin and the one bridge ramp of a city are practised far more
+often than chance would bring a car to them. Around the agents
 are *drones* — parked in the road or driving at traffic pace — and
 every so often a group of agents is restarted together from the race's
 real grid, with a drone standing in for the player.
@@ -131,7 +154,8 @@ target/release/examples/mm2_gym --mm2-path $MM2_RETAIL --city sf \
 #    void, into water) — route defects, not driving mistakes.
 target/release/examples/mm2_gym --mm2-path $MM2_RETAIL --city london audit
 
-# 3. Every race in the real game, player parked.
+# 3. Every race in the real game, player parked, until the field is
+#    home or twelve minutes are up.
 scripts/opponent_sweep.sh target/release/mm2 out/ 4
 ```
 
