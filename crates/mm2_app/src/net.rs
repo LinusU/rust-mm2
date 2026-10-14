@@ -915,7 +915,7 @@ fn resolve_selection(
 
 /// The windowed lobby's keyboard surface: while the session sits at
 /// `Menu` — the lobby's waiting phase — `Enter` toggles our roster
-/// ready flag and `Esc` leaves the lobby (the session-lifecycle Esc
+/// ready flag, the arrow keys pick the car and paint, and `Esc` leaves the lobby (the session-lifecycle Esc
 /// lives in `session_control_input`, which ignores `Menu`, so the two
 /// never collide). Gamepad equivalents are a menu-surface decision
 /// deferred with the real lobby UI.
@@ -924,6 +924,8 @@ pub fn lobby_input(
     session: Res<Session>,
     lobby: Res<LobbyState>,
     mut link: ResMut<LobbyLink>,
+    vfs: Option<Res<Mm2Vfs>>,
+    mut garage: Local<Option<Vec<(String, u8)>>>,
 ) {
     // A lobby the menu joined this frame ignores the keypress that did it.
     if *session.phase() != SessionPhase::Menu || link.leaving() || link.closed || link.is_added() {
@@ -938,6 +940,32 @@ pub fn lobby_input(
             .iter()
             .any(|e| e.player_id == link.player_id() && e.ready);
         let _ = link.ctl().set_ready(ready);
+    }
+    // Left/Right step the car, Up/Down its paint: the pick offered is
+    // always a garage entry, so the host's validator takes it.
+    let step = |neg: KeyCode, pos: KeyCode| {
+        i32::from(keys.just_pressed(pos)) - i32::from(keys.just_pressed(neg))
+    };
+    let (car, paint) = (
+        step(KeyCode::ArrowLeft, KeyCode::ArrowRight),
+        step(KeyCode::ArrowDown, KeyCode::ArrowUp),
+    );
+    if (car != 0 || paint != 0)
+        && let Some(vfs) = vfs
+    {
+        let garage =
+            garage.get_or_insert_with(|| crate::lobby_view::garage(&VehicleCatalog::scan(&vfs.0)));
+        let ours = lobby
+            .roster
+            .iter()
+            .find(|e| e.player_id == link.player_id())
+            .and_then(|e| e.pick.as_ref());
+        let current = ours.map_or(("", 0), |p| (p.vehicle.as_str(), p.paint));
+        if let Some((id, paint)) =
+            crate::lobby_view::cycle_pick(garage, current, car, if car != 0 { 0 } else { paint })
+        {
+            let _ = link.ctl().set_vehicle(&id, paint);
+        }
     }
 }
 
@@ -965,41 +993,14 @@ pub fn drive_lobby_text(
         text.0.clear();
         return;
     }
-    let offered = lobby
-        .advertised
-        .as_ref()
-        .map(|ad| ad.summary.clone())
-        .unwrap_or_else(|| "waiting for the host to advertise a session".to_string());
-    let ours = lobby
-        .roster
-        .iter()
-        .find(|e| e.player_id == link.player_id());
-    let picked = ours
-        .and_then(|e| e.pick.as_ref())
-        .map(|p| {
-            if p.vehicle.is_empty() {
-                "dev car".to_string()
-            } else {
-                format!("{} (paint {})", p.vehicle, p.paint)
-            }
-        })
-        .unwrap_or_else(|| "nothing yet".to_string());
-    let ready = ours.is_some_and(|e| e.ready);
-    let ready_count = lobby.roster.iter().filter(|e| e.ready).count();
-    let notice = lobby
-        .notice
-        .as_ref()
-        .map(|n| format!("\n{n}"))
-        .unwrap_or_default();
-    text.0 = format!(
-        "Lobby {} — {}\nsession: {offered}\nplayers: {} ({} ready)\nyou: {} — {picked}{}\n\nenter: toggle ready    esc: leave lobby",
+    text.0 = crate::lobby_view::LobbyView::client(
         link.peer(),
-        link.driver(),
-        lobby.roster.len(),
-        ready_count,
-        if ready { "ready" } else { "not ready" },
-        notice,
-    );
+        link.player_id(),
+        &lobby.roster,
+        lobby.advertised.as_ref().map(|ad| ad.summary.as_str()),
+        lobby.notice.as_deref(),
+    )
+    .render();
 }
 
 // ─── The in-app lobby host (F24-B.8) ───────────────────────────────
@@ -2208,26 +2209,19 @@ pub fn drive_host_text(
         text.0.clear();
         return;
     }
-    let offered = link.summary();
-    let pick = match &link.config.vehicle.id {
-        Some(id) => format!("{id} (paint {})", link.config.vehicle.paint),
-        None => "dev car".to_string(),
-    };
-    let ready_count = lobby.roster.iter().filter(|e| e.ready).count();
-    let notice = lobby
-        .notice
-        .as_ref()
-        .map(|n| format!("\n{n}"))
-        .unwrap_or_default();
-    text.0 = format!(
-        "Hosting {} — {}\nsession: {offered}\nplayers: {} connected ({} ready)\nyou: {} — {pick} (host)\n\nenter: start session    esc: stop hosting{}",
+    let pick = encode_pick(&link.config.vehicle).unwrap_or(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    text.0 = crate::lobby_view::LobbyView::host(
         link.addr(),
         link.driver(),
-        lobby.roster.len(),
-        ready_count,
-        link.driver(),
-        notice,
-    );
+        &pick,
+        &lobby.roster,
+        link.summary(),
+        lobby.notice.as_deref(),
+    )
+    .render();
 }
 
 /// The display line for lobby UIs/CLIs (`"sf, circuit:3, professional"`).

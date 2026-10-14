@@ -37,6 +37,7 @@ pub mod layers;
 pub mod leafnet;
 pub mod lesson;
 pub mod lobby_systems;
+pub mod lobby_view;
 pub mod manual_gear;
 pub mod menu;
 pub mod movers;

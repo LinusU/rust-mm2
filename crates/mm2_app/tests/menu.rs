@@ -6647,3 +6647,115 @@ fn paints_delete_confirmation_and_key_capture_back_out_on_either_device() {
         assert_eq!(shell(&app).focus, rebind);
     }
 }
+
+/// F24-AC01 (synthetic integration): the lobby screen on both ends of a
+/// menu-hosted lobby. The host's panel lists its own seat and the joiner
+/// with car and readiness and says who the start waits on; the joiner's
+/// panel lists the host and itself, and its arrow keys re-pick the car's
+/// paint, which the host's roster and panel then show. Evidence level:
+/// synthetic integration (one process, two apps, real loopback sockets);
+/// no rendered capture.
+#[test]
+fn the_lobby_screen_shows_roster_picks_and_readiness_on_both_ends() {
+    use bevy::prelude::Text;
+    use mm2_app::lobby_systems::{add_client_systems, add_host_systems};
+    use mm2_app::net::{HostLink, LobbyLink, LobbyState};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    fn wait_until(
+        host: &mut App,
+        client: &mut App,
+        mut pred: impl FnMut(&mut App, &mut App) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            host.update();
+            client.update();
+            if pred(host, client) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+    fn screen(app: &mut App) -> String {
+        app.world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|t| t.0.clone())
+            .find(|t| t.contains("LOBBY"))
+            .unwrap_or_default()
+    }
+
+    let mut host = menu_app(tmp.path(), None);
+    add_host_systems(&mut host, never_capturing);
+    let mut client = menu_app(tmp.path(), None);
+    client.add_message::<mm2_app::netdrive::RemoteImpact>();
+    client.add_message::<mm2_game::BangerStateChanged>();
+    client.add_message::<mm2_game::RaceStarted>();
+    add_client_systems(&mut client, never_capturing);
+    host.update();
+    client.update();
+
+    activate_row(&mut host, "Cops & Robbers");
+    activate_row(&mut host, "testcity");
+    activate_row(&mut host, "Host lobby");
+    let addr = host.world().resource::<HostLink>().addr();
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    settle_dial(&mut client);
+    assert!(client.world().get_resource::<LobbyLink>().is_some());
+
+    // Both screens list both seats; the host's names who it waits on.
+    assert!(
+        wait_until(&mut host, &mut client, |h, c| {
+            let (hs, cs) = (screen(h), screen(c));
+            hs.contains("HOSTING LOBBY")
+                && hs.contains("waiting on: player")
+                && cs.contains("cops & robbers")
+                && cs.contains("press enter when you are ready")
+                && cs.contains("vpt (paint 0)")
+        }),
+        "host:\n{}\nclient:\n{}",
+        screen(&mut host),
+        screen(&mut client)
+    );
+
+    // Up arrow steps the joiner's paint; the host sees the new pick.
+    press(&mut client, KeyCode::ArrowUp);
+    assert!(
+        wait_until(&mut host, &mut client, |h, c| {
+            h.world()
+                .resource::<LobbyState>()
+                .roster
+                .iter()
+                .any(|e| e.pick.as_ref().is_some_and(|p| p.paint == 1))
+                && screen(h).contains("vpt (paint 1)")
+                && screen(c).contains("vpt (paint 1)")
+        }),
+        "host:\n{}\nclient:\n{}",
+        screen(&mut host),
+        screen(&mut client)
+    );
+
+    // Ready flips both panels.
+    press(&mut client, KeyCode::Enter);
+    assert!(
+        wait_until(&mut host, &mut client, |h, c| {
+            screen(h).contains("everyone is ready")
+                && screen(c).contains("waiting for the host to start")
+        }),
+        "host:\n{}\nclient:\n{}",
+        screen(&mut host),
+        screen(&mut client)
+    );
+}
