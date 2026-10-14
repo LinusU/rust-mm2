@@ -671,6 +671,26 @@ mod tests {
         assert_eq!(roster.placeable().count(), 3);
     }
 
+    /// F20 "multiple offenses one tick" (COP-15): the original has no
+    /// offense counter, so coincident triggers are one sighting and one
+    /// phase change however long the tick.
+    #[test]
+    fn coincident_triggers_advance_the_phase_once() {
+        let policy = PursuitPolicy::default();
+        let mut p = Pursuit::new();
+        let s = see(10.0, true);
+        assert_eq!(
+            p.step(100.0, Some(&s), true, &policy),
+            Some(PursuitEvent::Noticed)
+        );
+        assert_eq!(p.phase, PursuitPhase::Engaged(0.0));
+        assert_eq!(
+            p.step(100.0, Some(&s), true, &policy),
+            Some(PursuitEvent::Committed)
+        );
+        assert!(p.is_pursuing());
+    }
+
     fn see(distance: f32, clear: bool) -> Sighting {
         Sighting {
             position: Vec3::new(distance, 0.0, 0.0),
