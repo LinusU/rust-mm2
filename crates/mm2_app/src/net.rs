@@ -1943,18 +1943,21 @@ pub fn close_menu_host(
     mut lobby: ResMut<LobbyState>,
     session: Res<Session>,
     menu: Option<Res<MenuShell>>,
+    note: Option<ResMut<crate::session::SessionNote>>,
     texts: Query<Entity, With<HostText>>,
 ) {
-    if menu.is_none()
-        || !link.leaving()
-        || *session.phase() != SessionPhase::Menu
-        || lobby.pending_start.is_some()
-    {
+    let (Some(_), Some(mut note)) = (menu, note) else {
+        return;
+    };
+    if !link.leaving() || *session.phase() != SessionPhase::Menu || lobby.pending_start.is_some() {
         return;
     }
-    if let Some(notice) = lobby.notice.take() {
-        warn!(notice, "menu-hosted lobby closed");
-    }
+    note.lobby = Some(
+        lobby
+            .notice
+            .take()
+            .unwrap_or_else(|| "closed the lobby".to_string()),
+    );
     for text in &texts {
         commands.entity(text).despawn();
     }

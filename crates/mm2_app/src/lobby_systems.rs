@@ -182,11 +182,17 @@ pub fn add_host_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + C
     // A lobby the menu opened goes with its link once it has come down; a
     // no-op without a menu. It removes the link and its companion
     // resources by deferred commands, and a sync point can apply those
-    // mid-schedule, so it runs after every system that reads them.
+    // mid-schedule, so it runs after every system that reads them. It also
+    // hands the menu the lobby's closing notice, and the hosted link reads
+    // as "not hosting" the moment `leaving` is set (unlike a joined link,
+    // which still holds `joined.is_some()` until the removal applies), so
+    // it must run *before* `menu_watch` reopens the shell or that notice
+    // would land with no transition left to carry it to the status line.
     .add_systems(
         Update,
         net::close_menu_host
             .after(HostedLobby)
+            .before(crate::menu::menu_watch)
             .run_if(resource_exists::<net::HostLink>),
     );
 }

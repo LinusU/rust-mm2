@@ -1588,6 +1588,8 @@ against the old inline dial.
 
 **Close ordering (found by running the production schedule).** `close_menu_host`/`close_menu_join` remove the link and its companion resources by deferred commands, and a sync point can apply those mid-schedule, so lobby systems not yet run that frame panicked on `Res<HostLink>`/`ResMut<NetDriveReport>` (`Esc` out of a menu-hosted lobby). Both closes now run `.after` a `HostedLobby`/`JoinedLobby` system set holding every other system of the lobby.
 
+`close_menu_host` now hands the menu the lobby's closing notice the same way `close_menu_join` does — a menu-hosted lobby whose loop died used to be only a `warn!` behind a closed shell, so the operator was left on a frozen lobby. The notice (`the lobby host loop died`, or `closed the lobby` for a clean `Esc`) rides `SessionNote::lobby` to the status line. It also runs `.before(menu::menu_watch)`: a hosted link reads as "not hosting" the moment `leaving` is set, unlike a joined link that holds `joined.is_some()` until the deferred removal applies, so without that edge `menu_watch` can reopen the shell a frame before the notice is set and the transition that carries it to the status line is already spent. `app::menu::a_menu_hosted_lobby_reports_a_dead_host_loop` kills the loop through `HostLink::ctl().shutdown()` and checks the status line plus every associated resource and the lobby text gone; `app::menu::a_menu_joined_lobby_reports_a_lost_host` drops the host app and checks the joined side the same way. `mm2 --join` now prints the `event=join_failed reason=…` record `mm2-join` prints before its exit 1, asserted in `net_app::mm2_join_failures_and_conflicts_are_named_exits`.
+
 ## Rematch within one lobby (F26-B.1, no wire change)
 
 A hosted lobby already loops: the host's `Cancel` (the operator's
@@ -2296,7 +2298,8 @@ once; `headless_lobby` joins an in-process host and proves the
 and the process legs run `mm2 --join --headless` against a separate
 `mm2-host` — `start` produces `world=dev-world mp=gen1 status=pass`,
 `cancel` produces `mp=lobby(1p) phase=menu`, a host quit produces
-`lost the host`/`status=fail` exit 3, a refused connection exits 1,
+`lost the host`/`status=fail` exit 3, a refused connection prints
+`event=join_failed reason=…` and exits 1,
 and `--join` × session-shaping flags are usage exit 2. The suite's
 `the_impairment_matrix_records_each_recipe_cell` leg adds the
 F25-AC03 grid: eight named recipes (clean/latency/jitter/loss/
@@ -2346,7 +2349,8 @@ against real OS processes over real loopback:
   slot`'s in-process claim).
 - `mm2-join` dialling a dead address reports `join_failed`/exit 1 —
   the headless client's half of the unreachable-join leg `net_app`
-  already holds for `mm2 --join`.
+  already holds for `mm2 --join`, which now prints the same
+  `event=join_failed` record on its own stdout.
 
 This is *not* LAN or Internet evidence — every socket so far is
 `127.0.0.1`, the world is synthetic, and nothing rendered — F24-C owns

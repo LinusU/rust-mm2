@@ -5135,6 +5135,157 @@ fn the_menu_joins_a_lobby_another_menu_opened() {
     assert_eq!(shell(&client).status.as_deref(), Some("left the lobby"));
 }
 
+/// F24-AC04: a lobby the *menu* joined that loses its host names the loss
+/// on the menu's status line and is taken down whole — the link, the
+/// lobby's mirror, the remote snap stream, the input sequence and the
+/// driver report all go, so a dead socket is never left holding `Menu`.
+#[test]
+fn a_menu_joined_lobby_reports_a_lost_host() {
+    use mm2_app::lobby_systems::{add_client_systems, add_host_systems};
+    use mm2_app::net::{HostLink, LobbyLink, LobbyState};
+    use mm2_app::netdrive::{InputSeq, NetDriveReport, RemoteSnaps};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+
+    let mut host = menu_app(tmp.path(), None);
+    add_host_systems(&mut host, never_capturing);
+    let mut client = menu_app(tmp.path(), None);
+    // The message types the replica set applies, as the binary registers.
+    client.add_message::<mm2_app::netdrive::RemoteImpact>();
+    client.add_message::<mm2_game::BangerStateChanged>();
+    client.add_message::<mm2_game::RaceStarted>();
+    add_client_systems(&mut client, never_capturing);
+    add_host_systems(&mut client, never_capturing);
+    host.update();
+    client.update();
+
+    activate_row(&mut host, "Cops & Robbers");
+    activate_row(&mut host, "testcity");
+    activate_row(&mut host, "Host lobby");
+    let addr = host.world().resource::<HostLink>().addr();
+    activate_row(&mut client, "Join lobby");
+    type_text(&mut client, &addr.to_string());
+    press(&mut client, KeyCode::Enter);
+    settle_dial(&mut client);
+    assert!(
+        client.world().get_resource::<LobbyLink>().is_some(),
+        "the menu never joined: {:?}",
+        shell(&client).status
+    );
+    assert!(client.world().get_resource::<LobbyState>().is_some());
+    assert!(client.world().get_resource::<RemoteSnaps>().is_some());
+    assert!(client.world().get_resource::<InputSeq>().is_some());
+    assert!(client.world().get_resource::<NetDriveReport>().is_some());
+    assert!(!shell(&client).active, "the lobby owns the joiner's screen");
+
+    // The host goes away: its listener and sockets come down with the app,
+    // which the joiner reads as a closed link, not a leave of its own.
+    drop(host);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while client.world().get_resource::<LobbyLink>().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the lost lobby was never taken down: {:?}",
+            shell(&client).status
+        );
+        client.update();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // `menu_watch` reopens the frame after the removal applies.
+    for _ in 0..5 {
+        client.update();
+    }
+    assert!(client.world().get_resource::<LobbyState>().is_none());
+    assert!(client.world().get_resource::<RemoteSnaps>().is_none());
+    assert!(client.world().get_resource::<InputSeq>().is_none());
+    assert!(client.world().get_resource::<NetDriveReport>().is_none());
+    assert!(
+        shell(&client).active,
+        "the menu returns once the lobby dies"
+    );
+    assert!(
+        shell(&client)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("lost the host")),
+        "the loss is named on the status line: {:?}",
+        shell(&client).status
+    );
+}
+
+/// F24-AC04: a lobby the *menu* is hosting whose loop dies names it on the
+/// status line and takes the lobby down — the same surface a menu-joined
+/// client gets, so the operator is never left on a frozen lobby.
+#[test]
+fn a_menu_hosted_lobby_reports_a_dead_host_loop() {
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::{HostLink, HostText, LobbyState};
+    use mm2_app::netdrive::{NetDriveReport, WireStall};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+
+    let mut app = menu_app(tmp.path(), None);
+    add_host_systems(&mut app, never_capturing);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Host lobby");
+    assert!(app.world().get_resource::<HostLink>().is_some());
+    assert!(app.world().get_resource::<LobbyState>().is_some());
+    assert!(!shell(&app).active, "the lobby owns the host's screen");
+
+    // Kill the loop without `leave()` — the same disconnect an internal
+    // failure gives the drain.
+    app.world().resource::<HostLink>().ctl().shutdown().unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.world().get_resource::<HostLink>().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dead hosted lobby was never taken down"
+        );
+        app.update();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+    assert!(app.world().get_resource::<LobbyState>().is_none());
+    assert!(app.world().get_resource::<NetDriveReport>().is_none());
+    assert!(app.world().get_resource::<WireStall>().is_none());
+    let mut texts = app.world_mut().query_filtered::<Entity, With<HostText>>();
+    assert!(
+        texts.iter(app.world()).next().is_none(),
+        "the hosted lobby's status line outlived it"
+    );
+    assert!(shell(&app).active, "the menu returns once the lobby dies");
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("host loop died")),
+        "the loss is named on the status line: {:?}",
+        shell(&app).status
+    );
+}
+
 /// F27-B.4c (rematch leg): a decided single-seat match opens the
 /// match-over screen instead of idling on a frozen HUD, and its *Play
 /// again* row begins a fresh generation with a fresh match — the same

@@ -1260,6 +1260,11 @@ fn main() {
         let link = match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
             Ok(link) => link.keep_ready(cli.ready),
             Err(e) => {
+                // A refused or unreachable lobby is a named failure on the
+                // process's own stdout too, so a script driving `mm2 --join`
+                // sees the same `event=join_failed` record `mm2-join` writes
+                // rather than having to scrape the log line.
+                println!("event=join_failed reason={e:?}");
                 error!(peer = %addr, error = %e, "join failed");
                 std::process::exit(1);
             }

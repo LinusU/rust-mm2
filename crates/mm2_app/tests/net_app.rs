@@ -2388,6 +2388,14 @@ fn mm2_join_failures_and_conflicts_are_named_exits() {
             "--headless".to_string(),
         ],
     );
+    // The refused/unreachable dial is a named failure on stdout — the same
+    // `event=join_failed` record `mm2-join` prints, not just a log line —
+    // so a script driving `mm2 --join` can read the reason.
+    let failed = client.until("event=join_failed");
+    assert!(
+        failed.starts_with("event=join_failed reason="),
+        "the join failure is not the named record: {failed:?}"
+    );
     assert_eq!(client.wait().code(), Some(1));
 
     for extra in [
