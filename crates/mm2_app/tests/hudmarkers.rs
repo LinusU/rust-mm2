@@ -569,13 +569,18 @@ fn checkpoint_markers_follow_the_local_driver_not_an_opponent() {
     let def = any_order_def();
     let mut app = markers_app(event_config(), def.clone());
     spawn_gantries(&mut app, &def);
+    // The opponent spawns *first*: both share one archetype, so entity
+    // order would otherwise hand the local the first slot and a
+    // `participants.iter().next()` regression would pass unnoticed. The
+    // disambiguation `update_checkpoint_markers` performs is the whole
+    // point of this leg, so the local must not be the naive pick.
+    let ai = participant(&mut app, &def, PlayerControl::Ai, Vec3::ZERO);
     let local = participant(
         &mut app,
         &def,
         PlayerControl::Local,
         Vec3::new(-10.0, 0.0, 0.0),
     );
-    let ai = participant(&mut app, &def, PlayerControl::Ai, Vec3::ZERO);
     app.update();
 
     assert_eq!(gate_vis(&mut app, Some(0)), Visibility::Visible);
