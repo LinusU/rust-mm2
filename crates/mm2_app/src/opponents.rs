@@ -777,29 +777,47 @@ const STAGED_ON_LAP: f32 = 30.0;
 /// [`route_is_closed`] holds however far apart the first and last
 /// intersections are (they are one road apart on retail `sf circuit6`
 /// and `london circuit3`, the same junction everywhere else).
+///
+/// Some retail records stop short: `london circuit3`'s four VW Cup
+/// rows end two intersections before the lap closes and then give the
+/// finish twice. Read as an open route they are one lap long, and a
+/// car that had driven it had no line for the second — it stopped on
+/// the finish position with three laps to go.
 pub fn circuit_lap(route: &OpponentRoute) -> Option<OpponentRoute> {
     let n = route.points.len();
-    if n < 6 || !route_is_closed(route) {
+    if n < 6 {
         return None;
     }
-    let lap = &route.points[1..n - 1];
     let start = route.points[0].position;
-    // The staging row must stand on the lap: on the road out of the
-    // first intersection, or the one back into it.
-    let off = |a: Vec3, b: Vec3| {
+    let finish = route.points[n - 1].position;
+    // A finish written twice is one finish.
+    let mut end = n - 1;
+    while end > 4 && plan_distance(route.points[end - 1].position, finish) <= FINISH_AGAIN {
+        end -= 1;
+    }
+    let lap = &route.points[1..end];
+    let first = lap[0].position;
+    // Distance from `p` to the road between two rows.
+    let off = |p: Vec3, a: Vec3, b: Vec3| {
         let (dx, dz) = (b.x - a.x, b.z - a.z);
         let len2 = dx * dx + dz * dz;
         let t = if len2 > 1e-6 {
-            (((start.x - a.x) * dx + (start.z - a.z) * dz) / len2).clamp(0.0, 1.0)
+            (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        (start.x - (a.x + dx * t)).hypot(start.z - (a.z + dz * t))
+        (p.x - (a.x + dx * t)).hypot(p.z - (a.z + dz * t))
     };
-    let first = lap[0].position;
-    let on_lap = off(first, lap[1].position) <= STAGED_ON_LAP
-        || off(lap[lap.len() - 1].position, first) <= STAGED_ON_LAP;
-    if !on_lap || !lap.iter().all(|p| p.position.is_finite()) {
+    // What makes a record a circuit's: the staging row and the finish
+    // both stand on the lap — on the road out of the first
+    // intersection, or the one back into it. (That the finish lies
+    // near the staging row does not: a car at the back of a grid
+    // stages 40 m and more behind it.)
+    let on_lap = |p: Vec3| {
+        off(p, first, lap[1].position) <= STAGED_ON_LAP
+            || off(p, lap[lap.len() - 1].position, first) <= STAGED_ON_LAP
+    };
+    if !on_lap(start) || !on_lap(finish) || !lap.iter().all(|p| p.position.is_finite()) {
         return None;
     }
     let mut points = lap.to_vec();
@@ -808,6 +826,15 @@ pub fn circuit_lap(route: &OpponentRoute) -> Option<OpponentRoute> {
     }
     Some(OpponentRoute { points })
 }
+
+/// Distance (m, XZ) between two points.
+fn plan_distance(a: Vec3, b: Vec3) -> f32 {
+    (a.x - b.x).hypot(a.z - b.z)
+}
+
+/// Distance (m, XZ) within which the row before a record's last is the
+/// finish position again — some retail records close with it twice.
+const FINISH_AGAIN: f32 = 5.0;
 
 /// The driving line a participant chases: `route` verbatim when no
 /// road graph was bound at session load, else

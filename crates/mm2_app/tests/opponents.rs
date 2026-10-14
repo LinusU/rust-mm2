@@ -407,6 +407,37 @@ fn a_circuit_record_reduces_to_its_lap_of_intersections() {
     let driven = driving_route(&record, None, &[], &[], start, yaw);
     assert_eq!(driven.points.len(), lap.points.len());
 
+    // A car at the back of the grid stages further from the finish
+    // position than any "the route closes" radius: it is the staging
+    // row and the finish standing on the lap that make a circuit.
+    let mut back_row = record.clone();
+    back_row.points[0].position.x = -170.0;
+    assert!(!route_is_closed(&back_row));
+    assert_eq!(circuit_lap(&back_row), Some(lap.clone()));
+
+    // Retail `london circuit3`'s VW Cup rows: the record stops two
+    // intersections short of closing the lap and gives the finish
+    // twice. The lap is the intersections it does name.
+    let cut_short = staged_route(
+        90.0,
+        &[
+            [-244.0, 0.0, -288.0],
+            [-113.0, 0.0, -285.0],
+            [-351.0, 0.0, -283.0],
+            [-351.0, 0.0, -100.0],
+            [-200.0, 0.0, -100.0],
+            [-255.0, 0.0, -290.0],
+            [-255.0, 0.0, -290.0],
+        ],
+    );
+    let xs: Vec<f32> = circuit_lap(&cut_short)
+        .expect("a circuit record")
+        .points
+        .iter()
+        .map(|p| p.position.x)
+        .collect();
+    assert_eq!(xs, [-113.0, -351.0, -351.0, -200.0, -113.0]);
+
     // An open record, and a closed one too short to hold a lap, are
     // left to the staging trim.
     let open = route(&[
