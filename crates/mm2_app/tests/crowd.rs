@@ -464,18 +464,34 @@ fn reactive() -> tempfile::TempDir {
     install_with(&REACTIVE_CSV.replace("WALK,xwalk,1,4,0,1,", "WALK,xwalk,1,4,0,0.4,"))
 }
 
-/// A car (default chassis, 1.85 × 4.4 m) the test steps by hand. It is
-/// a player-driven car, so walkers sense it (F19/UNK-43).
+/// A car (default chassis, 1.85 × 4.4 m) the test steps by hand: a
+/// player-driven car, so walkers sense it (F19/UNK-43).
 fn spawn_car(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
+    spawn_car_with(app, at, velocity, PlayerControl::Local, 0.0)
+}
+
+/// A car the test steps by hand with an explicit driver and steering
+/// input (F19/UNK-43: only non-AI players are sensed, and the dive side
+/// follows the sensed car's own steering).
+fn spawn_car_with(
+    app: &mut App,
+    at: Vec3,
+    velocity: Vec3,
+    control: PlayerControl,
+    steering: f32,
+) -> Entity {
     app.world_mut()
         .spawn((
             Vehicle {
                 config: Default::default(),
             },
-            VehicleInput::default(),
+            VehicleInput {
+                steering,
+                ..Default::default()
+            },
             Player {
                 id: PlayerId(0),
-                control: PlayerControl::Local,
+                control,
             },
             Position(at),
             LinearVelocity(velocity),
@@ -666,6 +682,89 @@ fn a_car_bearing_down_makes_a_walker_look_dive_clear_and_walk_back() {
     let found = walkers(&mut app);
     assert!(found.iter().all(|(t, _)| t.is_finite()));
     assert_eq!(actors(&mut app), found.len(), "no actor leaked");
+}
+
+/// Drive the hand-stepped car straight at the first walker from 40 m at
+/// 15 m/s for 4 s and report the crowd's reaction counters plus the
+/// first authored dive state the walker entered. `control` and
+/// `steering` are the sensed car's driver and steering input.
+fn drive_reactions(seed: u64, control: PlayerControl, steering: f32) -> (u64, u64, Option<String>) {
+    let tmp = reactive();
+    let mut app = app(tmp.path(), seed, Some(0.1));
+    run(&mut app, 3);
+    let walker = first_walker(&mut app);
+    let start = at(&app, walker).translation;
+    let car = spawn_car_with(
+        &mut app,
+        start + Vec3::new(0.0, 0.0, -40.0),
+        Vec3::new(0.0, 0.0, 15.0),
+        control,
+        steering,
+    );
+    let mut dive = None;
+    for _ in 0..240 {
+        step_car(&mut app, car);
+        app.update();
+        if dive.is_none() {
+            dive = app
+                .world()
+                .entity(walker)
+                .get::<PedActor>()
+                .map(|a| a.state().to_string())
+                .filter(|s| s.contains("DIVE"));
+        }
+    }
+    let crowd = app.world().resource::<PedCrowd>();
+    (crowd.alerts, crowd.dives, dive)
+}
+
+/// F19/UNK-43: the walker senses the original's *player* cars only
+/// (`0x6b1f60` nodes carry a player-slot index). The identical drive is
+/// sensed whether the driver is local or a networked human, but an AI
+/// opponent is not in the player table and never scares anyone.
+#[test]
+fn only_player_driven_cars_scare_the_crowd() {
+    let (_, local_dives, _) = drive_reactions(7, PlayerControl::Local, 0.0);
+    assert!(
+        local_dives >= 1,
+        "the local player's car makes the walker dive: {local_dives}"
+    );
+    let (_, remote_dives, _) = drive_reactions(7, PlayerControl::Remote, 0.0);
+    assert!(
+        remote_dives >= 1,
+        "a networked human's car is still a player car: {remote_dives}"
+    );
+    let (ai_alerts, ai_dives, ai_dive) = drive_reactions(7, PlayerControl::Ai, 0.0);
+    assert_eq!(
+        (ai_alerts, ai_dives),
+        (0, 0),
+        "an AI opponent is not in the player table (dive {ai_dive:?})"
+    );
+}
+
+/// F19/UNK-43: the dive side follows the *sensed car's* steering past
+/// full lock (`0x54dc3f`: `> 0.85` right, `< -0.85` left, both strict).
+/// The same approach differing only in the sign of the car's steering
+/// must therefore pick opposite dive states — the own-side fallback is
+/// the same for both, so the sign is the only thing that can flip them.
+#[test]
+fn a_hard_steering_car_picks_the_walkers_dive_side() {
+    let (_, right_dives, right) = drive_reactions(7, PlayerControl::Local, 1.0);
+    let (_, left_dives, left) = drive_reactions(7, PlayerControl::Local, -1.0);
+    assert!(
+        right_dives >= 1 && left_dives >= 1,
+        "both cars made the walker dive: {right_dives}, {left_dives}"
+    );
+    assert_eq!(
+        right.as_deref(),
+        Some("ANTIC_RDIVE"),
+        "steering +1 (right lock) dives right"
+    );
+    assert_eq!(
+        left.as_deref(),
+        Some("ANTIC_LDIVE"),
+        "steering -1 (left lock) dives left"
+    );
 }
 
 /// F19-B.9/AUD-15: the reaction *decisions* are what write the walker
@@ -1053,10 +1152,12 @@ fn a_remote_clients_walkers_dive_from_a_replicated_car_and_walk_back() {
     run(&mut app, 3);
     let walker = first_walker(&mut app);
     let start = at(&app, walker).translation;
-    let car = spawn_car(
+    let car = spawn_car_with(
         &mut app,
         start + Vec3::new(0.0, 0.0, -40.0),
         Vec3::new(0.0, 0.0, 15.0),
+        PlayerControl::Remote,
+        0.0,
     );
     let mut dived = false;
     for _ in 0..240 {

@@ -167,15 +167,32 @@ fn the_dive_direction_is_across_the_cars_line_on_the_walkers_side() {
 
 #[test]
 fn the_most_urgent_car_wins() {
+    // The nearer car is only in the far corridor (a lateral offset past
+    // the near margin), so it is a wary alert; the farther one is in the
+    // near corridor and imminent. The imminent threat wins.
     let near_alert = Approacher {
-        position: Vec3::new(-12.0, 0.0, 1.8),
+        position: Vec3::new(-10.0, 0.0, 4.0),
         ..car(10.0)
     };
     let strike = Approacher {
-        position: Vec3::new(-6.0, 0.0, 0.0),
+        position: Vec3::new(-12.0, 0.0, 0.0),
         ..car(10.0)
     };
     let ped = Vec3::ZERO;
+    // Hold the premises so the test cannot silently rot into two
+    // imminent cars again.
+    assert!(
+        near_alert.position.length() < strike.position.length(),
+        "the alert car is the nearer one"
+    );
+    assert_eq!(
+        assess(ped, &near_alert, &POLICY).unwrap().alarm,
+        Alarm::Alert
+    );
+    assert_eq!(
+        assess(ped, &strike, &POLICY).unwrap().alarm,
+        Alarm::Imminent
+    );
     let t = most_urgent(ped, [near_alert, strike], &POLICY).unwrap();
     assert_eq!(t.alarm, Alarm::Imminent);
     assert!(most_urgent(ped, [], &POLICY).is_none());
