@@ -79,6 +79,17 @@ impl PlayerSteeringConfig {
         (next, sign(next) * next.abs().powf(exponent))
     }
 
+    /// An analog stick is already a position, not a key held down: it
+    /// skips the keyboard's rate ramp and takes only the shaping
+    /// exponent, so a partial tilt answers at once and a full tilt is the
+    /// same lock as the keyboard's. Returns the `(state, output)` pair
+    /// [`Self::discrete_step`] does; the state is the raw target.
+    pub fn analog_step(&self, target: f32, speed: f32) -> (f32, f32) {
+        let target = target.clamp(-1.0, 1.0);
+        let exponent = self.interpolate(self.exponent, speed).max(0.01);
+        (target, sign(target) * target.abs().powf(exponent))
+    }
+
     /// Mouse is an absolute position with a divisor and exponent, not
     /// the keyboard's rate ramp. User sensitivity is applied upstream.
     pub fn mouse(&self, target: f32, speed: f32) -> f32 {
@@ -156,6 +167,24 @@ mod tests {
         assert!((time_to_lock(0.0) - 0.4).abs() < 0.05);
         assert!((time_to_lock(40.0) - 1.25).abs() < 0.1);
         assert!(beetle().speed_factor(100.0) > 1.0);
+    }
+
+    #[test]
+    fn a_stick_takes_the_exponent_without_the_keyboard_ramp() {
+        let config = beetle();
+        let (state, out) = config.analog_step(0.5, 0.0);
+        assert_eq!(state, 0.5, "the target lands at once");
+        let (_, expected) = config.discrete_step(0.5, 0.5, 0.0, 0.016);
+        assert_eq!(out, expected, "same shaping as the settled keyboard law");
+        let (_, ramped) = config.discrete_step(0.0, 0.5, 0.0, 0.016);
+        assert!(out > ramped, "the ramp would still be near zero");
+        assert_eq!(
+            config.analog_step(1.0, 0.0).1,
+            1.0,
+            "full tilt is full lock"
+        );
+        assert_eq!(config.analog_step(-1.0, 0.0).1, -1.0);
+        assert_eq!(config.analog_step(0.0, 0.0), (0.0, 0.0));
     }
 
     #[test]

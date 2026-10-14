@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 use mm2_app::camera::CameraMode;
+use mm2_app::controls::{ControlSettings, stick_axis};
 use mm2_app::input;
 use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionPhase};
 use mm2_vehicle::VehicleInput;
@@ -76,7 +77,11 @@ fn pad_axes_drive_the_player() {
     set_button_axis(&mut app, GamepadButton::RightTrigger2, 0.7);
     app.update();
     let vi = player_input(&mut app);
-    assert_eq!(vi.steering, -0.6, "stick steers analog");
+    assert_eq!(
+        vi.steering,
+        -stick_axis(0.6, ControlSettings::default().steer_deadzone),
+        "stick steers analog, past its deadzone"
+    );
     assert_eq!(vi.throttle, 0.7, "RT2 throttles analog");
     assert_eq!(vi.brake, 0.0);
     assert_eq!(vi.handbrake, 0.0);
@@ -99,7 +104,11 @@ fn pad_axes_drive_the_player() {
     set_axis(&mut app, GamepadAxis::LeftStickX, 0.8);
     app.update();
     let vi = player_input(&mut app);
-    assert_eq!(vi.steering, 0.8, "non-neutral stick outranks the key");
+    assert_eq!(
+        vi.steering,
+        stick_axis(0.8, ControlSettings::default().steer_deadzone),
+        "non-neutral stick outranks the key"
+    );
 }
 
 /// AC06's other half: the free camera flies without driving — a held
@@ -335,8 +344,8 @@ fn pad_deadzone_sensitivity_and_inversion_apply() {
     app.update();
     let vi = player_input(&mut app);
     assert!(
-        (vi.steering + 0.6).abs() < 1e-6,
-        "0.4 * 1.5, inverted: {}",
+        (vi.steering + stick_axis(0.4, 0.3) * 1.5).abs() < 1e-6,
+        "rescaled 0.4 * 1.5, inverted: {}",
         vi.steering
     );
     assert_eq!(vi.throttle, 0.5);

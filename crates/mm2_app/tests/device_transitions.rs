@@ -413,7 +413,13 @@ fn keyboard_and_pad_activity_mix_per_channel() {
     let vi = player_input(&mut app);
     assert_eq!(
         (vi.throttle, vi.steering),
-        (1.0, 0.5),
+        (
+            1.0,
+            mm2_app::controls::stick_axis(
+                0.5,
+                mm2_app::controls::ControlSettings::default().steer_deadzone
+            )
+        ),
         "key throttle, pad steering"
     );
 

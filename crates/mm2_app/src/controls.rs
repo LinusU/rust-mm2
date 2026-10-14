@@ -6,7 +6,7 @@
 //! normalized [`VehicleInput`], so [`crate::input::vehicle_input`] and the
 //! physics behind it never see a key code. `Default` is exactly the map
 //! the game shipped with — `W`/`↑` throttle, `S`/`↓` brake, `A`/`←` and
-//! `D`/`→` steer, `Space` handbrake, a 0.05 stick/trigger deadzone — so
+//! `D`/`→` steer, `Space` handbrake, a 0.10 stick / 0.05 trigger deadzone — so
 //! nobody's controls change until they ask them to.
 //!
 //! Scope: the seven *driving* actions ([`DriveAction::DRIVING`]) and the
@@ -323,6 +323,21 @@ pub const DEADZONE_RANGE: (f32, f32) = (0.0, 0.9);
 pub const SENSITIVITY_RANGE: (f32, f32) = (0.25, 2.0);
 
 const DEFAULT_DEADZONE: f32 = 0.05;
+/// The stick's default steering deadzone — wider than the trigger's, as a
+/// resting thumbstick drifts further than a spring-loaded trigger.
+const DEFAULT_STEER_DEADZONE: f32 = 0.10;
+/// Deflection a worn stick still reaches; the rescaled axis saturates here
+/// so full lock does not need the last few percent of travel.
+const STICK_OUTER: f32 = 0.95;
+
+/// A stick axis with its inner `deadzone` removed and the remaining travel
+/// rescaled to 0…1 (saturating at [`STICK_OUTER`]), so steering grows from
+/// zero at the deadzone's edge instead of jumping to the deadzone's value.
+pub fn stick_axis(x: f32, deadzone: f32) -> f32 {
+    let outer = STICK_OUTER.max(deadzone + f32::EPSILON);
+    let magnitude = ((x.abs() - deadzone) / (outer - deadzone)).clamp(0.0, 1.0);
+    magnitude.copysign(x)
+}
 
 /// Who changes gear. The sim's gearbox is automatic; `Manual` pins it
 /// through [`mm2_vehicle::VehicleInput::forced_gear`] (CTL-1 documents an
@@ -440,7 +455,7 @@ impl Default for ControlSettings {
     fn default() -> Self {
         Self {
             bindings: DriveAction::ALL.map(DriveAction::default_keys),
-            steer_deadzone: DEFAULT_DEADZONE,
+            steer_deadzone: DEFAULT_STEER_DEADZONE,
             trigger_deadzone: DEFAULT_DEADZONE,
             steer_sensitivity: 1.0,
             invert_steering: false,
@@ -660,7 +675,8 @@ impl ControlSettings {
         if let Some(x) = pad.get(GamepadAxis::LeftStickX)
             && x.abs() > self.steer_deadzone
         {
-            let steer = (x * self.steer_sensitivity).clamp(-1.0, 1.0);
+            let steer =
+                (stick_axis(x, self.steer_deadzone) * self.steer_sensitivity).clamp(-1.0, 1.0);
             input.steering = if self.invert_steering { -steer } else { steer };
             used = true;
         }
@@ -1284,6 +1300,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_stick_deadzone_is_removed_and_the_travel_rescaled() {
+        let dz = 0.12;
+        assert_eq!(stick_axis(0.0, dz), 0.0);
+        assert_eq!(stick_axis(0.12, dz), 0.0);
+        assert_eq!(stick_axis(-0.1, dz), 0.0);
+        let just_past = stick_axis(0.13, dz);
+        assert!(just_past > 0.0 && just_past < 0.03, "starts from zero");
+        assert_eq!(stick_axis(0.95, dz), 1.0, "a worn stick still saturates");
+        assert_eq!(stick_axis(1.0, dz), 1.0);
+        assert_eq!(stick_axis(-1.0, dz), -1.0);
+        assert!(stick_axis(0.5, dz) < stick_axis(0.6, dz), "monotonic");
+        assert_eq!(stick_axis(0.5, 0.0), 0.5 / STICK_OUTER);
+        // A hand-edited deadzone at the cap still yields a finite axis.
+        assert!(stick_axis(1.0, 0.9).is_finite());
+    }
+
+    #[test]
     fn the_shipped_map_is_valid_and_conflict_free() {
         let d = ControlSettings::default();
         assert!(d.conflicts().is_empty());
@@ -1502,7 +1535,7 @@ mod tests {
             [KeyCode::KeyS, KeyCode::ArrowDown]
         );
         assert!(c.invert_steering);
-        assert_eq!(c.steer_deadzone, DEFAULT_DEADZONE);
+        assert_eq!(c.steer_deadzone, DEFAULT_STEER_DEADZONE);
     }
 
     #[test]
@@ -1567,7 +1600,7 @@ mod tests {
             c = c.cycled_steer_deadzone(true);
         }
         assert_eq!(c.steer_deadzone, ControlSettings::default().steer_deadzone);
-        assert_eq!(c.cycled_steer_deadzone(false).steer_deadzone, 0.0);
+        assert_eq!(c.cycled_steer_deadzone(false).steer_deadzone, 0.05);
         assert_eq!(
             ControlSettings::default()
                 .cycled_sensitivity(false)
@@ -1643,7 +1676,7 @@ mod tests {
                 ControlItem::Reset,
             ]
         );
-        assert_eq!(rows[1].text, "Stick deadzone: 5%");
+        assert_eq!(rows[1].text, "Stick deadzone: 10%");
         assert!(
             rows[7].enabled.is_err(),
             "reset is disabled at the shipped map"

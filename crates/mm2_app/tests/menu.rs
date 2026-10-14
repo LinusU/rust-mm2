@@ -5488,7 +5488,7 @@ fn the_controls_screen_lists_every_binding_and_tuning_row() {
             "Shift up (manual): KeyG",
             "Shift down (manual): KeyB",
             "Transmission: Automatic",
-            "Stick deadzone: 5%",
+            "Stick deadzone: 10%",
             "Trigger deadzone: 5%",
             "Steering sensitivity: 1.00x",
             "Invert stick steering: Off",
@@ -6008,12 +6008,12 @@ fn tuning_rows_apply_and_persist_and_leaving_drops_a_capture() {
     focus_row(&mut app, "Mouse driving");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
-    assert_eq!(rows[8], "Stick deadzone: 10%");
+    assert_eq!(rows[8], "Stick deadzone: 15%");
     assert_eq!(rows[10], "Steering sensitivity: 1.25x");
     assert_eq!(rows[11], "Invert stick steering: On");
     assert_eq!(rows[12], "Mouse driving: On");
     let live = app.world().resource::<ControlSettings>().clone();
-    assert_eq!(live.steer_deadzone, 0.10);
+    assert_eq!(live.steer_deadzone, 0.15);
     assert!(live.invert_steering);
     assert!(live.mouse_driving, "the row turns mouse driving on");
     assert_eq!(ControlSettings::load(&path), live);

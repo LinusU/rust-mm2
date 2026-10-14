@@ -564,7 +564,11 @@ impl BufferedPlayerInput {
             self.pad_active |= self.pad;
             let use_pad = self.pad || (self.pad_active && !self.keyboard_held);
             let state = if use_pad { self.gamepad } else { self.keyboard };
-            let (next, output) = config.discrete_step(state, input.steering, speed, dt);
+            let (next, output) = if use_pad {
+                config.analog_step(input.steering, speed)
+            } else {
+                config.discrete_step(state, input.steering, speed, dt)
+            };
             if use_pad {
                 self.gamepad = next;
                 self.pad_active = next != 0.0;
