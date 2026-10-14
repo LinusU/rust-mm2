@@ -4757,7 +4757,7 @@ mod tests {
     }
 
     /// A static prop collides with its authored bound, not its render
-    /// mesh (#1443); the retail evidence is `tests/import_pipeline.rs`.
+    /// mesh (#1443); the retail evidence is `tests/golden_gate.rs`.
     #[test]
     fn a_dry_bound_replaces_the_render_collider() {
         use mm2_formats::bnd::BndFile;
