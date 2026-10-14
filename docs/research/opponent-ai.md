@@ -255,14 +255,14 @@ Our opponents (`mm2_app::opponents`, `mm2_app::neural`) are driven by a
 learned policy, not by a port of this controller: a small network
 trained in our own vehicle simulation that sees the car's line, the
 world and the vehicles around it and outputs steering and pedals
-(`docs/neural-opponents.md`, ledger DSN-110). What we take from the
+(`docs/neural-opponents.md`, ledger DSN-112). What we take from the
 original is everything *around* the driving:
 
 - **The route.** The `.opp` record is read as above: the car stages on
   row 0, the rows after it are intersections, a leg between two adjacent
   ones runs along the road they share whichever way its traffic flows
   (`NavGraph::race_leg`), and a circuit's lap is its intersection rows,
-  wrapping to row 1 (`opponents::circuit_lap`). Ledger DSN-112.
+  wrapping to row 1 (`opponents::circuit_lap`). Ledger DSN-114.
 - **The car.** `mm2_content::load_opponent` gives an opponent the
   player's own tune and ignores the `_opp` files.
 - **Finishing.** An opponent finishes on its own course and the finish
@@ -272,7 +272,7 @@ original is everything *around* the driving:
 - **`maxThrottle`**, the ceiling on the driver's throttle.
 - **Backing up.** A stalled car is reversed for at most 66 frames
   steering `−2.857 ×` the bearing to its line, ending inside 0.1 rad —
-  state 1's manoeuvre (ledger DSN-111).
+  state 1's manoeuvre (ledger DSN-113).
 - **No rubber-banding.** Nothing the driver sees or is given depends on
   another participant's progress.
 
