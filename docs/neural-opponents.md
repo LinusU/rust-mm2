@@ -34,7 +34,7 @@ can equally be a nav-graph path to a Cops & Robbers objective, or the
 straight segment to a target. Route information is how a caller says
 where to drive, not something the driver needs to exist.
 
-A race guide is built in three steps, and most of what once looked like
+A race guide is built in three steps, and much of what once looked like
 bad driving was one of them going wrong:
 
 1. **The roads.** Two consecutive rows of the record name two
@@ -46,10 +46,13 @@ bad driving was one of them going wrong:
 2. **The line.** Down the lanes that run the leg's way, heights from
    the lanes, the few-metre jink at each junction smoothed out
    (`Guide::from_route_on`).
-3. **The ground.** Once the collision world exists, every point more
+3. **The world.** Once the collision world exists, every point more
    than a metre off the ground under it is moved onto it
    (`Guide::regrounded`) — a course crosses parks and terraces where
-   there are no lanes to take a height from.
+   there are no lanes to take a height from — and the line is moved
+   sideways off whatever stands within a car's width of it and cannot
+   be pushed aside (`Guide::cleared`): a parked car in the kerb lane, a
+   traffic light on a corner the line cuts.
 
 `mm2_gym audit` walks every line and lists where it still cannot be
 driven as drawn.
