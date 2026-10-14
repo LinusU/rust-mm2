@@ -193,3 +193,95 @@ fn every_authored_position_in_both_cities_sits_inside_the_map_artwork() {
         );
     }
 }
+
+/// F22-AC02 on the authored zoom numbers: with the player parked on a
+/// retail start-grid point and the full-screen map at the authored
+/// `ZoomOutDistFS` (north-up), each retail city's own route waypoints
+/// project to pixel coordinates through the production framing
+/// (`HudMap::view_half_extent`, vertical extent = 2·half, horizontal =
+/// that × aspect, world −Z screen-up, +X screen-right). Checks the
+/// player sits at the frame centre, that a waypoint due north of the
+/// start lands above it and one due east lands right of it, and that
+/// the nearest waypoint is actually on screen — pixel coordinates are
+/// printed per city as the evidence record.
+#[test]
+fn start_grid_and_waypoints_project_to_expected_pixels_in_both_cities() {
+    let Some((retail, _slot)) = crate::support::retail_slot() else {
+        return;
+    };
+    let vfs = crate::support::mount(&retail);
+    const W: f32 = 2560.0;
+    const H: f32 = 1440.0;
+    for city in ["london", "sf"] {
+        let (bytes, _) = vfs.read_path(&format!("tune/{city}.mmhudmap")).unwrap();
+        let spec = HudMapSpec::parse(&String::from_utf8_lossy(&bytes)).unwrap();
+        let mut map = mm2_game::HudMap::new(spec, 0);
+        map.fullscreen = true;
+        map.zoomed_in = false;
+        map.zoom = map.target_zoom();
+        let half = map.view_half_extent();
+        assert!(half > 0.0 && half.is_finite(), "{city}: half extent {half}");
+        let px = |origin: (f32, f32), x: f32, z: f32| -> (f32, f32) {
+            (
+                W / 2.0 + (x - origin.0) / (half * W / H) * (W / 2.0),
+                H / 2.0 + (z - origin.1) / half * (H / 2.0),
+            )
+        };
+
+        let positions = authored_positions(&vfs, city);
+        // A start-grid point where the city has one, else the first
+        // authored route point — any authored position will do as the
+        // parked player.
+        let (spath, sline, sx, sz) = positions
+            .iter()
+            .find(|(p, ..)| p.ends_with("_strtpnts"))
+            .or_else(|| positions.first())
+            .expect("authored positions")
+            .clone();
+        let origin = (sx, sz);
+        let centre = px(origin, sx, sz);
+        assert!((centre.0 - W / 2.0).abs() < 1e-3 && (centre.1 - H / 2.0).abs() < 1e-3);
+
+        let mut nearest: Option<(f32, f32, f32, String)> = None;
+        let (mut north, mut east, mut south, mut west) = (false, false, false, false);
+        for (p, l, x, z) in positions
+            .iter()
+            .filter(|(p, ..)| p.ends_with("waypoints.csv"))
+        {
+            let (dx, dz) = (x - sx, z - sz);
+            let d = dx.hypot(dz);
+            if d > 1.0 && nearest.as_ref().is_none_or(|n| d < n.0) {
+                nearest = Some((d, *x, *z, format!("{p}:{l}")));
+            }
+            let (ox, oy) = px(origin, *x, *z);
+            if dz.abs() > dx.abs() * 4.0 && dz.abs() > 20.0 {
+                // World −Z must read screen-up (smaller y).
+                assert_eq!(
+                    oy < H / 2.0,
+                    dz < 0.0,
+                    "{city}: {p}:{l} north/south flipped"
+                );
+                if dz < 0.0 { north = true } else { south = true }
+            }
+            if dx.abs() > dz.abs() * 4.0 && dx.abs() > 20.0 {
+                assert_eq!(ox > W / 2.0, dx > 0.0, "{city}: {p}:{l} east/west mirrored");
+                if dx > 0.0 { east = true } else { west = true }
+            }
+        }
+        assert!(
+            north && south && east && west,
+            "{city}: all four quadrants probed"
+        );
+        let (d, nx, nz, label) = nearest.expect("a waypoint apart from the start");
+        let (ox, oy) = px(origin, nx, nz);
+        eprintln!(
+            "{city}: start {spath}:{sline} ({sx:.1}, {sz:.1}) at px ({:.0}, {:.0}); \
+             half extent {half:.0} m; nearest waypoint {label} {d:.1} m away at px ({ox:.0}, {oy:.0})",
+            centre.0, centre.1
+        );
+        assert!(
+            (0.0..=W).contains(&ox) && (0.0..=H).contains(&oy),
+            "{city}: the nearest waypoint {label} projects off-screen at ({ox}, {oy})"
+        );
+    }
+}
