@@ -144,6 +144,9 @@ impl DrivingPolicies {
 /// awnings, dumpsters and the checkpoint markers themselves.
 pub const HEAVY_PROP: f32 = 400.0;
 
+/// Progress (m) past its best that counts as a car getting somewhere.
+const PROGRESS_STEP: f32 = 2.0;
+
 /// Guide distance (m) between two re-anchors within which the second
 /// is the first one's predicament again.
 pub const REANCHOR_SAME: f32 = 30.0;
@@ -175,6 +178,10 @@ pub struct NeuralState {
     /// Where on the guide the car was the last time it was
     /// re-anchored.
     last_reanchor: Option<f32>,
+    /// The furthest its progress has reached.
+    best: f32,
+    /// Steps since `best` last grew.
+    idle: u32,
 }
 
 impl NeuralState {
@@ -195,6 +202,8 @@ impl NeuralState {
             unstick: Unstick::default(),
             grounded: false,
             last_reanchor: None,
+            best: arc,
+            idle: 0,
         }
     }
 
@@ -254,7 +263,29 @@ impl NeuralState {
         self.driven += self.guide.delta(self.arc, arc);
         self.arc = arc;
         self.last_pos = pos;
+        if self.progress() > self.best + PROGRESS_STEP {
+            self.best = self.progress();
+            self.idle = 0;
+        } else {
+            self.idle = self.idle.saturating_add(1);
+        }
         self.guide.remaining(self.arc)
+    }
+
+    /// Tracked steps since the car last got further along its guide
+    /// than it had ever been. A car can be busy and going nowhere:
+    /// knocked a street away from its line, where its place on the
+    /// guide stands still ([`Guide::follow`]) and it circles the
+    /// block looking for it.
+    pub fn idle_steps(&self) -> u32 {
+        self.idle
+    }
+
+    /// Start the idle count again — after a re-anchor, which is the
+    /// answer to it. Any other reset leaves it running: a car that
+    /// keeps being righted where it stands is still going nowhere.
+    pub fn restart_idle(&mut self) {
+        self.idle = 0;
     }
 
     /// Note a re-anchor at the car's place, and say whether the last
@@ -281,6 +312,7 @@ impl NeuralState {
         self.action = [0.0; ACT_DIM];
         self.hold = 0;
         self.unstick = Unstick::default();
+        self.idle = 0;
     }
 
     /// Find the car on its guide again after it was moved rather than

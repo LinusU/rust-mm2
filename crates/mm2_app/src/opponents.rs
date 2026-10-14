@@ -118,6 +118,11 @@ pub const REANCHOR_FRAMES: u32 = 900;
 /// their turns first, and a car they have not freed is not going to
 /// free itself.
 pub const OPPONENT_REANCHOR_FRAMES: u32 = 540;
+/// Frames an opponent may drive without getting further along its
+/// route than it has been before it is re-anchored all the same — 20 s:
+/// longer than any corner, queue or back-up takes, shorter than a lap
+/// of the wrong block.
+pub const OPPONENT_ASTRAY_FRAMES: u32 = 1200;
 /// Step back (m) along the route polyline the re-anchor takes —
 /// re-approach the point it failed at instead of landing inside it —
 /// and the stride each further step takes while the candidate still
@@ -1442,7 +1447,15 @@ pub fn opponent_drive(
                 d.stuck_frames += 1;
                 d.stuck_peak = d.stuck_peak.max(d.stuck_frames);
             }
-            if d.stuck_frames >= OPPONENT_REANCHOR_FRAMES
+            // Moving is not getting anywhere: a car knocked a street
+            // off its line circles the block, never still long enough
+            // to count as stuck.
+            let astray = d
+                .neural
+                .as_ref()
+                .is_some_and(|n| n.idle_steps() >= OPPONENT_ASTRAY_FRAMES);
+            let stuck = d.stuck_frames >= OPPONENT_REANCHOR_FRAMES;
+            if (stuck || astray)
                 && let Some(route) = d.route.clone()
                 && let Some(neural) = d.neural.as_mut()
             {
@@ -1503,7 +1516,7 @@ pub fn opponent_drive(
                 // the landing is past it: the first place ahead where
                 // the car can stand, nobody else does, and the next
                 // few metres are open.
-                let past = neural.reanchored_here_before().then(|| {
+                let past = (stuck && neural.reanchored_here_before()).then(|| {
                     let sq = spatial.as_ref()?;
                     let guide = neural.guide.clone();
                     let filter = SpatialQueryFilter::default();
@@ -1517,6 +1530,27 @@ pub fn opponent_drive(
                         let arc = guide.normalize(neural.arc + ahead);
                         let (p, t) = (guide.point_at(arc), guide.tangent_at(arc));
                         let pyaw = (-t.x).atan2(-t.z);
+                        // Fixed ground all the way there: a car waiting
+                        // at a raised drawbridge is not put down on
+                        // the far bank.
+                        let strides = (ahead / 4.0).ceil() as usize;
+                        let fixed = (1..=strides).all(|k| {
+                            let q = guide.point_at(
+                                guide.normalize(neural.arc + ahead * k as f32 / strides as f32),
+                            );
+                            sq.cast_ray_predicate(
+                                q + Vec3::Y * 2.0,
+                                Dir3::NEG_Y,
+                                6.0,
+                                false,
+                                &filter,
+                                &|e| !cars.contains(colliders.get(e).map_or(e, |c| c.body)),
+                            )
+                            .is_some_and(|hit| is_static(hit.entity))
+                        });
+                        if !fixed {
+                            return None;
+                        }
                         let in_gate = gates
                             .iter()
                             .any(|g| (p.x - g.center.x).hypot(p.z - g.center.z) < g.radius);
@@ -1594,6 +1628,7 @@ pub fn opponent_drive(
                 // teleport banks no arc it did not drive.
                 d.next = resync_next;
                 neural.reseat(pose);
+                neural.restart_idle();
                 d.stuck_frames = 0;
                 d.stuck_pos = pose;
                 d.reanchors += 1;
