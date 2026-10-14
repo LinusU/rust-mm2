@@ -3308,8 +3308,11 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             .entity_mut(copy)
             .insert(mm2_game::VehicleDamage::new(DAMAGE_SPEC));
     }
+    // `inputs_sent` is the client's counter; the host's reader thread
+    // applies the datagram later, so gate on the host-side mailbox.
     spin(&mut app, |a| {
         a.world().resource::<netdrive::NetDriveReport>().inputs_sent > 0
+            && host.remote_inputs().latest(our_id).is_some()
     });
     let sent = host
         .remote_inputs()
