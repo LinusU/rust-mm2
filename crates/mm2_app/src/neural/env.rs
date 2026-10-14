@@ -761,11 +761,13 @@ impl DrivingEnv {
             fields,
             slots: Vec::new(),
             drones: Vec::new(),
+            trouble: std::collections::VecDeque::new(),
             rng: NavRng::new(config.seed),
             clock: 0,
             staged: false,
             config,
         };
+        env.ground_lines();
         for _ in 0..env.config.agents {
             let slot = env.fresh_slot(None);
             env.slots.push(slot);
@@ -781,6 +783,32 @@ impl DrivingEnv {
             }
         }
         Ok(env)
+    }
+
+    /// Lay every line on the world's ground ([`Guide::regrounded`]),
+    /// as the game does for each opponent before its race starts.
+    fn ground_lines(&mut self) {
+        let Ok((spatial, bodies, colliders, vehicles)) = self.probe.get(self.app.world()) else {
+            return;
+        };
+        let world = self.app.world();
+        let filter = SpatialQueryFilter::default();
+        let ground = |e: Entity| {
+            let body = colliders.get(e).map_or(e, |c| c.body);
+            !vehicles.contains(body)
+                && bodies.get(body).is_ok_and(|b| !b.is_dynamic())
+                && world.get::<mm2_game::Banger>(body).is_none()
+        };
+        for line in &mut self.lines {
+            let grounded = line.guide.regrounded(|p| {
+                super::guide::ground_near(p, |from, reach| {
+                    spatial
+                        .cast_ray_predicate(from, Dir3::NEG_Y, reach, false, &filter, &ground)
+                        .map(|hit| hit.distance)
+                })
+            });
+            line.guide = Arc::new(grounded);
+        }
     }
 
     /// The cars this environment draws from.

@@ -1210,6 +1210,7 @@ pub fn opponent_drive(
     spatial: Option<SpatialQuery>,
     bodies: Query<&RigidBody>,
     colliders: Query<&ColliderOf>,
+    bangers: Query<(), With<mm2_game::Banger>>,
     water: Option<Res<crate::water::CityWater>>,
     race: Option<Res<RaceState>>,
     policies: Option<Res<DrivingPolicies>>,
@@ -1289,6 +1290,31 @@ pub fn opponent_drive(
     ) in &mut drivers
     {
         let d = &mut *driver;
+        // The line's heights between roads are a guess until the world
+        // is there to ask: lay it on the ground before the start.
+        // Ground is whatever stands still under a car — a drawbridge
+        // leaf, but not a car or a lamp post.
+        if let Some(sq) = spatial.as_ref()
+            && let Some(neural) = d.neural.as_mut()
+        {
+            let ground = |c: Entity| {
+                let body = colliders.get(c).map_or(c, |c| c.body);
+                !field.iter().any(|(e, _)| *e == body)
+                    && !bangers.contains(body)
+                    && bodies.get(body).is_ok_and(|b| !b.is_dynamic())
+            };
+            neural.ground(pos.0, |from, reach| {
+                sq.cast_ray_predicate(
+                    from,
+                    Dir3::NEG_Y,
+                    reach,
+                    false,
+                    &SpatialQueryFilter::default(),
+                    &ground,
+                )
+                .map(|hit| hit.distance)
+            });
+        }
         // A lesson's lead car carries no progress: it drives while the
         // field races, with nothing of its own to finish.
         let racing = progress.is_none_or(|p| {

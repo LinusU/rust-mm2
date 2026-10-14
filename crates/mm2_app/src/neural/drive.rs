@@ -157,6 +157,9 @@ pub struct NeuralState {
     hold: u8,
     /// The stalled-car watch that backs it out of a dead end.
     pub unstick: Unstick,
+    /// Whether the guide has been laid on the world's ground
+    /// ([`NeuralState::ground`]).
+    grounded: bool,
 }
 
 impl NeuralState {
@@ -175,7 +178,27 @@ impl NeuralState {
             action: [0.0; ACT_DIM],
             hold: 0,
             unstick: Unstick::default(),
+            grounded: false,
         }
+    }
+
+    /// Lay the guide on the world's ground, once
+    /// ([`Guide::regrounded`]). The guide is built when the car is
+    /// spawned, before the collision world can be asked anything; this
+    /// is called every step until `cast` — a ray straight down, as
+    /// [`ground_near`](super::guide::ground_near) wants it — finds
+    /// ground under the car at `pos` itself, which is when the world
+    /// has arrived. A car over a void waits; a line corrected nowhere
+    /// costs one pass of rays.
+    pub fn ground(&mut self, pos: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<f32>) {
+        if self.grounded || super::guide::ground_near(pos, &mut cast).is_none() {
+            return;
+        }
+        self.guide = Arc::new(
+            self.guide
+                .regrounded(|p| super::guide::ground_near(p, &mut cast)),
+        );
+        self.grounded = true;
     }
 
     /// This car as another driver sees it.

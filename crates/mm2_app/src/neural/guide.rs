@@ -44,6 +44,28 @@ const GROUND_STEP: f32 = 10.0;
 const GROUND_LANE: f32 = 12.0;
 /// How far above or below the straight line (m) the road is looked for.
 const GROUND_SEARCH: f32 = 40.0;
+/// Smallest height error (m) [`Guide::regrounded`] corrects: under it
+/// the line's own height — a lane's, an authored point's — is as good
+/// as a ray's, and is left exactly as it was.
+const REGROUND_MIN: f32 = 1.0;
+/// Largest height error (m) [`Guide::regrounded`] believes. Past it the
+/// ray found some other level — the street under a bridge, a roof.
+const REGROUND_MAX: f32 = 25.0;
+/// The steepest a line may climb or fall from one point to the next,
+/// as rise over run, before [`Guide::regrounded`] takes the far point's
+/// height for another level's. San Francisco's steepest street is 0.3.
+const STEEPEST: f32 = 0.6;
+/// How far above a point of the line (m) [`ground_near`] looks for
+/// ground before it looks below.
+const GROUND_ABOVE: f32 = 4.0;
+/// How far below it (m).
+const GROUND_BELOW: f32 = 26.0;
+/// How near the line's own height (m) ground must be for
+/// [`ground_near`] to look no further.
+const GROUND_CLOSE: f32 = 3.0;
+/// How far above a point (m) [`ground_near`] looks when the line may be
+/// under the ground — inside a hill between two authored points.
+const GROUND_BURIED: f32 = 24.0;
 /// Spacing (m) of the samples a route's guide is smoothed over.
 const SMOOTH_STEP: f32 = 5.0;
 
@@ -61,6 +83,32 @@ pub struct Guide {
     /// dropped ones included — what maps a position on the guide back
     /// to an index into the source route ([`Guide::chase_index`]).
     source_arc: Vec<f32>,
+}
+
+/// The height of the ground at `p`'s place in plan, of the levels
+/// there the one nearest `p`'s own: `cast` sends a ray straight down
+/// from a point and answers with how far it went before it met ground.
+///
+/// Ground just under or over the point is taken as it is. Failing that
+/// the point may be buried — a line drawn straight through a hill — so
+/// the ground above it is looked for too, and the nearer of the two
+/// wins. `None` over a void.
+pub fn ground_near(p: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<f32>) -> Option<f32> {
+    let below = cast(p + Vec3::Y * GROUND_ABOVE, GROUND_ABOVE + GROUND_BELOW)
+        .map(|d| p.y + GROUND_ABOVE - d);
+    if below.is_some_and(|y| (y - p.y).abs() <= GROUND_CLOSE) {
+        return below;
+    }
+    let above = cast(p + Vec3::Y * GROUND_BURIED, GROUND_BURIED - GROUND_ABOVE)
+        .map(|d| p.y + GROUND_BURIED - d);
+    match (below, above) {
+        (Some(b), Some(a)) => Some(if (a - p.y).abs() < (b - p.y).abs() {
+            a
+        } else {
+            b
+        }),
+        (b, a) => b.or(a),
+    }
 }
 
 impl Guide {
@@ -178,6 +226,75 @@ impl Guide {
             }
         }
         Self::with_sources(points, closed).map(Self::smoothed)
+    }
+
+    /// The same line laid on the ground actually under it.
+    ///
+    /// [`Guide::from_route_on`] takes heights from road lanes, and a
+    /// course does not keep to roads: across a park, down a terraced
+    /// slope or over a plaza there is no lane, the straight line
+    /// between two authored points stands, and it runs up to 11 m above
+    /// or below the ground (`sf race11` leaving Alta Plaza). `ground`
+    /// answers with the height of the ground at a point of the line —
+    /// [`ground_near`] over the collision world, once there is one —
+    /// and each point further than [`REGROUND_MIN`] from it is moved
+    /// there. Heights are then eased over the neighbouring points, so
+    /// a retaining wall becomes a ramp and a ray that found a kerb or a
+    /// statue does not put a spike in the line. A point whose own
+    /// height is on another level altogether — steeper than
+    /// [`STEEPEST`] from the point before it — is laid on the ground
+    /// at the line's level instead (`sf race8` under the freeway).
+    ///
+    /// Only heights change. Arc positions are kept as they were, so
+    /// everything bound to them — a car's place, a gate, the finish —
+    /// stays where it is; a corrected stretch measures a little short
+    /// of its true length.
+    pub fn regrounded(&self, mut ground: impl FnMut(Vec3) -> Option<f32>) -> Self {
+        let mut lift: Vec<f32> = Vec::with_capacity(self.points.len());
+        // The point before, where it ended up.
+        let mut last: Option<Vec3> = None;
+        for &p in &self.points {
+            // No road climbs like a wall. A point that stands far above
+            // or below where the line just was took its height from
+            // another level — the lane of a flyover crossing overhead —
+            // and the ground is looked for from the line's level, not
+            // from its own.
+            let from = match last {
+                Some(l)
+                    if (p.y - l.y).abs()
+                        > STEEPEST * (p.x - l.x).hypot(p.z - l.z) + REGROUND_MIN =>
+                {
+                    Vec3::new(p.x, l.y, p.z)
+                }
+                _ => p,
+            };
+            let d = ground(from)
+                .map(|y| y - p.y)
+                .filter(|d| (REGROUND_MIN..=REGROUND_MAX).contains(&d.abs()))
+                .unwrap_or(0.0);
+            lift.push(d);
+            last = Some(p + Vec3::Y * d);
+        }
+        let n = lift.len();
+        let wrap = |i: isize| -> usize {
+            (if self.closed {
+                i.rem_euclid(n as isize)
+            } else {
+                i.clamp(0, n as isize - 1)
+            }) as usize
+        };
+        // Where anything moved, the heights — not the corrections, or
+        // a spike taken out would be half put back — are eased over
+        // the points either side. Everywhere else is untouched.
+        let laid = |i: usize| self.points[i].y + lift[i];
+        let mut out = self.clone();
+        for (i, p) in out.points.iter_mut().enumerate() {
+            let (before, after) = (wrap(i as isize - 1), wrap(i as isize + 1));
+            if lift[before] != 0.0 || lift[i] != 0.0 || lift[after] != 0.0 {
+                p.y = (laid(before) + 2.0 * laid(i) + laid(after)) / 4.0;
+            }
+        }
+        out
     }
 
     /// The same line with its small-scale wiggle taken out.
@@ -484,6 +601,97 @@ impl Guide {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Flat ground at `y = 0` with a 9 m deep, 30 m wide cutting across
+    /// `x = 35..65`, as a ray straight down sees it.
+    fn cutting(from: Vec3, reach: f32) -> Option<f32> {
+        let ground = if (35.0..=65.0).contains(&from.x) {
+            -9.0
+        } else {
+            0.0
+        };
+        let d = from.y - ground;
+        (0.0..=reach).contains(&d).then_some(d)
+    }
+
+    #[test]
+    fn ground_near_takes_the_level_nearest_the_point() {
+        // On the ground, a little over it, a little under it.
+        for y in [0.0, 2.5, -2.5] {
+            assert_eq!(ground_near(Vec3::new(0.0, y, 0.0), cutting), Some(0.0));
+        }
+        // Well above the floor of the cutting: the floor.
+        assert_eq!(ground_near(Vec3::new(50.0, 0.0, 0.0), cutting), Some(-9.0));
+        // Buried under a hill: the ground overhead.
+        assert_eq!(ground_near(Vec3::new(0.0, -15.0, 0.0), cutting), Some(0.0));
+        // Over a void, nothing.
+        assert_eq!(ground_near(Vec3::ZERO, |_, _| None), None);
+        // A deck 6 m overhead and a street 2 m below: the street.
+        let stacked = |from: Vec3, reach: f32| {
+            [6.0, -2.0]
+                .into_iter()
+                .map(|level| from.y - level)
+                .find(|d| (0.0..=reach).contains(d))
+        };
+        assert_eq!(ground_near(Vec3::ZERO, stacked), Some(-2.0));
+    }
+
+    #[test]
+    fn a_regrounded_guide_follows_the_ground_between_its_roads() {
+        // A straight line at road height across the cutting.
+        let flat =
+            Guide::new((0..=20).map(|i| Vec3::new(i as f32 * 5.0, 0.0, 0.0)), false).unwrap();
+        let laid = flat.regrounded(|p| ground_near(p, cutting));
+        // Down in the cutting, eased in over a point either side.
+        assert_eq!(laid.point_at(50.0).y, -9.0);
+        assert_eq!(laid.point_at(20.0).y, 0.0);
+        assert_eq!(laid.point_at(80.0).y, 0.0);
+        assert!((-9.0..0.0).contains(&laid.point_at(35.0).y));
+        // Only heights moved: every arc position is where it was.
+        assert_eq!(laid.length(), flat.length());
+        for s in [0.0, 33.0, 50.0, 71.0, 100.0] {
+            let (a, b) = (flat.point_at(s), laid.point_at(s));
+            assert_eq!((a.x, a.z), (b.x, b.z));
+        }
+        // An error under a metre is the line's to keep, and one past
+        // belief is another level, not this line's ground.
+        let kerb = flat.regrounded(|_| Some(0.4));
+        assert_eq!(kerb, flat);
+        let roof = flat.regrounded(|_| Some(40.0));
+        assert_eq!(roof, flat);
+    }
+
+    #[test]
+    fn a_regrounded_guide_drops_a_height_taken_from_another_level() {
+        // A street at y = 0 under a deck at y = 14 that spans
+        // x = 45..55, and a line that took the deck's height there.
+        let under_deck = |from: Vec3, reach: f32| {
+            let deck = (45.0..=55.0).contains(&from.x).then_some(14.0);
+            deck.into_iter()
+                .chain([0.0])
+                .map(|level| from.y - level)
+                .find(|d| (0.0..=reach).contains(d))
+        };
+        let spiked = Guide::new(
+            (0..=20).map(|i| {
+                let x = i as f32 * 5.0;
+                Vec3::new(x, if x == 50.0 { 12.5 } else { 0.0 }, 0.0)
+            }),
+            false,
+        )
+        .unwrap();
+        // Asked from its own height the point is told it is on the
+        // deck, near enough…
+        assert_eq!(
+            ground_near(Vec3::new(50.0, 12.5, 0.0), under_deck),
+            Some(14.0)
+        );
+        // …but the line was on the street a moment ago, and stays.
+        let laid = spiked.regrounded(|p| ground_near(p, under_deck));
+        for s in [40.0, 45.0, 50.0, 55.0, 60.0] {
+            assert_eq!(laid.point_at(s).y, 0.0, "at {s}");
+        }
+    }
 
     fn square() -> Guide {
         Guide::new(
