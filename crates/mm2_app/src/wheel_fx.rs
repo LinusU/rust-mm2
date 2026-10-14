@@ -391,6 +391,9 @@ pub fn emit_wheel_fx(
                     Mesh3d(quad),
                     MeshMaterial3d(materials.add(material)),
                     transform,
+                    // Smoke puffs are translucent sprites: in the shadow pass they
+                    // land as disconnected dots on the road.
+                    bevy::light::NotShadowCaster,
                 ));
                 report.emitted += 1;
             }

@@ -189,6 +189,20 @@ fn a_damaged_vehicle_smokes_from_its_authored_pivots() {
 }
 
 #[test]
+fn damage_smoke_casts_no_shadow() {
+    let mut app = smoke_app(true);
+    damaged_car(&mut app, PlayerControl::Local, SPEC.med_damage + 10.0);
+    run(&mut app, 60);
+    assert!(!puffs(&mut app).is_empty());
+    let casters = app
+        .world_mut()
+        .query_filtered::<Entity, (With<SmokePuff>, Without<bevy::light::NotShadowCaster>)>()
+        .iter(app.world())
+        .count();
+    assert_eq!(casters, 0, "damage smoke casts no shadows");
+}
+
+#[test]
 fn an_intact_vehicle_never_smokes() {
     let mut app = smoke_app(true);
     damaged_car(&mut app, PlayerControl::Local, SPEC.med_damage - 1.0);

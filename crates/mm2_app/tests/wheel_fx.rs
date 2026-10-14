@@ -697,6 +697,12 @@ fn a_slipping_wheel_emits_both_authored_channels_at_its_contact() {
         .iter()
         .all(|(p, _, _)| (p.x - contact.x).abs() < 1.0 && (p.z - contact.z).abs() < 1.0);
     assert!(near, "puffs spawn at the wheel's contact point");
+    let casters = app
+        .world_mut()
+        .query_filtered::<Entity, (With<WheelPuff>, Without<bevy::light::NotShadowCaster>)>()
+        .iter(app.world())
+        .count();
+    assert_eq!(casters, 0, "wheel smoke and dust cast no shadows");
     assert!(app.world().get::<WheelPtx>(car).is_some(), "the rig bound");
 }
 
