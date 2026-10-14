@@ -96,6 +96,9 @@ action in between.
   (`opp_rec=`). Stuck again at the same place, it is put down past
   whatever is there instead — a parked car one racer wrecks settles
   into a static body on the line of every racer behind.
+  A car that drives for 20 s without getting further along its line
+  than it has been — lost, a street away — is re-anchored the same
+  way.
 
 ## Training
 
