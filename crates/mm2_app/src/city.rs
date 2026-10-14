@@ -2792,10 +2792,59 @@ struct PropSurfaceCollider {
     restitution: f32,
 }
 
-/// Restore liquid-bearing ASCII bounds. Other props keep the established PKG
-/// collision path until their bound variants have been audited. A valid bound
-/// replaces the entire render collider, split by material, so banks never gain
-/// water drag and no duplicate dry plane can hide the wet contact.
+/// A bound triangle tagged with its polygon's material index.
+type BoundTriangle = (u32, [u32; 3]);
+
+/// An authored bound's triangles in Bevy space: positions with `offset`
+/// baked in, and each polygon fanned into triangles tagged with its
+/// material index. `None` for a bound that cannot be trusted — a
+/// non-finite vertex, a polygon that is not a triangle or quad, an index
+/// past the vertex list, or no polygons at all.
+fn bound_triangles(
+    bound: &mm2_formats::bnd::BndFile,
+    offset: Vec3,
+) -> Option<(Vec<Vec3>, Vec<BoundTriangle>)> {
+    if bound.verts.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let positions: Vec<_> = bound.verts.iter().map(|&p| v3(p) + offset).collect();
+    let mut tris = Vec::new();
+    for poly in &bound.polys {
+        if !(3..=4).contains(&poly.indices.len())
+            || poly.indices.iter().any(|&i| i as usize >= positions.len())
+        {
+            return None;
+        }
+        for i in 1..poly.indices.len() - 1 {
+            let mut tri = [poly.indices[0], poly.indices[i], poly.indices[i + 1]];
+            if MIRROR_Z {
+                tri.swap(1, 2);
+            }
+            tris.push((poly.material, tri));
+        }
+    }
+    if tris.is_empty() {
+        return None;
+    }
+    Some((positions, tris))
+}
+
+/// A static prop's collider from its authored ASCII bound instead of its
+/// render mesh. The render mesh carries geometry that is not solid in the
+/// original — Golden Gate's deck-underside planes, for one, stand up to
+/// 0.3 m proud of the road where two bridge pieces meet and launched a
+/// car crossing the seam (#1443). `None` keeps the PKG collision.
+fn dry_bound_collider(bound: &mm2_formats::bnd::BndFile, offset: Vec3) -> Option<Collider> {
+    let (positions, tris) = bound_triangles(bound, offset)?;
+    Some(Collider::trimesh(
+        positions,
+        tris.into_iter().map(|(_, tri)| tri).collect(),
+    ))
+}
+
+/// Restore liquid-bearing ASCII bounds. A valid bound replaces the entire
+/// render collider, split by material, so banks never gain water drag and
+/// no duplicate dry plane can hide the wet contact.
 fn liquid_bound_colliders(
     bound: &mm2_formats::bnd::BndFile,
     tables: &SurfaceTables,
@@ -2816,34 +2865,17 @@ fn liquid_bound_colliders(
     if !identities
         .iter()
         .any(|&s| tables.tire_surface_for(s).is_some_and(|t| t.drag > 0.0))
-        || bound.verts.iter().flatten().any(|v| !v.is_finite())
     {
         return None;
     }
-    let positions: Vec<_> = bound.verts.iter().map(|&p| v3(p) + offset).collect();
+    let (positions, tris) = bound_triangles(bound, offset)?;
     let mut groups: BTreeMap<Option<u16>, Vec<[u32; 3]>> = BTreeMap::new();
-    for poly in &bound.polys {
-        let surface = *identities.get(poly.material as usize)?;
-        if !(3..=4).contains(&poly.indices.len())
-            || poly.indices.iter().any(|&i| i as usize >= positions.len())
-        {
-            return None;
-        }
-        let key = match surface {
+    for (material, tri) in tris {
+        let key = match *identities.get(material as usize)? {
             SurfaceMaterial::Authored(i) => Some(i),
             SurfaceMaterial::Unspecified => None,
         };
-        let tris = groups.entry(key).or_default();
-        for i in 1..poly.indices.len() - 1 {
-            let mut tri = [poly.indices[0], poly.indices[i], poly.indices[i + 1]];
-            if MIRROR_Z {
-                tri.swap(1, 2);
-            }
-            tris.push(tri);
-        }
-    }
-    if groups.is_empty() {
-        return None;
+        groups.entry(key).or_default().push(tri);
     }
     Some(
         groups
@@ -2980,7 +3012,8 @@ impl<'a> PropCache<'a> {
     fn build(&mut self, name: &str, offset: PropOffset, paint: usize) -> Option<PropModel> {
         let pkg = self.load_pkg(name)?;
         let movable = matches!(offset, PropOffset::Bound(_));
-        let static_bound = matches!(offset, PropOffset::Verbatim | PropOffset::Ground);
+        let verbatim = matches!(offset, PropOffset::Verbatim);
+        let static_bound = verbatim || matches!(offset, PropOffset::Ground);
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
             PropOffset::Bound(v) | PropOffset::Pivot(v) => v,
@@ -2998,19 +3031,30 @@ impl<'a> PropCache<'a> {
         if model.parts.is_empty() {
             return None;
         }
-        if static_bound && let Some(tables) = &self.surfaces {
+        if static_bound {
             let path = format!("bound/{name}_bound.bnd");
-            if let Ok((bytes, _)) = self.vfs.read_path(&path) {
-                match std::str::from_utf8(&bytes)
+            let bound = self.vfs.read_path(&path).ok().and_then(|(bytes, _)| {
+                std::str::from_utf8(&bytes)
                     .ok()
                     .and_then(|text| mm2_formats::bnd::BndFile::parse(text).ok())
-                    .and_then(|bound| liquid_bound_colliders(&bound, tables, offset))
-                {
-                    Some(colliders) => {
-                        model.collider = None;
-                        model.surface_colliders = colliders;
-                    }
-                    None => debug!(%path, "no usable liquid bound; keeping PKG collision"),
+            });
+            if let Some(bound) = bound {
+                let liquid = self
+                    .surfaces
+                    .as_ref()
+                    .and_then(|tables| liquid_bound_colliders(&bound, tables, offset));
+                if let Some(colliders) = liquid {
+                    model.collider = None;
+                    model.surface_colliders = colliders;
+                } else if verbatim && let Some(collider) = dry_bound_collider(&bound, offset) {
+                    // INST placements only: their full basis places the
+                    // bound's prop-local frame (the GG towers' `_upper`
+                    // bounds land on the visible tower legs). Stamped
+                    // props keep PKG collision — their content offset is
+                    // measured for the mesh, not the bound.
+                    model.collider = Some(collider);
+                } else {
+                    debug!(%path, "no usable bound; keeping PKG collision");
                 }
             }
         }
@@ -4710,6 +4754,59 @@ mod tests {
         bound.polys[1].material = 1;
         bound.verts[0][0] = f32::NAN;
         assert!(liquid_bound_colliders(&bound, &tables, Vec3::ZERO).is_none());
+    }
+
+    /// A static prop collides with its authored bound, not its render
+    /// mesh (#1443); the retail evidence is `tests/import_pipeline.rs`.
+    #[test]
+    fn a_dry_bound_replaces_the_render_collider() {
+        use mm2_formats::bnd::BndFile;
+        let bound = BndFile::parse(
+            "version: 1.01\nverts: 4\nmaterials: 1\npolys: 1\nv -4 0 -4\nv -4 0 4\nv 4 0 4\nv 4 0 -4\nmtl default {\n friction: 0.5\n}\nquad 0 1 2 3 0\n",
+        )
+        .unwrap();
+        let collider = dry_bound_collider(&bound, Vec3::Y).unwrap();
+        let down = |x: f32, z: f32| {
+            collider
+                .cast_ray(
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::new(x, 5.0, z),
+                    Vec3::NEG_Y,
+                    10.0,
+                    true,
+                )
+                .map(|(distance, _)| 5.0 - distance)
+        };
+        // The offset is baked in; the quad is fanned into two triangles.
+        assert!((down(3.0, 0.0).unwrap() - 1.0).abs() < 1e-5);
+        assert!((down(-3.0, 3.0).unwrap() - 1.0).abs() < 1e-5);
+        assert!(down(6.0, 0.0).is_none(), "nothing beyond the bound");
+    }
+
+    #[test]
+    fn an_untrustworthy_dry_bound_keeps_the_render_collider() {
+        use mm2_formats::bnd::BndFile;
+        let text = "version: 1.01\nverts: 4\nmaterials: 1\npolys: 1\nv 0 0 0\nv 0 0 1\nv 1 0 1\nv 1 0 0\nmtl default {\n friction: 0.5\n}\nquad 0 1 2 3 0\n";
+        let mut bound = BndFile::parse(text).unwrap();
+        assert!(dry_bound_collider(&bound, Vec3::ZERO).is_some());
+        bound.verts[2][1] = f32::INFINITY;
+        assert!(
+            dry_bound_collider(&bound, Vec3::ZERO).is_none(),
+            "non-finite"
+        );
+        let mut bound = BndFile::parse(text).unwrap();
+        bound.polys[0].indices[3] = 9;
+        assert!(
+            dry_bound_collider(&bound, Vec3::ZERO).is_none(),
+            "index past the verts"
+        );
+        let mut bound = BndFile::parse(text).unwrap();
+        bound.polys.clear();
+        assert!(
+            dry_bound_collider(&bound, Vec3::ZERO).is_none(),
+            "no polygons"
+        );
     }
 
     #[test]

@@ -98,8 +98,9 @@ dry banks in mixed-material bounds. Each collider carries `SurfaceMaterial`,
 the same session table. Wheels, audio and particles share the identity;
 no texture-name guess or global below-water plane is involved.
 
-This is deliberately limited to liquid-bearing static ASCII bounds.
-Unaudited dry props, moving props and absent/malformed bounds retain the
+Liquid-bearing bounds apply to every static prop. Dry bounds replace the
+render mesh for INST placements only (WLD-37, placement.md § Golden Gate
+deck); stamped props, moving props and absent/malformed bounds retain the
 existing PKG collision path. Binary bounds and `.ter` acceleration data are
 not newly interpreted. Mods resolve through the existing VFS priority for
 both the bound and city material tables. Collider entities retain session

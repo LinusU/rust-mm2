@@ -25,6 +25,7 @@ mod environment;
 mod environment_retail;
 mod event;
 mod game_keys;
+mod golden_gate;
 mod hud;
 mod hud_scale;
 mod hudjourney;

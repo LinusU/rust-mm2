@@ -195,3 +195,50 @@ this measurement:
 
 The audit's `sunk` counter is a measured finding, not a failure
 (`--strict` ignores it).
+
+## Golden Gate deck: render mesh is not collision (#1443)
+
+Player report: cars and opponents are launched by something invisible
+on the Golden Gate Bridge in the third SF Checkpoint race (`checkpoint:2`).
+Reproduced headless (`--event checkpoint:2 --bot`, a per-tick trace of the
+player's position, velocity and Avian contacts): at z ≈ −1273 the car
+leaves the deck at 4 → 7.8 m/s vertical at 14 m/s forward, in contact
+with `prop-pl_ggbridge_sanfran_mid_f-collider` (contact normal straight
+down — a downward-facing plane hit from above).
+
+Cause (measured, `tests/golden_gate.rs`): INST props collided with their
+best-LOD render triangles, and the `pl_ggbridge_*_mid_f` pieces carry the
+deck's underside as `pl_ggbridge_bot_f` planes. They are straight chords
+between the piece ends; the PSDL road they sit under is not (a 1.7 m
+vertical curve per 392 m, above). Across the whole span the plane stands
+0.21–0.25 m *above* the road surface in the lanes and, being a trimesh, is
+solid from above: a razor ledge. At the seam where the San Francisco side
+piece meets the mid piece (z = −1183) the mid plane starts 0.2–0.3 m above
+the road — a 0.25 m step at 32 m/s (`vy` 0.5 → 4.6 m/s, speed 32 → 25).
+
+Fix: a static INST prop uses its authored bound (WLD-37). The bound's
+deck is at or under the road everywhere the lanes run (≤ 0.15 m anywhere).
+Cross-map: a road-centroid sweep over SF and London (props rising
+0.2–3 m over any ground triangle) removes two phantoms —
+`pl_ggbridge_sanfran_mid_f` (0.23 m) and London's
+`cl_towerbrdge01_rt_l` (0.33 m) — and adds one, `nl_fishwheel_f`'s
+authored pedestal column (0.94 m, a bound that is only the column and
+footing; the mesh's wheel is no longer solid).
+
+Race sweep (`--event checkpoint:N --bot --headless --frames 7000`, 12 rows
+per city, mesh vs bound, frames with a prop contact and vertical speed
+above 2.5 m/s, retail 2026-10-14): SF `checkpoint:2` (Golden Hour) 16 → 0
+(peak 7.8 → 1.7 m/s, the Marin lip below); London `checkpoint:4` 12 → 0
+(`cl_towerbrdge01_rt_l`, peak 6.7 → 0). Worse: London `checkpoint:3`/`10`
+0 → 3/2 (Lambeth bridge, peak 3.8 m/s) and `checkpoint:6` 1 → 3 (Waterloo
+bridge, peak 4.4 m/s) — the bound's abutment wall tops (y −0.15) meet the
+drawbridge leaf deck; filed as #1450. SF `checkpoint:11` is the same in
+both (`fl_embarcramp01_f`, 16 vs 15 frames, peak 3.7 m/s). The other 20
+rows have no prop launch either way.
+
+Residual, authored: the Marin side bound's land apron (`pl_ggbridge_marin_side_f`
+grass triangles) is flat at y = 30.40 across the carriageway where the
+road ends at 30.25 (the sidewalk-top height), a 0.15 m lip at
+z ≈ −2078; the render mesh's triangles there dip to 27.8 instead. It
+hops a car at 12 m/s by ~0.6 m. Not changed here: the bound is authored
+and nothing says which of road or apron the original lets win.
