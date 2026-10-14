@@ -915,9 +915,9 @@ fn resolve_selection(
 
 /// The windowed lobby's keyboard surface: while the session sits at
 /// `Menu` — the lobby's waiting phase — `Enter` toggles our roster
-/// ready flag, the arrow keys pick the car and paint, and `Esc` leaves the lobby (the session-lifecycle Esc
-/// lives in `session_control_input`, which ignores `Menu`, so the two
-/// never collide). Gamepad equivalents are a menu-surface decision
+/// ready flag, the arrow keys pick the car and paint, and `Esc` leaves
+/// the lobby (the session-lifecycle Esc lives in `session_control_input`,
+/// which ignores `Menu`, so the two never collide). Gamepad equivalents are a menu-surface decision
 /// deferred with the real lobby UI.
 pub fn lobby_input(
     keys: Res<ButtonInput<KeyCode>>,
