@@ -4079,6 +4079,71 @@ fn an_authored_remote_picks_engine_voice_publishes_its_rpm() {
     );
 }
 
+/// F24-AC01 / F25-A: the roster picks of two peers reach the session's
+/// spawn — each wire seat is built from *its own* pick (the authored
+/// tune rides through: different masses), not from the host's car or the
+/// first peer's.
+#[test]
+fn two_peers_with_different_picks_spawn_their_own_vehicles() {
+    let install = tempfile::tempdir().unwrap();
+    support::tuned_car(install.path(), "vpa", 1200.0);
+    support::tuned_car(install.path(), "vpb", 1800.0);
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peers = Vec::new();
+    for (driver, car) in [("eve", "vpa"), ("bob", "vpb")] {
+        let mut peer = remote_peer(addr, driver, fp);
+        let ctl = peer.ctl().unwrap();
+        ctl.set_vehicle(car, 0).unwrap();
+        ctl.set_ready(true).unwrap();
+        until_wire(
+            &mut peer,
+            |m| matches!(m, Message::Roster { players: r } if r.iter().any(|e| e.driver == driver && e.ready && e.pick.as_ref().is_some_and(|p| p.vehicle == car))),
+        );
+        peers.push(peer);
+    }
+    // Both ready before the host starts, so neither pick races the gate.
+    until_wire(
+        &mut peers[0],
+        |m| matches!(m, Message::Roster { players: r } if r.len() == 2 && r.iter().all(|e| e.ready)),
+    );
+    hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .count()
+            == 2
+    });
+    let roster = app.world().resource::<LobbyState>().roster.clone();
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(&NetPlayer, &RemotePick, &mm2_vehicle::Vehicle), ()>();
+    let spawned: Vec<(u16, String, f32)> = q
+        .iter(app.world())
+        .map(|(n, p, v)| (n.0, p.0.vehicle.clone(), v.config.mass))
+        .collect();
+    assert_eq!(spawned.len(), 2);
+    for (wire, vehicle, mass) in spawned {
+        let entry = roster
+            .iter()
+            .find(|e| e.player_id == wire)
+            .expect("the spawned seat is on the roster");
+        let (want_vehicle, want_mass) = match entry.driver.as_str() {
+            "eve" => ("vpa", 1200.0),
+            "bob" => ("vpb", 1800.0),
+            other => panic!("unexpected roster driver {other}"),
+        };
+        assert_eq!(vehicle, want_vehicle, "{}'s pick spawned", entry.driver);
+        assert_eq!(
+            mass, want_mass,
+            "{}'s authored tune rode the pick",
+            entry.driver
+        );
+    }
+}
+
 /// F25-B (protocol v15), client half: an authored host pick's cardata
 /// binds `VehicleAudio` on the predicted copy the same way — its
 /// `EngineVoice` rig then mixes off the `SnapEntry.rpm` tail
