@@ -1889,6 +1889,70 @@ fn profiles_bind_create_and_delete() {
     );
 }
 
+/// F17-AC02: the Root difficulty row persists its pick on the bound
+/// profile — per driver, so switching profiles swaps both the displayed
+/// and effective difficulty, and re-binding a driver restores their own
+/// saved choice without another driver's pick overwriting it.
+#[test]
+fn difficulty_is_persisted_per_profile() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let bob = store
+        .create("Bob", Difficulty::Professional, ProfileKind::Standard)
+        .unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+
+    // Bind Alice (Amateur rank) and return to the Root screen.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    app.update();
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Root);
+    assert_eq!(shell(&app).difficulty, Difficulty::Amateur);
+
+    // Picking Professional persists on Alice; the fixed rank is untouched.
+    activate_row(&mut app, "Difficulty:");
+    assert_eq!(shell(&app).difficulty, Difficulty::Professional);
+    let alice_saved = store.load(&alice.id).unwrap().profile;
+    assert_eq!(
+        alice_saved.selections.difficulty,
+        Some(Difficulty::Professional)
+    );
+    assert_eq!(alice_saved.rank, Difficulty::Amateur);
+
+    // Bob has his own difficulty: binding him restores his rank so far,
+    // and his own change persists without touching Alice.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Bob");
+    app.update();
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).difficulty, Difficulty::Professional);
+    activate_row(&mut app, "Difficulty:");
+    assert_eq!(shell(&app).difficulty, Difficulty::Amateur);
+    assert_eq!(
+        store.load(&bob.id).unwrap().profile.selections.difficulty,
+        Some(Difficulty::Amateur)
+    );
+    assert_eq!(
+        store.load(&alice.id).unwrap().profile.selections.difficulty,
+        Some(Difficulty::Professional),
+        "Bob's change must not overwrite Alice's saved difficulty"
+    );
+
+    // Re-binding Alice restores her own Professional pick.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    app.update();
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).difficulty, Difficulty::Professional);
+}
+
 /// The name-entry screen owns the keyboard: typed characters append,
 /// Backspace erases, Enter creates and binds with the typed name, and
 /// the field's screen is a text field — not a row list.

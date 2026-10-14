@@ -278,6 +278,14 @@ pub struct ProfileSelections {
     /// rather than silently launching a degenerate run.
     #[serde(default)]
     pub customization: Option<crate::SessionCustomization>,
+    /// The race difficulty this driver last selected (the Root menu's
+    /// difficulty row). Written by an intentional difficulty change and
+    /// restored when the profile is selected, including at startup.
+    /// `None` — a fresh profile, or one saved before this preference
+    /// existed — falls back to the profile's fixed [`PlayerProfile::rank`]
+    /// (DRV-2), so a missing field never changes what a session runs.
+    #[serde(default)]
+    pub difficulty: Option<Difficulty>,
 }
 
 /// One driver profile on disk.
@@ -291,8 +299,10 @@ pub struct PlayerProfile {
     /// Display name; unique ids mean names may repeat (edge case:
     /// duplicate display names are legal).
     pub name: String,
-    /// Fixed driver rank (DRV-2): Amateur or Professional — the event
-    /// parameter block this profile races under (DRV-3).
+    /// Fixed driver rank (DRV-2): Amateur or Professional — the rank
+    /// this profile was created with and the fallback difficulty
+    /// ([`Self::chosen_difficulty`]) when the driver has not picked one
+    /// explicitly.
     pub rank: Difficulty,
     /// Standard vs sandbox identity (spec req 5).
     pub kind: ProfileKind,
@@ -331,6 +341,20 @@ impl PlayerProfile {
     /// — the single check F16-B consumers make (spec req 5/AC03).
     pub fn records_progress(&self) -> bool {
         matches!(self.kind, ProfileKind::Standard)
+    }
+
+    /// The race difficulty a session for this profile should use: the
+    /// difficulty the driver last selected, or the fixed [`Self::rank`]
+    /// (DRV-2) when they never changed it. Older profiles without the
+    /// field therefore keep racing under their rank.
+    pub fn chosen_difficulty(&self) -> Difficulty {
+        self.selections.difficulty.unwrap_or(self.rank)
+    }
+
+    /// Remember `difficulty` as this driver's selection. Persisted by
+    /// the caller's next save.
+    pub fn set_difficulty(&mut self, difficulty: Difficulty) {
+        self.selections.difficulty = Some(difficulty);
     }
 
     /// Only time units change between schemas. Round half a new tick

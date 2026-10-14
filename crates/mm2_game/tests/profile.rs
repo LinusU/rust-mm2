@@ -66,6 +66,59 @@ fn create_save_load_round_trip() {
     assert_eq!(loaded.selections.last_event, Some(event_key()));
 }
 
+/// The last selected race difficulty is a per-profile preference:
+/// it survives a save/reload, defaults to the fixed rank when the
+/// field is absent (a profile saved before it existed), and never
+/// mutates the rank itself.
+#[test]
+fn last_selected_difficulty_survives_a_restart_and_defaults_to_rank() {
+    let (dir, store) = store();
+    let mut profile = store
+        .create("Difficulty", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    // A fresh profile has made no explicit pick: it races under its rank.
+    assert_eq!(profile.selections.difficulty, None);
+    assert_eq!(profile.chosen_difficulty(), Difficulty::Amateur);
+
+    profile.set_difficulty(Difficulty::Professional);
+    assert_eq!(profile.chosen_difficulty(), Difficulty::Professional);
+    // Twice, so the `.bak` copy carries the pick as well.
+    store.save(&mut profile).unwrap();
+    store.save(&mut profile).unwrap();
+
+    // A fresh store over the same directory is a restart.
+    let reopened = ProfileStore::open(dir.path().join("profiles")).unwrap();
+    let loaded = reopened.load(&profile.id).unwrap().profile;
+    assert_eq!(loaded.selections.difficulty, Some(Difficulty::Professional));
+    assert_eq!(loaded.chosen_difficulty(), Difficulty::Professional);
+    assert_eq!(
+        loaded.rank,
+        Difficulty::Amateur,
+        "the fixed rank is unchanged"
+    );
+
+    // A profile written before the field existed (no `difficulty` key at
+    // all) loads without error and falls back to its rank.
+    let legacy_dir = tempfile::tempdir().unwrap();
+    let legacy_root = legacy_dir.path().join("profiles");
+    std::fs::create_dir_all(&legacy_root).unwrap();
+    let mut doc = serde_json::to_value(&profile).unwrap();
+    doc["selections"]
+        .as_object_mut()
+        .unwrap()
+        .remove("difficulty");
+    std::fs::write(
+        legacy_root.join("driver-0.json"),
+        serde_json::to_vec_pretty(&doc).unwrap(),
+    )
+    .unwrap();
+    let legacy_store = ProfileStore::open(&legacy_root).unwrap();
+    let legacy = legacy_store.load(&profile.id).unwrap().profile;
+    assert_eq!(legacy.selections.difficulty, None);
+    assert_eq!(legacy.chosen_difficulty(), legacy.rank);
+    assert_eq!(legacy.chosen_difficulty(), Difficulty::Amateur);
+}
+
 #[test]
 fn unknown_fields_survive_a_round_trip() {
     let (_dir, store) = store();

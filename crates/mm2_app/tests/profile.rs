@@ -488,6 +488,58 @@ fn choose_launch_merges_flags_over_remembered_selections() {
     assert_eq!(diff, Difficulty::Amateur);
 }
 
+/// The remembered difficulty (a profile's last selection) beats its
+/// fixed rank at launch, and `--pro` still overrides both; a profile
+/// that never picked one falls back to its rank (DRV-2).
+#[test]
+fn choose_launch_uses_the_remembered_difficulty_over_rank() {
+    let mut p = store_profile("anna", Difficulty::Amateur);
+    assert_eq!(p.chosen_difficulty(), Difficulty::Amateur);
+    p.set_difficulty(Difficulty::Professional);
+
+    let (_, _, diff) = choose_launch(None, None, false, Some(&p));
+    assert_eq!(diff, Difficulty::Professional);
+
+    // --pro still wins outright.
+    let (_, _, diff) = choose_launch(None, None, true, Some(&p));
+    assert_eq!(diff, Difficulty::Professional);
+}
+
+/// F17-AC02 restart leg: a difficulty picked on the profile is what a
+/// restarted app launches with — resolve the active profile from a
+/// fresh store handle and let `choose_launch` select the difficulty.
+#[test]
+fn remembered_difficulty_is_restored_on_restart() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut slot = bound(
+        &store,
+        ProfileRequest::Create {
+            name: "anna".to_string(),
+            rank: Difficulty::Amateur,
+            kind: ProfileKind::Standard,
+        },
+    );
+    slot.profile.set_difficulty(Difficulty::Professional);
+    slot.store.save(&mut slot.profile).unwrap();
+    let id = slot.profile.id.clone();
+
+    // A fresh handle over the same directory is a restart.
+    let reopened = ProfileStore::open(store_dir.path()).unwrap();
+    let bound_again = bound(&reopened, ProfileRequest::Select(id.as_str().to_string()));
+    assert_eq!(bound_again.profile.rank, Difficulty::Amateur);
+    assert_eq!(
+        bound_again.profile.chosen_difficulty(),
+        Difficulty::Professional
+    );
+    let (_, _, diff) = choose_launch(None, None, false, Some(&bound_again.profile));
+    assert_eq!(
+        diff,
+        Difficulty::Professional,
+        "the restart restores the pick"
+    );
+}
+
 fn store_profile(name: &str, rank: Difficulty) -> mm2_game::PlayerProfile {
     let tmp = tempfile::tempdir().unwrap();
     let store = ProfileStore::open(tmp.path()).unwrap();

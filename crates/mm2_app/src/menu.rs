@@ -494,6 +494,9 @@ pub enum MenuEffect {
     Bind(Box<ActiveProfile>),
     /// Remove the `ActiveProfile` resource.
     Unbind,
+    /// Remember `difficulty` on the bound profile and save immediately
+    /// (the Root row's change — persisted, not just an in-memory pick).
+    RecordDifficulty(Difficulty),
     /// Replace the [`GraphicsSettings`] resource — already saved by the
     /// model; the systems in `settings` push it onto lights and cameras.
     Settings(GraphicsSettings),
@@ -530,7 +533,9 @@ pub struct MenuShell {
     /// (`--car`/remembered/default) and changed on Garage/Paints.
     pub vehicle: VehicleSelection,
     /// Session difficulty — seeded from `--pro`/the bound profile's
-    /// rank (DRV-2) and cycled on the Root row.
+    /// remembered difficulty (its last selection, else its rank, DRV-2)
+    /// and changed on the Root row, which persists the new pick onto the
+    /// bound profile.
     pub difficulty: Difficulty,
     /// Commands produced by device systems outside `menu_input` (the
     /// mouse path) — drained first every update so every effect still
@@ -1151,6 +1156,26 @@ impl MenuShell {
         effects
     }
 
+    /// Change the session difficulty and persist it on the bound
+    /// profile. A no-op change is ignored so a redundant key press does
+    /// not churn the save file; `data.bound` is kept in step with the
+    /// resource so the menu's view and the effect agree.
+    fn set_difficulty(
+        &mut self,
+        data: &mut MenuData,
+        difficulty: Difficulty,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        if self.difficulty == difficulty {
+            return;
+        }
+        self.difficulty = difficulty;
+        if let Some(bound) = data.bound.as_mut() {
+            bound.set_difficulty(difficulty);
+        }
+        effects.push(MenuEffect::RecordDifficulty(difficulty));
+    }
+
     /// Execute one row action — the match that owns screen transitions
     /// and effect production.
     fn activate(
@@ -1166,10 +1191,11 @@ impl MenuShell {
                 self.pop();
             }
             Action::ToggleDifficulty => {
-                self.difficulty = match self.difficulty {
+                let next = match self.difficulty {
                     Difficulty::Amateur => Difficulty::Professional,
                     Difficulty::Professional => Difficulty::Amateur,
                 };
+                self.set_difficulty(data, next, effects);
             }
             // Activate on a filter or option row cycles forward, same
             // as Right.
@@ -1331,10 +1357,10 @@ impl MenuShell {
                 match crate::profile::resolve(store, &ProfileRequest::Select(id.as_str().into())) {
                     Ok(Some(slot)) => {
                         info!(profile = %slot.profile.id, name = %slot.profile.name, "driver selected");
-                        // The bound profile's rank is the difficulty
-                        // baseline (DRV-2) — the Root row still
-                        // overrides it per session.
-                        self.difficulty = slot.profile.rank;
+                        // The profile's remembered difficulty — its last
+                        // selection, else its fixed rank (DRV-2) — is the
+                        // baseline; the Root row changes and persists it.
+                        self.difficulty = slot.profile.chosen_difficulty();
                         self.status = Some(format!("driving as {}", slot.profile.name));
                         data.bound = Some(slot.profile.clone());
                         effects.push(MenuEffect::Bind(Box::new(slot)));
@@ -1470,10 +1496,11 @@ impl MenuShell {
                 self.tune_controls(data, ControlItem::AutoReverse, forward, effects);
             }
             Action::ToggleDifficulty => {
-                self.difficulty = match self.difficulty {
+                let next = match self.difficulty {
                     Difficulty::Amateur => Difficulty::Professional,
                     Difficulty::Professional => Difficulty::Amateur,
                 };
+                self.set_difficulty(data, next, effects);
             }
             Action::RecordsCityFilter => self.cycle_record_filter(data, true, forward),
             Action::RecordsTableFilter => self.cycle_record_filter(data, false, forward),
@@ -3255,6 +3282,9 @@ pub struct MenuTarget<'w, 's> {
     /// Present while a join's handshake is unanswered — a launch or
     /// another lobby waits for it.
     dialing: Option<Res<'w, crate::net::MenuDial>>,
+    /// The bound driver profile, when there is one — the target a
+    /// difficulty change is persisted onto (absent: profile-less run).
+    active: Option<ResMut<'w, ActiveProfile>>,
     /// The menu's click sounds (absent: silent).
     ui_sound: Option<ResMut<'w, crate::ui_sound::UiSound>>,
 }
@@ -3493,6 +3523,20 @@ pub fn menu_input(
                 }
                 MenuEffect::Unbind => {
                     target.commands.remove_resource::<ActiveProfile>();
+                }
+                MenuEffect::RecordDifficulty(difficulty) => {
+                    // Persist an intentional difficulty change on the
+                    // bound profile. The resource is the live copy the
+                    // session's own saves read from, so updating just
+                    // the store would be reverted by the next
+                    // `note_session_start` — mutate both.
+                    if let Some(active) = target.active.as_deref_mut() {
+                        active.profile.set_difficulty(difficulty);
+                        if let Err(e) = active.store.save(&mut active.profile) {
+                            warn!(profile = %active.profile.id, error = %e, "difficulty save failed");
+                            shell.status = Some(format!("could not save difficulty: {e}"));
+                        }
+                    }
                 }
                 MenuEffect::Settings(settings) => {
                     target.commands.insert_resource(settings);

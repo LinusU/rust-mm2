@@ -14,10 +14,11 @@
 //!   heals (F16-AC04).
 //! - [`choose_launch`] applies the remembered selections: the profile's
 //!   vehicle/paint is used when `--car`/`--paint` are absent, and its
-//!   rank (DRV-2) supplies the session difficulty unless `--pro`
-//!   overrides. A remembered vehicle that no longer resolves (changed
-//!   install, missing mod) degrades to the stock default with a
-//!   warning — saved preferences never hard-fail a launch.
+//!   last selected difficulty (else its rank, DRV-2) supplies the
+//!   session difficulty unless `--pro` overrides. A remembered vehicle
+//!   that no longer resolves (changed install, missing mod) degrades to
+//!   the stock default with a warning — saved preferences never
+//!   hard-fail a launch.
 //! - [`note_session_start`] records the session's actual selections —
 //!   the driven vehicle and the event's stable [`EventKey`] — and saves
 //!   immediately, so a crash mid-session cannot lose them. A dev-car
@@ -214,7 +215,8 @@ pub enum VehicleSource<'a> {
 /// Returns `(vehicle source, paint, difficulty)`: `--car` beats the
 /// remembered vehicle; `--paint` beats the remembered paint (which only
 /// applies while the remembered vehicle is what loads); `--pro` beats
-/// the profile's rank (DRV-2). `last_event` is *not* launched — its
+/// the profile's remembered difficulty (its last selection, else its
+/// rank, DRV-2). `last_event` is *not* launched — its
 /// consumer is F17's Quick Race/menu flow (DRV-8).
 pub fn choose_launch<'a>(
     cli_car: Option<&'a str>,
@@ -236,7 +238,7 @@ pub fn choose_launch<'a>(
     let paint = cli_paint.or(saved_paint).unwrap_or(0);
     let difficulty = match (pro, profile) {
         (true, _) => Difficulty::Professional,
-        (false, Some(p)) => p.rank,
+        (false, Some(p)) => p.chosen_difficulty(),
         (false, None) => Difficulty::Amateur,
     };
     (source, paint, difficulty)
