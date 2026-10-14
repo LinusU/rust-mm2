@@ -726,6 +726,13 @@ pub struct RouteOptions {
     /// `[Exceptions]` list. Closed roads are never entered through a
     /// turn; a start or goal snapped onto one is still honoured.
     pub closed_roads: BTreeSet<u16>,
+    /// The course a re-pathed race route should keep to: the race's
+    /// checkpoint centres. They constrain nothing — a participant that
+    /// must *cross* its gates passes them to
+    /// [`NavGraph::densify_route`] — but where a leg has more than one
+    /// way round, the one along these is the course
+    /// ([`NavGraph::race_path`]).
+    pub course: Vec<Vec3>,
 }
 
 impl Default for RouteOptions {
@@ -734,6 +741,7 @@ impl Default for RouteOptions {
             max_snap: 64.0,
             max_expansions: 4096,
             closed_roads: BTreeSet::new(),
+            course: Vec::new(),
         }
     }
 }
@@ -2032,8 +2040,19 @@ impl NavGraph {
                 // Two adjacent intersections: the leg is the road they
                 // share, whichever way its traffic runs.
                 insert(&mut out, samples, a, b);
-            } else if self.leg_leaves_corridor(a.position, b.position)
-                && let Ok(r) = self.route_candidates(a.position.into(), b.position.into(), options)
+            } else if !self.leg_leaves_corridor(a.position, b.position) {
+                // Already along a road: the authored line stands.
+            } else if let Some(samples) = self.race_path(
+                a.position,
+                b.position,
+                (leg > 0 || closed).then(|| route.points[(leg + n - 1) % n].position),
+                &options.course,
+                DENSIFY_STEP,
+            ) {
+                // Two intersections the record skips one between.
+                insert(&mut out, samples, a, b);
+            } else if let Ok(r) =
+                self.route_candidates(a.position.into(), b.position.into(), options)
             {
                 let samples: Vec<Vec3> = self.route_path(&r, DENSIFY_STEP);
                 let chain: Vec<Vec3> = std::iter::once(a.position)
@@ -2140,6 +2159,13 @@ impl NavGraph {
             }
         }
         let (_, road, forward) = best?;
+        self.road_line(road, forward, step)
+    }
+
+    /// The line a race leg drives down `road`, from its first junction
+    /// to its second when `forward` and the other way otherwise,
+    /// sampled at most `step` apart.
+    fn road_line(&self, road: usize, forward: bool, step: f32) -> Option<Vec<Vec3>> {
         // The line to drive: the middle of the lanes that carry traffic
         // the way the leg goes — the right carriageway of a divided
         // road, whose centre line is a median with trees on it. A road
@@ -2189,6 +2215,162 @@ impl NavGraph {
         (out.len() >= 2 && out.iter().all(|p| p.is_finite())).then_some(out)
     }
 
+    /// A race leg whose points name two intersections that share no
+    /// road: the chain of roads between them, each driven as
+    /// [`NavGraph::race_leg`] drives one — whichever way its traffic
+    /// flows. Retail `.opp` records skip an intersection here and there
+    /// (`sf circuit8` names the two ends of the Lombard hill loop and
+    /// not the junction between them, with both roads one-way against
+    /// the lap), and the directed router then turns the car round and
+    /// sends it back the way it came.
+    ///
+    /// Of the chains that join the two, the one preferred runs along
+    /// the race's own checkpoints: a road with a gate on it costs
+    /// [`GATE_ROAD_COST`] of its length, so the course the player is
+    /// held to wins over a short cut past it. `behind` is the point the
+    /// car came to `a` from: the chain never opens by going back to it,
+    /// which on a square block costs exactly what going on does. `None`
+    /// when the points do
+    /// not name two different intersections, no chain of at most
+    /// [`RACE_PATH_ROADS`] roads joins them, or the best one is a
+    /// detour — longer than [`RACE_PATH_DETOUR`] times the straight
+    /// line and with no gate on it to explain why.
+    pub fn race_path(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        behind: Option<Vec3>,
+        course: &[Vec3],
+        step: f32,
+    ) -> Option<Vec<Vec3>> {
+        let nearest = |p: Vec3| -> Option<u16> {
+            self.intersections
+                .iter()
+                .filter(|i| (i.center[1] - p.y).abs() <= ANCHOR_LEVEL)
+                .map(|i| ((i.center[0] - p.x).hypot(i.center[2] - p.z), i.id))
+                .filter(|(d, _)| *d <= ANCHOR_INTERSECTION)
+                .min_by(|x, y| x.0.total_cmp(&y.0))
+                .map(|(_, id)| id)
+        };
+        let (from, to) = (nearest(a)?, nearest(b)?);
+        if from == to {
+            return None;
+        }
+        let behind = behind.and_then(nearest).filter(|&i| i != to);
+        // Each road's length, and whether a gate stands on it.
+        let length = |road: usize| {
+            self.roads[road]
+                .arcs
+                .iter()
+                .flatten()
+                .map(|&arc| self.arc(arc).length)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let gated = |road: usize| {
+            let reach = self.roads[road].half_width + GATE_ON_ROAD;
+            course.iter().any(|&g| {
+                self.lanes
+                    .iter()
+                    .filter(|l| l.id.road as usize == road && l.id.kind == LaneKind::Vehicle)
+                    .any(|l| {
+                        l.points.windows(2).any(|w| {
+                            let (p, q) = (Vec3::from(w[0]), Vec3::from(w[1]));
+                            let d = q - p;
+                            let t = if d.length_squared() > 1e-6 {
+                                ((g - p).dot(d) / d.length_squared()).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let off = g - (p + d * t);
+                            off.x.hypot(off.z) <= reach && off.y.abs() <= ANCHOR_LEVEL
+                        })
+                    })
+            })
+        };
+        // Cheapest chain by Dijkstra over (intersection, roads used).
+        // The graph is a few hundred junctions; a linear scan for the
+        // next node is plenty.
+        #[derive(Clone, Copy)]
+        struct Reached {
+            cost: f32,
+            via: Option<(u16, usize, bool)>,
+            roads: usize,
+            done: bool,
+        }
+        let mut reached: std::collections::HashMap<u16, Reached> = std::collections::HashMap::new();
+        reached.insert(
+            from,
+            Reached {
+                cost: 0.0,
+                via: None,
+                roads: 0,
+                done: false,
+            },
+        );
+        loop {
+            let (&at, &here) = reached
+                .iter()
+                .filter(|(_, r)| !r.done)
+                .min_by(|x, y| x.1.cost.total_cmp(&y.1.cost))?;
+            if at == to {
+                break;
+            }
+            reached.get_mut(&at)?.done = true;
+            if here.roads == RACE_PATH_ROADS {
+                continue;
+            }
+            let Some(node) = self.intersections.iter().find(|i| i.id == at) else {
+                continue;
+            };
+            for &road in &node.roads {
+                let road = road as usize;
+                let (next, forward) = match self.road_ends(road) {
+                    Some((ArcEnd::Intersection(s), ArcEnd::Intersection(e))) if s == at => {
+                        (e, true)
+                    }
+                    Some((ArcEnd::Intersection(s), ArcEnd::Intersection(e))) if e == at => {
+                        (s, false)
+                    }
+                    _ => continue,
+                };
+                let len = length(road);
+                if next == at || !len.is_finite() || (at == from && Some(next) == behind) {
+                    continue;
+                }
+                let cost = here.cost + len * if gated(road) { GATE_ROAD_COST } else { 1.0 };
+                if reached.get(&next).is_none_or(|r| cost < r.cost) {
+                    reached.insert(
+                        next,
+                        Reached {
+                            cost,
+                            via: Some((at, road, forward)),
+                            roads: here.roads + 1,
+                            done: false,
+                        },
+                    );
+                }
+            }
+        }
+        let mut chain = Vec::new();
+        let mut at = to;
+        while let Some((back, road, forward)) = reached.get(&at)?.via {
+            chain.push((road, forward));
+            at = back;
+        }
+        chain.reverse();
+        let driven: f32 = chain.iter().map(|&(road, _)| length(road)).sum();
+        let explained = chain.iter().any(|&(road, _)| gated(road));
+        let straight = (b.x - a.x).hypot(b.z - a.z);
+        if !explained && driven > straight * RACE_PATH_DETOUR + ANCHOR_INTERSECTION {
+            return None;
+        }
+        let mut out = Vec::new();
+        for (road, forward) in chain {
+            out.extend(self.road_line(road, forward, step)?);
+        }
+        Some(out)
+    }
+
     /// Whether the straight leg `a`→`b` departs the road corridor —
     /// any sample along it (endpoints included: an off-network anchor
     /// means the approach leg needs routing too) sitting further than
@@ -2211,6 +2393,20 @@ impl NavGraph {
 /// same road compete, without letting a neighbouring block's lanes
 /// pretend to be the endpoint.
 const ENTRY_TOLERANCE: f32 = 12.0;
+/// Most roads a [`NavGraph::race_path`] chain may have: the records
+/// skip one intersection, or a few along one street.
+const RACE_PATH_ROADS: usize = 6;
+/// How much longer than the straight line between its ends an
+/// unexplained [`NavGraph::race_path`] chain may be. A chain round two
+/// sides of a block is 1.4 times it; past 2.5 the graph has no sensible
+/// way across and the caller should think again.
+const RACE_PATH_DETOUR: f32 = 2.5;
+/// What a metre of road with a checkpoint on it costs
+/// [`NavGraph::race_path`], against 1 for any other.
+const GATE_ROAD_COST: f32 = 0.1;
+/// How far (m, XZ) beyond a road's half width a checkpoint's centre may
+/// stand and still be on that road.
+const GATE_ON_ROAD: f32 = 6.0;
 /// How far (m, XZ) from an intersection's centre a route point may sit
 /// and still name it — retail `.opp` rows lie within 15 m of theirs;
 /// the slack covers the big junctions.

@@ -810,7 +810,9 @@ pub fn circuit_lap(route: &OpponentRoute) -> Option<OpponentRoute> {
 /// ambient classes are disabled (London's Tower Bridge approaches) stay
 /// routable here. `gates` are the race's checkpoint triggers: a re-path
 /// that abandons a gate the authored leg crossed is rejected so the
-/// course stays crossable.
+/// course stays crossable. `course` is the same checkpoints as a hint
+/// and no more: where the record skips an intersection and there are
+/// two ways round, the one along them ([`NavGraph::race_path`]).
 ///
 /// `pos`/`yaw` is the staged pose the car starts from: anchors behind
 /// it are dropped by [`trim_behind_staging`] before the re-path, so the
@@ -820,6 +822,7 @@ pub fn driving_route(
     route: &OpponentRoute,
     nav: Option<&NavGraph>,
     gates: &[mm2_game::Checkpoint],
+    course: &[mm2_game::Checkpoint],
     pos: Vec3,
     yaw: f32,
 ) -> OpponentRoute {
@@ -829,7 +832,10 @@ pub fn driving_route(
             &route,
             route_is_closed(&route),
             gates,
-            &RouteOptions::default(),
+            &RouteOptions {
+                course: course.iter().map(|g| g.center).collect(),
+                ..default()
+            },
         ),
         None => route,
     }
@@ -1047,8 +1053,9 @@ fn spawn_roster(
             // No gate constrains the re-path: an opponent earns its
             // gates by route position, so a leg is always better driven
             // along the road than straight through a block to keep a
-            // checkpoint cylinder on the line.
-            .map(|r| driving_route(r, nav, &[], pos, yaw));
+            // checkpoint cylinder on the line. The gates still say
+            // which way round the course goes.
+            .map(|r| driving_route(r, nav, &[], &definition.checkpoints, pos, yaw));
         // First chase index along the authored facing — early anchors
         // behind the staged heading are left for the next pass, not
         // chased off the spawn line.

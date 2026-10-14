@@ -1844,6 +1844,7 @@ pub fn load_session_world(
                                 &route,
                                 nav,
                                 &def.checkpoints,
+                                &def.checkpoints,
                                 spawn.position,
                                 spawn.yaw,
                             )

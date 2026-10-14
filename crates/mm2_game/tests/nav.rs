@@ -1448,6 +1448,152 @@ fn a_race_leg_runs_the_shared_road_against_its_traffic() {
     );
 }
 
+/// A city block: four intersections on a 100 m square, joined by four
+/// one-way streets whose traffic circulates 0 → 3 → 2 → 1 → 0.
+fn one_way_block() -> Bai {
+    let street = |id: u16, centre: [[f32; 3]; 2], lane: (f32, f32), start, end| {
+        road(
+            id,
+            &centre,
+            vec![1],
+            side(0, &[(3.0, offset(&centre, lane.0, lane.1))], &[], 2),
+            side(0, &[], &[], 2),
+            start,
+            end,
+        )
+    };
+    bai(
+        vec![
+            street(
+                0,
+                [[90.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+                (0.0, 3.0),
+                connected(1, 0),
+                connected(0, 0),
+            ),
+            street(
+                1,
+                [[100.0, 0.0, 90.0], [100.0, 0.0, 10.0]],
+                (3.0, 0.0),
+                connected(2, 0),
+                connected(1, 1),
+            ),
+            street(
+                2,
+                [[10.0, 0.0, 100.0], [90.0, 0.0, 100.0]],
+                (0.0, 3.0),
+                connected(3, 0),
+                connected(2, 1),
+            ),
+            street(
+                3,
+                [[0.0, 0.0, 10.0], [0.0, 0.0, 90.0]],
+                (3.0, 0.0),
+                connected(0, 1),
+                connected(3, 1),
+            ),
+        ],
+        vec![
+            intersection(0, [0.0, 0.0, 0.0], &[0, 3]),
+            intersection(1, [100.0, 0.0, 0.0], &[0, 1]),
+            intersection(2, [100.0, 0.0, 100.0], &[1, 2]),
+            intersection(3, [0.0, 0.0, 100.0], &[2, 3]),
+        ],
+    )
+}
+
+/// A record that skips an intersection (`sf circuit8`) names two
+/// junctions with no road between them. The leg is the chain of roads
+/// that joins them — against the traffic if need be, along the race's
+/// checkpoints where there is a choice, and never back the way the car
+/// came.
+#[test]
+fn a_race_path_joins_two_intersections_a_record_skips_one_between() {
+    let g = NavGraph::build(&one_way_block()).graph;
+    let (near, far) = (Vec3::new(2.0, 0.0, 1.0), Vec3::new(99.0, 0.0, 102.0));
+    assert!(g.race_leg(near, far, 8.0).is_none(), "no shared road");
+    let east = |p: &Vec3| p.x > 90.0 && (20.0..80.0).contains(&p.z);
+    let west = |p: &Vec3| p.x < 10.0 && (20.0..80.0).contains(&p.z);
+
+    // A checkpoint on the east street: round by intersection 1, both
+    // streets driven against their traffic.
+    let by_east = g
+        .race_path(near, far, None, &[Vec3::new(100.0, 0.0, 50.0)], 8.0)
+        .expect("joined");
+    assert!(by_east.iter().any(east) && !by_east.iter().any(west));
+    assert!(by_east.first().unwrap().distance(Vec3::new(10.0, 0.0, 3.0)) < 0.1);
+    assert!(
+        by_east
+            .last()
+            .unwrap()
+            .distance(Vec3::new(103.0, 0.0, 90.0))
+            < 0.1
+    );
+    for w in by_east.windows(2) {
+        assert!(w[0].distance(w[1]) <= 25.0, "{:?} → {:?}", w[0], w[1]);
+    }
+    // One on the west street: round by intersection 3.
+    let by_west = g
+        .race_path(near, far, None, &[Vec3::new(0.0, 0.0, 50.0)], 8.0)
+        .expect("joined");
+    assert!(by_west.iter().any(west) && !by_west.iter().any(east));
+    // A checkpoint on another level is on neither.
+    let level = [Vec3::new(100.0, 30.0, 50.0)];
+    // No checkpoint to choose by, and the car came from intersection
+    // 3: the two ways round are as long as each other, and it does not
+    // go back.
+    let came_from = Some(Vec3::new(-1.0, 0.0, 99.0));
+    for course in [&[][..], &level[..]] {
+        let onward = g
+            .race_path(near, far, came_from, course, 8.0)
+            .expect("joined");
+        assert!(onward.iter().any(east) && !onward.iter().any(west));
+    }
+
+    // The record's next point is the junction the car came from: that
+    // is where the chain goes.
+    assert!(
+        g.race_path(near, Vec3::new(0.0, 0.0, 100.0), came_from, &[], 8.0)
+            .is_some()
+    );
+    // Points that name the same intersection, or none, are no path.
+    assert!(
+        g.race_path(near, Vec3::new(-3.0, 0.0, 4.0), None, &[], 8.0)
+            .is_none()
+    );
+    assert!(
+        g.race_path(near, Vec3::new(50.0, 0.0, 50.0), None, &[], 8.0)
+            .is_none()
+    );
+
+    // The route re-path uses it: the diagonal across the block becomes
+    // the two streets the course runs along, not the directed router's
+    // lawful way round the other side.
+    let route = OpponentRoute {
+        points: vec![
+            waypoint(0.0, 0.0, 100.0),
+            waypoint(0.0, 0.0, 0.0),
+            waypoint(100.0, 0.0, 100.0),
+        ],
+    };
+    let d = g.densify_route(
+        &route,
+        false,
+        &[],
+        &RouteOptions {
+            course: vec![Vec3::new(100.0, 0.0, 50.0)],
+            ..RouteOptions::default()
+        },
+    );
+    let driven: Vec<Vec3> = d.points.iter().map(|p| p.position).collect();
+    let turn = driven
+        .iter()
+        .position(|p| *p == Vec3::ZERO)
+        .expect("the authored point stands");
+    assert!(driven[turn..].iter().any(east));
+    assert!(!driven[turn..].iter().any(west), "it does not double back");
+}
+
 #[test]
 fn densify_route_keeps_corridor_legs_verbatim() {
     let g = NavGraph::build(&straight()).graph;

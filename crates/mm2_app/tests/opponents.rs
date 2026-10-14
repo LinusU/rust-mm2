@@ -404,7 +404,7 @@ fn a_circuit_record_reduces_to_its_lap_of_intersections() {
 
     // The driving line is the lap: nothing in it doubles back onto the
     // staging or finish rows.
-    let driven = driving_route(&record, None, &[], start, yaw);
+    let driven = driving_route(&record, None, &[], &[], start, yaw);
     assert_eq!(driven.points.len(), lap.points.len());
 
     // An open record, and a closed one too short to hold a lap, are

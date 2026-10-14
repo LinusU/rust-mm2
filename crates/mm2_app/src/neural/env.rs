@@ -534,7 +534,14 @@ fn load_lines(vfs: &Vfs, city: &str, only: Option<&str>, seed: u64) -> Result<Co
                 };
                 let (pos, yaw) =
                     opponents::spawn_pose(&definition, i, spec, player_pos, player_yaw);
-                let driven = opponents::driving_route(route, Some(&nav), &[], pos, yaw);
+                let driven = opponents::driving_route(
+                    route,
+                    Some(&nav),
+                    &[],
+                    &definition.checkpoints,
+                    pos,
+                    yaw,
+                );
                 let Some(guide) = Guide::from_route_on(&driven, Some(&nav)) else {
                     continue;
                 };
