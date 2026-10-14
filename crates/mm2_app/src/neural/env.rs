@@ -799,7 +799,8 @@ impl DrivingEnv {
         Ok(env)
     }
 
-    /// Lay every line on the world's ground ([`Guide::regrounded`]),
+    /// Lay every line on the world — on its ground and round what
+    /// stands on it ([`laid_on_world`](super::guide::laid_on_world)) —
     /// as the game does for each opponent before its race starts.
     fn ground_lines(&mut self) {
         let Ok((spatial, bodies, colliders, vehicles)) = self.probe.get(self.app.world()) else {
@@ -813,18 +814,38 @@ impl DrivingEnv {
                 && bodies.get(body).is_ok_and(|b| !b.is_dynamic())
                 && world.get::<mm2_game::Banger>(body).is_none()
         };
+        let solid = |e: Entity| {
+            let body = colliders.get(e).map_or(e, |c| c.body);
+            !vehicles.contains(body)
+                && world
+                    .get::<mm2_game::Banger>(body)
+                    .is_none_or(|b| b.def.mass >= super::drive::HEAVY_PROP)
+        };
         for line in &mut self.lines {
-            let grounded = line.guide.regrounded(|p| {
-                super::guide::ground_near(p, |from, reach| {
+            let laid = super::guide::laid_on_world(
+                &line.guide,
+                |from, reach| {
                     spatial
                         .cast_ray_predicate(from, Dir3::NEG_Y, reach, false, &filter, &ground)
                         .map(|hit| {
                             let body = colliders.get(hit.entity).map_or(hit.entity, |c| c.body);
                             (hit.distance, bodies.get(body).is_ok_and(|b| b.is_static()))
                         })
-                })
-            });
-            line.guide = Arc::new(grounded);
+                },
+                |from, dir, reach| {
+                    spatial
+                        .cast_ray_predicate(
+                            from,
+                            Dir3::new(dir).ok()?,
+                            reach,
+                            true,
+                            &filter,
+                            &solid,
+                        )
+                        .map(|hit| (hit.distance, hit.normal))
+                },
+            );
+            line.guide = Arc::new(laid);
         }
     }
 

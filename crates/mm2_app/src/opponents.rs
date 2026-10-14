@@ -1210,7 +1210,7 @@ pub fn opponent_drive(
     spatial: Option<SpatialQuery>,
     bodies: Query<&RigidBody>,
     colliders: Query<&ColliderOf>,
-    bangers: Query<(), With<mm2_game::Banger>>,
+    bangers: Query<&mm2_game::Banger>,
     water: Option<Res<crate::water::CityWater>>,
     race: Option<Res<RaceState>>,
     policies: Option<Res<DrivingPolicies>>,
@@ -1275,6 +1275,8 @@ pub fn opponent_drive(
     // two cars whose windows expire together (a shared pen, a pileup)
     // both land on the same spot.
     let mut claimed: Vec<Vec3> = Vec::new();
+    // Whether a driver's line was laid on the world this step.
+    let mut laid = false;
     for (
         entity,
         mut input,
@@ -1304,20 +1306,41 @@ pub fn opponent_drive(
                     && !bangers.contains(body)
                     && bodies.get(body).is_ok_and(|b| !b.is_dynamic())
             };
-            neural.ground(pos.0, |from, reach| {
-                sq.cast_ray_predicate(
-                    from,
-                    Dir3::NEG_Y,
-                    reach,
-                    false,
-                    &SpatialQueryFilter::default(),
-                    &ground,
-                )
-                .map(|hit| {
-                    let body = colliders.get(hit.entity).map_or(hit.entity, |c| c.body);
-                    (hit.distance, bodies.get(body).is_ok_and(|b| b.is_static()))
-                })
-            });
+            // In the way is what a car could not push aside: the world
+            // and its heavy props — a parked car, not a street sign.
+            let solid = |c: Entity| {
+                let body = colliders.get(c).map_or(c, |c| c.body);
+                !field.iter().any(|(e, _)| *e == body)
+                    && bangers
+                        .get(body)
+                        .map_or(true, |b| b.def.mass >= crate::neural::drive::HEAVY_PROP)
+            };
+            let filter = SpatialQueryFilter::default();
+            // One line a step: a field's worth of rays at once is a
+            // hitch in the countdown.
+            if !laid {
+                laid = neural.ground(
+                    pos.0,
+                    |from, reach| {
+                        sq.cast_ray_predicate(from, Dir3::NEG_Y, reach, false, &filter, &ground)
+                            .map(|hit| {
+                                let body = colliders.get(hit.entity).map_or(hit.entity, |c| c.body);
+                                (hit.distance, bodies.get(body).is_ok_and(|b| b.is_static()))
+                            })
+                    },
+                    |from, dir, reach| {
+                        sq.cast_ray_predicate(
+                            from,
+                            Dir3::new(dir).ok()?,
+                            reach,
+                            true,
+                            &filter,
+                            &solid,
+                        )
+                        .map(|hit| (hit.distance, hit.normal))
+                    },
+                );
+            }
         }
         // A lesson's lead car carries no progress: it drives while the
         // field races, with nothing of its own to finish.

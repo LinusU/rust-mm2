@@ -136,6 +136,12 @@ impl DrivingPolicies {
     }
 }
 
+/// Mass (kg) from which a prop is something to drive round rather than
+/// through. Retail parked cars weigh 725–2200 kg, street lights and
+/// telephone poles 640–950, trees 450–1260; under 500 are barrels,
+/// carts, phone boxes and the checkpoint markers themselves.
+pub const HEAVY_PROP: f32 = 500.0;
+
 /// One car's neural-driver state.
 #[derive(Debug, Clone)]
 pub struct NeuralState {
@@ -190,15 +196,28 @@ impl NeuralState {
     /// ground under the car at `pos` itself, which is when the world
     /// has arrived. A car over a void waits; a line corrected nowhere
     /// costs one pass of rays.
-    pub fn ground(&mut self, pos: Vec3, mut cast: impl FnMut(Vec3, f32) -> Option<(f32, bool)>) {
-        if self.grounded || super::guide::ground_near(pos, &mut cast).is_none() {
-            return;
+    ///
+    /// The same pass moves the line off what stands on it
+    /// ([`Guide::cleared`]): `ray` looks along the way for things a
+    /// car could not push aside. Returns whether the pass ran, so a
+    /// caller with a field of cars can spread them over several steps.
+    pub fn ground(
+        &mut self,
+        pos: Vec3,
+        mut down: impl FnMut(Vec3, f32) -> Option<(f32, bool)>,
+        ray: impl FnMut(Vec3, Vec3, f32) -> Option<(f32, Vec3)>,
+    ) -> bool {
+        if self.grounded || super::guide::ground_near(pos, &mut down).is_none() {
+            return false;
         }
-        self.guide = Arc::new(
-            self.guide
-                .regrounded(|p| super::guide::ground_near(p, &mut cast)),
-        );
+        self.guide = Arc::new(super::guide::laid_on_world(&self.guide, down, ray));
         self.grounded = true;
+        true
+    }
+
+    /// Whether [`NeuralState::ground`] has run.
+    pub fn is_grounded(&self) -> bool {
+        self.grounded
     }
 
     /// This car as another driver sees it.
