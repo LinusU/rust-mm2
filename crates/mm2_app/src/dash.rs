@@ -330,11 +330,19 @@ pub fn spawn_dash(
             let (rpm_min, rpm_max) = rot(spec.rpm_rot);
             let (dmg_min, dmg_max) = rot(spec.damage_rot);
             for part in &model.parts {
-                // The pkg/mtx-authored pivot shares the gate — an
-                // astronomical origin would overflow `pivot + offset`
-                // the same way the text records could.
+                // The rotation pivot is the part's `.mtx` *pivot* — the
+                // quad's authored centre in the shared cluster space.
+                // Stock dashes author `origin` 0 (the geometry already
+                // sits in cluster space) and the centre in `pivot`;
+                // vp4x4/vpdune carry the centre in both. Reading
+                // `origin` here left every gauge rotating about the
+                // cluster origin instead of its own hub, which threw
+                // the steering wheel across the cockpit as steering
+                // turned it. The field shares `build_model`'s usable
+                // gate — an astronomical pivot reads unauthored (the
+                // part falls back to the in-place pose).
                 let pivot = part
-                    .origin
+                    .pivot
                     .filter(usable3)
                     .map(Vec3::from)
                     .unwrap_or(Vec3::ZERO);

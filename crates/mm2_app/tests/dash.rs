@@ -1319,28 +1319,30 @@ fn overflowing_asnode_reads_unauthored() {
     }
 }
 
-/// A 48-byte `.mtx` part transform: bounds min/max, pivot, origin.
-fn part_mtx(origin: [f32; 3]) -> Vec<u8> {
+/// A 48-byte `.mtx` part transform: bounds min/max, the part `pivot`
+/// (the quad centre for a stock dash), origin 0 — the layout every stock
+/// dash uses (`origin` is 0, the centre lives in `pivot`).
+fn part_mtx(pivot: [f32; 3]) -> Vec<u8> {
     let mut d = Vec::new();
     for f in [
         -0.15f32, -0.3, -0.15, 0.15, 0.3, 0.15, // bounds min/max
-        0.0, 0.0, 0.0, // pivot
-        origin[0], origin[1], origin[2],
+        pivot[0], pivot[1], pivot[2], 0.0, 0.0,
+        0.0, // origin (dash geometry is authored in cluster space)
     ] {
         d.extend_from_slice(&f.to_le_bytes());
     }
     d
 }
 
-/// The pkg/mtx-authored dash pivot shares the `USABLE_BOUND` gate at
-/// `build_model`: a hostile `geometry/<car>_dash_<part>.mtx` origin
-/// would overflow `pivot + offset + pivot_offset` the same way a text
-/// field would, so the pivot reads unauthored (part at the in-place
-/// pose) and every spawned transform stays finite through `drive_dash`.
-/// A usable origin still binds verbatim — the gate rejects nothing
-/// authored.
+/// The `.mtx` part *pivot* — the gauge quad's authored centre and so the
+/// rotation axis — shares the `USABLE_BOUND` gate at `build_model`: a
+/// hostile `geometry/<car>_dash_<part>.mtx` pivot would overflow
+/// `pivot + offset + pivot_offset` the same way a text field would, so it
+/// reads unauthored (part at the in-place pose) and every spawned
+/// transform stays finite through `drive_dash`. A usable pivot still
+/// binds verbatim — the gate rejects nothing authored.
 #[test]
-fn overflowing_dash_mtx_origin_reads_unauthored() {
+fn overflowing_dash_mtx_pivot_reads_unauthored() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("tune")).unwrap();
     std::fs::create_dir_all(tmp.path().join("geometry")).unwrap();
@@ -1350,7 +1352,7 @@ fn overflowing_dash_mtx_origin_reads_unauthored() {
     )
     .unwrap();
     std::fs::write(tmp.path().join("geometry/x_dash.pkg"), dash_pkg()).unwrap();
-    // The needle's origin overflows `pivot + offset` verbatim (3.4e38);
+    // The needle's pivot overflows `pivot + offset` verbatim (3.4e38);
     // the wheel's sits just past the bound (2e6). Both read unauthored.
     std::fs::write(
         tmp.path().join("geometry/x_dash_speed_needle.mtx"),
@@ -1406,7 +1408,7 @@ fn overflowing_dash_mtx_origin_reads_unauthored() {
         });
     assert_eq!(report.parts, 2, "both authored parts bound: {report}");
 
-    // The hostile origins read unauthored: the needle pivot node sits at
+    // The hostile pivots read unauthored: the needle pivot node sits at
     // `SpeedOffset` (in-place pose), the wheel node at `WheelPos` — not
     // at 3.4e38/2e6, and never non-finite.
     let mut saw_speed = false;
@@ -1419,19 +1421,19 @@ fn overflowing_dash_mtx_origin_reads_unauthored() {
                 assert_eq!(
                     t.translation,
                     Vec3::new(0.1, 0.2, 0.3),
-                    "3.4e38 mtx origin reads unauthored"
+                    "3.4e38 mtx pivot reads unauthored"
                 );
             }
             DashRole::Wheel { .. } => {
                 saw_wheel = true;
-                assert_eq!(t.translation, Vec3::ZERO, "2e6 mtx origin reads unauthored");
+                assert_eq!(t.translation, Vec3::ZERO, "2e6 mtx pivot reads unauthored");
             }
             _ => {}
         }
     }
     assert!(saw_speed && saw_wheel);
 
-    // A usable authored origin still binds verbatim: rewrite the
+    // A usable authored pivot still binds verbatim: rewrite the
     // needle's transform record in place and respawn.
     std::fs::write(
         tmp.path().join("geometry/x_dash_speed_needle.mtx"),
@@ -1468,12 +1470,12 @@ fn overflowing_dash_mtx_origin_reads_unauthored() {
         });
     assert_eq!(report.parts, 2, "usable mtx still binds: {report}");
     // The first spawn's needle still exists beside the respawn — find
-    // the one the usable origin produced (`0.05 + SpeedOffset`).
+    // the one the usable pivot produced (`0.05 + SpeedOffset`).
     let mut q = app.world_mut().query::<(&DashNode, &Transform)>();
     let bound = q.iter(app.world()).any(|(n, t)| {
         matches!(n.role, DashRole::Speed { .. }) && t.translation == Vec3::new(0.15, 0.2, 0.3)
     });
-    assert!(bound, "usable origin adds to the authored offset");
+    assert!(bound, "usable pivot adds to the authored offset");
 
     // Every spawned cockpit transform is finite, and stays finite once
     // the needles drive off live vehicle state.
@@ -1487,4 +1489,192 @@ fn overflowing_dash_mtx_origin_reads_unauthored() {
             "hostile mtx produced a non-finite transform: {t:?}"
         );
     }
+}
+
+/// A `_dash.pkg` with a single symmetric `wheel` quad authored around
+/// `centre` in the shared cluster space (the stock dash layout: the quad
+/// centre is `centre`, not the file origin — as `vpbug_dash_wheel`'s quad
+/// is authored around its `.mtx` pivot), plus a one-paint untextured
+/// shader table.
+fn dash_wheel_pkg(centre: [f32; 3]) -> Vec<u8> {
+    let h = 0.15f32;
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // n_sections
+    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
+    geo.extend_from_slice(&6u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&0u32.to_le_bytes()); // sections_duplicate
+    geo.extend_from_slice(&0x002u32.to_le_bytes()); // fvf = XYZ
+    geo.extend_from_slice(&1u16.to_le_bytes()); // n_strips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // flags
+    geo.extend_from_slice(&0i32.to_le_bytes()); // shader_offset
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim_type = triangles
+    geo.extend_from_slice(&4u32.to_le_bytes());
+    for v in [
+        [centre[0] - h, centre[1] - h, centre[2]],
+        [centre[0] + h, centre[1] - h, centre[2]],
+        [centre[0] - h, centre[1] + h, centre[2]],
+        [centre[0] + h, centre[1] + h, centre[2]],
+    ] {
+        for f in v {
+            geo.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&6u32.to_le_bytes());
+    for i in [0u16, 1, 2, 2, 1, 3] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+
+    let mut shaders = Vec::new();
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // 1 paint job
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // 1 shader per job
+    push_lp(&mut shaders, ""); // untextured
+    for f in [
+        0.9f32, 0.8, 0.2, 1.0, // diffuse
+        1.0, 1.0, 1.0, 1.0, // ambient
+        0.0, 0.0, 0.0, 1.0, // specular
+        0.0, 0.0, 0.0, 1.0, // emissive
+        0.0, // shininess
+    ] {
+        shaders.extend_from_slice(&f.to_le_bytes());
+    }
+
+    let mut pkg = b"PKG3".to_vec();
+    for (name, payload) in [("wheel_h", geo), ("shaders", shaders)] {
+        pkg.extend_from_slice(b"FILE");
+        push_lp(&mut pkg, name);
+        pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&payload);
+    }
+    pkg
+}
+
+/// F22-AC04 regression: the steering wheel must roll about its own hub,
+/// not swing across the cockpit. The authored wheel quad sits at
+/// `centre` in the shared cluster space and its `.mtx` *pivot* is that
+/// centre; the composed pivot node must place the quad's centre at
+/// `WheelPos` and rotate it there, so full-left, centred and full-right
+/// leave the wheel's mesh centre put (within the authored
+/// `WheelPivotOffset` nudge). Reading the `.mtx` *origin* (0 on every
+/// stock dash) instead rotated it about the cluster origin and threw the
+/// centre ~0.9 m — the reported "up and to the right / off-screen" bug.
+#[test]
+fn steering_wheel_rotates_about_its_own_centre() {
+    let centre = Vec3::new(0.28, -0.21, 0.2295);
+    let wheel_pos = Vec3::new(0.1, 0.2, 0.3);
+    // The stock wheel record's authored nudge; the wheel centre may only
+    // move by this much under rotation.
+    let nudge = Vec3::new(-0.001, 0.003, 0.0);
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tune")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("geometry")).unwrap();
+    std::fs::write(
+        tmp.path().join("tune/x_dash.asnode"),
+        "type: a\nasNode {\n  DashPos 0.0 0.0 0.0\n  WheelPos 0.1 0.2 0.3\n  WheelPivotOffset -0.001 0.003 0.0\n  WheelFact 0.9\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("geometry/x_dash.pkg"),
+        dash_wheel_pkg(centre.to_array()),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("geometry/x_dash_wheel.mtx"),
+        part_mtx(centre.to_array()),
+    )
+    .unwrap();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.direction = DriveDirection::Forward;
+    let player = spawn_player(&mut app, &config, state);
+
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "x",
+                            0,
+                            None,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            player,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+    assert_eq!(report.parts, 1, "the wheel quad bound: {report}");
+
+    let (wheel_node, holder) = {
+        let mut q = app.world_mut().query::<(Entity, &DashNode)>();
+        let node = q
+            .iter(app.world())
+            .find(|(_, n)| matches!(n.role, DashRole::Wheel { .. }))
+            .map(|(e, _)| e)
+            .expect("a wheel DashNode spawned");
+        let holder = app
+            .world()
+            .get::<Children>(node)
+            .and_then(|c| c.iter().next())
+            .expect("the wheel pivot node has a mesh holder");
+        (node, holder)
+    };
+
+    let lock = config.steering.low_speed_max_angle;
+    let mut poses = Vec::new();
+    for steer in [-lock, 0.0, lock] {
+        app.world_mut()
+            .get_mut::<VehicleState>(player)
+            .unwrap()
+            .steer_angle = steer;
+        app.update();
+        let node = *app.world().get::<Transform>(wheel_node).unwrap();
+        let hold = *app.world().get::<Transform>(holder).unwrap();
+        // The quad's centre in the pivot node's frame (the holder only
+        // ever carries a translation); the node spins about its origin.
+        let centre_in_node = hold.translation + centre;
+        let centre_now = node.translation + node.rotation * centre_in_node;
+        poses.push(centre_now);
+        assert!(
+            (centre_now - (wheel_pos + centre)).length() < 0.02,
+            "steer {steer}: wheel centre {centre_now:?} drifted from the \
+             authored placement {:?}",
+            wheel_pos + centre
+        );
+    }
+    for pair in poses.windows(2) {
+        assert!(
+            (pair[0] - pair[1]).length() < 0.02,
+            "the wheel centre moved {:?} between steering poses (drift)",
+            (pair[0] - pair[1]).length()
+        );
+    }
+    // The nudge is the only legitimate displacement: the wheel centre
+    // sits `nudge` off the pivot node, so a rotation moves it by at most
+    // `2 · |nudge|`.
+    assert!(
+        nudge.length() * 2.0 < 0.02,
+        "the authored nudge must stay below the drift tolerance"
+    );
 }
