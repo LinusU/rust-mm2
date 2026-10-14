@@ -176,6 +176,11 @@ pub struct Starts {
     pub full_throttle: f32,
     /// Lowest throttle ceiling an episode may draw.
     pub throttle_floor: f32,
+    /// Share of starts placed a little way before a spot where an
+    /// episode lately came to grief, so the hard places of a city —
+    /// one hairpin, one bridge ramp — are practised far more often
+    /// than their few metres of a course would be met by chance.
+    pub revisit: f32,
 }
 
 impl Default for Starts {
@@ -191,6 +196,7 @@ impl Default for Starts {
             grid_period: 500,
             full_throttle: 0.6,
             throttle_floor: 0.55,
+            revisit: 0.25,
         }
     }
 }
@@ -228,6 +234,11 @@ pub const OFF_ROUTE: f32 = 35.0;
 /// Height difference (m) from the guide beyond which an agent is off
 /// route — under a bridge it should be on, or over a tunnel.
 const OFF_ROUTE_HEIGHT: f32 = 12.0;
+/// How many recent failures' places are kept to start agents before.
+const TROUBLE_SPOTS: usize = 96;
+/// How far before such a place (m) a revisiting agent starts: room to
+/// arrive at speed, as a car that has driven the course would.
+const REVISIT_BACK: (f32, f32) = (50.0, 220.0);
 /// Seconds on its side or roof before an agent is written off.
 const UPENDED_SECONDS: f32 = 3.0;
 /// Longest episode (s).
@@ -399,6 +410,9 @@ pub struct DrivingEnv {
     fields: Vec<Field>,
     slots: Vec<Slot>,
     drones: Vec<Slot>,
+    /// Where the last [`TROUBLE_SPOTS`] failed episodes ended: line
+    /// and arc position.
+    trouble: std::collections::VecDeque<(usize, f32)>,
     rng: NavRng,
     /// Decisions stepped.
     clock: u64,
@@ -898,7 +912,19 @@ impl DrivingEnv {
             let others: Vec<usize> = (0..self.slots.len())
                 .filter(|&i| Some(i) != replacing)
                 .collect();
-            let (line, s, astray) = if !plain && roll < starts.join && !others.is_empty() {
+            let revisit =
+                !plain && !self.trouble.is_empty() && self.rng.next_f32() < starts.revisit;
+            let (line, s, astray) = if revisit {
+                let spot = self.pick(self.trouble.len());
+                let (line, at) = self.trouble[spot];
+                let back = self.uniform(REVISIT_BACK.0, REVISIT_BACK.1);
+                let s = if self.lines[line].guide.is_closed() {
+                    at - back
+                } else {
+                    (at - back).max(0.0)
+                };
+                (line, s, false)
+            } else if !plain && roll < starts.join && !others.is_empty() {
                 let other = others[self.pick(others.len())];
                 let side = if self.rng.next_f32() < 0.5 { -1.0 } else { 1.0 };
                 let gap = self.uniform(START_CLEAR, 45.0) * side;
@@ -1443,6 +1469,13 @@ impl DrivingEnv {
                 let mut last = vec![0.0; OBS_DIM];
                 self.observe_into(i, &mut last);
                 out.final_obs.extend_from_slice(&last);
+            }
+            if !end.is_truncation() {
+                if self.trouble.len() == TROUBLE_SPOTS {
+                    self.trouble.pop_front();
+                }
+                self.trouble
+                    .push_back((self.slots[i].line, self.slots[i].s));
             }
             let slot = &self.slots[i];
             out.episodes.push(Episode {
