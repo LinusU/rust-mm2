@@ -25,6 +25,7 @@ mod environment_retail;
 mod event;
 mod game_keys;
 mod hud;
+mod hud_scale;
 mod hudjourney;
 mod hudmap;
 mod hudmap_retail;

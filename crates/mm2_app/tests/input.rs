@@ -931,3 +931,42 @@ fn simultaneous_steering_keys_choose_left() {
     app.update();
     assert_eq!(player_input(&mut app).steering, -1.0);
 }
+
+/// F22-AC06: every shipped drive key — WASD, the arrows, Space and the
+/// shift keys — writes a zeroed `VehicleInput` while the free camera
+/// flies, and they drive again the frame a drive view returns.
+#[test]
+fn free_camera_detaches_every_default_drive_key() {
+    let keys = [
+        KeyCode::KeyW,
+        KeyCode::KeyA,
+        KeyCode::KeyS,
+        KeyCode::KeyD,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::Space,
+    ];
+    let mut app = drive_app(CameraMode::Free);
+    for key in keys {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(key);
+    }
+    app.update();
+    let vi = player_input(&mut app);
+    assert_eq!(
+        (vi.throttle, vi.brake, vi.steering, vi.handbrake),
+        (0.0, 0.0, 0.0, 0.0),
+        "no default key may drive while the camera flies"
+    );
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    let vi = player_input(&mut app);
+    assert!(
+        vi.throttle > 0.0 || vi.brake > 0.0 || vi.handbrake > 0.0,
+        "the same held keys drive once a drive view returns"
+    );
+}
