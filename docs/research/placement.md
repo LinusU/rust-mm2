@@ -170,10 +170,10 @@ the previous pass left open:
   Gate tower slabs at ≈−0.03). INST positions the PKG verbatim, so
   `base_y` is the mesh's real base — there is no mesh-pivot offset that
   could turn a placement convention into a phantom penetration.
-- London's covering fans are flat (88 of 92 FloorFan hits constant to
-  <0.01 m), so room 166's 0.69/1.00 m is a real, deeper authored
-  base-below-floor beside a flat lot — the fleet's phenomenon at ~3× the
-  depth.
+- London's covering fans are flat (88 of 92 FloorFan hits level to
+  within 0.01 m; the other four spread at most 0.35 m), so room 166's
+  0.69/1.00 m is a real, deeper authored base-below-floor beside a flat
+  lot — the fleet's phenomenon at ~3× the depth.
 - SF's covering fans span 0.00–2.31 m across the footprint (20 of 68
   ≥0.5 m). Most of the >0.5 m set is a flat base crossing a 1–2 m
   authored hillside grade; rooms 193 and 17 alone are the flat
