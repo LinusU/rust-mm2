@@ -59,8 +59,8 @@ use mm2_formats::pkg::Pkg;
 use mm2_formats::proprules::{PropDefs, PropRules};
 use mm2_formats::psdl::{AttributeType, Psdl};
 use mm2_game::{
-    Carriageway, MAX_PATHSET_STAMPS, SurfaceBand, carriageways, path_stamp_sites,
-    stamp_space_verts, walkable_surfaces, yawed_basis,
+    Carriageway, MAX_PATHSET_STAMPS, SurfaceBand, carriageways, local_geometry_verts,
+    path_stamp_sites, stamp_space_verts, walkable_surfaces, yawed_basis,
 };
 
 use crate::TEXTURE_EXTS;
@@ -225,6 +225,37 @@ struct SunkHit {
     depth: f32,
 }
 
+/// Mesh-base measurement for one sunk *INST* placement (`--sunk-mesh`):
+/// INST transforms position a PKG verbatim, so the placement origin is
+/// not necessarily the mesh's base — a building whose mesh extends
+/// below its origin is not buried just because the origin is. This
+/// records the mesh's lowest local Y, its world base under the authored
+/// transform, and the covering surface's height range sampled over the
+/// mesh's own XZ footprint (which separates a flat datum from a fan
+/// sloping under a building spanning the grade).
+struct MeshSink {
+    detail: String,
+    origin: [f32; 3],
+    room: u16,
+    kind: AttributeType,
+    band: SurfaceBand,
+    /// Surface height minus origin Y at the origin XZ — the audit's
+    /// sustained `penetration`.
+    penetration: f32,
+    /// Lowest/highest local Y of the placed PKG's rendered verts.
+    local_y: (f32, f32),
+    /// World Y of the lowest rendered vertex under the verbatim
+    /// transform (`origin.y + min over verts of (y_axis · local)`).
+    base_y: f32,
+    /// Surface height samples over the mesh's XZ footprint. `None` when
+    /// no footprint sample lands on the covering region.
+    surface_range: Option<(f32, f32)>,
+    /// XZ footprint `[min_x, min_z, max_x, max_z]` of the placed mesh.
+    footprint: [f32; 4],
+    /// Footprint XZ samples that landed on the covering surface.
+    surface_samples: usize,
+}
+
 /// Per-channel tallies — every discovered/expected item lands in a
 /// count; nothing filters out of a denominator.
 #[derive(Default)]
@@ -312,6 +343,132 @@ fn sunk_penetration(p: [f32; 3], regions: &[Region]) -> Option<(f32, f32, &Regio
         }
     }
     best
+}
+
+/// Resolve a placed PKG name and return its rendered local verts (best
+/// LOD, no content offset) — the mesh an INST transform positions
+/// verbatim. `None` when the name does not resolve or decode.
+fn placed_local_verts(vfs: &Vfs, name: &str) -> Option<Vec<[f32; 3]>> {
+    let res = vfs
+        .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
+        .or_else(|| vfs.resolve_preferred(name, &["pkg"]))?;
+    let pkg = Pkg::parse(&vfs.read(&res).ok()?).ok()?;
+    let verts = local_geometry_verts(&pkg);
+    (!verts.is_empty()).then_some(verts)
+}
+
+/// The authored basis an INST placement builds — the images of the
+/// PKG's local axes. Coordinate records carry all three; a simple
+/// record's heading vector is the image of local X and stretches along
+/// that axis only (`docs/research/inst.md`), so Y and Z stay unit.
+fn inst_axes(placement: &InstPlacement) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    match placement {
+        InstPlacement::Coordinate(c) => (c.x_axis, c.y_axis, c.z_axis),
+        InstPlacement::Simple(s) => {
+            let (dx, dz) = (s.x_delta, s.z_delta);
+            let scale = (dx * dx + dz * dz).sqrt().max(0.001);
+            (
+                [dx, 0.0, dz],
+                [0.0, 1.0, 0.0],
+                [-dz / scale, 0.0, dx / scale],
+            )
+        }
+    }
+}
+
+/// The covering surface's height range sampled at `points` (their XZ
+/// projection) over `covering`'s triangles, plus how many points landed
+/// on the region. `(None, 0)` when no point lands on it.
+fn sample_surface_range(
+    points: impl Iterator<Item = [f32; 3]>,
+    covering: &Region,
+) -> (Option<(f32, f32)>, usize) {
+    let mut range = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut count = 0usize;
+    for w in points {
+        for t in &covering.tris {
+            if let Some(sy) = tri_surface_y(w, t) {
+                range.0 = range.0.min(sy);
+                range.1 = range.1.max(sy);
+                count += 1;
+                break;
+            }
+        }
+    }
+    ((count > 0).then_some(range), count)
+}
+
+/// Measure a sunk INST placement's mesh base against its covering
+/// surface (`--sunk-mesh`; operator report 4 item 4's residual INST
+/// clusters). Returns `None` when the PKG does not resolve. `origin` is
+/// the authored placement point, `covering` the deepest walkable region
+/// over it and `penetration` the covering surface's height minus
+/// `origin.y` there.
+// The measurement threads the hit's already-computed context (channel
+// fields, covering region, penetration); folding them into a struct
+// would only move the same fields into a constructor at the call site.
+#[allow(clippy::too_many_arguments)]
+fn measure_mesh_sink(
+    vfs: &Vfs,
+    name: &str,
+    detail: String,
+    placement: &InstPlacement,
+    origin: [f32; 3],
+    room: u16,
+    kind: AttributeType,
+    band: SurfaceBand,
+    penetration: f32,
+    covering: &Region,
+) -> Option<MeshSink> {
+    let verts = placed_local_verts(vfs, name)?;
+    let (xa, ya, za) = inst_axes(placement);
+    let world = |v: &[f32; 3]| -> [f32; 3] {
+        [
+            origin[0] + v[0] * xa[0] + v[1] * ya[0] + v[2] * za[0],
+            origin[1] + v[0] * xa[1] + v[1] * ya[1] + v[2] * za[1],
+            origin[2] + v[0] * xa[2] + v[1] * ya[2] + v[2] * za[2],
+        ]
+    };
+    let mut local_y = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut base_y = f32::INFINITY;
+    let mut footprint = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for v in &verts {
+        local_y.0 = local_y.0.min(v[1]);
+        local_y.1 = local_y.1.max(v[1]);
+        let w = world(v);
+        base_y = base_y.min(w[1]);
+        footprint[0] = footprint[0].min(w[0]);
+        footprint[1] = footprint[1].min(w[2]);
+        footprint[2] = footprint[2].max(w[0]);
+        footprint[3] = footprint[3].max(w[2]);
+    }
+    if !base_y.is_finite() || !local_y.0.is_finite() {
+        return None;
+    }
+    // The covering surface's height at each footprint sample that lands
+    // on it — the origin plus every mesh vertex's XZ.
+    let (surface_range, surface_samples) = sample_surface_range(
+        std::iter::once(origin).chain(verts.iter().map(world)),
+        covering,
+    );
+    Some(MeshSink {
+        detail,
+        origin,
+        room,
+        kind,
+        band,
+        penetration,
+        local_y,
+        base_y,
+        surface_range,
+        footprint,
+        surface_samples,
+    })
 }
 
 /// Cache of prop name → stamp-space rendered verts ([`stamp_space_verts`]
@@ -461,6 +618,8 @@ struct Findings {
     fp_hits: Vec<Hit>,
     /// Stamps under a walkable surface covering their XZ.
     sunk: Vec<SunkHit>,
+    /// Mesh-base measurements for sunk INST placements (`--sunk-mesh`).
+    mesh_sunk: Vec<MeshSink>,
 }
 
 /// Measure one batch of stamped positions for `channel` against the
@@ -522,6 +681,7 @@ fn audit_city(
     psdl: &Psdl,
     regions: &[Region],
     walkable: &[Region],
+    mesh_detail: bool,
     findings: &mut Findings,
 ) -> (BTreeMap<&'static str, Channel>, Vec<String>) {
     let mut channels: BTreeMap<&'static str, Channel> = BTreeMap::new();
@@ -550,6 +710,35 @@ fn audit_city(
                         )
                     });
                     measure("inst", positions, regions, walkable, inst, findings);
+                    if mesh_detail {
+                        for (i, c) in comps.iter().enumerate() {
+                            let origin = match &c.placement {
+                                InstPlacement::Coordinate(c) => c.origin,
+                                InstPlacement::Simple(s) => s.location,
+                            };
+                            if !origin.iter().all(|v| v.is_finite()) {
+                                continue;
+                            }
+                            let Some((pen, _, covering)) = sunk_penetration(origin, walkable)
+                            else {
+                                continue;
+                            };
+                            if let Some(sink) = measure_mesh_sink(
+                                vfs,
+                                &c.package_name,
+                                format!("{}#{i} {} room {}", res.logical, c.package_name, c.room),
+                                &c.placement,
+                                origin,
+                                c.room,
+                                covering.kind,
+                                covering.band,
+                                pen,
+                                covering,
+                            ) {
+                                findings.mesh_sunk.push(sink);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     inst.failed += 1;
@@ -754,6 +943,7 @@ pub fn placement(
     mods: Option<&Path>,
     city: Option<&str>,
     strict: bool,
+    sunk_mesh: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = crate::build_vfs(dir, mods)?;
     let cities: Vec<String> = match city {
@@ -829,13 +1019,21 @@ pub fn placement(
         );
 
         let mut findings = Findings::default();
-        let (channels, ch_failures) =
-            audit_city(&vfs, c, &psdl, &regions, &walkable, &mut findings);
+        let (channels, ch_failures) = audit_city(
+            &vfs,
+            c,
+            &psdl,
+            &regions,
+            &walkable,
+            sunk_mesh,
+            &mut findings,
+        );
         failures.extend(ch_failures);
         let Findings {
             mut hits,
             mut fp_hits,
             mut sunk,
+            mut mesh_sunk,
         } = findings;
         for (name, ch) in &channels {
             println!(
@@ -1004,6 +1202,44 @@ pub fn placement(
         }
         if sunk.len() > MAX_HITS_SHOWN {
             println!("    … +{} more sunk stamps", sunk.len() - MAX_HITS_SHOWN);
+        }
+        // Mesh-base measurement of the sunk INST placements
+        // (`--sunk-mesh`): the placed PKG's lowest local Y, its world
+        // base under the verbatim transform, and the covering surface's
+        // height range across the mesh's own XZ footprint. Separates a
+        // foundation (mesh authored above its placement origin) from a
+        // datum error, and a flat floor from a fan sloping under a
+        // building that spans the grade.
+        if sunk_mesh {
+            mesh_sunk.sort_by(|a, b| b.penetration.total_cmp(&a.penetration));
+            println!("  INST sunk mesh bases ({})", mesh_sunk.len());
+            for m in &mesh_sunk {
+                let (lo, hi) = match m.surface_range {
+                    Some((a, b)) => (format!("{a:.2}"), format!("{b:.2}")),
+                    None => ("none".to_string(), "none".to_string()),
+                };
+                println!(
+                    "    mesh-sunk {det} origin=({x:.2},{y:.2},{z:.2}) room {room} {kind:?} {band:?} pen={pen:.2} local_y=({ly0:.2},{ly1:.2}) base_y={base:.2} surface@footprint=[{lo},{hi}] samples={n} footprint=({fx0:.1},{fz0:.1})..({fx1:.1},{fz1:.1})",
+                    det = m.detail,
+                    x = m.origin[0],
+                    y = m.origin[1],
+                    z = m.origin[2],
+                    room = m.room,
+                    kind = m.kind,
+                    band = m.band,
+                    pen = m.penetration,
+                    ly0 = m.local_y.0,
+                    ly1 = m.local_y.1,
+                    base = m.base_y,
+                    lo = lo,
+                    hi = hi,
+                    n = m.surface_samples,
+                    fx0 = m.footprint[0],
+                    fz0 = m.footprint[1],
+                    fx1 = m.footprint[2],
+                    fz1 = m.footprint[3],
+                );
+            }
         }
     }
 
@@ -1286,5 +1522,74 @@ mod tests {
             "pole top lands at x≈6.6, z=2.5 — off the road"
         );
         assert_eq!(hits.len(), 1);
+    }
+
+    /// A strip sloping from y=0 at x=0 to y=2 at x=10, 4 m wide.
+    fn sloped_region() -> Region {
+        Region {
+            room: 9,
+            kind: AttributeType::Fan,
+            band: SurfaceBand::FloorFan,
+            min: [0.0, -2.0],
+            max: [10.0, 2.0],
+            ring: vec![
+                [0.0, 0.0, -2.0],
+                [10.0, 2.0, -2.0],
+                [10.0, 2.0, 2.0],
+                [0.0, 0.0, 2.0],
+            ],
+            tris: vec![
+                [[0.0, 0.0, -2.0], [10.0, 2.0, -2.0], [10.0, 2.0, 2.0]],
+                [[0.0, 0.0, -2.0], [10.0, 2.0, 2.0], [0.0, 0.0, 2.0]],
+            ],
+        }
+    }
+
+    #[test]
+    fn surface_range_captures_a_slope_across_the_footprint() {
+        let r = sloped_region();
+        // Two footprint samples at opposite ends of the slope: the
+        // range is the surface's own 0..2, which is the flat-floor vs
+        // sloping-fan distinction the measurement exists to draw.
+        let (range, n) =
+            sample_surface_range([[0.0, 99.0, 0.0], [10.0, 99.0, 0.0]].into_iter(), &r);
+        let (lo, hi) = range.expect("both samples on the fan");
+        assert!((lo - 0.0).abs() < 1e-4, "lo {lo}");
+        assert!((hi - 2.0).abs() < 1e-4, "hi {hi}");
+        assert_eq!(n, 2);
+        // Samples off the region footprint contribute nothing.
+        let (range, n) = sample_surface_range([[5.0, 0.0, 9.0]].into_iter(), &r);
+        assert!(range.is_none());
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn inst_axes_read_the_coordinate_basis_verbatim() {
+        let p = InstPlacement::Coordinate(inst::InstCoordinate {
+            x_axis: [0.0, 0.0, 1.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [-1.0, 0.0, 0.0],
+            origin: [1.0, 2.0, 3.0],
+        });
+        let (x, y, z) = inst_axes(&p);
+        assert_eq!(x, [0.0, 0.0, 1.0]);
+        assert_eq!(y, [0.0, 1.0, 0.0]);
+        assert_eq!(z, [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn inst_axes_simple_stays_unit_on_y_and_z() {
+        // A 5 m heading stretches local X only; Y and Z stay unit
+        // (docs/research/inst.md).
+        let p = InstPlacement::Simple(inst::InstSimple {
+            x_delta: 3.0,
+            z_delta: 4.0,
+            location: [0.0, 0.0, 0.0],
+        });
+        let (x, y, z) = inst_axes(&p);
+        assert!((x[0] - 3.0).abs() < 1e-4 && (x[2] - 4.0).abs() < 1e-4);
+        assert_eq!(y, [0.0, 1.0, 0.0]);
+        assert!((z[0] * z[0] + z[2] * z[2] - 1.0).abs() < 1e-4, "{z:?}");
+        assert_eq!(z[1], 0.0);
     }
 }

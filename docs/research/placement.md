@@ -18,6 +18,16 @@ channel × band × name × room. A hit is a walkable surface standing
 0.05–1.0 m above the stamp base, more than 0.05 m inside its XZ
 footprint (`SUNK_EPS` / `SUNK_MAX` / `SUNK_DEPTH_EPS`).
 
+The building-mesh leg comes from `mm2-inspect placement $MM2_RETAIL
+--city <c> --sunk-mesh` (added for this task; prints every sunk INST
+placement, uncapped). For each it resolves the placed PKG and prints the
+mesh's lowest/highest local Y (`local_y`), its world base under the
+authored transform (`base_y`), and the covering surface's height range
+sampled at the origin and at every mesh vertex's XZ (`surface@footprint`,
+with `samples`). INST positions a PKG verbatim, so `base_y` is the mesh's
+real base in the world: a mesh authored with its base at `local_y = 0`
+has its base exactly on the placement origin.
+
 | city   | INST | pathset | note |
 |--------|-----:|--------:|------|
 | london | 94 (Driving 2, FloorFan 92) | 46 (FloorFan 20, SidewalkTop 26) | the task text's "54" no longer reproduces |
@@ -39,20 +49,44 @@ footprint (`SUNK_EPS` / `SUNK_MAX` / `SUNK_DEPTH_EPS`).
   `ww_hous1_brick_red_2s_12_l` at y = −1.00 and two
   `ww_hous1_stone_tan_b6_12_l` at y = −0.69, 2.4–4.5 m inside a flat
   y = 0 fan (the only INST hits over 0.5 m in London).
-  *Unknown: the retail mesh base is not measured here, so whether
-  these are deliberately deep foundations is not established.*
+  *Measured (`--sunk-mesh`): all 94 London sunk INST meshes have their
+  lowest vertex at `local_y = 0.00`, so the transform origin is the
+  facade's base, not a pivot above it, and the covering fan is flat
+  (`surface@footprint = [−0.00, −0.00]`), so no slope hides part of the
+  offset either. The three bases genuinely stand 0.69/0.69/1.00 m below
+  the flat y = 0 lot. Classification: authored base-below-floor
+  (verbatim INST) — the same phenomenon as the ≤0.3 m fleet, at ~3× its
+  depth — not a mesh-pivot or slope datum error.*
 - **London Driving, 2 hits** (`kw_storefront*`, `cw_b*_store*`, rooms
   1021 / 1176): 0.06–0.12 m under a walkway/road-fan surface, ≥1 m
   inside it. Storefront origins on pedestrianised streets; same
   magnitude as the floor-fan noise. *Authored, benign.*
 - **SF FloorFan, 68 hits, 43 rooms.** Penetrations spread 0.05–1.0 m
-  (median 0.27) and the covering surface heights are all distinct (no
-  shared datum like London's 0.0/5.0), on hillside rooms. This is the
-  pattern of a sloped lot-floor fan sampled at a building's origin
-  while the building spans the slope. *Inferred, not measured:* the
-  slope-vs-footprint test is not in the audit. Names are
-  `*_canneryshop*`, `sw_b*_tft*`, `gw_b*_bung*`, `sw_coit_*` — building
-  shells, none street furniture.
+  (median 0.27). *Measured (`--sunk-mesh`):* the covering surface's
+  height spread across each mesh's own XZ footprint runs 0.00–2.31 m;
+  20 of the 68 spread ≥0.5 m and 13 are flat (<0.05 m). Every mesh here
+  is authored with its base at `local_y = 0.00` except the deliberate
+  undercroft family `nw_b4s_*/nw_b4awn_*` (seven hits, `local_y =
+  (−3.00, 4.00)`) and the three Golden Gate tower slabs (`local_y ≈
+  −0.03`). The hits the previous pass flagged over 0.5 m read:
+
+  | room | mesh | local_y min | base_y | surface@footprint | spread | reading |
+  |-----:|------|------------:|-------:|-------------------|-------:|---------|
+  | 27 | `nw_b4_canneryshop01_8_f` | 0.00 | 62.28 | 61.28–63.28 | 2.00 | base crosses a 2 m grade |
+  | 147 | `sw_coit_b4r_fff01_12_f` | 0.00 | 39.50 | 39.48–40.42 | 0.94 | base at the grade's low end |
+  | 193 | `gw_b4_bung01_v_8_f` | 0.00 | 41.12 | 42.00 | 0.00 | flat fan, 0.88 m below it |
+  | 125 | `sw_4_f01_12_f` | 0.00 | 42.80 | 43.64–44.10 | 0.46 | base below the fan's low end |
+  | 59 | `nw_b5_canneryshop01_20_f` | 0.00 | 49.79 | 48.95–50.54 | 1.59 | base crosses a 1.6 m grade |
+  | 111 | `nw_b4_canneryshop01_12_f` | 0.00 | 63.59 | 62.37–64.33 | 1.96 | base crosses a 2 m grade |
+  | 24 | `nw_b4s_canneryshop01_8_f` | −3.00 | 67.52 | 69.39–71.23 | 1.84 | 3 m undercroft under a grade |
+  | 17 | `sw_b4_tft01_8_f` | 0.00 | 42.09 | 42.78 | 0.00 | flat fan, 0.69 m below it |
+
+  So the >0.5 m set is **two different authored relationships**: a flat
+  base crossing a fan that rises 1–2 m under the footprint (rooms 27, 59,
+  111, the sloped sides of 147/125 — SF's hillside grade), or a flat base
+  under a fan that is constant to <0.01 m (rooms 193, 17 — the London-166
+  shape). Names are `*_canneryshop*`, `sw_b*_tft*`, `gw_b*_bung*`,
+  `sw_coit_*` — building shells, none street furniture.
 - **SF SidewalkTop, 3 hits** (`pl_ggbridge_{marin,ftpnt}_upper01_f`,
   rooms 562/563/570, 0.5–0.71 m): Golden Gate bridge-tower pieces over
   a derived sidewalk top (the audit's kerb-foot chain lifted by
@@ -127,16 +161,37 @@ footprint (`SUNK_EPS` / `SUNK_MAX` / `SUNK_DEPTH_EPS`).
 No cluster is a loader defect and none justifies touching a Y. Of 249
 sunk stamps (London 140, SF 109): the large majority are authored
 sub-0.3 m offsets (foundations, planted bases, roots, jitter). The
-residue that is **not** explained, and is left open:
+building-mesh measurement (`--sunk-mesh`) settles the two INST residues
+the previous pass left open:
 
-1. London room 166 terraced houses (−0.69 / −1.00 m under a flat floor).
-2. ~~SF pathset 136~~ — resolved: the poles are a linear chord between
-   two on-deck endpoints over a crested deck (see above).
+- Every sunk INST building mesh in both cities has its lowest rendered
+  vertex at `local_y = 0.00` (London 94/94; SF 62/72, the rest being the
+  deliberate `nw_b4s_*/nw_b4awn_*` 3 m undercroft and the three Golden
+  Gate tower slabs at ≈−0.03). INST positions the PKG verbatim, so
+  `base_y` is the mesh's real base — there is no mesh-pivot offset that
+  could turn a placement convention into a phantom penetration.
+- London's covering fans are flat (88 of 92 FloorFan hits constant to
+  <0.01 m), so room 166's 0.69/1.00 m is a real, deeper authored
+  base-below-floor beside a flat lot — the fleet's phenomenon at ~3× the
+  depth.
+- SF's covering fans span 0.00–2.31 m across the footprint (20 of 68
+  ≥0.5 m). Most of the >0.5 m set is a flat base crossing a 1–2 m
+  authored hillside grade; rooms 193 and 17 alone are the flat
+  London-166 shape.
+
+The four residues the previous pass carried, with their status after
+this measurement:
+
+1. London room 166 terraced houses (−0.69 / −1.00 m under a flat floor) —
+   **resolved**: authored depth (base at the origin, flat fan); a data
+   curiosity, not a defect.
+2. ~~SF pathset 136~~ — resolved (task #1169): the poles are a linear
+   chord between two on-deck endpoints over a crested deck (see above).
 3. SF INST FloorFan hillside buildings (> 0.5 m: rooms 27, 147, 193,
-   125, 59, 111, 24, 17) — slope hypothesis unmeasured.
+   125, 59, 111, 24, 17) — **resolved**: authored hillside grade plus
+   two flat-fan cases; no datum error.
 4. `sp_hotdogcart_f` pathset 0:1, SF (0.67 m) — measured, still
    unexplained (single authored point; see above).
 
-Resolving 1 and 3 needs the building meshes' lowest local Y against the
-fan slope over the footprint. The audit's `sunk` counter is a measured finding,
-not a failure (`--strict` ignores it).
+The audit's `sunk` counter is a measured finding, not a failure
+(`--strict` ignores it).

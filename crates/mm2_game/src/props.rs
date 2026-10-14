@@ -1146,13 +1146,14 @@ pub fn stamp_content_offset(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> [f32; 3] {
     [0.0, (-min_y).max(0.0), 0.0]
 }
 
-/// The prop's rendered-geometry vertices in stamp space — best LOD per
-/// stem with `shadow`/`dmg` stand-ins excluded, every vertex offset by
-/// [`stamp_content_offset`]. This is the selection `mm2_app` renders
-/// and collides; the placement audit sweeps it through each stamp's
-/// basis as the prop's world-space footprint.
-pub fn stamp_space_verts(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> Vec<[f32; 3]> {
-    let offset = stamp_content_offset(pkg, bound_cg);
+/// The prop's rendered-geometry vertices in its own local space —
+/// best LOD per stem with `shadow`/`dmg` stand-ins excluded, no content
+/// offset applied. `mm2_app` reads the same selection for INST props,
+/// whose authored 4×4 transform positions the mesh verbatim
+/// (`PropOffset::Verbatim`): the lowest local Y of a building PKG is
+/// therefore the height of its base relative to its placement origin.
+/// [`stamp_space_verts`] is this plus [`stamp_content_offset`].
+pub fn local_geometry_verts(pkg: &Pkg) -> Vec<[f32; 3]> {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
         let (stem, rank) = lod_split(name);
@@ -1174,16 +1175,24 @@ pub fn stamp_space_verts(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> Vec<[f32; 3]>
         for section in &geo.sections {
             for strip in &section.strips {
                 for v in &strip.vertices {
-                    out.push([
-                        v.position[0] + offset[0],
-                        v.position[1] + offset[1],
-                        v.position[2] + offset[2],
-                    ]);
+                    out.push(v.position);
                 }
             }
         }
     }
     out
+}
+
+/// [`local_geometry_verts`] offset by the content convention
+/// [`stamp_content_offset`] recovers — a bound prop is centred on its
+/// bound's `CG`, an unbound one is ground-lifted so its lowest authored
+/// vertex rests on the stamp point.
+pub fn stamp_space_verts(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> Vec<[f32; 3]> {
+    let offset = stamp_content_offset(pkg, bound_cg);
+    local_geometry_verts(pkg)
+        .into_iter()
+        .map(|v| [v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]])
+        .collect()
 }
 
 /// One drivable region extracted from a room's road attributes: the

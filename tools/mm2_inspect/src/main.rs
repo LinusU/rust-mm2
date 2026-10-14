@@ -544,6 +544,14 @@ enum Command {
         /// legitimately stamp onto some drivable surfaces.
         #[arg(long)]
         strict: bool,
+        /// For every sunk INST placement, resolve the placed PKG and
+        /// measure its lowest local Y, its world base under the authored
+        /// transform and the covering surface's height range across the
+        /// mesh's XZ footprint (operator report 4 item 4: foundation vs
+        /// datum error; flat floor vs fan sloping under a hillside
+        /// building).
+        #[arg(long)]
+        sunk_mesh: bool,
     },
     /// Audit ambient-traffic content (F10-A.1): each city's
     /// `[Ambient Types/Density]` roster, per-class
@@ -807,9 +815,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::BangerBind { dir, city, strict } => {
             bind::banger_bind(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
-        Command::Placement { dir, city, strict } => {
-            placement::placement(dir, cli.mods.as_deref(), city.as_deref(), *strict)
-        }
+        Command::Placement {
+            dir,
+            city,
+            strict,
+            sunk_mesh,
+        } => placement::placement(
+            dir,
+            cli.mods.as_deref(),
+            city.as_deref(),
+            *strict,
+            *sunk_mesh,
+        ),
         Command::Traffic { dir, city, strict } => {
             traffic(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
