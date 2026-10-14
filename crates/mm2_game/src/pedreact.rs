@@ -426,7 +426,7 @@ impl Reaction {
     }
 
     /// Step the decision. `anim` is the animator's current state name,
-    /// `threat` the most urgent threat this frame, `side` the dive
+    /// `threat` the threat from the sensed car this frame, `side` the dive
     /// side the walker's frame gives for it. Non-finite or negative
     /// `dt` advances nothing.
     pub fn decide(
