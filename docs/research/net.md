@@ -2110,8 +2110,37 @@ wire actually moved rather than an in-process mailbox's contents.
   reverse state of its own, so there is nothing to assert; the
   tractor's own reverse bit is covered by the seat legs. **Extra-wheel
   presentation** — the row's `spin` drives the copy's wheels (the `rspn`
-  counter is seat-wide), but there is no per-trailer-wheel counter yet.
-  Loopback, clean link; the lossy leg is open.
+  counter is seat-wide), but there was no per-trailer-wheel counter; the
+  `trl=` `turn` cell and the `xwhl=` cell below now cover it. Loopback,
+  clean link; the lossy leg is open.
+- **Extra-wheel trailer rig at process level (F25-AC05).**
+  `a_reset_extra_wheel_rig_drives_its_remote_wheels_across_processes`
+  (retail install, `MM2_RETAIL`): alice drives the `vpcentury` — the
+  retail car that carries both `whl4`/`whl5` "back-back" follower wheels
+  *and* a towed trailer, so one rig is a trailer rig and an extra-wheel
+  rig — and asks the host for a reset with `--reset-at 300`; bob records
+  at the same authority tick (`--until-snap-tick 700`) while she is still
+  connected. The smoke record gained two wheel-presentation cells.
+  `trl=` gained a fourth `turn<k>` (`NetDriveReport::trailers_driven`):
+  `Snap.trailers` rows whose `spin` was non-zero that landed on a
+  *remote* trailer copy, so a client shows the towed rig's wheels were
+  turned by the wire; the own rig's trailer is a real body driven by its
+  own physics and never counts. A new `xwhl=<driven>/<total>` counts the
+  follower ("extra") wheels on this process's remote copies and how many
+  are driven by the replicated wheel state: a follower mount is the one
+  with a non-zero `WheelMount::follow_offset`, and its spin, suspension
+  and steer are the reference physics wheel's by construction
+  (`car_visual`), so a driven reference drives the extra wheels — nothing
+  extra rides the wire for them. Asserted: alice asked once (`req1s`) and
+  her own trailer reseated (`live1,remote0,reseat≥1`) but was never
+  wire-driven (`turn0`); bob held both peers (`rem2`), applied her
+  trailer rows (`tsyn`), reseated his copy on her epoch
+  (`live1,remote1,reseat≥1`), turned that copy's wheels (`turn>0`), and
+  drove both of her follower wheels (`xwhl=2/2`); the host granted the
+  ask (`req1g`) and kept no trailer (`live0`). 5/5 isolated passes
+  (~2 s). Advances F25-AC05's extra-wheel-presentation half; still open:
+  the lossy reset, trailer reverse presentation, reset-while-moving
+  divergence. Loopback, dev world with a retail vehicle.
 - **Reset on an impaired link (F25-C.5).** The ask is one frame, and a
   lossy link may eat it — which the first leg could not survive. The
   scheduled ask now behaves like a driver whose `R` seemed to do

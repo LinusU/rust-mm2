@@ -1408,6 +1408,46 @@ fn run_headless(
             format!(" seats={}", rows.join("/"))
         }
     };
+    // F25-AC05 extra-wheel evidence: a retail car's `whl4`+ "back-back"
+    // follower wheels carry no physics wheel of their own — their mount
+    // shadows a reference physics wheel by a non-zero `follow_offset`
+    // (see `car_visual`). Count the follower wheels on this process's
+    // *remote* copies (the extras a peer's rig adds) and how many are
+    // driven by the replicated wheel state, so a process can show the
+    // extra wheels it holds for a peer turn with it. Emitted only when a
+    // remote copy carries one, so every record without extra wheels
+    // stays bit-identical.
+    let xwhl_detail = {
+        let mounts: Vec<(Entity, usize, Vec3)> = {
+            let mut q = app.world_mut().query::<&crate::car_visual::WheelMount>();
+            q.iter(app.world())
+                .map(|m| (m.vehicle, m.index, m.follow_offset))
+                .collect()
+        };
+        let (mut total, mut driven) = (0usize, 0usize);
+        for (vehicle, index, offset) in mounts {
+            if offset == Vec3::ZERO {
+                continue;
+            }
+            let world = app.world();
+            if world.get::<mm2_vehicle::RemoteReplica>(vehicle).is_none() {
+                continue;
+            }
+            total += 1;
+            if world
+                .get::<VehicleState>(vehicle)
+                .and_then(|s| s.wheels.get(index))
+                .is_some_and(|w| w.spin != 0.0)
+            {
+                driven += 1;
+            }
+        }
+        if total == 0 {
+            String::new()
+        } else {
+            format!(" xwhl={driven}/{total}")
+        }
+    };
     let world_ecs = app.world();
     let session = world_ecs.resource::<Session>();
     // `updates=` counts the updates actually run when a stop condition
@@ -1536,17 +1576,19 @@ fn run_headless(
         .unwrap_or_default();
     // F25-AC05 trailer evidence: `trl=` is the trailer entities alive
     // at the last reconcile (own rig included) and the remote copies
-    // among them, plus the rows that reseated one on its seat's reset
-    // epoch. Absent until a trailer existed or a row landed, so every
-    // trailer-free record stays bit-identical; a leaver's copy shows as
-    // `remote0` once the record outlives it.
+    // among them, the rows that reseated one on its seat's reset epoch,
+    // and the rows that turned a *remote* copy's wheels (`turn`, the
+    // towed rig's wheel presentation arriving over the wire). Absent
+    // until a trailer existed or a row landed, so every trailer-free
+    // record stays bit-identical; a leaver's copy shows as `remote0`
+    // once the record outlives it.
     let trl_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .filter(|r| r.trailers_synced > 0 || r.trailers_live > 0)
         .map(|r| {
             format!(
-                " trl=live{},remote{},reseat{}",
-                r.trailers_live, r.trailers_remote_live, r.trailers_reseated
+                " trl=live{},remote{},reseat{},turn{}",
+                r.trailers_live, r.trailers_remote_live, r.trailers_reseated, r.trailers_driven
             )
         })
         .unwrap_or_default();
@@ -2674,7 +2716,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{xwhl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

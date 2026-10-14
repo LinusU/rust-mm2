@@ -1031,6 +1031,13 @@ pub struct NetDriveReport {
     /// carries no epoch of its own, so this is how a rig reset shows on
     /// a client.
     pub trailers_reseated: u64,
+    /// Of `trailers_synced`, the rows that carried a non-zero wheel rate
+    /// onto a *remote* trailer copy (F25-AC05) — the wire turned the
+    /// towed rig's wheels on this client, the trailer half of the spec's
+    /// "representative trailer/extra-wheel presentation". The own rig's
+    /// trailer integrates its own sim (`remote_copy` is false), so only a
+    /// peer's copy counts.
+    pub trailers_driven: u64,
     /// Trailer entities alive at the last reconcile, every role (own
     /// rig included), and the kinematic remote copies among them. A
     /// leaver's or re-picker's copy must not outlive its seat.
@@ -3599,6 +3606,12 @@ fn apply_snap_frame(
             report.trailers_synced += 1;
             if reset_owners.contains(&t.owner) {
                 report.trailers_reseated += 1;
+            }
+            // The row's replicated wheel rate, applied only to a remote
+            // copy — the own rig's trailer runs its own physics and is
+            // reseated on a declared reset, never driven by the wire.
+            if remote_copy && t.spin != 0 {
+                report.trailers_driven += 1;
             }
             break;
         }
