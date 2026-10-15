@@ -129,7 +129,7 @@ install layouts and checks each one. `--layout` picks them; it defaults to
 | `--layout` | Produced (under `target/package/`) | Layout |
 |---|---|---|
 | `flat` | `rust-mm2-<os>-<arch>/` and an archive | the four binaries, `assets/`, `README.md`, `LICENSE-MIT`, `LICENSE-APACHE` and `docs/` at the root |
-| `app` | `rust-mm2.app/` and an archive | `Contents/MacOS/` binaries, `Contents/Resources/assets/`, `Contents/Resources/{README.md,LICENSE-*,docs/}` — macOS only |
+| `app` | `rust-mm2.app/` and an archive | `Contents/Info.plist`, `Contents/MacOS/` binaries, `Contents/Resources/assets/`, `Contents/Resources/{README.md,LICENSE-*,docs/}` — macOS only |
 | `prefix` | `rust-mm2-<os>-<arch>-prefix/` and an archive | `bin/` binaries, `share/rust-mm2/assets/`, `share/doc/rust-mm2/{README.md,LICENSE-*,docs/}` |
 
 The archive is a `.tar.gz` on macOS and Linux and a `.zip` on Windows
@@ -337,6 +337,34 @@ cargo run --bin mm2-host -- --help                # dedicated lobby host
 cargo run --bin mm2-join -- --help                # lobby client
 ```
 
+### The `.app` bundle
+
+`scripts/package.sh` writes a minimal `Contents/Info.plist` so Finder and
+LaunchServices treat `rust-mm2.app` as an application: `open rust-mm2.app`
+launches `Contents/MacOS/mm2`, which mounts `Contents/Resources/assets`
+(verified on macOS arm64 with `open -W -n rust-mm2.app --args --headless
+--frames 3 --stdout <file>`, whose log shows the `mounted app assets` line
+for the bundle). `scripts/check-package.sh --layout app` requires the plist
+at exactly `Contents/Info.plist`, requires it to name `mm2` as
+`CFBundleExecutable`, and rejects it anywhere else or in another layout.
+
+The plist carries `CFBundleIdentifier` `se.folkdatorn.rust-mm2`, the name
+`rust-mm2` and the version Cargo resolves for `mm2_app`. These are
+*designed* values: the original game has no bundle, so there is no
+recovered convention behind them. No manifest sets a version yet, so the
+bundle reports Cargo's default `0.0.0` until the owner picks one. There is
+no icon (the app has no icon asset; Finder shows the generic one).
+
+Signing: the four binaries are signed ad hoc by `scripts/release-build.sh`
+(`codesign --force --sign -`), and the bundle itself is *not* sealed, since
+a bundle signature adds `Contents/_CodeSignature/`, which the allowlist
+does not permit. Developer ID signing and notarization need the owner's
+Apple Developer certificate and notarytool credentials, which an agent does
+not hold, so they are left to the owner. Until then a bundle downloaded
+through a browser carries the quarantine attribute and Gatekeeper refuses
+it; clear it with `xattr -dr com.apple.quarantine rust-mm2.app` or build it
+locally.
+
 The README documents the flags in context; `mm2 --help` lists them all.
 
 ## Not done yet
@@ -346,10 +374,10 @@ The README documents the flags in context; `mm2 --help` lists them all.
   `tests/package.rs`, but no maintainer machine or CI runner has run the
   script with a real Windows `uname`, built the `.exe` binaries or opened
   the zip.
-- A double-clickable `.app`: the bundle has the layout the app's asset
-  search uses (`Contents/MacOS/mm2`, `Contents/Resources/assets`) but no
-  `Contents/Info.plist`, so it is run from `Contents/MacOS/mm2` rather
-  than opened by Finder, and it is not signed or notarized (task #1375).
+- A Developer-ID-signed, notarized `.app` with an icon: the bundle opens
+  with `open` (see above) but is only ad-hoc signed, has no icon and
+  needs the owner's Apple credentials to be notarized. A launch from
+  Finder's GUI (as opposed to `open`) was not exercised.
 - A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
   runs the headless commands, not the `--cam` captures, so it shows the
   optimised package loads the same content and reaches the same race

@@ -15,7 +15,8 @@
 #           `.zip` on Windows)
 #   app     a macOS bundle: binaries in `Contents/MacOS/`, assets in
 #           `Contents/Resources/assets/`, README, licenses and `docs/`
-#           under `Contents/Resources/`
+#           under `Contents/Resources/`, and the required
+#           `Contents/Info.plist` (the only other file the bundle may hold)
 #   prefix  a Unix prefix: binaries in `bin/`, assets in
 #           `share/rust-mm2/assets/`, README, licenses and `docs/` under
 #           `share/doc/rust-mm2/`
@@ -59,7 +60,7 @@ $2
             shift 2
             ;;
         -h|--help)
-            sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -164,6 +165,10 @@ for path in $files; do
     case "$logical" in
         mm2|mm2-host|mm2-join|mm2-inspect) plain_count=$((plain_count + 1)) ;;
         mm2.exe|mm2-host.exe|mm2-join.exe|mm2-inspect.exe) exe_count=$((exe_count + 1)) ;;
+        Contents/Info.plist)
+            # Only the bundle's own file; other layouts have no such path.
+            [ "$layout" = app ] || problem "not on the allowlist: $rel"
+            ;;
         README.md|LICENSE|LICENSE-*|LICENSE.*) ;;
         docs/*.md)
             case "${logical#docs/}" in
@@ -202,6 +207,13 @@ for bin in mm2 mm2-host mm2-join mm2-inspect; do
         problem "binary is not executable: $bin"
     fi
 done
+if [ "$layout" = app ]; then
+    if [ ! -f "$dir/Contents/Info.plist" ]; then
+        problem "missing Contents/Info.plist"
+    elif ! grep -A1 '<key>CFBundleExecutable</key>' "$dir/Contents/Info.plist" | grep -q '<string>mm2</string>'; then
+        problem "Contents/Info.plist does not name mm2 as CFBundleExecutable"
+    fi
+fi
 [ -f "$dir/${doc_prefix}README.md" ] || problem "missing README.md"
 [ -f "$dir/$asset_dir/texture/dev_road.png" ] || problem "missing $asset_dir/texture/dev_road.png"
 

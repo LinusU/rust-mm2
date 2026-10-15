@@ -98,6 +98,10 @@ fn layout_dirs(layout: &str) -> (&'static str, &'static str, &'static str) {
     }
 }
 
+/// The parts of a bundle's `Info.plist` the check reads.
+const GOOD_PLIST: &str =
+    "<plist><dict><key>CFBundleExecutable</key>\n<string>mm2</string></dict></plist>\n";
+
 /// A folder `check-package.sh` accepts, in `layout`.
 fn good_layout_package(at: &Path, layout: &str) -> PathBuf {
     let (bin_prefix, asset_dir, doc_prefix) = layout_dirs(layout);
@@ -122,6 +126,9 @@ fn good_layout_package(at: &Path, layout: &str) -> PathBuf {
     std::fs::write(readme, "readme").unwrap();
     std::fs::write(docs.join("building.md"), "doc").unwrap();
     std::fs::write(dir.join(asset_dir).join("texture/dev_road.png"), b"png").unwrap();
+    if layout == "app" {
+        std::fs::write(dir.join("Contents/Info.plist"), GOOD_PLIST).unwrap();
+    }
     assert_eq!(
         code(&check_layout(&dir, layout, &[])),
         0,
@@ -370,11 +377,19 @@ fn an_unknown_layout_is_a_usage_error() {
 fn a_stray_or_wrong_type_file_is_named_by_its_real_path_in_a_layout() {
     // A file the bundle was never meant to carry fails whatever its depth,
     // and the message says where it really is.
+    // The plist is the bundle's own file, at exactly one path, and only
+    // in the app layout.
     assert_layout_rejected_with(
         "app",
+        "Contents/Resources/Info.plist",
+        GOOD_PLIST.as_bytes(),
+        "not on the allowlist: Contents/Resources/Info.plist",
+    );
+    assert_layout_rejected_with(
+        "prefix",
         "Contents/Info.plist",
-        b"plist",
-        "not on the allowlist",
+        GOOD_PLIST.as_bytes(),
+        "not on the allowlist: Contents/Info.plist",
     );
     assert_layout_rejected_with(
         "app",
@@ -397,6 +412,24 @@ fn a_stray_or_wrong_type_file_is_named_by_its_real_path_in_a_layout() {
 }
 
 #[test]
+fn a_bundle_plist_that_does_not_name_mm2_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = good_layout_package(tmp.path(), "app");
+    std::fs::write(
+        dir.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleExecutable</key><string>other</string></dict></plist>",
+    )
+    .unwrap();
+    let out = check_layout(&dir, "app", &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("does not name mm2"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn a_layout_missing_one_of_its_own_places_fails() {
     for (layout, gone, needle) in [
         ("app", "Contents/MacOS/mm2", "missing binary: mm2"),
@@ -406,6 +439,7 @@ fn a_layout_missing_one_of_its_own_places_fails() {
             "missing Contents/Resources/assets/texture/dev_road.png",
         ),
         ("app", "Contents/Resources/README.md", "missing README.md"),
+        ("app", "Contents/Info.plist", "missing Contents/Info.plist"),
         ("prefix", "bin/mm2-join", "missing binary: mm2-join"),
         (
             "prefix",
@@ -825,9 +859,37 @@ fn the_app_bundle_is_assembled_checked_and_archived() {
         "Contents/Resources/LICENSE-APACHE",
         "Contents/Resources/docs/building.md",
         "Contents/Resources/docs/modding.md",
+        "Contents/Info.plist",
     ] {
         assert!(app.join(rel).is_file(), "missing {rel}");
     }
+    // What LaunchServices reads: the plist parses and names the executable
+    // that sits in `Contents/MacOS`.
+    let plist = app.join("Contents/Info.plist");
+    let lint = Command::new("plutil")
+        .arg("-lint")
+        .arg(&plist)
+        .output()
+        .unwrap();
+    assert_eq!(code(&lint), 0, "{}", String::from_utf8_lossy(&lint.stdout));
+    let key = |k: &str| {
+        let out = Command::new("plutil")
+            .args(["-extract", k, "raw", "-o", "-"])
+            .arg(&plist)
+            .output()
+            .unwrap();
+        assert_eq!(
+            code(&out),
+            0,
+            "{k}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    assert_eq!(key("CFBundleExecutable"), "mm2");
+    assert_eq!(key("CFBundlePackageType"), "APPL");
+    assert_eq!(key("CFBundleIdentifier"), "se.folkdatorn.rust-mm2");
+    assert!(!key("CFBundleShortVersionString").is_empty());
     assert_eq!(code(&check_layout(&app, "app", &[])), 0);
     // The packaged asset is the repository's own, byte for byte. These
     // binaries are fakes, so the launch half of AC04 — the app's own asset

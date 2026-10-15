@@ -18,7 +18,8 @@
 #           LICENSE-MIT, LICENSE-APACHE, docs/
 #   app     <out>/rust-mm2.app/              a macOS bundle:
 #           Contents/MacOS/{mm2,...}, Contents/Resources/assets/,
-#           Contents/Resources/{README.md,LICENSE-*,docs/}, plus an archive
+#           Contents/Resources/{README.md,LICENSE-*,docs/}, a generated
+#           Contents/Info.plist, plus an archive
 #   prefix  <out>/rust-mm2-<os>-<arch>-prefix/  a Unix prefix:
 #           bin/{mm2,...}, share/rust-mm2/assets/,
 #           share/doc/rust-mm2/{README.md,LICENSE-*,docs/}, plus an archive
@@ -59,7 +60,7 @@ while [ $# -gt 0 ]; do
         --forbid) [ $# -ge 2 ] || { echo "error: --forbid needs a value" >&2; exit 2; }; forbid="${forbid}--forbid
 $2
 "; shift 2 ;;
-        -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -165,11 +166,52 @@ stage_flat() {
     strip_os_files "$flat_dir"
 }
 
+# The package version, as Cargo resolves it for `mm2_app` (the manifests
+# set none, so this is Cargo's default 0.0.0 until one is chosen).
+app_version() {
+    cargo pkgid --locked --offline -p mm2_app | sed 's/.*[#@]//; s/^mm2_app://'
+}
+
+# The minimal Info.plist that makes Finder/LaunchServices treat the folder
+# as an application. Identifier, names and version are designed values
+# with no original counterpart.
+write_info_plist() { # $1 = version
+    cat > "$app_dir/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>mm2</string>
+    <key>CFBundleIdentifier</key>
+    <string>se.folkdatorn.rust-mm2</string>
+    <key>CFBundleName</key>
+    <string>rust-mm2</string>
+    <key>CFBundleDisplayName</key>
+    <string>rust-mm2</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$1</string>
+    <key>CFBundleVersion</key>
+    <string>$1</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+}
+
 stage_app() {
+    version=$(app_version)
+    [ -n "$version" ] || { echo "error: could not read the mm2_app version" >&2; exit 2; }
     mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/docs"
     copy_bins "$app_dir/Contents/MacOS"
     cp -R assets "$app_dir/Contents/Resources/assets"
     copy_docs "$app_dir/Contents/Resources" "$app_dir/Contents/Resources/docs"
+    write_info_plist "$version"
     strip_os_files "$app_dir"
 }
 
