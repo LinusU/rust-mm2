@@ -242,3 +242,37 @@ road ends at 30.25 (the sidewalk-top height), a 0.15 m lip at
 z ≈ −2078; the render mesh's triangles there dip to 27.8 instead. It
 hops a car at 12 m/s by ~0.6 m. Not changed here: the bound is authored
 and nothing says which of road or apron the original lets win.
+
+## Bridge ends: the bound is flush with the closed leaf (#1450)
+
+#1443's London sweep showed 3–4.4 m/s hops at the Lambeth
+(`wl_lambethbrdge_rt_l`) and Waterloo (`cl_waterloobrdge_rt_l`) bridge
+ends, and put them down to the bound's abutment wall tops (y −0.15)
+meeting the leaf deck. Measured here, that premise does not hold:
+
+- The only bound geometry near the Lambeth hinge is one vertical quad,
+  (539.96, 644.15)–(547.38, 621.32), top edge y −0.15, bottom −2.26 —
+  the quay face. The leaf hinge (543.67, −0.3, 632.73) sits at its
+  midpoint, and the closed leaf's deck is −0.3 + 0.15 = −0.15
+  (`drawbridge.md` § Pose). Wall top, deck and the PSDL road at the
+  approach (`city-ground-m6-flat`, −0.15) are the same height; the
+  wall is flush, not a ridge. The render mesh's lower wall top (−0.42) is
+  a mesh-vs-bound difference, not evidence of a deck above the bound.
+- `tests/bridge_ends.rs` casts downward rays over every closed London leaf
+  pair (axis ±9 m, 6 m onto each approach) and finds no prop collider
+  more than 0.2 m above the deck. It passes with the bound and with the
+  render mesh, so it guards the flush reading rather than selecting
+  between them.
+- A per-tick trace of `--event checkpoint:3 --bot --headless` (player
+  position, velocity, Avian contacts) puts the hop at 57 s of play: the
+  timed leaf (10 s closed, 9.4 s opening at 0.05 rad/s, 38.8 s cycle) is
+  ~24° up and the car is climbing it. `vy` is +2.1 m/s on first leaf
+  contact and 3.5 → 4.5 m/s while the car is on the raised deck; the wall
+  quad shows up as a contact for three frames (+1 m/s). With the Lambeth
+  bound swapped for the render mesh the same run hops harder (7.1 m/s at
+  22 m/s), so the bound is not the cause: the car drives up a rising leaf.
+
+Nothing was changed in the collision. Open (unknown original semantics):
+whether the original's leaves are solid ramps while rising, and whether
+its bots time their approach to a closed leaf.
+

@@ -20,10 +20,10 @@ use mm2_assets::Vfs;
 use mm2_game::SessionEntity;
 
 #[derive(Resource)]
-struct VfsRes(Vfs);
+pub(crate) struct VfsRes(pub(crate) Vfs);
 
 /// A physics-enabled world holding the loaded retail city.
-fn retail_city_app(vfs: Vfs, psdl: &str) -> App {
+pub(crate) fn retail_city_app(vfs: Vfs, psdl: &str) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())

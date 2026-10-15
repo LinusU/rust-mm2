@@ -8,6 +8,7 @@ mod audio;
 mod banger;
 mod bot;
 mod breakaway;
+mod bridge_ends;
 mod build_docs;
 mod cablecar;
 mod camframe_retail;
