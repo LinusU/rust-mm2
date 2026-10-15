@@ -753,6 +753,83 @@ fn a_dropped_leave_is_retried_until_the_host_reaps_the_seat() {
     host.shutdown();
 }
 
+/// The blocking form of the same goodbye, for a teardown that runs no
+/// more updates: a headless run whose stop condition just fired has no
+/// `drive_lobby` frame left to drive `LobbyLink::retry_leave`, so
+/// `leave_reliably` repeats the copy itself, on the socket thread, until
+/// the host's close acknowledges it. A dropped one-shot must not strand
+/// the seat on the host and its peers.
+#[test]
+fn a_teardown_repeats_its_leave_until_the_host_closes() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    // Same proxy seed as the retry leg: the handshake crosses clean, only
+    // the goodbye is impaired.
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1308).unwrap();
+    let mut link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match host.try_recv() {
+            Ok(HostEvent::Joined { id: 1, .. }) => break,
+            Ok(_) => continue,
+            Err(_) => {
+                assert!(Instant::now() < deadline, "the join never landed");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    // Drop every client→host frame: the blocking goodbye must keep
+    // repeating, not give up after the one copy it opened with. No
+    // `app.update()` and no other frame is in flight, so each dropped Up
+    // frame is a `Leave` copy.
+    proxy.set(
+        LinkDir::Up,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    let goodbye = thread::spawn(move || link.leave_reliably());
+    let first = Instant::now() + Duration::from_secs(2);
+    while proxy.stats(LinkDir::Up).dropped < 1 {
+        assert!(Instant::now() < first, "no Leave copy reached the lane");
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    // The lane recovers: the next copy lands and the host reaps the seat
+    // as a clean quit. The relay holds the socket clone, so the host's
+    // close does not reach our pump here — the blocking goodbye runs its
+    // watchdog bound rather than ending at the close, and the join below
+    // returns once that bound passes (it must not hang the suite).
+    proxy.set(LinkDir::Up, Impair::default());
+    let bound = Instant::now() + Duration::from_secs(8);
+    let mut cause = None;
+    while Instant::now() < bound && cause.is_none() {
+        if let Ok(HostEvent::Left { cause: c, .. }) = host.try_recv() {
+            cause = Some(c);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        cause,
+        Some(LeaveCause::Quit),
+        "the repeated Leave reaped the seat as a clean quit"
+    );
+    goodbye.join().unwrap();
+    host.shutdown();
+}
+
 /// NET-ROSTER-LOSSY: the host announces a removal with one roster
 /// broadcast, and on a lossy link that frame can be dropped — a survivor
 /// then kept the departed peer's seat until the next membership change

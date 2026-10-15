@@ -2833,42 +2833,43 @@ fn run_shove_trio(
     let join_addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
     // A driven client's frame budget is a non-binding ceiling (like the
     // host's), and its run ends on the authority's settle tick. Waiting
-    // on the wire tick rather than a frame count — or on the peer's
-    // departure, whose roster snapshot the lossy lane can swallow — is
-    // what keeps both records at the same point of the authority's sim:
-    // the seats have come to rest, so alice's and bob's copies of every
-    // seat agree whatever their local throughput. Frames stay only the
-    // ceiling.
+    // on the wire tick rather than a frame count puts both records at
+    // the same point of the authority's sim: the seats have come to
+    // rest, so alice's and bob's copies of every seat agree whatever
+    // their local throughput. Frames stay only the ceiling.
     let (alice_flags, bob_flags) = if host_rams {
         // A client that stops leaves the session, and the authority's
         // roster removal then reaches the *other* client, which loses
-        // that seat from its own record if it has not stopped yet (the
-        // two links are impaired independently, so which client applies
-        // the settle tick first is not fixed: measured on CI, bob's
-        // record held two seats because alice had already left). Alice
-        // therefore stops `ALICE_LINGER_SECS` of authority time after
-        // bob, so bob has stopped and printed while she is still
-        // seated. The shoved field is at rest by then, so her
-        // later record is the same settled pose; she keeps the host's
-        // and her own seat (all the checks read), only bob's copy is
-        // gone by her stop. A mid-pursuit leg compares moving seats at
-        // one instant and keeps the shared tick.
-        const ALICE_LINGER_SECS: u64 = 8;
-        let linger = if settle_secs == SHOVE_SETTLE_SECS {
-            ALICE_LINGER_SECS * mm2_game::RACE_TICK_HZ as u64
-        } else {
-            0
-        };
+        // that seat from its own record if it has not stopped yet. The
+        // two links are impaired independently, so which process applies
+        // the settle tick first is not fixed (measured on CI, bob's
+        // record held two seats because alice had already left). A
+        // settle-time margin on alice's stop tick only shrinks that race
+        // — it cannot close it, because a loaded or reordered link can
+        // delay bob's applied tick past any margin. Instead alice *holds*
+        // her seat past her own stop tick until bob leaves
+        // (`--hold-until-peer-left`), so bob always holds her in his
+        // record — read from the world as it stood at his stop, with no
+        // later update able to apply a departure. Her own record is taken
+        // after bob left, so it holds the host's seat and her own, all the
+        // checks read; the field is at rest, so it is the same settled
+        // pose. A mid-pursuit leg compares moving seats at one instant and
+        // keeps the plain shared tick, no hold.
+        //
+        // The departure alice waits for must survive a lossy link: a
+        // client's `Leave` is a one-shot with no reply, so the runner
+        // repeats it until the host's close (`--headless`'s
+        // `leave_reliably`) — otherwise bob's copy is dropped, the host
+        // never reaps him, and alice's hold runs to its deadline.
+        let settled = settle_secs == SHOVE_SETTLE_SECS;
         let driven = |driver: &str| {
             let mut flags = join_args(install, join_addr, driver, HOST_FRAME_CEILING);
             flags.push("--parked".into());
-            let stop_tick = settle_tick + if driver == "alice" { linger } else { 0 };
-            flags.extend([
-                "--until-snap-tick".to_string(),
-                stop_tick.to_string(),
-                "--deadline".to_string(),
-                DEADLINE.as_secs().to_string(),
-            ]);
+            flags.extend(["--until-snap-tick".to_string(), settle_tick.to_string()]);
+            if settled && driver == "alice" {
+                flags.push("--hold-until-peer-left".into());
+            }
+            flags.extend(["--deadline".to_string(), DEADLINE.as_secs().to_string()]);
             flags
         };
         (driven("alice"), driven("bob"))
@@ -2911,10 +2912,12 @@ fn run_shove_trio(
     alice.wait_success("alice", &alice_rec);
     bob.wait_success("bob", &bob_rec);
     if host_rams {
-        // Both records were ended by the authority's own clock reaching
-        // the settle tick — the whole point of the leg, and a stronger
-        // pin than a local frame budget: each ran to the same point of
-        // the shoved field's sim regardless of load or link.
+        // Both runs were ended by the authority's own clock reaching
+        // the settle tick — a stronger pin than a local frame budget:
+        // each ran to the same point of the shoved field's sim
+        // regardless of load or link. Alice's record is printed after
+        // her hold (once bob has left), but her stop is that same
+        // settled tick.
         assert_eq!(field(&alice_rec, "stop"), "snap-tick", "{alice_rec}");
         assert_eq!(field(&bob_rec, "stop"), "snap-tick", "{bob_rec}");
         // The shove produced a replicated impact row, pinned on the
@@ -3045,10 +3048,13 @@ fn assert_shove_converged(control_bob: &str, alice: &str, bob: &str) {
         "the control holds all three seats: {control_bob}"
     );
 
-    // Bob printed while alice was connected (she stops later on
-    // purpose, see `run_shove_trio`), so he holds all three seats;
-    // alice holds the host's and her own, and bob's too unless he had
-    // already left by her later stop.
+    // Bob printed while alice was connected — she holds her seat past
+    // her own stop tick until he leaves (see `run_shove_trio`), so his
+    // record always holds all three seats. His record is read from the
+    // world as it stood when his stop fired; the reliable goodbye the
+    // runner then sends is pure I/O and never steps the sim, so it cannot
+    // drop her. Alice's record is taken after bob left, so it holds the
+    // host's seat and her own.
     assert_eq!(seat_poses(bob).len(), 3, "{bob}");
     assert!(at(alice, 0).is_some() && at(alice, 1).is_some(), "{alice}");
 

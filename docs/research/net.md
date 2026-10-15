@@ -1977,9 +1977,11 @@ wire actually moved rather than an in-process mailbox's contents.
   `--parked`, joined in a fixed order so alice holds the seat beside
   the host. The smoke record gained `seats=<id>:<x>,<z>/…` — where
   each process holds every wire seat's car (its own and the copies) —
-  and `net=` gained a trailing `fix<n>` cell. Bob's shorter cap prints
-  while alice is connected, so he holds all three seats; the field is
-  at rest by then (host ram parks itself on its strike). An all-parked
+  and `net=` gained a trailing `fix<n>` cell. Bob prints while alice is
+  connected, so he holds all three seats; the field is at rest by then
+  (host ram parks itself on its strike). (Both clients now end on the
+  same *authority* tick, and alice holds her seat past it until bob leaves
+  — see the tick-rate #1283 and close #1308 notes below.) An all-parked
   control run gives the nominal grid (x = 0/4/8, z ≈ 0.1). Measured
   (dev world, loopback): the host drives from x=0 to (3.0–3.1, 2.4)
   at ≤5.7 m/s and shoves alice from (4.0, 0.2) to (3.9, −2.7…−2.9); the
@@ -2064,6 +2066,41 @@ wire actually moved rather than an in-process mailbox's contents.
   recipe, the impaired-link counters and every pose assertion are
   unchanged; bob now also holds alice's seat at his record, so the
   convergence compares all three.
+
+- **Deterministic shove-trio close (NET-SHOVE-CLEAN-RACE, #1308).** Both
+  driven clients stop on the same authority tick, but the first to *leave*
+  reaps its seat on the authority, and the reduced roster can reach the
+  other's final update before its record — measured even in isolation, on
+  the `duplicate`/`reorder` cells, where a lossy link can hold one client's
+  *applied* tick past the other's. The earlier fix was a timing margin
+  (alice stopped 8 authority-seconds after bob), which only shrinks the
+  race. Now alice *holds* her seat past her own stop tick until bob leaves
+  (`--hold-until-peer-left`): a departure is a gate on her stop, not a
+  reason for it, and `--deadline` still bounds a peer that never leaves.
+  Bob's record is read from the world as it stood at his stop, so alice is
+  in it; hers is taken after bob left, holding the host's seat and her own
+  (all the checks read). The hold depends on *seeing* bob leave, so his
+  departure must survive the lossy link: a headless client's `Leave` was a
+  one-shot sent from `LobbyLink::drop` (the run loop had ended, so
+  `drive_lobby`'s per-frame `retry_leave` never ran), and a dropped copy
+  left the authority's seat sitting until its own socket died.
+  `LobbyLink::leave_reliably` now repeats the copy (on the caller's
+  thread) until the host's close acknowledges it (bounded by
+  `LEAVE_WATCHDOG`), and the headless runner arms the link so its own
+  [`Drop`] sends that goodbye once its stop fired. The drop runs when the
+  run's world does — *after* the record is built, the same instant the old
+  single-copy drop fired — so the first copy cannot leave earlier than
+  before and race a peer's record that stops on the same authority tick
+  (measured: sending it before the record made the extra-wheel reset leg
+  `net_drive::a_reset_extra_wheel_rig_drives_its_remote_wheels_across_
+  processes` lose alice 5/10; after the record it is 10/10). On a clean
+  link the pump's exit is a shared flag, so the repeat ends at the host's
+  close, not the whole watchdog. The
+  in-process twin `net_app::a_teardown_repeats_its_leave_until_the_host_
+  closes` drops every copy behind a full-loss lane and shows the repeat
+  reaps the seat. Measured: the clean leg 20/20 under two concurrent trios
+  on a contended 8-core box; the impaired combined leg and all eight matrix
+  cells green (alice `stop=snap-tick`, `rem1`; bob `rem2`, three seats).
 
 - **Reset across processes (F25-C.4).** `--reset-at` was inert under a
   `Remote` session (a local teleport is the unannounced self-teleport

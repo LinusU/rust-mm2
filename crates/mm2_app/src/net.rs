@@ -386,6 +386,16 @@ pub struct LobbyLink {
     leave_sent: Option<Instant>,
     /// The pump reported `Closed` — the link is dead.
     pub closed: bool,
+    /// Set by the pump thread the instant it ends — the link is dead
+    /// even before an update has drained the terminal `Closed` event.
+    /// A teardown that has stopped running updates reads this (see
+    /// [`LobbyLink::leave_reliably`]).
+    ended: Arc<AtomicBool>,
+    /// Repeat the goodbye at [`LobbyLink`]'s drop until the host closes
+    /// (see [`LobbyLink::arm_reliable_leave`]). Armed by a headless
+    /// runner whose stop fired; the windowed app never arms it, so its
+    /// resource-removal drop stays non-blocking.
+    reliable_leave: bool,
     /// Re-ready after every `Cancel` — the host resets readiness when it
     /// closes a session, so a client that asked to be ready (`--ready`)
     /// would otherwise sit out the rematch with no one to press `Enter`.
@@ -407,9 +417,11 @@ impl LobbyLink {
         let player_id = client.player_id();
         let ctl = client.ctl()?;
         let (tx, rx) = mpsc::channel();
+        let ended = Arc::new(AtomicBool::new(false));
+        let pump_ended = Arc::clone(&ended);
         thread::Builder::new()
             .name("mm2-lobby".to_string())
-            .spawn(move || pump(client, tx))?;
+            .spawn(move || pump(client, tx, pump_ended))?;
         Ok(Self {
             events: Mutex::new(rx),
             ctl,
@@ -421,6 +433,8 @@ impl LobbyLink {
             leaving: None,
             leave_sent: None,
             closed: false,
+            ended,
+            reliable_leave: false,
             keep_ready: false,
         })
     }
@@ -504,6 +518,40 @@ impl LobbyLink {
         self.send_leave();
     }
 
+    /// Say goodbye and *block* until the host's close acknowledges it —
+    /// the blocking form of the [`LobbyLink::leave`] /
+    /// [`LobbyLink::retry_leave`] pair, for a teardown that will not run
+    /// another update. A `Leave` carries no reply of its own: a single
+    /// copy can be dropped on a lossy link, and the host would then keep
+    /// this seat (and its reduced-roster broadcast) until some later
+    /// membership change — a client that ended its run would strand
+    /// itself on the host and its peers. Repeating the copy until the
+    /// pump sees the host's close (or the watchdog bounds the wait)
+    /// makes the departure survive a dropped datagram, the standing rule
+    /// for a one-shot message that matters.
+    pub fn leave_reliably(&mut self) {
+        self.leave();
+        let start = Instant::now();
+        while !self.ended.load(AtomicOrdering::Relaxed)
+            && !self.closed
+            && start.elapsed() < LEAVE_WATCHDOG
+        {
+            thread::sleep(LEAVE_RETRY_INTERVAL);
+            self.retry_leave();
+        }
+    }
+
+    /// Make this link's own [`Drop`] send its goodbye reliably (see
+    /// [`LobbyLink::leave_reliably`]) instead of a single best-effort
+    /// copy. A headless runner that stopped on a condition arms this so
+    /// the *first* copy leaves when the run's world does — the same
+    /// instant the old single-copy drop sent it — and the repeats then
+    /// carry it past a dropped datagram. The windowed app never arms
+    /// it, so removing its link mid-session stays a non-blocking drop.
+    pub fn arm_reliable_leave(&mut self) {
+        self.reliable_leave = true;
+    }
+
     /// Drain whatever the pump has queued — non-blocking.
     fn drain(&self) -> Vec<LobbyEvent> {
         let rx = self.events.lock().unwrap_or_else(|e| e.into_inner());
@@ -517,7 +565,11 @@ impl LobbyLink {
 
 impl Drop for LobbyLink {
     fn drop(&mut self) {
-        self.leave();
+        if self.reliable_leave {
+            self.leave_reliably();
+        } else {
+            self.leave();
+        }
     }
 }
 
@@ -526,7 +578,7 @@ impl Drop for LobbyLink {
 /// socket *or* when the app dropped the link (a failed `send` is the
 /// receiver going away). Either way the client says `Leave` on its
 /// way out so the host records `Quit`, not `Lost`.
-fn pump(mut client: Client, tx: Sender<LobbyEvent>) {
+fn pump(mut client: Client, tx: Sender<LobbyEvent>, ended: Arc<AtomicBool>) {
     loop {
         let event = match client.recv() {
             Ok(msg) => LobbyEvent::Message(msg),
@@ -537,6 +589,9 @@ fn pump(mut client: Client, tx: Sender<LobbyEvent>) {
             break;
         }
     }
+    // The link is dead before the `Closed` event is drained — a teardown
+    // no longer running updates reads this via [`LobbyLink::leave_reliably`].
+    ended.store(true, AtomicOrdering::Relaxed);
     let _ = client.leave();
 }
 

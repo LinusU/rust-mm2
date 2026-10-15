@@ -194,6 +194,15 @@ pub struct StopWhen {
     /// the applied wire tick puts every process's record at the same
     /// point of the authority's sim, whatever its local step rate.
     pub snap_tick: Option<u64>,
+    /// With `snap_tick`: hold the stop until a remote copy this process
+    /// held is gone — the seat stays in the session past this process's
+    /// own stop tick, so the *other* process can take its record with
+    /// this seat still present. A settled leg whose record the peer
+    /// reads uses this: a client's exit sends `Leave`, the authority
+    /// reaps the seat and rebroadcasts the reduced roster, and if that
+    /// reaches the peer before its record the peer loses the seat. The
+    /// deadline (or the frame ceiling) is the backstop.
+    pub hold_peer_left: bool,
     /// Stop once every fielded opponent has resolved — finished or
     /// timed out. Armed by the first opponent appearing; a race record
     /// then ends when the field does instead of running out its frames.
@@ -221,6 +230,7 @@ impl StopWhen {
             || self.resets_observed.is_some()
             || self.repaired.is_some()
             || self.peer_left
+            || self.hold_peer_left
             || self.opponents_done
             || self.snap_tick.is_some()
             || self.deadline.is_some()
@@ -291,6 +301,12 @@ impl StopWatch {
 
     fn fired(&mut self, world: &World) -> Option<StopReason> {
         let report = world.get_resource::<crate::netdrive::NetDriveReport>();
+        // The remote peak is sampled every frame, not only when the run
+        // stops on a departure: the `snap_tick` hold reads it too.
+        if let Some(r) = report {
+            self.peers_peak = self.peers_peak.max(r.remotes);
+        }
+        let peer_left = self.peers_peak > 0 && report.is_some_and(|r| r.remotes < self.peers_peak);
         if let (Some(want), Some(r)) = (self.stop.impacts_applied, report)
             && r.impacts_applied >= want
         {
@@ -308,25 +324,24 @@ impl StopWatch {
         {
             return Some(StopReason::Repaired);
         }
+        // A holding run never stops *on* a departure: the departure is
+        // what releases it, so it stays a gate below, not a reason.
         if self.stop.peer_left
-            && let Some(r) = report
-        {
-            self.peers_peak = self.peers_peak.max(r.remotes);
-            let local = world
+            && !self.stop.hold_peer_left
+            && peer_left
+            && world
                 .get_resource::<contracts::ImpactFilter>()
-                .map_or(0, |f| f.emitted);
-            if self.peers_peak > 0
-                && r.remotes < self.peers_peak
-                && local >= self.stop.peer_left_after_impacts
-            {
-                return Some(StopReason::PeerLeft);
-            }
+                .map_or(0, |f| f.emitted)
+                >= self.stop.peer_left_after_impacts
+        {
+            return Some(StopReason::PeerLeft);
         }
         if let Some(want) = self.stop.snap_tick
             && world
                 .get_resource::<crate::netdrive::RemoteSnaps>()
                 .and_then(crate::netdrive::RemoteSnaps::applied)
                 .is_some_and(|(_, tick)| tick >= want)
+            && !(self.stop.hold_peer_left && !peer_left)
         {
             return Some(StopReason::SnapTick);
         }
@@ -1393,6 +1408,22 @@ fn run_headless(
             grounded_wheels = state.wheels.iter().filter(|w| w.grounded).count();
             peak_speed = peak_speed.max(state.forward_speed);
         }
+    }
+
+    // A joined client that ended on a stop condition says a *reliable*
+    // goodbye: the bridge's per-frame `retry_leave` runs inside an
+    // update, and there are none left, so a single copy sent from
+    // `Drop` could be dropped on a lossy link and strand this seat on
+    // the host and its peers. Arming the link makes its own drop repeat
+    // the copy until the host's close acknowledges it. The drop happens
+    // when this run's world does, after the record below is built — the
+    // same instant the old single-copy drop sent it — so the first
+    // `Leave` cannot leave *earlier* than before and race a peer's
+    // record (a peer that stops on the same authority tick).
+    if stopped.is_some()
+        && let Some(mut link) = app.world_mut().get_resource_mut::<net::LobbyLink>()
+    {
+        link.arm_reliable_leave();
     }
 
     // F25-C pose-agreement evidence: where this process holds every
@@ -3157,6 +3188,53 @@ mod tests {
             .resource_mut::<crate::netdrive::RemoteSnaps>()
             .set_applied(1, 10);
         assert_eq!(watch.fired(&world), Some(StopReason::SnapTick));
+    }
+
+    #[test]
+    fn a_holding_stop_keeps_its_seat_until_the_peer_leaves() {
+        let stop = StopWhen {
+            snap_tick: Some(10),
+            hold_peer_left: true,
+            ..default()
+        };
+        assert!(stop.is_armed());
+        assert!(stop.needs_wire());
+        let mut watch = StopWatch::new(stop);
+        let mut world = world_with(crate::netdrive::NetDriveReport {
+            remotes: 2,
+            ..default()
+        });
+        let mut snaps = crate::netdrive::RemoteSnaps::default();
+        snaps.set_applied(1, 10);
+        world.insert_resource(snaps);
+        // The authority tick is reached but the peer still sits: the run
+        // holds its seat, so the peer's own record cannot race the
+        // roster removal this process's exit would trigger.
+        assert_eq!(watch.fired(&world), None);
+        world
+            .resource_mut::<crate::netdrive::NetDriveReport>()
+            .remotes = 1;
+        assert_eq!(watch.fired(&world), Some(StopReason::SnapTick));
+    }
+
+    #[test]
+    fn a_holding_stop_still_ends_on_its_deadline() {
+        let mut watch = StopWatch::new(StopWhen {
+            snap_tick: Some(10),
+            hold_peer_left: true,
+            deadline: Some(Duration::ZERO),
+            ..default()
+        });
+        let mut world = world_with(crate::netdrive::NetDriveReport {
+            remotes: 2,
+            ..default()
+        });
+        let mut snaps = crate::netdrive::RemoteSnaps::default();
+        snaps.set_applied(1, 10);
+        world.insert_resource(snaps);
+        // A hold with no departure to release it is bounded, not hung:
+        // the deadline ends it rather than the run never exiting.
+        assert_eq!(watch.fired(&world), Some(StopReason::Deadline));
     }
 
     #[test]

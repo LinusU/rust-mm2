@@ -429,6 +429,14 @@ struct Cli {
     #[arg(long, value_name = "tick", requires = "headless")]
     until_snap_tick: Option<u64>,
 
+    /// With `--until-snap-tick`: keep this process seated past its own
+    /// stop tick until a peer leaves (or `--deadline` passes), then
+    /// report the original `stop=snap-tick`. A settled leg whose peer
+    /// takes its record uses this so the peer's record cannot race the
+    /// roster removal this process's exit triggers.
+    #[arg(long, requires_all = ["headless", "until_snap_tick"])]
+    hold_until_peer_left: bool,
+
     /// End a `--headless` run once every fielded opponent has finished
     /// or timed out — a race record that ends with its field instead of
     /// running out `--frames`. The record prints `stop=opponents`.
@@ -1437,6 +1445,7 @@ fn main() {
                 peer_left: cli.until_peer_left,
                 peer_left_after_impacts: cli.with_impacts,
                 snap_tick: cli.until_snap_tick,
+                hold_peer_left: cli.hold_until_peer_left,
                 opponents_done: cli.until_opponents,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
@@ -1457,7 +1466,7 @@ fn main() {
                     "{}",
                     record(
                         smoke::SmokeStatus::Fail,
-                        "--until-impacts/--until-resets/--until-repaired/--until-peer-left/--until-snap-tick/--deadline need --join or --host: \
+                        "--until-impacts/--until-resets/--until-repaired/--until-peer-left/--until-snap-tick/--hold-until-peer-left/--deadline need --join or --host: \
                          a single-process run only counts --frames"
                             .into(),
                     )
