@@ -238,6 +238,47 @@ Every smoke prints `mm2-smoke commit=<sha>` then one record:
 
 Usage errors (bad flags, unloadable `--car`/`--vehicle-config`) exit 2.
 
+Headless smoke reports also include `travel=<metres>`, `sim=<seconds>`,
+`resets=<count>`, `controls=<throttle steps>t/<brake steps>b/<steer steps>s`
+and `finite=<bool>`. Travel is planar solver displacement sampled at 60 Hz;
+reset teleports and session-generation changes break the segment. `moved=`
+remains displacement from spawn. These metrics describe evidence, not a
+claim that the whole course was completed; read `cp=` and the race result.
+
+`--bot --bot-speed 8` limits the evidence driver to approximately 8 m/s
+through its ordinary throttle/brake inputs. The optional ceiling preserves
+steering, reverse recoveries, vehicle tuning and the default driver behavior.
+It works in windowed and headless sessions; useful for narrow custom streets.
+
+`--bot --event <table:row> --bot-route /absolute/path/guide.opp` supplies
+an explicit native `.opp` evidence guide. It overrides the roster-derived
+player guide without spawning or changing opponents. The guide must contain at
+least two points, no malformed rows, finite values in every column, and positive
+finite XZ length for each consecutive edge. Invalid input fails before world
+spawning. The route guides ordinary steering and throttle/brake inputs; gates,
+laps, countdown and time limits still use the event definition. These runs are
+record-ineligible, and existing bounded bot recovery behavior still applies.
+
+When a guide is bound, the evidence driver uses the scripted racing line's
+speed-scaled route projection, handling-derived steering and curvature braking.
+The live player's next checkpoint still bounds the aim, so lookahead never
+substitutes route traversal for crossing a gate. Unguided steering and the
+existing bounded recovery policy remain unchanged.
+
+Scripted escape and route reanchor traces disclose their tick, position, speed,
+heading, route index and live gate. Escape traces also include the current aim;
+reanchor traces include the landing point, helping locate source obstacles
+without treating a recovered traversal as clean evidence.
+
+An explicit `--bot` also opts into scripted motion during a windowed
+`--frames N --screenshot out.png` capture, enabling played lap/finish HUD
+images with the real opponent drivers active. Keyboard input remains frozen. Captures without `--bot` preserve their
+ordinary static pose policy.
+
+Dense evidence guides use spacing-bounded anchor reach and adjacent segment
+projections to retain an upcoming corner in the speed plan until the car
+actually turns.
+
 ### Frame-time profiling
 
 A stutter report needs a number per frame, not an average. Play (or let
@@ -405,47 +446,6 @@ for the host process tests).
 *Midtown Madness 2* is © Microsoft/Angel Studios. This project is an
 unofficial, non-commercial reimplementation effort; it ships no copyrighted
 material and requires users to supply their own game data.
-
-Headless smoke reports also include `travel=<metres>`, `sim=<seconds>`,
-`resets=<count>`, `controls=<throttle steps>t/<brake steps>b/<steer steps>s`
-and `finite=<bool>`. Travel is planar solver displacement sampled at 60 Hz;
-reset teleports and session-generation changes break the segment. `moved=`
-remains displacement from spawn. These metrics describe evidence, not a
-claim that the whole course was completed; read `cp=` and the race result.
-
-`--bot --bot-speed 8` limits the evidence driver to approximately 8 m/s
-through its ordinary throttle/brake inputs. The optional ceiling preserves
-steering, reverse recoveries, vehicle tuning and the default driver behavior.
-It works in windowed and headless sessions; useful for narrow custom streets.
-
-`--bot --event <table:row> --bot-route /absolute/path/guide.opp` supplies
-an explicit native `.opp` evidence guide. It overrides the roster-derived
-player guide without spawning or changing opponents. The guide must contain at
-least two points, no malformed rows, finite values in every column, and positive
-finite XZ length for each consecutive edge. Invalid input fails before world
-spawning. The route guides ordinary steering and throttle/brake inputs; gates,
-laps, countdown and time limits still use the event definition. These runs are
-record-ineligible, and existing bounded bot recovery behavior still applies.
-
-When a guide is bound, the evidence driver uses the scripted racing line's
-speed-scaled route projection, handling-derived steering and curvature braking.
-The live player's next checkpoint still bounds the aim, so lookahead never
-substitutes route traversal for crossing a gate. Unguided steering and the
-existing bounded recovery policy remain unchanged.
-
-Scripted escape and route reanchor traces disclose their tick, position, speed,
-heading, route index and live gate. Escape traces also include the current aim;
-reanchor traces include the landing point, helping locate source obstacles
-without treating a recovered traversal as clean evidence.
-
-An explicit `--bot` also opts into scripted motion during a windowed
-`--frames N --screenshot out.png` capture, enabling played lap/finish HUD
-images with the real opponent drivers active. Keyboard input remains frozen. Captures without `--bot` preserve their
-ordinary static pose policy.
-
-Dense evidence guides use spacing-bounded anchor reach and adjacent segment
-projections to retain an upcoming corner in the speed plan until the car
-actually turns.
 
 ## License
 
