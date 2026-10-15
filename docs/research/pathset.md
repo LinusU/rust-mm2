@@ -93,7 +93,8 @@ per path: char[32] name (NUL-padded, may fill all 32 bytes)
 | `*/props.pathset`, `*/decals*.pathset` | prop rows, decals | `mm2_formats::pathset` (this doc) |
 | `race/<city>/*.pathset` | event barricades, parked cars, animated-object routes | `mm2_formats::pathset` |
 | `*/audio_pathsets/*.pathset` | ambient-sound source paths (F07/F08 scope) | `mm2_formats::pathset` |
-| `.cpvs`, `.ldef` | block culling / lights — F18 scope, still unparsed | — |
+| `.cpvs` | per-room block culling, bound to room culling at runtime (DSN-33, `mm2_app::pvs`) | `mm2_formats::cpvs` |
+| `.ldef` | ambient light definitions; parsed but unconsumed — bake-tool data with no exe reference (UNK-24; see [environment.md](environment.md)) | `mm2_formats::ldef` |
 | `race/*.opp`, `*waypoints.csv`, `*_strtpnts` | opponent paths, gates, start grids | F11-A parsers |
 
 ## Runtime consumption (implemented for props, 2026-09-20)
