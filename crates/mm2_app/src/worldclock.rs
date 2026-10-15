@@ -1243,6 +1243,116 @@ mod tests {
         assert_eq!((clock.ticks, clock.seek), (50, None));
     }
 
+    /// F28-AC05 (late-join leg): a joiner that spawned its scenery at
+    /// its own tick 0 and is seeked to the host's clock stands every
+    /// kind of timed actor — leaf, sailboat, ferry, train — exactly
+    /// where the host's, stepped live, stands.
+    #[test]
+    fn a_seek_lands_every_kind_of_timed_actor_on_the_hosts_phase() {
+        use mm2_game::movers::MoverFamily;
+
+        fn world(seek: Option<u64>) -> (App, [Entity; 4]) {
+            let mut app = App::new();
+            let mut fixed = Time::<Fixed>::from_hz(60.0);
+            fixed.advance_by(std::time::Duration::from_secs_f32(DT));
+            let mut session = Session::default();
+            session.transition(SessionPhase::Loading).unwrap();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Countdown).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            let dt = fixed.delta_secs();
+            app.insert_resource(fixed)
+                .insert_resource(session)
+                .insert_resource(WorldClock { ticks: 0, seek })
+                .add_systems(
+                    Update,
+                    (
+                        capture_world_start,
+                        advance_world_clock,
+                        // The drivers' step, as `drive_movers` and
+                        // `drive_drawbridges` take it.
+                        move |mut leaves: Query<&mut DrawbridgeLeaf>,
+                              mut movers: Query<&mut Mover>,
+                              mut trains: Query<&mut Train>| {
+                            for mut l in &mut leaves {
+                                l.motion.step(dt);
+                            }
+                            for mut m in &mut movers {
+                                m.follower.advance(dt);
+                            }
+                            for mut t in &mut trains {
+                                t.motion.step(dt);
+                            }
+                        },
+                    )
+                        .chain(),
+                );
+            let pts = vec![
+                Vec3::ZERO,
+                Vec3::new(100.0, 0.0, 0.0),
+                Vec3::new(100.0, 0.0, 100.0),
+                Vec3::new(0.0, 0.0, 100.0),
+            ];
+            let leaf = app
+                .world_mut()
+                .spawn(DrawbridgeLeaf {
+                    motion: LeafMotion::new(DrawbridgeMode::Timed),
+                    partner: None,
+                    hinge: Vec3::ZERO,
+                    base: Quat::IDENTITY,
+                    slot: 0,
+                })
+                .id();
+            let mover = |family| Mover {
+                family,
+                follower: PathFollower::new(pts.clone(), 10.0).unwrap(),
+                lift: 0.0,
+            };
+            let boat = app.world_mut().spawn(mover(MoverFamily::Sailboat)).id();
+            let ferry = app.world_mut().spawn(mover(MoverFamily::Ferry)).id();
+            let train = app
+                .world_mut()
+                .spawn(Train {
+                    motion: TrainMotion::new(&pts).unwrap(),
+                    cars: Vec::new(),
+                    lift: 0.0,
+                })
+                .id();
+            (app, [leaf, boat, ferry, train])
+        }
+
+        // The host has been stepping for well past a drawbridge's
+        // closed wait and a train's dwell.
+        let target = (CLOSED_WAIT / DT) as u64 + 900;
+        let (mut host, h) = world(None);
+        for _ in 0..target {
+            host.update();
+        }
+        assert_eq!(host.world().resource::<WorldClock>().ticks, target);
+        // The joiner's first frame seeks to the host's clock.
+        let (mut joiner, j) = world(Some(target));
+        joiner.update();
+        assert_eq!(joiner.world().resource::<WorldClock>().ticks, target);
+
+        let leaf = |a: &App, e| a.world().get::<DrawbridgeLeaf>(e).unwrap().motion;
+        assert_eq!(leaf(&host, h[0]), leaf(&joiner, j[0]));
+        assert_ne!(leaf(&host, h[0]).phase, LeafPhase::Resting);
+        for i in [1, 2] {
+            let (a, b) = (
+                host.world().get::<Mover>(h[i]).unwrap().follower.pose(),
+                joiner.world().get::<Mover>(j[i]).unwrap().follower.pose(),
+            );
+            assert_eq!(a, b, "mover {i}");
+            assert!(a.0.distance(Vec3::ZERO) > 1.0, "mover {i} never left");
+        }
+        let (ht, jt) = (
+            host.world().get::<Train>(h[3]).unwrap().motion.clone(),
+            joiner.world().get::<Train>(j[3]).unwrap().motion.clone(),
+        );
+        assert_eq!(ht.phase, jt.phase);
+        assert_eq!(ht.car_pose(0), jt.car_pose(0));
+    }
+
     fn fixed_dt() -> f32 {
         std::time::Duration::from_secs_f32(DT).as_secs_f32()
     }
