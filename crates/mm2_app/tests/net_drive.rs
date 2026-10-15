@@ -616,12 +616,39 @@ fn trailer_cells(line: &str) -> Option<(u64, u64, u64)> {
 /// grounded), so reverse presentation is not asserted here.
 #[test]
 fn a_reset_trailer_rig_reseats_on_the_other_client_and_leaves_no_replica() {
+    trailer_rig_reset(None);
+}
+
+/// The same trailer rig reset with both clients reaching the host
+/// through a seeded [`ImpairProxy`] (30 % loss, duplication, reordering,
+/// latency) armed on both directions once `Start` crossed clean
+/// (F25-AC05 × AC03). The trailer row rides the `Snap` stream as epoch
+/// *state*, so a lost snap only delays the reseat; alice's ask repeats
+/// until her seat's reset returns, so the count of asks is a floor. What
+/// must hold is the clean leg's outcome: bob's copy reseats on her epoch
+/// (`trl=…reseat>=1`) and no replica survives her seat once she has left.
+#[test]
+fn a_reset_trailer_rig_reseats_and_leaves_no_replica_on_an_impaired_link() {
+    trailer_rig_reset(Some(Impair {
+        delay: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.30,
+        duplicate: 0.10,
+        reorder: 0.10,
+    }));
+}
+
+/// One trailer rig reset run (see the clean test), optionally through an
+/// armed relay.
+fn trailer_rig_reset(impair: Option<Impair>) {
     let Some((retail, _slot)) = support::retail_slot() else {
         eprintln!("skipped: MM2_RETAIL is not set");
         return;
     };
     let mut host = Proc::spawn(MM2_EXE, &host_args(&retail, HOST_FRAME_CEILING));
     let addr = listening_addr(&host);
+    let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC05).unwrap());
+    let addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
     let mut alice_args = join_args(&retail, addr, "alice", 6000);
     alice_args.extend(
         [
@@ -641,12 +668,32 @@ fn a_reset_trailer_rig_reseats_on_the_other_client_and_leaves_no_replica() {
     bob_args.extend(["--until-snap-tick", "1500", "--deadline", "90"].map(String::from));
     let bob = Proc::spawn(MM2_EXE, &bob_args);
     start_when_ready(&mut host, 2);
+    if let (Some(proxy), Some(impair)) = (&proxy, impair) {
+        // `Start` rides Down: let the clean lane deliver it first.
+        until_live(&alice);
+        until_live(&bob);
+        proxy.set(LinkDir::Up, impair);
+        proxy.set(LinkDir::Down, impair);
+    }
 
     let bound = Duration::from_secs(90 + 60);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     alice.wait_success("alice", &alice_rec);
     bob.wait_success("bob", &bob_rec);
+    if let Some(proxy) = &proxy {
+        let (up, down) = (proxy.stats(LinkDir::Up), proxy.stats(LinkDir::Down));
+        eprintln!("impaired trailer reset alice={alice_rec}\n bob={bob_rec}");
+        for (dir, stats) in [("up", up), ("down", down)] {
+            assert!(
+                stats.dropped + stats.duplicated + stats.reordered > 0,
+                "{dir} saw no impairment: {stats:?}"
+            );
+        }
+    }
+    // The relay holds socket clones until it drops: the host only sees
+    // the clients leave once the proxy is down.
+    drop(proxy);
     for _ in 0..2 {
         host.until("event=left");
     }
@@ -654,11 +701,16 @@ fn a_reset_trailer_rig_reseats_on_the_other_client_and_leaves_no_replica() {
     let host_rec = host.until("smoke=headless-physics");
     assert!(host.wait().success(), "mm2 --host did not exit cleanly");
 
-    // Alice: one ask, one epoch back, and her own real trailer reseated
+    // Alice: one ask (a floor through a relay: the ask repeats until her
+    // reset returns), one epoch back, and her own real trailer reseated
     // with her (no kinematic copy of herself).
     assert_eq!(field(&alice_rec, "stop"), "snap-tick", "{alice_rec}");
     let alice_net = net_field(&alice_rec);
-    assert_eq!(alice_net.requests_sent, 1, "{alice_rec}");
+    if impair.is_none() {
+        assert_eq!(alice_net.requests_sent, 1, "{alice_rec}");
+    } else {
+        assert!(alice_net.requests_sent >= 1, "{alice_rec}");
+    }
     assert!(alice_net.resets >= 1, "{alice_rec}");
     let (alice_live, alice_remote, alice_reseat) =
         trailer_cells(&alice_rec).unwrap_or_else(|| panic!("alice tows no trailer: {alice_rec}"));

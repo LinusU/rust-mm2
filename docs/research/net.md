@@ -2210,8 +2210,26 @@ wire actually moved rather than an in-process mailbox's contents.
   `net_drive` module (19 process tests contending, ~86 s), including
   the clean leg's exact one-ask assertion — so that timing assumption
   (the reset returns well inside `RESET_RETRY`) held under CPU
-  contention too. Not covered: other recipes, a trailer rig reset on a
-  lossy link, reset-while-moving divergence; loopback, dev world.
+  contention too. Not covered: other recipes, reset-while-moving
+  divergence; loopback, dev world. (The trailer rig reset on a lossy
+  link is the next entry.)
+- **Trailer rig reset through the impaired relay (F25-AC05 × AC03).**
+  `net_drive::a_reset_trailer_rig_reseats_and_leaves_no_replica_on_an_impaired_link`
+  is the retail `vpsemi` leg (`--car vpsemi --reset-at 300`,
+  `--until-snap-tick 700`) with both clients dialled through a seeded
+  `ImpairProxy` (40 ms + 30 ms jitter, 30 % loss, 10 % duplicate,
+  10 % reorder, seed `0xAC05`) armed on both lanes once `Start` crossed
+  clean; it shares `trailer_rig_reset` with the clean leg. Asserted:
+  both lanes saw drops/duplicates/reorders, alice's ask count is a floor
+  (the ask repeats), her own trailer reseated (`trl=1,0,reseat>=1`),
+  bob applied trailer rows and his copy reseated on her epoch
+  (`reseat>=1`), and bob and the host hold no trailer once she left
+  (`remote0`/`live0`). The trailer row rides the `Snap` stream as epoch
+  state, so a lost snap only delays the reseat. Evidence level:
+  original-content validation (retail vpsemi), loopback processes. 8/9
+  runs passed (6/6 isolated back-to-back); the one failure was a first
+  run on a loaded machine where a client process did not exit cleanly
+  (`wait_success`, stderr not captured) and could not be reproduced.
 - **Reset ask lost five times running (NET-RESET-LOSSY).** Main CI
   failed the impaired leg once: the client sent 5 asks (`req5s`), the
   host saw none (`req0s/0g/0d`). Root cause: each ask is one
