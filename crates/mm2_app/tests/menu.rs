@@ -6699,6 +6699,299 @@ fn a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch() {
     );
 }
 
+/// The journey install: the shared one with gates faced down the +x
+/// lane so a straight drive sweeps every one.
+fn race_install() -> tempfile::TempDir {
+    let tmp = install();
+    let mut course = WAYPOINTS.to_string();
+    for x in [60.0f32, 110.0, 140.0, 165.0, 180.0] {
+        course.push_str(&format!("{x},0,140,-90,15,0,0,0,\n"));
+    }
+    write(tmp.path(), "race/testcity/race0waypoints.csv", course);
+    tmp
+}
+
+/// Name a driver on the entry screen, then launch `race0` from the
+/// Events list; returns once the countdown or the race is live.
+fn name_driver_and_launch_race0(app: &mut App, name: &str) {
+    activate_row(app, "Driver:");
+    activate_row(app, "New driver");
+    type_text(app, name);
+    press(app, KeyCode::Enter);
+    press(app, KeyCode::Escape);
+    app.update();
+    launch_race0(app);
+}
+
+fn launch_race0(app: &mut App) {
+    activate_row(app, "Events");
+    activate_row(app, "testcity");
+    activate_row(app, "Checkpoint");
+    activate_row(app, "race0");
+    assert!(
+        run_until(app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "race0 never launched: {:?}",
+        phase(app)
+    );
+}
+
+fn race_clock(app: &App) -> u64 {
+    app.world().resource::<mm2_game::RaceState>().clock
+}
+
+fn local_player(app: &mut App) -> mm2_game::PlayerId {
+    app.world_mut()
+        .query::<&mm2_game::Player>()
+        .iter(app.world())
+        .find(|p| p.control == mm2_game::PlayerControl::Local)
+        .map(|p| p.id)
+        .expect("a local player")
+}
+
+/// F31-B.2 / F31-AC03 (a), synthetic: a driver whose profile file and
+/// backup are both destroyed shows up as unreadable on the Driver
+/// screen instead of aborting the menu, never becomes the active
+/// driver, and neither that file's bytes nor a neighbour's reward are
+/// lost when the neighbour races and saves.
+#[test]
+fn an_unreadable_profile_degrades_visibly_and_other_profiles_survive() {
+    let tmp = race_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let bad = store
+        .create("Broken", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap()
+        .id;
+    let good = store
+        .create("Ada", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap()
+        .id;
+    store.set_active(&bad).unwrap();
+    let main = store_dir.path().join(format!("{}.json", bad.as_str()));
+    let bak = store_dir.path().join(format!("{}.json.bak", bad.as_str()));
+    std::fs::write(&main, b"{ not json").unwrap();
+    std::fs::write(&bak, b"also not json").unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    add_race_and_progression(&mut app);
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Menu, "launch survives");
+    assert!(
+        app.world().get_resource::<ActiveProfile>().is_none(),
+        "nothing is silently bound to the damaged driver"
+    );
+    activate_row(&mut app, "Driver:");
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains(bad.as_str()) && t.contains("unreadable")),
+        "the damaged driver is listed as unreadable: {texts:?}"
+    );
+    assert!(texts.iter().any(|t| t.starts_with("Ada")), "{texts:?}");
+
+    // Choosing the damaged row does not make it the active driver.
+    activate_row(&mut app, "unreadable");
+    app.update();
+    assert!(
+        app.world()
+            .get_resource::<ActiveProfile>()
+            .is_none_or(|p| p.profile.id != bad),
+        "an unreadable profile never becomes the active driver"
+    );
+
+    // The healthy neighbour races, earns and saves.
+    if shell(&app).screen != menu::Screen::Profiles {
+        activate_row(&mut app, "Driver:");
+    }
+    activate_row(&mut app, "Ada");
+    press(&mut app, KeyCode::Escape);
+    launch_race0(&mut app);
+    assert!(drive_until_results(&mut app, 1500), "{:?}", phase(&app));
+    let saved = store.load(&good).unwrap().profile;
+    assert!(saved.progress.unlocks.contains("paint:vpt:1"));
+
+    // The damaged files are exactly as they were left.
+    assert_eq!(std::fs::read(&main).unwrap(), b"{ not json");
+    assert_eq!(std::fs::read(&bak).unwrap(), b"also not json");
+}
+
+/// F31-B.2 / F31-AC03 (b), synthetic: while the race is paused through
+/// the production Esc path the race clock, the session tick and the
+/// ledger stand still even with the throttle key held, and the race
+/// then resumes from where it stopped. A window that loses focus zeroes
+/// the driver's input through the production input system, so an
+/// unattended car neither advances nor finishes.
+#[test]
+fn pausing_or_losing_focus_mid_race_freezes_the_clock_and_awards_nothing() {
+    let tmp = race_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    add_race_and_progression(&mut app);
+    app.init_resource::<ButtonInput<GamepadButton>>();
+    app.add_systems(
+        Update,
+        mm2_app::input::vehicle_input.before(session::drive_session),
+    )
+    .add_systems(FixedUpdate, mm2_app::input::apply_player_input);
+    app.update();
+    name_driver_and_launch_race0(&mut app, "Ada");
+    let id = app.world().resource::<ActiveProfile>().profile.id.clone();
+    assert!(run_until(&mut app, 400, |a| phase(a) == SessionPhase::Playing));
+    // Real, held keyboard throttle through the production input path.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ArrowUp);
+    for _ in 0..30 {
+        app.update();
+    }
+    let raced = race_clock(&app);
+    assert!(raced > 0, "the race clock runs while playing");
+
+    // Pause: nothing advances however long it lasts.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ArrowUp);
+    let (clock, tick) = (race_clock(&app), app.world().resource::<Session>().tick());
+    for _ in 0..120 {
+        app.update();
+    }
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    assert_eq!(race_clock(&app), clock, "the race clock is frozen");
+    assert_eq!(app.world().resource::<Session>().tick(), tick);
+    assert!(app.world().resource::<ResultLedger>().is_empty());
+
+    // Resume (the first pause row): the clock carries on.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(race_clock(&app) > clock, "resume restarts the clock");
+
+    // Focus loss: the held throttle stops reaching the car. With the
+    // key down and the window focused the car gains speed; once the
+    // window is unfocused the same held key leaves it coasting down.
+    let speed = |app: &mut App| {
+        app.world_mut()
+            .query_filtered::<&mm2_vehicle::VehicleState, With<PlayerVehicle>>()
+            .single(app.world())
+            .unwrap()
+            .forward_speed
+    };
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ArrowUp);
+    for _ in 0..60 {
+        app.update();
+    }
+    let focused_speed = speed(&mut app);
+    assert!(focused_speed > 1.0, "the key drives while focused");
+    app.world_mut().spawn((
+        PrimaryWindow,
+        Window {
+            focused: false,
+            ..default()
+        },
+    ));
+    for _ in 0..120 {
+        app.update();
+    }
+    assert!(
+        speed(&mut app) < focused_speed,
+        "an unfocused window leaves the car coasting down"
+    );
+    assert!(app.world().resource::<ResultLedger>().is_empty());
+
+    // Nothing was awarded at any point.
+    let saved = store.load(&id).unwrap().profile;
+    assert!(saved.progress.events.iter().all(|r| !r.is_beaten()));
+    assert!(saved.progress.unlocks.is_empty(), "{:?}", saved.progress);
+}
+
+/// F31-B.2 / F31-AC03 (c), synthetic: a finish delivered twice — the
+/// identical result id, and a retried second result for the same
+/// participant and event — grants the reward once. The ledger refuses
+/// the identical id; the retried result neither repeats the unlock
+/// message nor adds to the unlocks (it counts as one more finish).
+#[test]
+fn a_duplicate_result_does_not_double_award_the_reward() {
+    let tmp = race_install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    add_race_and_progression(&mut app);
+    app.update();
+    name_driver_and_launch_race0(&mut app, "Ada");
+    let id = app.world().resource::<ActiveProfile>().profile.id.clone();
+    assert!(drive_until_results(&mut app, 1500), "{:?}", phase(&app));
+    app.update();
+    let report = app
+        .world()
+        .resource::<mm2_app::progression::SessionReport>()
+        .clone();
+    assert!(report.recorded && !report.granted.is_empty(), "{report:?}");
+    let before = store.load(&id).unwrap().profile;
+    let local = local_player(&mut app);
+    let first = app
+        .world()
+        .resource::<ResultLedger>()
+        .iter()
+        .find(|r| r.id.event.is_some() && r.id.participant == local)
+        .cloned()
+        .expect("the local finish is in the ledger");
+
+    // The same id is refused outright.
+    let again = app
+        .world_mut()
+        .resource_mut::<ResultLedger>()
+        .record(first.clone());
+    assert!(again.is_err(), "an identical result id is a duplicate");
+
+    // A retried result (next sequence) is a new ledger row, but must not
+    // pay the reward again.
+    let mut retry = first.clone();
+    retry.id.sequence += 1;
+    app.world_mut()
+        .resource_mut::<ResultLedger>()
+        .record(retry)
+        .unwrap();
+    for _ in 0..6 {
+        app.update();
+    }
+    let after_report = app
+        .world()
+        .resource::<mm2_app::progression::SessionReport>()
+        .clone();
+    assert_eq!(after_report.granted, report.granted, "no second message");
+    let after = store.load(&id).unwrap().profile;
+    assert_eq!(
+        after.progress.unlocks, before.progress.unlocks,
+        "the reward is paid once"
+    );
+    // A retry at a new sequence is a distinct finish by design (the
+    // sequence exists to tell them apart): it counts as one more
+    // finish and nothing else on the record changes.
+    let (b, a) = (&before.progress.events[0], &after.progress.events[0]);
+    assert_eq!((a.finishes, b.finishes), (2, 1));
+    assert_eq!(
+        (a.best_race_ticks, a.best_place, a.beaten_amateur),
+        (b.best_race_ticks, b.best_place, b.beaten_amateur)
+    );
+}
+
 /// A 22 kHz mono wave long enough to still sound a few frames on.
 fn ui_wav() -> Vec<u8> {
     let mut fmt = Vec::new();
