@@ -490,14 +490,31 @@ any other sub-event of the lesson fires a call-out.
   sub-event or only an unused switch.
 - The goal point `0x6b1f90` the lead's arrival test uses: which route
   node writes it.
-- Instruction/subtitle linkage — no authored reference in these
-  tables points at instruction content; where lesson *text* lives is
-  unrecovered. The lesson *messages* are the `mmlang.dll` ids above;
-  the *voice* lines are `aud/spchdata/<ccl|ccs>/<school><row>.csv`
-  (`DSN-92`); the per-gate call-outs are the `cc_cpoint_*` tables
-  covered above. The mid-exam `*firstexam*`/`*thirdexam*` lines are
-  authored inside their rows' `PRERACE`/`RESULTSPOOR` sections
-  (`ccl3`/`ccl7`/`ccl11`/`ccl12`) and are already bound; only their
-  on-screen subtitle text is unrecovered.
+- Instruction/subtitle linkage — **partly recovered (F21-B subtitle
+  leg, 2026-10-15).** The lesson object shows a message by calling
+  `0x534770(id, seconds, flag)` — the literal `mmlang.dll` string id,
+  1.5 s for every pre-race line and 5 s for every outcome line — and
+  handing the result to the player car's message display
+  (`0x42e1e0` on the car `+0x288`). Read per handler: cop chase 193
+  (instruction) → 194 (Ready) → 195 (Go), cleared 196, timer expiry
+  198, course complete with a cop in sight 197 (`0x41a320`); jump 206
+  (instruction) → 207 → 208, cleared 209, timer expiry 614, wreck 615;
+  follow 218 → 219 → 220, won 221, escaped 222; stop 617 → 618 → 619,
+  cleared 620, lead reached its destination 621; maneuver 241 → 242 →
+  243, cleared 609, timer expiry 244, wreck 245. Bound in
+  `mm2_content::lesson_text` and checked against the install by
+  `tests/lesson_text.rs`; the table is read by
+  `mm2_formats::langdll::StringTable`. Still unrecovered: the
+  cross-traffic (225–230), corner (231–240) and clean-driving
+  (210–216) sequences, follow 223, stop 622, the cop-chase `Go`
+  alternative (652, 3 s, chosen by a flag at `0x416c8f`), the flag
+  argument, and *where on screen* the car's message display draws
+  (`0x42e1e0` was not decoded). No authored reference in the lesson
+  tables points at instruction content. The *voice* lines are
+  `aud/spchdata/<ccl|ccs>/<school><row>.csv` (`DSN-92`); the per-gate
+  call-outs are the `cc_cpoint_*` tables covered above. The mid-exam
+  `*firstexam*`/`*thirdexam*` lines are authored inside their rows'
+  `PRERACE`/`RESULTSPOOR` sections (`ccl3`/`ccl7`/`ccl11`/`ccl12`) and
+  are already bound; only their on-screen subtitle text is unrecovered.
 - Professional `TimeofDay`/`Weather` divergence — deliberate harder
   conditions or revision drift.

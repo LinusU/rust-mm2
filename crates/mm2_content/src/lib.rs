@@ -23,6 +23,7 @@ pub mod expect;
 pub mod fingerprint;
 pub mod garage;
 pub mod lesson_def;
+pub mod lesson_text;
 pub mod model;
 pub mod nav;
 pub mod opponents;
