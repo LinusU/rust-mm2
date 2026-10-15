@@ -287,6 +287,13 @@ pub(crate) fn event_app(config: SessionConfig, vfs: Vfs) -> App {
             paint: 0,
         })
         .add_systems(FixedUpdate, advance_session_tick)
+        // #1446: the production readiness gate, so opponent start state
+        // is only ever observed the way the binary produces it.
+        .init_resource::<mm2_app::readiness::SimulationGate>()
+        .add_systems(
+            First,
+            mm2_app::readiness::gate_world_simulation.before(bevy::time::TimeSystems),
+        )
         .add_systems(
             FixedLast,
             (
@@ -909,9 +916,7 @@ fn sloped_install() -> tempfile::TempDir {
 /// `y = grid_ground_y(x)` across the whole course. The dev world is flat
 /// here, so the slab supplies the hill; the flat ground lies metres below
 /// its downhill end, out of a rolling car's reach.
-fn sloped_grid_app() -> (tempfile::TempDir, App) {
-    let tmp = sloped_install();
-    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+fn spawn_sloped_slab(app: &mut App) {
     let angle = GRID_SLOPE_DEG.to_radians();
     let (width, thickness) = (240.0_f32, 0.5_f32);
     let center_x = 100.0; // spans x ∈ [−20, 220] under the course
@@ -928,8 +933,20 @@ fn sloped_grid_app() -> (tempfile::TempDir, App) {
             ..default()
         },
     ));
+}
+
+fn sloped_grid_app() -> (tempfile::TempDir, App) {
+    let tmp = sloped_install();
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    spawn_sloped_slab(&mut app);
     app.update();
     (tmp, app)
+}
+
+/// One steady 60 Hz frame — `event_app`'s fixed timestep and its default
+/// `ManualDuration`.
+fn one_tick() -> Duration {
+    Duration::from_secs_f64(1.0 / 60.0)
 }
 
 /// Run the session until its countdown begins.
@@ -1063,6 +1080,90 @@ fn opponents_release_from_a_sloped_grid_without_backward_momentum() {
             worst_back[i]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #1446 — a slow map load must not hand the field extra simulation time
+// ---------------------------------------------------------------------------
+
+/// Load the sloped event with a deliberately slow frame where a machine's
+/// map-load cost would surface: `event_app`'s first update is the `Loading`
+/// frame that builds the world, and the *next* frame is the one whose
+/// `Time<Real>` delta carries however long that load took. The helper sets
+/// `ManualDuration` to `load_frame` for exactly that frame, then settles
+/// back to one 60 Hz tick and runs a short steady stretch.
+fn grid_loaded_over(load_frame: Duration) -> (tempfile::TempDir, App) {
+    let tmp = sloped_install();
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    spawn_sloped_slab(&mut app);
+    app.update(); // the `Loading` frame — world built, phase → `Countdown`
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(load_frame));
+    app.update(); // the recovery frame, carrying the load's wall time
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(one_tick()));
+    run(&mut app, 10); // a steady start to the countdown
+    (tmp, app)
+}
+
+/// What the field looks like at the race start: the countdown, the
+/// simulation clock and every opponent's pose and momentum.
+#[derive(Debug, PartialEq)]
+struct StartState {
+    countdown: Option<u32>,
+    elapsed: Duration,
+    opponents: Vec<(Vec3, Vec3, Vec3)>,
+}
+
+fn start_state((_tmp, mut app): (tempfile::TempDir, App)) -> StartState {
+    let countdown = countdown_remaining(&app);
+    let elapsed = app.world().resource::<Time<Fixed>>().elapsed();
+    let opponents = opponents(&mut app)
+        .into_iter()
+        .map(|e| {
+            (
+                app.world().get::<Position>(e).unwrap().0,
+                app.world().get::<LinearVelocity>(e).unwrap().0,
+                app.world().get::<AngularVelocity>(e).unwrap().0,
+            )
+        })
+        .collect();
+    StartState {
+        countdown,
+        elapsed,
+        opponents,
+    }
+}
+
+/// #1446: the race start must be a function of the event, not the machine.
+/// A load that takes one 60 Hz frame and a load that stalls for 400 ms must
+/// leave the countdown, the simulation clock and every opponent in exactly
+/// the same place — the slower load must not be replayed as catch-up
+/// physics before the race begins.
+#[test]
+fn a_slow_load_starts_the_race_like_a_fast_one() {
+    let fast = start_state(grid_loaded_over(one_tick()));
+    let slow = start_state(grid_loaded_over(Duration::from_millis(400)));
+
+    assert_eq!(
+        fast.opponents.len(),
+        2,
+        "the authored roster is staged on the grid"
+    );
+    assert_eq!(
+        fast.countdown, slow.countdown,
+        "the countdown advanced by the load's wall time"
+    );
+    assert!(
+        fast.countdown.is_some(),
+        "the race is still counting down at the start"
+    );
+    assert_eq!(
+        fast.elapsed, slow.elapsed,
+        "the slow load replayed catch-up fixed steps"
+    );
+    assert_eq!(
+        fast.opponents, slow.opponents,
+        "opponent start state differs"
+    );
 }
 
 /// Opponents drive their authored `.opp` routes through real physics and
