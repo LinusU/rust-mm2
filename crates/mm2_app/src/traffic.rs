@@ -158,11 +158,17 @@
 //! session-owned [`TrafficSignal`] indicator spawns at every authored
 //! origin within `SIGNAL_MAX_DISTANCE` of its junction (designed
 //! sanity bound — retail authors a few wild outliers, counted in
-//! `signals_dropped`); `drive_signals` then sets each indicator's
+//! `signals_dropped`) and draws the retail `sp_traflit*` unit there —
+//! the aimap's `[Traffic Lights]` models or the executable defaults,
+//! single or dual by approach-lane count (designed), standing on the
+//! origin with its lamps facing along the road away from the junction
+//! (axis sign unverified, so the facing is designed); a model that does
+//! not resolve is reported, not replaced. `drive_signals` then sets each indicator's
 //! aspect off the authoritative [`Junctions`] controller every tick —
 //! green while the approach's road holds the signal phase, red out of
 //! phase and in the all-red clearance, constant green on free-flow
-//! ends, the stop aspect on stop-signed ends. The mapping is a
+//! ends, the stop aspect on stop-signed ends; `sync_signal_lamps`
+//! shows the matching authored glow chunk. The mapping is a
 //! designed presentation over authored positions and rules; the
 //! original's signal visuals and exact state semantics are unverified
 //! (UNK-12).
@@ -368,17 +374,20 @@ impl LampState {
     /// else ↔ don't walk): a designed presentation, the original's
     /// pedestrian phasing is unrecovered (UNK-12).
     fn lit(self, aspect: SignalAspect) -> bool {
-        match (self, aspect) {
-            (Self::Green | Self::Walk, SignalAspect::Green) => true,
-            (Self::Red | Self::NoWalk, SignalAspect::Red) => true,
-            (Self::Yellow, SignalAspect::Stop) => true,
-            (Self::NoWalk, SignalAspect::Stop) => true,
-            _ => false,
-        }
+        matches!(
+            (self, aspect),
+            (Self::Green | Self::Walk, SignalAspect::Green)
+                | (Self::Red | Self::NoWalk, SignalAspect::Red)
+                | (Self::Yellow | Self::NoWalk, SignalAspect::Stop)
+        )
     }
 }
 
 type ModelPart = (Handle<Mesh>, Handle<StandardMaterial>);
+
+/// A lamp mesh before its material is built: state, mesh, base texture
+/// material and the authored glow colour.
+type RawLampPart = (LampState, Handle<Mesh>, Handle<StandardMaterial>, [f32; 4]);
 
 /// One authored signal-unit PKG prepared for drawing: the pole/arm/housing
 /// body and each lamp state's glow geometry as its own part list.
@@ -499,8 +508,7 @@ fn build_signal_model(
     let mut mats = crate::city::MaterialCache::new(vfs, images, materials);
     let mut missing_prims = 0usize;
     let body = crate::city::pkg_paint_parts(&body_pkg, &mut mats, meshes, &mut missing_prims, 0);
-    let mut lamp_parts: Vec<(LampState, Handle<Mesh>, Handle<StandardMaterial>, [f32; 4])> =
-        Vec::new();
+    let mut lamp_parts: Vec<RawLampPart> = Vec::new();
     for file in &pkg.files {
         let PkgChunk::Geometry(geo) = &file.data else {
             continue;
@@ -2552,5 +2560,107 @@ mod size_collider_tests {
                 .as_convex_polyhedron()
                 .is_some()
         );
+    }
+}
+
+#[cfg(test)]
+mod signal_unit_tests {
+    //! F10 signal-unit geometry: facing, lamp states and the retail
+    //! `sp_traflit*` models.
+
+    use super::*;
+
+    #[test]
+    fn a_head_faces_along_the_road_away_from_the_junction_whatever_the_axis_sign() {
+        let origin = Vec3::new(10.0, 5.0, 0.0);
+        let center = Vec3::ZERO;
+        // The axis runs across the road (±Z); the face is along ±X.
+        for axis in [Vec3::Z, -Vec3::Z] {
+            let face = signal_facing(origin, origin + axis, center);
+            assert!((face - Vec3::X).length() < 1e-5, "{face:?}");
+        }
+    }
+
+    #[test]
+    fn a_head_with_no_axis_faces_straight_out_of_the_junction() {
+        let origin = Vec3::new(0.0, 3.0, -8.0);
+        assert!((signal_facing(origin, origin, Vec3::ZERO) + Vec3::Z).length() < 1e-5);
+    }
+
+    #[test]
+    fn each_aspect_lights_its_own_lamps() {
+        assert!(LampState::Green.lit(SignalAspect::Green));
+        assert!(LampState::Walk.lit(SignalAspect::Green));
+        assert!(!LampState::Red.lit(SignalAspect::Green));
+        assert!(LampState::Red.lit(SignalAspect::Red));
+        assert!(LampState::NoWalk.lit(SignalAspect::Red));
+        assert!(LampState::Yellow.lit(SignalAspect::Stop));
+        assert!(!LampState::Green.lit(SignalAspect::Stop));
+    }
+
+    #[test]
+    fn lamp_stems_are_recognised_by_state_and_time_of_day() {
+        assert_eq!(LampState::from_day_stem("redglowday"), Some(LampState::Red));
+        assert_eq!(
+            LampState::from_day_stem("nowalk_day"),
+            Some(LampState::NoWalk)
+        );
+        assert_eq!(LampState::from_day_stem("greenglownight"), None);
+        assert!(LampState::is_lamp_stem("greenglownight"));
+        assert!(!LampState::is_lamp_stem(""));
+    }
+
+    #[test]
+    fn a_missing_model_is_reported_not_replaced() {
+        let vfs = Vfs::new();
+        let mut images = Assets::<Image>::default();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let assets = SignalAssets::load(&vfs, "none", &mut images, &mut meshes, &mut materials);
+        assert_eq!(
+            assets.missing,
+            vec![
+                DEFAULT_SINGLE_MODEL.to_string(),
+                DEFAULT_DUAL_MODEL.to_string()
+            ]
+        );
+        assert!(assets.model_for(4).is_none());
+    }
+
+    /// Original-content level: both retail defaults and the London
+    /// override resolve with body and all five/three lamp states.
+    #[test]
+    fn retail_signal_units_load_with_their_lamp_geometry() {
+        let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+            eprintln!("skipped: MM2_RETAIL is not set; retail signal models NOT checked");
+            return;
+        };
+        let mut vfs = Vfs::new();
+        mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
+            .expect("the install mounts");
+        let mut images = Assets::<Image>::default();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        for (city, single, dual, lamps) in [
+            ("sf", "sp_traflitsingle_f", "sp_traflitdual_f", 5),
+            (
+                "london",
+                "sp_traflitsingle_ped_l",
+                "sp_traflitsingle_ped_l",
+                5,
+            ),
+        ] {
+            assert_eq!(
+                signal_model_names(&vfs, city),
+                (single.to_string(), dual.to_string())
+            );
+            let assets = SignalAssets::load(&vfs, city, &mut images, &mut meshes, &mut materials);
+            assert!(assets.missing.is_empty(), "{city}: {:?}", assets.missing);
+            for model in [&assets.single, &assets.dual] {
+                let model = model.as_ref().expect("model resolves");
+                assert!(!model.body.is_empty());
+                assert_eq!(model.lamps.len(), lamps, "{city}: lamp states");
+            }
+        }
     }
 }

@@ -175,11 +175,12 @@ as authored geometry, not a recoloured material:
 `{RED,YELLOW,GREEN}GLOW{DAY,NIGHT}_H` on all five and
 `{WALK,NOWALK}_{DAY,NIGHT}_H` on `sp_traflitsingle_f`,
 `sp_traflitsingle_ped_l` and `sp_traflitdual_f` (the `_l` and
-`_corner_l` singles ship no pedestrian states). The runtime's unlit
-sphere at the anchor
-(`mm2_app::traffic`) is therefore a placeholder for geometry that ships;
-which variant each head gets and how the pole/arm is placed remain
-unrecovered. The four `sp_traflit*` rows in `city/phys/props.pathset` (a
+`_corner_l` singles ship no pedestrian states). `mm2_app::traffic` draws
+that geometry at each origin (pole base on the origin, DAY lamp chunks
+toggled per aspect); which variant each head gets and which way it faces
+remain unrecovered, so the runtime picks single/dual by approach-lane
+count and faces the lamps along the road away from the junction
+(designed). The four `sp_traflit*` rows in `city/phys/props.pathset` (a
 dev set no session loads) are a demo layout — the nearest SF authored
 origin is 33 m away, the farthest 56 m (horizontal) — not the placement
 source.
