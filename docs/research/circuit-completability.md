@@ -80,3 +80,21 @@ the owner (not diagnosed here, policy side): sf circuit:6 has the most
 re-anchors (70 on Pro, the `vpdb7` slots at 12-21 each and finishing
 last). The
 re-anchor recovery was not widened.
+
+## Re-measure of sf circuit:8/9 after the neural driver (#1401)
+
+The same sweep flags as above (`--headless --parked --no-profile
+--until-opponents --frames 43200`, release build, Amateur and `--pro`):
+
+| event | diff | finished | re-anchors | slowest finisher |
+|---|---|---|---|---|
+| sf circuit:8 | Amateur | 4/4 | 3 | 277 s |
+| sf circuit:8 | Pro | 4/4 | 0 | 193 s |
+| sf circuit:9 | Amateur | 6/6 | 0 | 248 s |
+| sf circuit:9 | Pro | 6/6 | 4 | 247 s |
+
+Every opponent completes every gate on both circuits (two laps, 23 and
+14 gates), so the zero-finish stalls were the old scripted controller, not
+the `.opp` route data or the lap length. No code change. The re-anchor
+recovery was not widened. Evidence level: synthetic integration (headless,
+retail data), no rendered check.
