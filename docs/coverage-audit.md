@@ -99,7 +99,7 @@ plan's recorded remainder plus acceptance criteria with no direct evidence.
 | F25 networked driving | active | loopback, impairment matrix measured | sub-epoch drift, full input-replay prediction, LAN/Internet scope, rejoin |
 | F26 shared world/races | active | synthetic + loopback | late-joiner bulk ledger, spectator/race-ends-during-late-join, two-process breakdown leg |
 | F27 Cops & Robbers | active | synthetic + loopback | what knocks gold loose, pickup radius, respawn, disconnect/out-of-bounds (UNK-10) — stock variants each need status (AC06) |
-| F28 city specials | active | retail-data | `mm2-inspect specials` report landed; cable car runs partially (4 cars, 2 circuits in SF, signal-gated; no audio, no player/ambient obstacles, init gate unknown — UNK-44); late-join phase (F26) |
+| F28 city specials | active | retail-data | per-city actor record below; cable car runs partially (4 cars, 2 circuits in SF, signal-gated; audio and init gate unrecovered — UNK-44); `[Hookmen]` semantics (UNK-45); late-join phase (F26) |
 | F29 modding | active | synthetic | per-consumer override tests exist for car texture, handling, prop, audio cue (`mod_override.rs`) and race rules — Checkpoint, Blitz and Circuit tables, waypoints, grids, and the `.aimap`/`.opp` roster with a malformed aimap refused (`mod_override_race.rs`); a Crash Course lesson's malformed aimap is refused too (`lesson_launch.rs`); a mod's lesson sub-event table, lead-car aimap and `.opp` route reach `lesson_race_setup`, and an unusable lead-car route is refused (`mod_override_race.rs`, `lesson_launch.rs`); a mod's `tune/<city>.cinfo` renames menu races and classifies cosmetic (`menu.rs`), a malformed one falls back to its own stem labels rather than the shadowed stock names (`menu.rs`); a malformed selected override is refused, not papered over, across car texture (unknown and truncated `.tex`), model (non-`PKG2`/`PKG3` container) and audio cue (`mod_override.rs`); menu art has a VFS consumer (`menu_art_image`; override/revert/malformed/cosmetic in `mod_override.rs`); `mmlang.dll` strings are deliberately not a mod surface (`docs/modding.md`); open: a real-install run beyond `--trace-deps --city` |
 | F30 performance/packaging | active | local measurement | release-profile baseline for named scenes; memory/draw-call/voice/bandwidth columns; packaging step, real OS layouts |
 | F31 final audit | A.1 this doc; B.1 synthetic single-player journey; C queued | synthetic | B.1: `menu::a_named_driver_races_earns_a_reward_and_finds_it_after_a_relaunch` (name a driver → locked paint/race → launch → authored finish → results → restart → menu → relaunch). Open: retail-data journey, lesson/C&R/multiplayer journeys, negative-path journeys |
@@ -129,6 +129,94 @@ order), so it catches pose/cursor disagreement, not a misreading of the BAI
 itself; the authored-direction convention is `docs/research/bai.md`. Whether
 the cars *look* right on the road is not measured. Population constants stay
 designed (UNK-12).
+
+### F28 city-special-content evidence (F28-AC01 / F28-AC06)
+
+Recorded 2026-10-15 with `MM2_RETAIL` set, original-content validation
+level, `fnv1a64:e91e6cd4b2ae30d9`. Command (exit 0; the same run with
+`--strict` also exits 0, i.e. no data failure):
+
+```sh
+mm2-inspect specials "$MM2_RETAIL"
+```
+
+The tool inventories each city *from the installation* — no actor list is
+hard-coded — parses every pathset with the production parser, and resolves
+each path's model the way its manager resolves it. `--strict` fails only on
+a data failure (a missing expected file, a parse failure, a model that
+resolves neither by name nor as the family default, an unreadable
+water/BAI record, a cable-car terminus with no route); an unresolved actor
+is listed and counted, not failed. Retail summary: **expected default
+pathsets 9/9, pathset files loaded 20/21, 0 failure(s), 0 unresolved
+actor(s), 1 partially reproduced** (the cable car). The one file not
+loaded is the unreachable, truncated `london_bridge_blitz10`
+(`drawbridge.md`). Every row below is an actor the install authors; a city
+that authors none is listed as *absent*, never invented. Source keys R3,
+R4, R5 (`SOURCES.md`); the load rules are WLD-26 (drawbridge), WLD-28
+(movers) and the cable car's recovered init/controller (UNK-44).
+
+**London** — 45 catalogued events; 102 `.aimap` files read.
+
+| Special actor | Authored source | Status | Reference |
+|---|---|---|---|
+| drawbridge leaves | `race/london/london_bridge.pathset` (4 paths; event overlays `circuit0`, `crash3`, `crash5`, `race0`) | implemented — `mm2_app::drawbridge` | WLD-26; `docs/research/drawbridge.md` |
+| sailboats (tugs, water taxis, sailboards, ducks) | `race/london/london_sailboat.pathset` (16 paths) | implemented — `mm2_app::movers` | WLD-28; `docs/research/movers.md` |
+| ferries | `race/london/london_ferry.pathset` (6 paths; Crash Course overlays `crash9`, `crash11`, `crash12`) | implemented — `mm2_app::movers` | WLD-28; `docs/research/movers.md` |
+| Underground trains (3 cars per path) | `race/london/london_train.pathset` (8 paths) | implemented — `mm2_app::movers` | WLD-28; `docs/research/movers.md` |
+| parked-car strips | `race/london/london_parkedcar.pathset` (91 strips; overlays `crash0`, `crash3`) | implemented — `mm2_app::city::spawn_parked_cars` | `docs/research/parked.md` |
+| cable cars | none — `city/london.bai` authors 28 train curves, 0 tram curves, 0 tram-line termini (0 one-sided tram roads) | absent (authored that way) | `docs/research/specials.md` |
+| water / recovery rooms | `city/london.water` level −3.8, 3 room refs | implemented — `mm2_app::water`, `mm2_app::recovery` | F28-AC04 |
+| `[Subway]` AI-map train | 0 of 102 `.aimap` files define one | absent (a mod's row would list unresolved) | `docs/research/specials.md` |
+| `[Hookmen]` | 0 rows over 102 `.aimap` files | absent; semantics unknown (UNK-45) | UNK-45 |
+
+Two overlays load but no catalogued event selects them
+(`london_bridge_multi`, `london_parkedcar_test`); they are authored
+leftovers, shown not failed.
+
+**San Francisco** — 45 catalogued events; 107 `.aimap` files read.
+
+| Special actor | Authored source | Status | Reference |
+|---|---|---|---|
+| drawbridge leaves | `race/sf/sf_bridge.pathset` (1 path) | implemented — `mm2_app::drawbridge` | WLD-26; `docs/research/drawbridge.md` |
+| sailboats | `race/sf/sf_sailboat.pathset` (16 paths: 12 name their model, 4 fall back to the family default) | implemented — `mm2_app::movers` | WLD-28; `docs/research/movers.md` |
+| ferries | `race/sf/sf_ferry.pathset` (1 path) | implemented — `mm2_app::movers` | WLD-28; `docs/research/movers.md` |
+| Underground trains | none — SF authors no `sf_train.pathset` (not in `EXPECTED_SPECIAL_PATHSETS`) | absent (authored that way) | `docs/research/specials.md` |
+| parked-car strips | `race/sf/sf_parkedcar.pathset` (55 strips) | implemented — `mm2_app::city::spawn_parked_cars` | `docs/research/parked.md` |
+| cable cars | `city/sf.bai`: 42 tram curves on 21/379 roads, 4 tram-line termini → 4 cars on 2 closed circuits; assets `geometry/va_cablecar_f.pkg`, `bound/va_cablecar_f_bound.bnd`, `tune/vehicle/va_cablecar_f.aivehicledata` all resolve | **partially reproduced** — `mm2_app::cablecar` (signal-gated; audio and the init gate not reproduced) | WLD-28 / UNK-44; `docs/research/specials.md` |
+| water / recovery rooms | `city/sf.water` level −1.9, 3 room refs | implemented — `mm2_app::water`, `mm2_app::recovery` | F28-AC04 |
+| `[Subway]` AI-map train | 0 of 107 `.aimap` files define one | absent (a mod's row would list unresolved) | `docs/research/specials.md` |
+| `[Hookmen]` | 0 rows over 107 `.aimap` files | absent; semantics unknown (UNK-45) | UNK-45 |
+
+**Open items this record carries explicitly unresolved (F28-AC01).**
+
+- Cable-car object audio — the `cablecar`, `cablecarstart`/`cablecarstop`,
+  `cablecarbell*` and `streetcable` clips ship; no trigger is recovered
+  (UNK-44).
+- The `+0x40` init gate of `AIMAP.Init`'s parameter block: what sets it is
+  unrecovered, so whether every original San Francisco session spawns the
+  four cars is unknown; the port spawns them in every local session
+  (UNK-44).
+- `[Hookmen]` semantics: what the row's first name means, its fourth float
+  and flag, and what a hookman does (UNK-45). Retail authors none.
+- `[Subway]` has a parser (`mm2_formats::aimap::Aimap::subway`) but no
+  runtime; retail's one `[Subway]` line is a `#` comment, so the step is
+  never reached.
+- Cable-car side-of-road, AI-bubble behaviour and the `+0x4c` model offset
+  (all in UNK-44).
+
+**AC mapping.** *F28-AC01* (each expected actor inventoried, implemented
+or explicitly unresolved with a source reference) — satisfied at
+original-content level by the two tables above and the `mm2-inspect
+specials` run they summarise; the actor set is the install's own files
+plus the executable's AI-map init (`[Subway]`, `[Hookmen]`). *F28-AC06*
+(both cities' coverage reported without inventing actors) — the 9/9
+expected default pathsets, the per-city counts and the absent rows (SF
+Underground, London cable cars) come from the fingerprinted install; no
+actor outside it is named. The cable car stays **partial** and the four
+open items above stay open, so the F28 feature row is *active*, not
+checked. Rendered and playtest evidence for F28-AC02–AC05 lives in
+`docs/research/specials.md` §"What the port does" and the `mm2_app` tests
+it names.
 
 ## 4. Cross-cutting gaps (not owned by one feature)
 
