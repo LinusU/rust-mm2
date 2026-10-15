@@ -35,6 +35,7 @@ MP-4 lists Cruise, Blitz, Checkpoint, Circuit and Cops & Robbers.
 | City/mode change (AC05) | `net_drive::a_session_edit_typed_on_the_host_reaches_the_next_round`, `net_join::a_client_process_leaves_cleanly_when_the_changed_session_is_unrunnable` |
 | Leaver's seat is freed (MP-5) | `net_drive::a_seat_freed_by_a_leaver_is_not_resurrected_for_the_next_joiner`, `net_edge::a_rejoined_client_gets_a_fresh_slot` |
 | Host loss | `net_edge::a_killed_host_ends_a_driving_client` (the client ends; there is no host migration — below) |
+| Whole journey on a lossy link (F31-AC03) | `net_app::a_multiplayer_journey_survives_a_lossy_link` (synthetic, loopback, two clients each behind a seeded 20 % loss/duplicate/reorder proxy: lobby → mode change → race → `Results` → rematch → leave). `Start`/`Cancel` (#1489) and `SetReady`/`SetVehicle` (#1488) are not loss-safe yet; the test works around neither silently (see its `TODO` markers). |
 | Impaired links (AC03) | `net_drive::the_process_level_impairment_matrix_records_each_recipe_cell` |
 
 ## Unsupported original variants
