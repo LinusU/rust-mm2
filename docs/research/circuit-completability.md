@@ -93,8 +93,8 @@ The same sweep flags as above (`--headless --parked --no-profile
 | sf circuit:9 | Amateur | 6/6 | 0 | 248 s |
 | sf circuit:9 | Pro | 6/6 | 4 | 247 s |
 
-Every opponent completes every gate on both circuits (two laps, 23 and
-14 gates), so the zero-finish stalls were the old scripted controller, not
+Every opponent finishes on both circuits, so the zero-finish stalls were
+the old scripted controller, not
 the `.opp` route data or the lap length. No code change. The re-anchor
 recovery was not widened. Evidence level: synthetic integration (headless,
 retail data), no rendered check.
