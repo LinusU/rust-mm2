@@ -733,11 +733,13 @@ Two schemas:
   cells are padding):
   - `Min speed,Max speed,min time in range,max time out of range` +
     `<min>,<max>,<in>,<out>` — a speed band (ped tables author one
-    `0,500,0.01,0` band of `*SCREAM*` samples; ambient-car tables a
-    `0,20,5,0` band, a `50,999999,0.25,5` band — `999999` reads as
-    unbounded — and an impact band);
-  - `min impact force` + `<force>` (retail `5500`) — an impact band
-    whose sample header adds `play after seconds`.
+    `0,500,0.01,0` band of `*SCREAM*` samples; `default_ambcarvoice_*`
+    tables a `0,20,5,0` and a `50,999999,0.25,5` band, the `va_*`
+    tables their own `0,20,20,0` / `35,999999,0.25,5` — `999999`
+    reads as unbounded);
+  - `min impact force` + `<force>` (retail `5500`) — an impact band on
+    every ambient-car table, whose sample header adds `play after
+    seconds`.
 - **Counts** — `num{male,female}pedvoicefiles`,
   `numambcarvoicefiles_{l,s}`: `Num files` then one integer. The
   counts do not always equal the number of `default_*` files shipped
