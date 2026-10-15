@@ -118,7 +118,6 @@ fn bai(roads: Vec<Road>) -> Bai {
     }
 }
 
-/// Two parallel vehicle roads (0 and 1), each 100 m long.
 /// The default policy with the recovered 50 m ambient separation
 /// off: the fixture networks are a few tens of metres across, so the
 /// separation would admit one car. The separation has its own tests.
@@ -129,6 +128,7 @@ fn fixture_spawn_policy() -> SpawnPolicy {
     }
 }
 
+/// Two parallel vehicle roads (0 and 1), each 100 m long.
 fn two_roads() -> NavGraph {
     NavGraph::build(&bai(vec![road_x(0, 0.0, 0), road_x(1, 20.0, 0)])).graph
 }
