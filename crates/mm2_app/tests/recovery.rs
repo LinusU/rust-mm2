@@ -1400,7 +1400,8 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
         let catalog = EventCatalog::scan(&vfs, city);
         assert!(!catalog.events.is_empty(), "{city}: no events");
         let (mut events, mut points, mut wading) = (0usize, 0usize, Vec::new());
-        let (mut routes, mut route_points) = (0usize, 0usize);
+        let mut lane_wading: Vec<String> = Vec::new();
+        let (mut routes, mut route_points, mut route_segments) = (0usize, 0usize, 0usize);
         for event in catalog.events.iter().filter(|e| e.status.is_ready()) {
             for difficulty in [Difficulty::Amateur, Difficulty::Professional] {
                 let Ok(race) = race_definition(event, difficulty) else {
@@ -1431,6 +1432,20 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
                             wading.push(format!(
                                 "{:?} {difficulty:?} opponent {i} anchor {n} at {}",
                                 event.event_ref, row.position
+                            ));
+                        }
+                    }
+                    // The straight line the driver follows between
+                    // consecutive anchors, sampled every metre.
+                    for (n, pair) in route.points.windows(2).enumerate() {
+                        route_segments += 1;
+                        if let Some(p) =
+                            first_deadly_on_segment(&water, pair[0].position, pair[1].position)
+                        {
+                            wading.push(format!(
+                                "{:?} {difficulty:?} opponent {i} segment {n}->{} at {p}",
+                                event.event_ref,
+                                n + 1
                             ));
                         }
                     }
@@ -1503,6 +1518,47 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
                 }
             }
         }
+
+        // The city's authored BAI driving lanes (ambient traffic and
+        // the nav graph both follow them): every lane polyline,
+        // densified to a metre, against the same deadly volumes.
+        let (bai_bytes, _) = vfs.read_path(&format!("city/{city}.bai")).unwrap();
+        let bai = mm2_formats::bai::Bai::parse(&bai_bytes).unwrap();
+        let (mut lanes, mut lane_segments, mut over_water) = (0usize, 0usize, 0usize);
+        for road in &bai.roads {
+            for (side_name, side) in [("right", &road.right), ("left", &road.left)] {
+                for (l, curve) in side
+                    .lane_vertices
+                    .iter()
+                    .take(side.lane_count as usize)
+                    .enumerate()
+                {
+                    lanes += 1;
+                    let pts: Vec<Vec3> = curve.iter().map(|v| Vec3::from(*v)).collect();
+                    // Frame control: the lane's footprint over water
+                    // (dropped to a metre under the level) must be hit,
+                    // else a mirrored frame would pass the audit blind.
+                    over_water += pts
+                        .iter()
+                        .filter(|p| water.is_deadly(Vec3::new(p.x, water.level() - 1.0, p.z)))
+                        .count();
+                    for (n, pair) in pts.windows(2).enumerate() {
+                        lane_segments += 1;
+                        if let Some(p) = first_deadly_on_segment(&water, pair[0], pair[1]) {
+                            lane_wading.push(format!(
+                                "road {} {side_name} lane {l} segment {n} at {p}",
+                                road.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{city}: {lanes} BAI lanes / {lane_segments} segments, {route_segments} route \
+             segments, {over_water} lane vertices over water, {} in deadly water: {lane_wading:?}",
+            lane_wading.len()
+        );
         eprintln!(
             "{city}: {} water rooms, {wet} wet grid cells, {events} race definitions, \
              {points} start/gate points, {routes} opponent routes / {route_points} anchors, \
@@ -1521,8 +1577,22 @@ fn retail_no_authored_race_point_stands_in_deadly_water() {
             lessons > 0 && legs > 0 && lesson_points > 0,
             "{city}: no Crash Course lesson audited"
         );
+        assert!(
+            route_segments > 0 && lanes > 0 && over_water > 0,
+            "{city}: no route segment or BAI lane audited"
+        );
         assert!(wading.is_empty(), "{city}: {wading:?}");
+        assert!(lane_wading.is_empty(), "{city}: {lane_wading:?}");
     }
+}
+
+/// First point on the segment `a..b` (sampled every metre, both ends
+/// included) that stands in deadly water.
+fn first_deadly_on_segment(water: &mm2_app::water::CityWater, a: Vec3, b: Vec3) -> Option<Vec3> {
+    let steps = (a.distance(b).ceil() as usize).max(1);
+    (0..=steps)
+        .map(|i| a.lerp(b, i as f32 / steps as f32))
+        .find(|p| water.is_deadly(*p))
 }
 
 /// F05-AC05's class matrix on the authored retail roster: a small car
