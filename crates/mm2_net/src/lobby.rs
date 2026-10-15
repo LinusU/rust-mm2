@@ -1030,6 +1030,22 @@ fn run(
                 // keepalive write needs no extra pass: `broadcast_roster`
                 // below reports the corrected roster either way.
                 broadcast(&mut players, &Message::Keepalive, &events, &inputs);
+                // The lobby's advertised next session is as one-shot as
+                // a removal: a client that missed the host's edit would
+                // keep (and be started on) the stale ad. Newest-wins and
+                // idempotent on the client, so the lobby repeats it each
+                // tick; a running session's peers are not re-told (the
+                // ad that *started* it is theirs already).
+                if matches!(phase, Phase::Lobby)
+                    && let Some(ad) = &session
+                {
+                    broadcast(
+                        &mut players,
+                        &Message::Session(ad.clone()),
+                        &events,
+                        &inputs,
+                    );
+                }
                 broadcast_roster(&mut players, &events, &inputs);
                 continue;
             }
@@ -2901,6 +2917,23 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_lobby_repeats_its_advertised_session() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        // The join already told her once (consumed above); a lost edit
+        // is repaired by the next keepalive tick, so a second copy
+        // arrives unprompted.
+        alice.set_timeout(Some(KEEPALIVE_INTERVAL * 4)).unwrap();
+        let again = loop {
+            match alice.recv().unwrap() {
+                Message::Session(got) => break got,
+                _ => continue,
+            }
+        };
+        assert_eq!(again, ad("go"));
+    }
+
+    #[test]
     fn an_idle_lobby_keeps_speaking_and_a_client_swallows_it() {
         let host = sessioned_host();
         let mut alice = join_sessioned(&host, "alice");
@@ -2921,11 +2954,12 @@ mod tests {
             .unwrap();
         });
         // The host resends the (idempotent) roster on each keepalive tick
-        // too (NET-ROSTER-LOSSY), so those ride in between; the first
-        // message that is not one is the broadcast.
+        // too (NET-ROSTER-LOSSY), and so does the lobby's advertised
+        // session, so those ride in between; the first message that is
+        // not one is the broadcast.
         let first = loop {
             match alice.recv().unwrap() {
-                Message::Roster { .. } => continue,
+                Message::Roster { .. } | Message::Session(_) => continue,
                 other => break other,
             }
         };
