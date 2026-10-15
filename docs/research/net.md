@@ -2145,7 +2145,13 @@ wire actually moved rather than an in-process mailbox's contents.
   carries only the grounded bit (`SnapTrailer::flags`), brake/handbrake
   ride the tractor's input through `trailer_input`, and the copy has no
   reverse state of its own, so there is nothing to assert; the
-  tractor's own reverse bit is covered by the seat legs. **Extra-wheel
+  tractor's own reverse bit is covered by the seat legs. There is also
+  nothing for the wire to *present*: none of the four authored trailers
+  ships a reverse (or brake) lamp — `mm2-inspect pkg` on
+  `geometry/{vpsemi,vpcentury,vpftruck,vplafrance}_trailer.pkg` shows each
+  carries only `TLIGHT_L`, the taillight quad, while the tow car authors
+  `RLIGHT_L` — and a trailer never enters reverse gear, so no trailer
+  reverse presentation exists in authored content (DSN-119). **Extra-wheel
   presentation** — the row's `spin` drives the copy's wheels (the `rspn`
   counter is seat-wide), but there was no per-trailer-wheel counter; the
   `trl=` `turn` cell and the `xwhl=` cell below now cover it. Loopback,
