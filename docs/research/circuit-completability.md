@@ -78,5 +78,5 @@ Every opponent completes every gate, so the earlier stalls were the old
 controller, not the `.opp` route data. No code change. Residual signal for
 the owner (not diagnosed here, policy side): sf circuit:6 has the most
 re-anchors (70 on Pro, the `vpdb7` slots at 12-21 each and finishing
-last), and circuit:7 shows 24-36 `d` (opp_drv columns unchanged). The
+last). The
 re-anchor recovery was not widened.
