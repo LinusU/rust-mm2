@@ -2219,9 +2219,34 @@ wire actually moved rather than an in-process mailbox's contents.
   measured only ~58 % of first asks answered, so 5 straight misses
   (~1.3 %) fit inside the 6000-update cap at the then 3 s retry. The
   retry was also only the dev flag's; the `R` key sent once. Both now
-  share `ResetAsk` (1.25 s, 12 asks max, epoch snap = the ack); the
-  retry rule is unit-tested against a link that eats the first five
-  asks. Evidence level: code checks + local multi-process loop.
+  share `ResetAsk` (1.25 s — 75 session ticks, 12 asks max, epoch snap =
+  the ack); the retry rule is unit-tested against a link that eats the
+  first five asks. Evidence level: code checks + local multi-process loop.
+- **The reset ask's budget spent in wall-clock time, not session time
+  (NET-SCHED-RESET-FLAKE).** Main CI run 38719923939 (commit c1f02a0, a
+  docs-only change) failed `net_drive::a_scheduled_reset_comes_back_on_
+  every_impairment_recipe` on one recipe, `loss-heavy` (60 % loss, the
+  pair's fixed proxy seed `0xAC04`): alice's record read `updates=6000
+  ticks=5999 resets=0` and `req7s/0g/0d` — seven asks sent, the host saw
+  none — so the scheduled reset never came back and the parser then
+  panicked on the absent `stop=` field (the panic is the *diagnostic*
+  bug, not the cause). Root cause: the retry cadence was wall-clock
+  (`RESET_RETRY = 1250 ms`), but a headless evidence client is
+  *frame*-budgeted and ticks far faster than real time (6000 frames ran
+  in ~8.7 s here), so a whole run could only afford a handful of the 12
+  asks — local loops measured 1–5, the CI run 7 — and at 60 % loss all
+  of them can vanish (`0.6^7` ≈ 3 %). The `req7s` in the failing record is
+  the tell: the client hit its frame cap still holding five asks of
+  budget it could never reach. Fix: the ledger counts the session's own
+  ticks, not `Instant` — `RESET_RETRY_TICKS = 75` is the 1.25 s at the
+  60 Hz step and stays above the host's `RESET_REQUEST_COOLDOWN`, and
+  `ResetAsk` is keyed by session generation because a `Cancel`/`Start`
+  cycle restarts the tick clock (a stale ledger would read the new
+  zero-tick as "no time passed"). Now the full 12-ask budget fits inside
+  a 6000-tick run (ticks 1200…2025), leaving `0.6^12` ≈ 0.2 %. The
+  matrix test also names the recipe and the missing stop instead of
+  panicking on the bare field. Evidence level: CI log (recipe + seed +
+  ask count) + unit tests + a 50/50 local run of the matrix test.
 - **A remote driver's breakdown across processes (report 6 follow-up
   1, new-run iteration 11).** The policy and its in-process legs
   landed earlier (remote humans pay the Blitz/Checkpoint breakdown;

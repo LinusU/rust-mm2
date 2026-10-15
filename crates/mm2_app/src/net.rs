@@ -334,7 +334,7 @@ pub fn vehicle_validator(catalog: &VehicleCatalog) -> PickValidator {
 const LEAVE_WATCHDOG: Duration = Duration::from_secs(5);
 
 /// How often a leaving client repeats its `Leave` until the host's close
-/// acknowledges it (designed, like `RESET_RETRY`/`RESULTS_FRAME_REPEATS`
+/// acknowledges it (designed, like `RESET_RETRY_TICKS`/`RESULTS_FRAME_REPEATS`
 /// — nothing original is involved). A single `Leave` frame can be lost on
 /// a lossy link; it carries no reply of its own, so the removal stays
 /// invisible until the socket closes. Repeating it makes the host's close

@@ -104,6 +104,28 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
+/// The `stop=` field of a record, tagged with the leg it came from. A
+/// run that reaches its frame cap without meeting its stop condition
+/// prints a record with no `stop=` field at all. On a reset leg that is
+/// exactly "the scheduled reset never came back" (NET-SCHED-RESET-
+/// FLAKE), so name the leg and the missing stop rather than parsing the
+/// absent field as a bare `no stop= field` panic.
+fn stop_field<'a>(line: &'a str, leg: &str) -> &'a str {
+    line.split_whitespace()
+        .find_map(|t| t.strip_prefix("stop="))
+        .unwrap_or_else(|| {
+            let resets = line
+                .split_whitespace()
+                .find_map(|t| t.strip_prefix("net="))
+                .and_then(|net| net.split(',').find_map(|c| c.strip_prefix("rst")))
+                .map_or(0, leading_u64);
+            panic!(
+                "{leg}: the run ended without its stop condition — the scheduled reset \
+                 never came back (resets={resets}, no stop= field): {line}"
+            )
+        })
+}
+
 /// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>,surf<s>s/<a>a,fix<n>`
 /// record field decoded — the wire counters the run actually moved.
 /// `stall` (F25-B wire-seat retirements) is authority-side only and
@@ -507,7 +529,7 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
 /// host through a recipe with 30 % loss, duplication, reordering and
 /// latency armed on both directions for the driving window. The ask is
 /// one frame that the link may lose, so alice repeats it until her own
-/// seat's reset comes back (`RESET_RETRY`) — the count of asks is
+/// seat's reset comes back (`RESET_RETRY_TICKS`) — the count of asks is
 /// therefore a floor, not exact — and a duplicated or repeated ask the
 /// host sees inside its cooldown is dropped counted, never granted
 /// twice in a row. What must hold is the clean leg's outcome: she
@@ -3741,7 +3763,11 @@ fn a_scheduled_reset_comes_back_on_every_impairment_recipe() {
             alice_net.resets
         );
         assert_eq!(field(&bob_rec, "status"), "pass", "{name}: {bob_rec}");
-        assert_eq!(field(&alice_rec, "stop"), "resets", "{name}: {alice_rec}");
+        assert_eq!(
+            stop_field(&alice_rec, name),
+            "resets",
+            "{name}: the scheduled reset never came back: {alice_rec}"
+        );
         assert_eq!(field(&alice_rec, "status"), "pass", "{name}: {alice_rec}");
         assert!(
             alice_net.requests_sent >= 1 && alice_net.resets >= 1,

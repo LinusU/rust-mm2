@@ -247,50 +247,70 @@ impl SettleWatch {
 /// immediate answer to a wedge.
 pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
 
-/// How long a reset ask waits for its own seat's reset to come back
-/// before asking again (F25-C; designed). The ask is one frame on a link
-/// that may lose it — a 30 % lossy relay measured ~40 % of asks never
-/// answered (NET-RESET-LOSSY) — so, like a driver whose `R` seemed to do
-/// nothing pressing it again, both the key and `--reset-at` repeat it.
-/// Wall clock, not session ticks: a headless client runs ticks far
-/// faster than the wire answers, and an ask repeated inside the round
-/// trip would only be dropped by [`RESET_REQUEST_COOLDOWN`] (which this
-/// must stay above).
-pub const RESET_RETRY: Duration = Duration::from_millis(1250);
+/// How many session ticks a reset ask waits for its own seat's reset to
+/// come back before asking again (F25-C; designed). The ask is one frame
+/// on a link that may lose it — a 30 % lossy relay measured ~40 % of
+/// asks never answered (NET-RESET-LOSSY) — so, like a driver whose `R`
+/// seemed to do nothing pressing it again, both the key and `--reset-at`
+/// repeat it up to [`MAX_RESET_ASKS`] times.
+///
+/// The cadence is the *session's* clock, not wall-clock. A wall-clock
+/// retry spends the ask budget at real-world speed, but an evidence run
+/// is frame-budgeted: a headless client ticks far faster than real time,
+/// so a short run reached its frame cap with only a couple of asks out
+/// of [`MAX_RESET_ASKS`] spent, and a heavy-loss recipe could drop every
+/// one of them (NET-SCHED-RESET-FLAKE). Counting session ticks spends
+/// the same budget whatever the run's speed. 75 ticks is the 1.25 s the
+/// cadence was tuned to at the 60 Hz fixed step, and it still outlasts
+/// [`RESET_REQUEST_COOLDOWN`] (1 s) so a retry never races a grant
+/// already in flight to the same seat.
+pub const RESET_RETRY_TICKS: u64 = 75;
 
 /// Asks one press (or one scheduled reset) may send in total. The epoch
 /// declaration is the acknowledgement, so the bound only matters for a
 /// host that never answers (a refused ask, a dead link): it keeps that
-/// from becoming a request every [`RESET_RETRY`] forever.
+/// from becoming a request every [`RESET_RETRY_TICKS`] forever.
 pub const MAX_RESET_ASKS: u32 = 12;
 
-/// A reset ask's retransmission state: when it last went out, how many
-/// own-seat resets the client had applied then, and how many went out.
-/// Pure, so the retry rule is testable without a clock.
+/// A reset ask's retransmission state: the session generation and tick
+/// it last went out on, how many own-seat resets the client had applied
+/// then, and how many went out. Pure, so the retry rule is testable
+/// without a clock.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetAsk {
-    asked: Option<(Instant, u64)>,
+    generation: u64,
+    asked: Option<(u64, u64)>,
     sent: u32,
 }
 
 impl ResetAsk {
-    /// Whether to send now: never before the first ask is due, once at
-    /// the tick, then again after [`RESET_RETRY`] if no own-seat reset
-    /// has been applied since the last ask, up to [`MAX_RESET_ASKS`].
-    pub fn due(&self, now: Instant, own_resets: u64, tick_reached: bool) -> bool {
-        match self.asked {
-            None => tick_reached,
-            Some((at, seen)) => {
-                own_resets == seen
-                    && self.sent < MAX_RESET_ASKS
-                    && now.duration_since(at) >= RESET_RETRY
-            }
+    /// Whether to send now in session `generation` at session `tick`:
+    /// never before the first ask is due, once the tick reaches it,
+    /// then again after [`RESET_RETRY_TICKS`] ticks if no own-seat
+    /// reset has been applied since the last ask, up to
+    /// [`MAX_RESET_ASKS`]. A new session generation invalidates the
+    /// ledger — its ticks restart from zero, so the last ask's tick no
+    /// longer measures elapsed time.
+    pub fn due(&self, generation: u64, tick: u64, own_resets: u64, tick_reached: bool) -> bool {
+        let Some((at, seen)) = self.asked else {
+            return tick_reached;
+        };
+        if self.generation != generation {
+            return tick_reached;
         }
+        own_resets == seen
+            && self.sent < MAX_RESET_ASKS
+            && tick.saturating_sub(at) >= RESET_RETRY_TICKS
     }
 
-    /// Record a sent ask.
-    pub fn sent(&mut self, now: Instant, own_resets: u64) {
-        self.asked = Some((now, own_resets));
+    /// Record a sent ask. A new generation restarts the count: its ask
+    /// budget is its own.
+    pub fn sent(&mut self, generation: u64, tick: u64, own_resets: u64) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.sent = 0;
+        }
+        self.asked = Some((tick, own_resets));
         self.sent += 1;
     }
 }
@@ -2191,7 +2211,7 @@ pub fn apply_remote_inputs(
 /// seat's epoch-declared `Snap`: [`apply_snapshots`]' own-seat reconcile
 /// already applies it like any authority reset. Fire-and-forget — a
 /// dropped request would be a key press nothing answered, so the ask
-/// repeats every [`RESET_RETRY`] (at most [`MAX_RESET_ASKS`] times)
+/// repeats every [`RESET_RETRY_TICKS`] (at most [`MAX_RESET_ASKS`] times)
 /// until the own seat's reset comes back; no reply message exists by
 /// design, the epoch declaration is the acknowledgement.
 // A Bevy system: the key/pad/window reads, link, session, controls, report and
@@ -2229,12 +2249,15 @@ pub fn send_reset_request(
     let Some(pending) = ask.as_mut() else {
         return;
     };
-    let now = Instant::now();
-    if pending.due(now, report.own_resets, true)
-        && link.ctl().request_reset(session.wire_generation()).is_ok()
+    if pending.due(
+        session.generation(),
+        session.tick(),
+        report.own_resets,
+        true,
+    ) && link.ctl().request_reset(session.wire_generation()).is_ok()
     {
         report.requests_sent += 1;
-        pending.sent(now, report.own_resets);
+        pending.sent(session.generation(), session.tick(), report.own_resets);
     }
 }
 
@@ -2244,7 +2267,7 @@ pub fn send_reset_request(
 /// teleport would be the unannounced self-teleport the key's gate
 /// forbids, so the flag does what the key does — asks the authority
 /// when the session clock reaches the tick, and asks again after
-/// [`RESET_RETRY`] if the own seat's reset has not come back (the
+/// [`RESET_RETRY_TICKS`] if the own seat's reset has not come back (the
 /// ask is one frame on a link that may lose it, and a driver would
 /// press `R` again). This is what lets a headless process leg exercise
 /// the wire reset (request up, epoch snap down) without a keyboard; the
@@ -2260,13 +2283,17 @@ pub fn send_dev_reset_request(
     }
     let at = session.config().and_then(|c| c.dev.reset_at);
     let reached = at.is_some_and(|at| session.tick() >= at);
-    let now = Instant::now();
     if session.is_playing()
-        && ask.due(now, report.own_resets, reached)
+        && ask.due(
+            session.generation(),
+            session.tick(),
+            report.own_resets,
+            reached,
+        )
         && link.ctl().request_reset(session.wire_generation()).is_ok()
     {
         report.requests_sent += 1;
-        ask.sent(now, report.own_resets);
+        ask.sent(session.generation(), session.tick(), report.own_resets);
     }
 }
 
@@ -3783,24 +3810,25 @@ mod tests {
     /// one has been applied.
     #[test]
     fn the_scheduled_reset_ask_repeats_until_the_own_seat_resets() {
-        let t0 = Instant::now();
+        const GEN: u64 = 1;
+        const AT: u64 = 1200;
         let mut ask = ResetAsk::default();
-        assert!(!ask.due(t0, 0, false), "nothing before the tick");
-        assert!(ask.due(t0, 0, true), "the tick fires it");
-        ask.sent(t0, 0);
-        let early = t0 + RESET_RETRY / 2;
-        assert!(!ask.due(early, 0, true), "the answer may be in flight");
+        assert!(!ask.due(GEN, 0, 0, false), "nothing before the tick");
+        assert!(ask.due(GEN, AT, 0, true), "the tick fires it");
+        ask.sent(GEN, AT, 0);
+        let early = AT + RESET_RETRY_TICKS / 2;
+        assert!(!ask.due(GEN, early, 0, true), "the answer may be in flight");
         assert!(
-            RESET_RETRY > RESET_REQUEST_COOLDOWN,
-            "a retry must outlast the host's grant cooldown"
+            RESET_RETRY_TICKS > RESET_REQUEST_COOLDOWN.as_secs() * 60,
+            "a retry must outlast the host's grant cooldown at the 60 Hz step"
         );
-        let late = t0 + RESET_RETRY;
-        assert!(ask.due(late, 0, true), "no reset came back: ask again");
-        ask.sent(late, 0);
-        assert!(!ask.due(late, 0, true), "the retry restarts the wait");
-        let much_later = late + RESET_RETRY * 10;
+        let late = AT + RESET_RETRY_TICKS;
+        assert!(ask.due(GEN, late, 0, true), "no reset came back: ask again");
+        ask.sent(GEN, late, 0);
+        assert!(!ask.due(GEN, late, 0, true), "the retry restarts the wait");
+        let much_later = late + RESET_RETRY_TICKS * 10;
         assert!(
-            !ask.due(much_later, 1, true),
+            !ask.due(GEN, much_later, 1, true),
             "an own-seat reset applied since the last ask ends it"
         );
     }
@@ -3813,23 +3841,22 @@ mod tests {
         // The link loses the first five asks outright (the failing CI
         // run's pattern), then delivers; the host's answer applies one
         // reset to the own seat.
-        let t0 = Instant::now();
+        const GEN: u64 = 1;
         let mut ask = ResetAsk::default();
         let mut own_resets = 0;
         let mut delivered_at = None;
-        for step in 0..2000u32 {
-            let now = t0 + Duration::from_millis(u64::from(step) * 16);
-            if ask.due(now, own_resets, true) {
-                ask.sent(now, own_resets);
+        for tick in 0..6000u64 {
+            if ask.due(GEN, tick, own_resets, true) {
+                ask.sent(GEN, tick, own_resets);
                 if ask.sent > 5 {
-                    delivered_at = Some(now);
+                    delivered_at = Some(tick);
                     own_resets += 1;
                 }
             }
         }
         let delivered = delivered_at.expect("the sixth ask got through");
         assert!(
-            delivered.duration_since(t0) <= RESET_RETRY * 5 + Duration::from_millis(100),
+            delivered <= RESET_RETRY_TICKS * 5,
             "five lost asks cost five retry periods, not more"
         );
         assert_eq!(ask.sent, 6, "no ask after the answer applied");
@@ -3838,15 +3865,38 @@ mod tests {
     /// A host that never answers is asked a bounded number of times.
     #[test]
     fn a_reset_ask_to_a_silent_host_gives_up() {
-        let t0 = Instant::now();
+        const GEN: u64 = 1;
         let mut ask = ResetAsk::default();
-        for step in 0..MAX_RESET_ASKS * 4 {
-            let now = t0 + RESET_RETRY * step;
-            if ask.due(now, 0, true) {
-                ask.sent(now, 0);
+        for step in 0..MAX_RESET_ASKS as u64 * 4 {
+            let tick = step * RESET_RETRY_TICKS;
+            if ask.due(GEN, tick, 0, true) {
+                ask.sent(GEN, tick, 0);
             }
         }
         assert_eq!(ask.sent, MAX_RESET_ASKS);
+    }
+
+    /// A `Cancel`/`Start` cycle restarts the session clock, so a stale
+    /// ask from the last generation must not read that zero tick as
+    /// "no time has passed" — the new session gets its own ask budget.
+    #[test]
+    fn a_reset_ask_ledger_resets_with_the_session_generation() {
+        const AT: u64 = 100;
+        let mut ask = ResetAsk::default();
+        ask.sent(1, AT, 0);
+        assert!(
+            !ask.due(1, AT, 0, true),
+            "a retry inside the window does not re-ask"
+        );
+        // A fresh session: its ticks restart at zero, so this is a new
+        // ask budget, not a stale ledger that never retries.
+        assert!(ask.due(2, AT, 0, true), "the new session asks afresh");
+        ask.sent(2, AT, 0);
+        assert_eq!(ask.sent, 1, "the count belongs to the new generation");
+        assert!(
+            !ask.due(2, AT + RESET_RETRY_TICKS / 2, 0, true),
+            "and it waits the retry window like any ask"
+        );
     }
 
     /// A residual inside the bound — the measured prediction error —
