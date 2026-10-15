@@ -719,8 +719,9 @@ C&R cue sections stay unbound. The 21 `aud/creaturedata/*.csv` files
 (plain text, CRLF) parse through `mm2_formats::creaturedata`, and
 `mm2-inspect audio` reports them as `21 supported, 0 unsupported,
 0 missing wave ref(s)` (retail, 2026-10-11; every sample name resolves
-to a shipped wave). Three `.bat` work files (`renshit.bat` etc.) are
-extras.
+to a shipped wave). Three `.bat` work files shipped elsewhere in the
+audio tree (`aud/aud11/temp.bat`, `aud/cardata/opponent/renshit.bat`,
+`aud/cardata/opponent/temp.bat`) are extras.
 
 Two schemas:
 
@@ -746,7 +747,9 @@ Two schemas:
 Runtime semantics are **unknown**, not recovered from the exe: the
 speed and force units, what "min time in range"/"max time out of
 range" gate, how a sample is drawn, and the numbered-file selection.
-Nothing in the runtime consumes these tables yet.
+The port reads the two `default_{f,m}pedvoice1` tables for its
+pedestrian scream rig (AUD-15, DSN-109); the ambient-car tables have no
+consumer.
 
 ## Open semantics
 
