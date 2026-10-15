@@ -815,6 +815,7 @@ fn run_headless(
                     crate::traffic::drape_ambient,
                     crate::traffic::maintain_ambient,
                     crate::traffic::drive_signals,
+                    crate::traffic::sync_signal_lamps,
                 )
                     .chain(),
             )

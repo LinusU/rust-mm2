@@ -186,7 +186,7 @@ use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
-    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
+    AmbientRoster, AmbientSpec, ArcEnd, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
     Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_ANGULAR_SPEED,
     MAX_BANGER_LINEAR_SPEED, NavGraph, NavIssue, NavOverrides, NavRng, ObjectIdentity, Player,
     Session, SessionAuthority, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
@@ -298,9 +298,10 @@ pub struct AmbientTraffic {
     /// sanity bound — retail authors a few wild outliers; counted,
     /// not hidden.
     pub signals_dropped: usize,
-    /// Shared lamp mesh and aspect materials for the signal
-    /// indicators — one allocation serves every head.
-    signal_assets: SignalAssets,
+    /// Authored signal-unit model names that did not resolve — the
+    /// heads at those models draw no geometry; reported, never
+    /// replaced by a placeholder.
+    pub signal_models_missing: Vec<String>,
     /// Planner/setup problems, reported honestly.
     pub issues: Vec<String>,
 }
@@ -312,50 +313,264 @@ pub struct AmbientTraffic {
 /// `signals_dropped`). Designed bound, UNK-12.
 const SIGNAL_MAX_DISTANCE: f32 = 60.0;
 
-/// Indicator lamp radius (m) — a designed presentation size; the
-/// authored head's dimensions are not part of the BAI record.
-const SIGNAL_LAMP_RADIUS: f32 = 0.45;
+/// The retail signal-unit models `Midtown2.exe` carries as the
+/// `[Traffic Lights]` defaults (WLD-35) — a map's aimap line overrides
+/// them (`city/london.aimap` names `sp_traflitsingle_ped_l` for both).
+const DEFAULT_SINGLE_MODEL: &str = "sp_traflitsingle_f";
+const DEFAULT_DUAL_MODEL: &str = "sp_traflitdual_f";
 
-/// The shared lamp mesh and per-aspect materials every signal
-/// indicator draws with.
+/// Lateral width (m) a vehicle lane is taken to occupy when choosing
+/// between the single and dual signal unit — designed, UNK-12.
+const SIGNAL_LANE_PITCH: f32 = 3.0;
+
+/// One lamp state the signal-unit PKGs author as glow geometry
+/// (`{RED,YELLOW,GREEN}GLOW{DAY,NIGHT}_H`, `{WALK,NOWALK}_{DAY,NIGHT}_H`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LampState {
+    Red,
+    Yellow,
+    Green,
+    Walk,
+    NoWalk,
+}
+
+impl LampState {
+    /// The lamp state a PKG geometry stem names, for the day variant —
+    /// the night chunks are larger halo billboards of the same lamps
+    /// and are not drawn (the world has no night lighting to pair
+    /// them with; designed).
+    fn from_day_stem(stem: &str) -> Option<Self> {
+        match stem {
+            "redglowday" => Some(Self::Red),
+            "yellowglowday" => Some(Self::Yellow),
+            "greenglowday" => Some(Self::Green),
+            "walk_day" => Some(Self::Walk),
+            "nowalk_day" => Some(Self::NoWalk),
+            _ => None,
+        }
+    }
+
+    /// Whether the chunk stem is any lamp state, day or night.
+    fn is_lamp_stem(stem: &str) -> bool {
+        Self::from_day_stem(stem).is_some()
+            || matches!(
+                stem,
+                "redglownight"
+                    | "yellowglownight"
+                    | "greenglownight"
+                    | "walk_night"
+                    | "nowalk_night"
+            )
+    }
+
+    /// Whether this lamp is lit while a head shows `aspect`. The
+    /// pedestrian lamps follow the vehicle aspect (green ↔ walk, anything
+    /// else ↔ don't walk): a designed presentation, the original's
+    /// pedestrian phasing is unrecovered (UNK-12).
+    fn lit(self, aspect: SignalAspect) -> bool {
+        match (self, aspect) {
+            (Self::Green | Self::Walk, SignalAspect::Green) => true,
+            (Self::Red | Self::NoWalk, SignalAspect::Red) => true,
+            (Self::Yellow, SignalAspect::Stop) => true,
+            (Self::NoWalk, SignalAspect::Stop) => true,
+            _ => false,
+        }
+    }
+}
+
+type ModelPart = (Handle<Mesh>, Handle<StandardMaterial>);
+
+/// One authored signal-unit PKG prepared for drawing: the pole/arm/housing
+/// body and each lamp state's glow geometry as its own part list.
+pub(crate) struct SignalModel {
+    body: Vec<ModelPart>,
+    lamps: Vec<(LampState, Vec<ModelPart>)>,
+    /// Lift (m) that stands the body's lowest vertex on the anchor —
+    /// the unbound-prop ground convention (`stamp_content_offset`).
+    lift: f32,
+    /// How far the body reaches along its local −X (the mast arm), m.
+    reach: f32,
+}
+
+/// The signal-unit models a session draws with, resolved once.
+#[derive(Default)]
 pub(crate) struct SignalAssets {
-    lamp: Handle<Mesh>,
-    green: Handle<StandardMaterial>,
-    red: Handle<StandardMaterial>,
-    amber: Handle<StandardMaterial>,
+    single: Option<Arc<SignalModel>>,
+    dual: Option<Arc<SignalModel>>,
+    /// Authored model names that did not resolve to drawable geometry —
+    /// reported, never replaced by a placeholder.
+    pub(crate) missing: Vec<String>,
 }
 
 impl SignalAssets {
-    pub(crate) fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
-        // Unlit vivid colours — readable in daylight without lighting
-        // support, the same convention the checkpoint markers use.
-        let mut mat = |r: f32, g: f32, b: f32| {
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(r, g, b),
-                unlit: true,
-                ..default()
-            })
-        };
-        Self {
-            lamp: meshes.add(Sphere::new(SIGNAL_LAMP_RADIUS)),
-            green: mat(0.15, 0.95, 0.25),
-            red: mat(0.95, 0.12, 0.08),
-            amber: mat(0.95, 0.65, 0.10),
+    /// Resolve the single/dual signal-unit models: the city aimap's
+    /// `[Traffic Lights]` line when it names two models, else the
+    /// executable's defaults (WLD-35).
+    pub(crate) fn load(
+        vfs: &Vfs,
+        stem: &str,
+        images: &mut Assets<Image>,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Self {
+        let (single, dual) = signal_model_names(vfs, stem);
+        let mut out = Self::default();
+        let mut cache: HashMap<String, Option<Arc<SignalModel>>> = HashMap::new();
+        for (slot, name) in [(0, single), (1, dual)] {
+            let model = cache
+                .entry(name.clone())
+                .or_insert_with(|| {
+                    let built = build_signal_model(vfs, &name, images, meshes, materials);
+                    if built.is_none() {
+                        warn!(model = %name, "signal unit model missing or empty — heads draw no geometry");
+                    }
+                    built.map(Arc::new)
+                })
+                .clone();
+            if model.is_none() {
+                out.missing.push(name);
+            }
+            if slot == 0 {
+                out.single = model;
+            } else {
+                out.dual = model;
+            }
         }
+        out
     }
 
-    pub(crate) fn lamp(&self) -> &Handle<Mesh> {
-        &self.lamp
-    }
-
-    pub(crate) fn material(&self, aspect: SignalAspect) -> &Handle<StandardMaterial> {
-        match aspect {
-            SignalAspect::Green => &self.green,
-            SignalAspect::Red => &self.red,
-            SignalAspect::Stop => &self.amber,
+    /// The model a head with `lanes` approach lanes draws: the dual
+    /// unit when those lanes ([`SIGNAL_LANE_PITCH`] each) are wider than
+    /// the single unit's mast arm reaches, else the single. The
+    /// original's selection rule is unrecovered; this one is designed
+    /// from the measured arm reach (WLD-35).
+    fn model_for(&self, lanes: usize) -> Option<&Arc<SignalModel>> {
+        match (&self.single, &self.dual) {
+            (Some(single), Some(dual)) if lanes as f32 * SIGNAL_LANE_PITCH > single.reach => {
+                Some(dual)
+            }
+            (Some(single), _) => Some(single),
+            (None, dual) => dual.as_ref(),
         }
     }
 }
+
+/// The map's `[Traffic Lights]` single/dual model names: the city
+/// aimap's line when it carries two names, else the executable defaults.
+fn signal_model_names(vfs: &Vfs, stem: &str) -> (String, String) {
+    let authored = mm2_content::load_city_aimap(vfs, stem)
+        .ok()
+        .flatten()
+        .and_then(|aimap| {
+            let line = aimap.traffic_lights.first()?.clone();
+            let mut names = line.split_whitespace();
+            Some((names.next()?.to_string(), names.next()?.to_string()))
+        });
+    authored.unwrap_or_else(|| (DEFAULT_SINGLE_MODEL.into(), DEFAULT_DUAL_MODEL.into()))
+}
+
+/// Build one signal unit from its PKG: the non-lamp chunks as the body,
+/// each day lamp chunk as a per-state part list drawn unlit.
+fn build_signal_model(
+    vfs: &Vfs,
+    name: &str,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Option<SignalModel> {
+    use mm2_formats::pkg::{Pkg, PkgChunk, lod_split};
+    let resolved = vfs.resolve_preferred(&format!("geometry/{name}"), &["pkg"])?;
+    let pkg = Pkg::parse(&vfs.read(&resolved).ok()?).ok()?;
+    let stem_of = |file: &mm2_formats::pkg::PkgFile| lod_split(&file.name).0;
+    let is_geo = |file: &mm2_formats::pkg::PkgFile| matches!(file.data, PkgChunk::Geometry(_));
+
+    let mut body_pkg = pkg.clone();
+    body_pkg
+        .files
+        .retain(|f| !is_geo(f) || !LampState::is_lamp_stem(&stem_of(f)));
+    let verts = mm2_game::local_geometry_verts(&body_pkg);
+    if verts.is_empty() {
+        return None;
+    }
+    let lift = -verts.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+    let reach = -verts.iter().map(|v| v[0]).fold(f32::MAX, f32::min);
+
+    // Phase 1 — meshes and base textures through the shared PKG path.
+    let mut mats = crate::city::MaterialCache::new(vfs, images, materials);
+    let mut missing_prims = 0usize;
+    let body = crate::city::pkg_paint_parts(&body_pkg, &mut mats, meshes, &mut missing_prims, 0);
+    let mut lamp_parts: Vec<(LampState, Handle<Mesh>, Handle<StandardMaterial>, [f32; 4])> =
+        Vec::new();
+    for file in &pkg.files {
+        let PkgChunk::Geometry(geo) = &file.data else {
+            continue;
+        };
+        let Some(state) = LampState::from_day_stem(&stem_of(file)) else {
+            continue;
+        };
+        for section in &geo.sections {
+            let Some(shader) = pkg.shaders().and_then(|s| {
+                usize::try_from(section.shader_offset)
+                    .ok()
+                    .and_then(|i| s.shaders.get(i))
+            }) else {
+                continue;
+            };
+            let mut one = pkg.clone();
+            one.files.retain(|f| !is_geo(f) || f.name == file.name);
+            if let Some(PkgChunk::Geometry(g)) = one
+                .files
+                .iter_mut()
+                .find(|f| is_geo(f))
+                .map(|f| &mut f.data)
+            {
+                g.sections = vec![section.clone()];
+            }
+            let base = mats.get(&shader.texture);
+            let emissive = shader.emissive;
+            let color = if emissive[..3].iter().any(|c| *c > 0.0) {
+                emissive
+            } else {
+                shader.diffuse
+            };
+            for (mesh, _) in
+                crate::city::pkg_paint_parts(&one, &mut mats, meshes, &mut missing_prims, 0)
+            {
+                lamp_parts.push((state, mesh, base.clone(), color));
+            }
+        }
+    }
+    if missing_prims > 0 {
+        warn!(model = %name, missing_prims, "signal unit: non-triangle primitives skipped");
+    }
+    drop(mats);
+
+    // Phase 2 — lamp materials: unlit and tinted with the authored
+    // glow colour, blended over the housing.
+    let mut lamps: Vec<(LampState, Vec<ModelPart>)> = Vec::new();
+    for (state, mesh, base, color) in lamp_parts {
+        let mut material = materials.get(&base).cloned().unwrap_or_default();
+        material.base_color = Color::srgb(color[0], color[1], color[2]);
+        material.unlit = true;
+        material.cull_mode = None;
+        material.alpha_mode = AlphaMode::Blend;
+        let part = (mesh, materials.add(material));
+        match lamps.iter_mut().find(|(s, _)| *s == state) {
+            Some((_, parts)) => parts.push(part),
+            None => lamps.push((state, vec![part])),
+        }
+    }
+    Some(SignalModel {
+        body,
+        lamps,
+        lift,
+        reach,
+    })
+}
+
+/// A lamp-state mesh under a signal head: shown while its state is lit.
+#[derive(Component)]
+pub struct SignalLamp(LampState);
 
 /// One authored signal head a session renders (F10-B.7): its junction,
 /// the member road it governs, the authored rule that selects its
@@ -370,6 +585,35 @@ pub(crate) struct SignalHead {
     /// fallback, not a phase-dependent aspect.
     pub member: bool,
     pub origin: Vec3,
+    /// Horizontal unit vector the unit's lamps face: along the road,
+    /// away from the junction, toward the traffic the head governs.
+    pub facing: Vec3,
+    /// Vehicle lanes the head's road feeds into its junction — selects
+    /// the single or dual unit.
+    pub approach_lanes: usize,
+}
+
+/// The horizontal direction a head faces. The authored axis is a unit
+/// vector across the carriageway stored as `origin + axis`
+/// (docs/research/bai.md), so the lamps face along the road, at right
+/// angles to it; its sign is mixed and tracks nothing measurable, so
+/// the facing is signed to point away from the junction (designed —
+/// heads face the approaching traffic). A head with no usable axis (4
+/// SF ends author `axis == origin`) faces straight away from the
+/// junction centre.
+fn signal_facing(origin: Vec3, axis_point: Vec3, center: Vec3) -> Vec3 {
+    let outward = Vec3::new(origin.x - center.x, 0.0, origin.z - center.z);
+    let across = Vec3::new(axis_point.x - origin.x, 0.0, axis_point.z - origin.z);
+    let along = across
+        .try_normalize()
+        .map(|a| Vec3::new(-a.z, 0.0, a.x))
+        .filter(|f| f.is_finite());
+    match (along, outward.try_normalize()) {
+        (Some(f), Some(o)) if f.dot(o) < 0.0 => -f,
+        (Some(f), _) => f,
+        (None, Some(o)) => o,
+        (None, None) => Vec3::Z,
+    }
 }
 
 /// Enumerate the authored signal heads a session renders: every
@@ -389,13 +633,13 @@ pub(crate) fn authored_signal_heads(
     for head in graph.signals() {
         let ix = head.junction;
         let origin = Vec3::from(head.signal.origin);
-        if junction_zone(graph, ix, policy).is_none_or(|(center, _)| {
-            !Vec3::from(center).is_finite()
-                || origin.distance(Vec3::from(center)) > SIGNAL_MAX_DISTANCE
-        }) {
+        let Some(center) = junction_zone(graph, ix, policy)
+            .map(|(center, _)| Vec3::from(center))
+            .filter(|center| center.is_finite() && origin.distance(*center) <= SIGNAL_MAX_DISTANCE)
+        else {
             dropped += 1;
             continue;
-        }
+        };
         let member_set = members
             .entry(ix)
             .or_insert_with(|| Junctions::signal_members(graph, ix));
@@ -405,6 +649,23 @@ pub(crate) fn authored_signal_heads(
             rule: head.rule(),
             member: member_set.contains(&head.road),
             origin,
+            facing: signal_facing(
+                origin,
+                Some(Vec3::from(head.signal.axis))
+                    .filter(|a| *a != Vec3::ZERO)
+                    .unwrap_or(origin),
+                center,
+            ),
+            approach_lanes: graph.road(head.road).map_or(0, |road| {
+                road.arcs
+                    .iter()
+                    .flatten()
+                    .map(|a| graph.arc(*a))
+                    .filter(|arc| arc.exit == ArcEnd::Intersection(ix))
+                    .map(|arc| arc.lanes.len())
+                    .max()
+                    .unwrap_or(0)
+            }),
         });
     }
     (heads, dropped)
@@ -722,7 +983,7 @@ pub fn load_ambient_traffic(
         jumps: 0,
         signals: 0,
         signals_dropped: 0,
-        signal_assets: SignalAssets::new(meshes, materials),
+        signal_models_missing: Vec::new(),
         issues: plan
             .issues
             .iter()
@@ -749,7 +1010,15 @@ pub fn load_ambient_traffic(
             *traffic.spawned_by_class.entry(directive.class).or_insert(0) += 1;
         }
     }
-    spawn_traffic_signals(commands, &mut traffic, owner);
+    let signal_assets = SignalAssets::load(vfs, stem, images, meshes, materials);
+    traffic.signal_models_missing = signal_assets.missing.clone();
+    traffic.issues.extend(
+        signal_assets
+            .missing
+            .iter()
+            .map(|m| format!("signal unit model {m} missing")),
+    );
+    spawn_traffic_signals(commands, &mut traffic, owner, &signal_assets);
     // Operator report 4 item 5: `NoVehicleLanes` fires once per
     // authored pedestrian/special/disabled road — expected data
     // (WLD-11; retail london/sf carry ~150 of them), so per-road WARN
@@ -787,19 +1056,20 @@ pub fn load_ambient_traffic(
     Some(traffic)
 }
 
-/// Spawn the authored traffic-signal indicators (F10-B.7): one
-/// session-owned lamp at every `NavGraph::signals` head that passes
-/// the `SIGNAL_MAX_DISTANCE` sanity bound. Each head shows the aspect
-/// its end's authored rule admits under the junction controller's
-/// initial state — a head whose road never joins the member set
-/// resolves the same green fallback `gate` does; `drive_signals`
-/// keeps them current. The authored `trafficLightAxis` is preserved
-/// on the nav graph but unused — its convention is unverified (R3
-/// notes it only as a flag that the light exists).
+/// Spawn the authored traffic-signal units (F10-B.7): one session-owned
+/// head at every `NavGraph::signals` entry that passes the
+/// `SIGNAL_MAX_DISTANCE` sanity bound, drawn as the retail `sp_traflit*`
+/// prop (WLD-35). Each head shows the aspect its end's authored rule
+/// admits under the junction controller's initial state — a head whose
+/// road never joins the member set resolves the same green fallback
+/// `gate` does; `drive_signals` keeps them current. The unit stands on
+/// the authored origin, its lamps facing along the road away from the
+/// junction (see [`signal_facing`]).
 fn spawn_traffic_signals(
     commands: &mut Commands,
     traffic: &mut AmbientTraffic,
     owner: SessionEntity,
+    assets: &SignalAssets,
 ) {
     let (heads, dropped) = authored_signal_heads(&traffic.graph, &JunctionPolicy::default());
     // A wild authored outlier — drop it and count the loss rather than
@@ -811,22 +1081,61 @@ fn spawn_traffic_signals(
             .entry(head.junction)
             .or_insert_with(|| traffic.junctions.green_road(&traffic.graph, head.junction));
         let aspect = SignalAspect::of_phase(head.member, green, head.road, head.rule);
-        commands.spawn((
-            owner,
-            TrafficSignal {
-                junction: head.junction,
-                road: head.road,
-                rule: head.rule,
-                member: head.member,
-                aspect,
-            },
-            Mesh3d(traffic.signal_assets.lamp().clone()),
-            MeshMaterial3d(traffic.signal_assets.material(aspect).clone()),
-            Transform::from_translation(head.origin),
-            Visibility::Visible,
-        ));
+        spawn_signal_head(commands, owner, assets, &head, aspect);
         traffic.signals += 1;
     }
+}
+
+/// Spawn one signal head: the logic entity at the authored origin,
+/// rotated so the unit's local +Z (the lamp face) points along
+/// `head.facing`, with the body and every lamp state as children — only
+/// the lamps lit by `aspect` visible.
+fn spawn_signal_head(
+    commands: &mut Commands,
+    owner: SessionEntity,
+    assets: &SignalAssets,
+    head: &SignalHead,
+    aspect: SignalAspect,
+) {
+    let face = head.facing;
+    let rotation = Quat::from_mat3(&Mat3::from_cols(Vec3::Y.cross(face), Vec3::Y, face));
+    let mut entity = commands.spawn((
+        owner,
+        TrafficSignal {
+            junction: head.junction,
+            road: head.road,
+            rule: head.rule,
+            member: head.member,
+            aspect,
+        },
+        Transform::from_translation(head.origin).with_rotation(rotation),
+        Visibility::Visible,
+    ));
+    let Some(model) = assets.model_for(head.approach_lanes) else {
+        return;
+    };
+    entity.with_children(|children| {
+        let lift = Transform::from_xyz(0.0, model.lift, 0.0);
+        for (mesh, material) in &model.body {
+            children.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), lift));
+        }
+        for (state, parts) in &model.lamps {
+            let visibility = if state.lit(aspect) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            for (mesh, material) in parts {
+                children.spawn((
+                    SignalLamp(*state),
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    lift,
+                    visibility,
+                ));
+            }
+        }
+    });
 }
 
 /// Spawn the client's traffic-signal heads for a `Remote` city session
@@ -835,58 +1144,47 @@ fn spawn_traffic_signals(
 /// head starts at its phase-independent aspect (a light member starts
 /// red until the host's [`Message::Signals`](mm2_net::Message::Signals)
 /// frame names its phase); [`crate::signalnet::apply_signals`] then
-/// keeps the light members on the host's phase. Returns the shared
-/// assets the apply system needs, or `None` when the graph cannot load
-/// (the session simply renders no signals, like a failed ambient load).
+/// keeps the light members on the host's phase. Returns `false` when
+/// the graph cannot load (the session simply renders no signals, like a
+/// failed ambient load).
 pub(crate) fn spawn_client_signals(
     commands: &mut Commands,
     vfs: &Vfs,
     stem: &str,
     owner: SessionEntity,
+    images: &mut Assets<Image>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-) -> Option<SignalAssets> {
+) -> bool {
     let build = match mm2_content::load_nav_graph(vfs, stem) {
         Ok(build) => build,
         Err(e) => {
             warn!(error = %e, "signal replica: nav graph failed — no signal heads");
-            return None;
+            return false;
         }
     };
-    let assets = SignalAssets::new(meshes, materials);
+    let assets = SignalAssets::load(vfs, stem, images, meshes, materials);
     let (heads, _dropped) = authored_signal_heads(&build.graph, &JunctionPolicy::default());
     for head in heads {
         let aspect = SignalAspect::of_phase(head.member, None, head.road, head.rule);
-        commands.spawn((
-            owner,
-            TrafficSignal {
-                junction: head.junction,
-                road: head.road,
-                rule: head.rule,
-                member: head.member,
-                aspect,
-            },
-            Mesh3d(assets.lamp().clone()),
-            MeshMaterial3d(assets.material(aspect).clone()),
-            Transform::from_translation(head.origin),
-            Visibility::Visible,
-        ));
+        spawn_signal_head(commands, owner, &assets, &head, aspect);
     }
-    Some(assets)
+    true
 }
 
-/// Keep every authored signal indicator's aspect in step with the
+/// Keep every authored signal head's aspect in step with the
 /// authoritative [`Junctions`] controller — runs after
 /// `drive_ambient` so the just-advanced phase is what the lamps show
 /// (F10-B.7). Rule admission only: a light member is green exactly
 /// while it holds the phase (red through the all-red clearance),
 /// `NeverStop`/unruled ends stay green, `StopSign` ends show the stop
 /// aspect, `AlwaysStop` ends stay red. The box-yield that holds cars
-/// behind a green is an obstruction rule, not a lamp state.
+/// behind a green is an obstruction rule, not a lamp state. The lamp
+/// meshes follow in [`sync_signal_lamps`].
 pub fn drive_signals(
     session: Res<Session>,
     traffic: Option<Res<AmbientTraffic>>,
-    mut signals: Query<(&mut TrafficSignal, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut signals: Query<&mut TrafficSignal>,
 ) {
     let Some(traffic) = traffic else { return };
     if session.authority_role() != AuthorityRole::Authority {
@@ -901,14 +1199,37 @@ pub fn drive_signals(
     // The junction's green is per-intersection — cache it rather than
     // rescanning the member set for every head at the junction.
     let mut greens: HashMap<u16, Option<u16>> = HashMap::new();
-    for (mut sig, mut material) in &mut signals {
+    for mut sig in &mut signals {
         let green = *greens
             .entry(sig.junction)
             .or_insert_with(|| traffic.junctions.green_road(&traffic.graph, sig.junction));
         let aspect = SignalAspect::of_phase(sig.member, green, sig.road, sig.rule);
         if aspect != sig.aspect {
             sig.aspect = aspect;
-            material.0 = traffic.signal_assets.material(aspect).clone();
+        }
+    }
+}
+
+/// Show exactly the lamp geometry the head's aspect lights: the
+/// original toggles authored glow meshes rather than recolouring one
+/// (WLD-35). Runs for heads whose aspect changed, on the authority and
+/// on a client applying the host's phase alike.
+pub fn sync_signal_lamps(
+    heads: Query<(&TrafficSignal, &Children), Changed<TrafficSignal>>,
+    mut lamps: Query<(&SignalLamp, &mut Visibility)>,
+) {
+    for (head, children) in &heads {
+        for child in children.iter() {
+            if let Ok((lamp, mut visibility)) = lamps.get_mut(child) {
+                let want = if lamp.0.lit(head.aspect) {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+                if *visibility != want {
+                    *visibility = want;
+                }
+            }
         }
     }
 }

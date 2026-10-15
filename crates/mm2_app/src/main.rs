@@ -1864,6 +1864,7 @@ fn main() {
                 traffic::drape_ambient,
                 traffic::maintain_ambient,
                 traffic::drive_signals,
+                traffic::sync_signal_lamps,
             )
                 .chain(),
         )

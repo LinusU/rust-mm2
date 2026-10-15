@@ -134,6 +134,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
                 mm2_app::traffic::drive_ambient,
                 mm2_app::traffic::maintain_ambient,
                 mm2_app::traffic::drive_signals,
+                mm2_app::traffic::sync_signal_lamps,
             )
                 .chain(),
         )

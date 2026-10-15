@@ -33,7 +33,7 @@ use mm2_net::{MAX_SNAP_SIGNALS, Message, SIGNAL_NO_GREEN, SnapSignal};
 
 use crate::net::HostLink;
 use crate::netdrive::RemoteSnaps;
-use crate::traffic::{AmbientTraffic, SignalAssets, TrafficSignal, fields_ambient_traffic};
+use crate::traffic::{AmbientTraffic, TrafficSignal, fields_ambient_traffic};
 use crate::worldclock::{PUBLISH_EVERY_TICKS, WorldClock};
 
 /// Generations the client-side inbox tracks at once, as the world
@@ -218,7 +218,7 @@ pub fn apply_signals(
     mut snaps: ResMut<RemoteSnaps>,
     session: Res<Session>,
     replica: Option<Res<SignalReplica>>,
-    mut signals: Query<(&mut TrafficSignal, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut signals: Query<&mut TrafficSignal>,
 ) {
     if session.authority_role().is_authority() {
         return;
@@ -234,14 +234,16 @@ pub fn apply_signals(
             return;
         }
     }
-    let Some(replica) = replica else { return };
+    if replica.is_none() {
+        return;
+    }
     let stage = &mut snaps.signals;
     let Some(rows) = stage.take_for(session.wire_generation()) else {
         return;
     };
     stage.landed += 1;
     let phases: HashMap<u16, u16> = rows.iter().map(|r| (r.junction, r.green)).collect();
-    for (mut sig, mut material) in &mut signals {
+    for mut sig in &mut signals {
         if sig.rule != Some(VehicleRule::TrafficLight) {
             continue;
         }
@@ -253,19 +255,15 @@ pub fn apply_signals(
         let aspect = SignalAspect::of_phase(sig.member, green, sig.road, sig.rule);
         if aspect != sig.aspect {
             sig.aspect = aspect;
-            material.0 = replica.assets.material(aspect).clone();
         }
         stage.heads_applied += 1;
     }
 }
 
-/// The client's signal world: the shared lamp mesh and per-aspect
-/// materials its heads draw with. Inserted by the session load on a
-/// `Remote` city session; removed with the session.
+/// Marks a `Remote` city session that renders the host's signal heads.
+/// Inserted by the session load; removed with the session.
 #[derive(Resource)]
-pub struct SignalReplica {
-    assets: SignalAssets,
-}
+pub struct SignalReplica;
 
 /// Build the client's signal world for `config`: nothing unless the
 /// session is a `Remote` city session that fields traffic. Spawns the
@@ -275,6 +273,7 @@ pub fn load_signal_replica(
     vfs: &Vfs,
     config: &SessionConfig,
     owner: SessionEntity,
+    images: &mut Assets<Image>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
@@ -288,10 +287,8 @@ pub fn load_signal_replica(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(psdl.as_str());
-    if let Some(assets) =
-        crate::traffic::spawn_client_signals(commands, vfs, stem, owner, meshes, materials)
-    {
-        commands.insert_resource(SignalReplica { assets });
+    if crate::traffic::spawn_client_signals(commands, vfs, stem, owner, images, meshes, materials) {
+        commands.insert_resource(SignalReplica);
     }
 }
 
@@ -349,12 +346,9 @@ mod tests {
         session.transition(SessionPhase::Ready).unwrap();
         session.transition(SessionPhase::Countdown).unwrap();
         session.transition(SessionPhase::Playing).unwrap();
-        let mut meshes = Assets::<Mesh>::default();
-        let mut materials = Assets::<StandardMaterial>::default();
-        let assets = SignalAssets::new(&mut meshes, &mut materials);
         app.insert_resource(session)
             .init_resource::<RemoteSnaps>()
-            .insert_resource(SignalReplica { assets })
+            .insert_resource(SignalReplica)
             .add_systems(Update, apply_signals);
         app
     }
@@ -369,34 +363,25 @@ mod tests {
         }
     }
 
-    /// The lamp component the apply query matches on — the client only
-    /// swaps the material handle it already holds.
-    fn lamp() -> MeshMaterial3d<StandardMaterial> {
-        MeshMaterial3d(Handle::default())
-    }
-
     #[test]
     fn a_client_takes_the_hosts_phase_for_its_light_heads() {
         let mut app = client(3);
-        let a = app.world_mut().spawn((head(0, 7, true), lamp())).id();
-        let b = app.world_mut().spawn((head(0, 8, true), lamp())).id();
+        let a = app.world_mut().spawn(head(0, 7, true)).id();
+        let b = app.world_mut().spawn(head(0, 8, true)).id();
         // A head whose road is not a member ignores the phase (the
         // green fallback), and a non-light head is not a phase consumer.
-        let c = app.world_mut().spawn((head(1, 9, false), lamp())).id();
+        let c = app.world_mut().spawn(head(1, 9, false)).id();
         let d = app
             .world_mut()
-            .spawn((
-                TrafficSignal {
-                    junction: 1,
-                    road: 10,
-                    rule: Some(VehicleRule::NeverStop),
-                    member: false,
-                    // As the client spawns it: a non-light head starts at
-                    // its phase-independent aspect.
-                    aspect: SignalAspect::Green,
-                },
-                lamp(),
-            ))
+            .spawn((TrafficSignal {
+                junction: 1,
+                road: 10,
+                rule: Some(VehicleRule::NeverStop),
+                member: false,
+                // As the client spawns it: a non-light head starts at
+                // its phase-independent aspect.
+                aspect: SignalAspect::Green,
+            },))
             .id();
         app.world_mut().resource_mut::<RemoteSnaps>().push_signals(
             3,
@@ -420,7 +405,7 @@ mod tests {
     #[test]
     fn a_light_head_at_an_unreported_junction_is_left_alone_and_counted() {
         let mut app = client(3);
-        let a = app.world_mut().spawn((head(5, 1, true), lamp())).id();
+        let a = app.world_mut().spawn(head(5, 1, true)).id();
         app.world_mut()
             .resource_mut::<RemoteSnaps>()
             .push_signals(3, 100, vec![row(0, 1)]);
@@ -437,7 +422,7 @@ mod tests {
     #[test]
     fn a_frame_of_another_generation_changes_nothing() {
         let mut app = client(3);
-        let a = app.world_mut().spawn((head(0, 1, true), lamp())).id();
+        let a = app.world_mut().spawn(head(0, 1, true)).id();
         app.world_mut()
             .resource_mut::<RemoteSnaps>()
             .push_signals(4, 100, vec![row(0, 1)]);

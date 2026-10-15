@@ -1811,6 +1811,7 @@ pub fn load_session_world(
             &vfs.0,
             &config,
             owner,
+            &mut assets.images,
             &mut assets.meshes,
             &mut assets.materials,
         );
