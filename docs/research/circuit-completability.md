@@ -122,3 +122,73 @@ side, not diagnosed here): london circuits 7 and 8 have 40-48 re-anchors
 per race, concentrated in the `vpdb7`/`vppanozgt` slots. No code change; the
 re-anchor recovery was not widened. Evidence level: synthetic integration
 (headless, retail data), no rendered check.
+
+## Re-measure of the remaining London circuits after the neural driver (#1402)
+
+The earlier re-measures in this file cover every sf circuit the audit left
+incomplete — sf circuit:2/5/6/7 (#1400) and sf circuit:8/9 (#1401). #1402
+named the remaining incomplete London circuits, london circuit:1/2/3/5 (5/6,
+2/6, 5/6 and 3/4 finished in the table above), so all ten London circuits
+were re-measured on `main` at `af2f87b`, release build, with the sweep's
+flags (`--headless --parked --no-profile --until-opponents --frames 43200`,
+i.e. up to 720 s of sim), both difficulties. Eight of the ten are listed
+below; the same sweep also re-ran 7/8/9 as an independent cross-check of
+#1403:
+
+| event | diff | finished | re-anchors | slowest finisher |
+|---|---|---:|---:|---:|
+| london circuit:0 | Amateur | 7/7 | 0 | 111.4 s |
+| london circuit:0 | Pro | 7/7 | 0 | 76.2 s |
+| london circuit:1 | Amateur | 6/6 | 1 | 169.9 s |
+| london circuit:1 | Pro | 6/6 | 0 | 114.0 s |
+| london circuit:2 | Amateur | 6/6 | 8 | 354.1 s |
+| london circuit:2 | Pro | 6/6 | 30 | 443.5 s |
+| london circuit:3 | Amateur | 6/6 | 5 | 278.9 s |
+| london circuit:3 | Pro | 6/6 | 6 | 293.6 s |
+| london circuit:4 | Amateur | 5/5 | 2 | 209.7 s |
+| london circuit:4 | Pro | 5/5 | 36 | 443.7 s |
+| london circuit:5 | Amateur | 4/4 | 0 | 218.2 s |
+| london circuit:5 | Pro | 4/4 | 9 | 234.0 s |
+| london circuit:6 | Amateur | 6/6 | 2 | 291.0 s |
+| london circuit:6 | Pro | 7/7 | 15 | 434.9 s |
+| london circuit:9 | Amateur | 6/6 | 1 | 496.9 s |
+| london circuit:9 | Pro | 6/6 | 6 | 294.3 s |
+
+The same run covered circuit:7/8/9 as an independent cross-check and agrees
+with #1403 to within a second: 7 finishes 6/6 and 6/6, 8 finishes 6/6 and 5/6
+(slot 4 `vppanozgt` at 7 of 12 gates when the 720 s cap hits; #1403 shows it
+finishes at 806 s), 9 finishes 6/6 and 6/6.
+
+Every opponent of all four circuits #1402 named now finishes: london
+circuit:1 6/6 at both difficulties, circuit:2 6/6 and 6/6, circuit:3 6/6 and
+6/6, circuit:5 4/4 and 4/4, all inside 597 s of sim (the slowest is circuit:2
+Professional at 443.5 s). The circuit:0/4/6 rows stay complete and the London
+rows above for circuit:7/8/9 are stale.
+
+### Route data versus controller
+
+`mm2_gym audit` is the route-defect screen: it walks every authored line and
+reports points it cannot be driven as drawn. Run for both cities on the same
+build, it names **no circuit line** — sf's entries are `race4/8/11` and
+London's are `race6`, `race8` and `circuit8` only. London circuit:1/2/3/5 have
+no entry: their `.opp` lines are drivable as drawn, so their earlier
+partial-finish stalls were the old scripted controller, not route data. That
+matches the sf conclusion in #1400/#1401. No code change and no route-data fix
+were needed for the four circuits this task named; the re-anchor recovery was
+not widened.
+
+### Residual signal (policy side, not diagnosed here)
+
+Nothing in the London circuit catalog fails to complete: circuit:8
+Professional is the only miss at the 720 s cap and #1403 shows it is slowness
+(slot 4 finishes at 806 s when given 86400 frames), not a stall. Two things
+are left for the owner. The re-anchor counts are high on circuits 7-8 (40-48 a
+race, concentrated in the `vpdb7`/`vppanozgt` slots). And `circuit8` is the one
+London circuit whose lines the route-defect screen flags — all six at the same
+place, a `wall` at arc 1572 (`at [127.9, -0.1, -238.5]`). Since every
+circuit:8 car completes laps, that entry is not a hard block; it is either a
+barrier the line can go around or a screen false positive, and is left as a
+note rather than a fix. The 12-minute result also disagrees with the aggregate
+44/44 race table in [neural-opponents.md](../neural-opponents.md) for
+circuit:8 Professional on current `main`, which is the same slowness #1403
+established.
