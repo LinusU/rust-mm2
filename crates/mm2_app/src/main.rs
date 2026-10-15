@@ -1418,6 +1418,12 @@ fn main() {
             );
             std::process::exit(smoke::SmokeStatus::Unavailable.exit_code());
         }
+    } else if !cli.headless && !display_available() {
+        // An interactive launch opens a window too; without a display
+        // winit's `create_window` panics (or never returns), so say why
+        // and leave with the same code a capture reports for it.
+        eprintln!("error: cannot open a window: {}", no_display_detail());
+        std::process::exit(smoke::SmokeStatus::Unavailable.exit_code());
     }
 
     // Headless physics smoke: no window, no GPU. Runs and exits here —
