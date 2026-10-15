@@ -55,3 +55,28 @@ rather than guessed. The re-anchor recovery was not widened.
 Not covered: the Professional block, a driving player, the lap model's
 original fidelity (UNK-11), and F14-AC02/03/05 (unit-level, tested
 elsewhere).
+
+## Re-measure after the neural opponent driver (#1400)
+
+The audit above was taken against the old scripted controller. After the
+neural driver landed (`docs/neural-opponents.md`), sf circuit:2/5/6/7 were
+re-run on main with the sweep's flags (`--headless --parked --no-profile
+--until-opponents --frames 43200`, release build, Amateur and `--pro`):
+
+| event | diff | finished | re-anchors | slowest finisher |
+|---|---|---|---|---|
+| sf circuit:2 | Amateur | 6/6 | 1 | 324 s |
+| sf circuit:2 | Pro | 6/6 | 4 | 262 s |
+| sf circuit:5 | Amateur | 7/7 | 0 | 135 s |
+| sf circuit:5 | Pro | 7/7 | 4 | 201 s |
+| sf circuit:6 | Amateur | 6/6 | 15 | 321 s |
+| sf circuit:6 | Pro | 6/6 | 70 | 517 s |
+| sf circuit:7 | Amateur | 6/6 | 10 | 268 s |
+| sf circuit:7 | Pro | 6/6 | 21 | 343 s |
+
+Every opponent completes every gate, so the earlier stalls were the old
+controller, not the `.opp` route data. No code change. Residual signal for
+the owner (not diagnosed here, policy side): sf circuit:6 has the most
+re-anchors (70 on Pro, the `vpdb7` slots at 12-21 each and finishing
+last), and circuit:7 shows 24-36 `d` (opp_drv columns unchanged). The
+re-anchor recovery was not widened.
