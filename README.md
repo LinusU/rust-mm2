@@ -410,7 +410,10 @@ for how MM2 tuning becomes a drivable car,
 [docs/neural-opponents.md](docs/neural-opponents.md) for the learned driver
 behind every race opponent and how it is trained,
 [docs/modding.md](docs/modding.md) for mod authoring, and
-[docs/research/](docs/research/) for format notes.
+[docs/research/](docs/research/) for format notes. Where the recreation
+stands against the original scope, and the evidence for it, is in
+[docs/coverage-audit.md](docs/coverage-audit.md) and the final acceptance
+runs in [docs/release-report.md](docs/release-report.md).
 
 ## Mods (summary)
 
