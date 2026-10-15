@@ -355,8 +355,17 @@ fn menu_app_with(dir: &Path, data: MenuData) -> App {
 }
 
 /// [`menu_app_with`] over a caller-built VFS — an install with mods
-/// mounted over it.
+/// mounted over it. The default shell drives the synthetic `vpt`; a
+/// retail-data journey over an install that ships no such car uses
+/// [`menu_app_vfs_car`].
 fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
+    menu_app_vfs_car(vfs, data, "vpt")
+}
+
+/// [`menu_app_vfs`] with the pending garage selection named — a
+/// carried-over choice the launch resolves against the mounted
+/// content.
+fn menu_app_vfs_car(vfs: Vfs, data: MenuData, car: &str) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -402,7 +411,7 @@ fn menu_app_vfs(vfs: Vfs, data: MenuData) -> App {
         })
         .insert_resource(MenuShell::new(
             VehicleSelection {
-                id: Some("vpt".to_string()),
+                id: Some(car.to_string()),
                 paint: 0,
             },
             Difficulty::Amateur,
@@ -7960,4 +7969,175 @@ fn a_cops_and_robbers_round_is_played_from_the_menu_and_left() {
     app.update();
     assert!(app.world().get_resource::<CnrHost>().is_none());
     assert!(shell(&app).active);
+}
+
+/// F31-B.5 / F31-AC03 (retail-data journey), original-content
+/// validation: the F31-B.1 menu journey over one real stock event.
+/// Needs the operator's install (`MM2_RETAIL=<dir>`); skipped without
+/// it, so CI (no retail data) never runs it.
+///
+/// A named driver picks the real "London's Calling" (London Blitz:0)
+/// from the production Events list; the session loads the authored
+/// `city/london.psdl` world and its `blitz0` course (3 gates + a
+/// finish on a 25 s clock) from retail data, and the production
+/// scripted evidence driver — the same `scripted::scripted_drive` the
+/// `--bot` CLI schedules — races the car to a real `Finished` result,
+/// moving the session to `Results` through the ordinary race runtime.
+///
+/// The scripted driver's result is record-ineligible (DSN-16): the
+/// driver is an evidence tool, not the player, so the profile is left
+/// uncredited and the session report says why. This leg therefore
+/// validates the retail menu → load → real course → results path at
+/// original-content level; an *eligible* retail reward leg — a
+/// human-driven finish banked to the profile — stays open
+/// (`docs/coverage-audit.md`).
+#[test]
+fn a_retail_stock_event_drives_from_the_menu_to_a_finished_result() {
+    use mm2_app::progression::SessionReport;
+    use mm2_app::scripted;
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::{RaceState, SessionOutcome};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    // `vpbug` is a stock car the install ships (`vpt` is the synthetic
+    // fixture's own test car and has no retail records).
+    let mut app = menu_app_vfs_car(
+        vfs,
+        MenuData::new(Some(store.clone()), false, None),
+        "vpbug",
+    );
+    // The binary's own fixed rate (FIXED_HZ): the scripted driver's
+    // evidence runs at 60 Hz, not the menu harness's 120 Hz default.
+    app.insert_resource(Time::<Fixed>::from_hz(60.0));
+    add_race_and_progression(&mut app);
+    // The `--bot` CLI in-process: the resource gates route picking at
+    // load, and the system owns the car's `VehicleInput` in Update.
+    app.add_message::<mm2_game::RecoveryEvent>()
+        .insert_resource(scripted::ScriptedDrive)
+        .add_systems(
+            Update,
+            scripted::scripted_drive.after(session::drive_session),
+        );
+    app.update();
+
+    // Profile: the first-run driver is named on the entry screen.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+    type_text(&mut app, "Ada");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Escape);
+    app.update();
+    let id = app
+        .world()
+        .get_resource::<ActiveProfile>()
+        .expect("naming a driver binds it")
+        .profile
+        .id
+        .clone();
+
+    // Load + race: the real Events list → London → Blitz → the authored
+    // row (a Blitz event, so it carries no unlock gate).
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "london");
+    activate_row(&mut app, "Blitz");
+    activate_row(&mut app, "London's Calling");
+    assert!(
+        run_until(&mut app, 40, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the stock event never launched: {:?}",
+        phase(&app)
+    );
+    let first = app.world().resource::<Session>().generation();
+
+    // The authored blitz0 course actually built: three gates plus a
+    // finish trigger, on the 25 s Amateur clock `mm2-inspect event`
+    // reads from the same retail row.
+    let def = app.world().resource::<RaceState>().definition.clone();
+    assert_eq!(def.checkpoints.len(), 3, "the authored blitz0 gate count");
+    assert!(def.finish.is_some(), "blitz0 authors a finish trigger");
+    assert_eq!(
+        def.time_limit_ticks,
+        Some(25 * mm2_game::RACE_TICK_HZ),
+        "the authored 25 s blitz limit"
+    );
+
+    // Drive: the scripted evidence driver races the real course to a
+    // finish. The `--bot` release-candidate leg finishes this event in
+    // 2400 app updates; allow generous headroom for the harness.
+    assert!(
+        run_until(&mut app, 8000, |a| phase(a) == SessionPhase::Results),
+        "the stock event never reached Results: {:?}",
+        phase(&app)
+    );
+
+    // A real finish, through the authoritative ledger: the local
+    // participant's own result, `Finished`, in this generation.
+    let me = local_player(&mut app);
+    let result = app
+        .world()
+        .resource::<ResultLedger>()
+        .iter()
+        .find(|r| r.id.generation == first && r.id.participant == me)
+        .cloned()
+        .expect("the local driver has a recorded result");
+    assert!(
+        matches!(result.outcome, SessionOutcome::Finished { .. }),
+        "the scripted driver finished the real course: {:?}",
+        result.outcome
+    );
+    assert!(
+        result.id.event.is_some(),
+        "the result is the authored event's"
+    );
+
+    // The finish is honest about the scripted driver: nothing is banked
+    // on the profile and the report says so (DSN-16).
+    app.update();
+    let report = app.world().resource::<SessionReport>().clone();
+    assert!(!report.recorded, "a scripted finish is not recorded");
+    assert_eq!(
+        report.note.as_deref(),
+        Some("scripted driver - records and rewards are not kept")
+    );
+    let saved = store.load(&id).unwrap().profile;
+    assert!(
+        saved
+            .progress
+            .events
+            .iter()
+            .all(|r| r.key.stem != "blitz0" || !r.is_beaten()),
+        "the scripted driver left the profile uncredited: {:?}",
+        saved.progress.events
+    );
+
+    // Restart: the results row begins a fresh generation, then quit
+    // returns to the menu.
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 40, |a| {
+            matches!(phase(a), SessionPhase::Countdown | SessionPhase::Playing)
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the restart never began: {:?}",
+        phase(&app)
+    );
+    quit_session(&mut app);
+    assert!(
+        run_until(&mut app, 40, |a| phase(a) == SessionPhase::Menu),
+        "quit never reached Menu: {:?}",
+        phase(&app)
+    );
+    app.update();
+    assert!(shell(&app).active, "the menu is back");
 }
