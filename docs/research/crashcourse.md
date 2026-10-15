@@ -458,10 +458,8 @@ any other sub-event of the lesson fires a call-out.
   `RuleError`, never a pass.
 - **Still not wired:** the lead's *goal direction* for `0x53d6c0`
   (the port infers the final route leg's heading — `docs/
-  original-rules.md` DSN-75), and the wreck-recovery (reset in place
-  after 3 s) policy for follow, cop chase and stop, which
-  `WreckPolicy` reports but nothing yet acts on versus
-  `DisabledOutcome::RestartEvent`.
+  original-rules.md` DSN-75). Wreck recovery on follow, cop chase
+  and stop is wired (F21-C.4, `mm2_app::damage::LessonWreck`).
 - **Per-gate call-outs (F21-B):** `mm2_game::lesson_callout_tables`
   binds the `cc_cpoint_*` pair for the `row == 4` lesson and
   `mm2_game::callout_suffix(add, indexinfo, row)` maps a cleared course
