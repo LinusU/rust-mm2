@@ -481,7 +481,7 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         "the control client asked nothing: {bob_rec}"
     );
 
-    assert_eq!(field(&alice_rec, "stop"), "resets", "{alice_rec}");
+    assert_eq!(stop_field(&alice_rec, "clean"), "resets", "{alice_rec}");
     // Not `assert_client_drove`: that one wants `moved > 0`, and the
     // reset is exactly what puts alice back at zero.
     assert_eq!(field(&alice_rec, "status"), "pass", "{alice_rec}");
@@ -561,7 +561,7 @@ fn a_scheduled_reset_comes_back_across_two_processes_on_an_impaired_link() {
     assert_eq!(field(&bob_rec, "status"), "pass", "{bob_rec}");
     assert_eq!(net_field(&bob_rec).requests_sent, 0, "{bob_rec}");
 
-    assert_eq!(field(&alice_rec, "stop"), "resets", "{alice_rec}");
+    assert_eq!(stop_field(&alice_rec, "impaired"), "resets", "{alice_rec}");
     assert_eq!(field(&alice_rec, "status"), "pass", "{alice_rec}");
     let alice_net = net_field(&alice_rec);
     assert!(

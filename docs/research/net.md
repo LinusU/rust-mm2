@@ -2244,8 +2244,9 @@ wire actually moved rather than an in-process mailbox's contents.
   cycle restarts the tick clock (a stale ledger would read the new
   zero-tick as "no time passed"). Now the full 12-ask budget fits inside
   a 6000-tick run (ticks 1200…2025), leaving `0.6^12` ≈ 0.2 %. The
-  matrix test also names the recipe and the missing stop instead of
-  panicking on the bare field. Evidence level: CI log (recipe + seed +
+  reset legs' `stop=` assertions now name the leg and the missing stop
+  (`resets=<n>`) instead of panicking on the bare field. Evidence level:
+  CI log (recipe + seed +
   ask count) + unit tests + a 50/50 local run of the matrix test.
 - **A remote driver's breakdown across processes (report 6 follow-up
   1, new-run iteration 11).** The policy and its in-process legs

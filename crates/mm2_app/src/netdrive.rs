@@ -261,9 +261,11 @@ pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
 /// of [`MAX_RESET_ASKS`] spent, and a heavy-loss recipe could drop every
 /// one of them (NET-SCHED-RESET-FLAKE). Counting session ticks spends
 /// the same budget whatever the run's speed. 75 ticks is the 1.25 s the
-/// cadence was tuned to at the 60 Hz fixed step, and it still outlasts
-/// [`RESET_REQUEST_COOLDOWN`] (1 s) so a retry never races a grant
-/// already in flight to the same seat.
+/// cadence was tuned to at the 60 Hz fixed step, so a real-time session
+/// retries after [`RESET_REQUEST_COOLDOWN`] (1 s). A faster-than-real-
+/// time evidence client can retry inside that wall-clock cooldown and
+/// have the ask dropped counted — harmless, because the grant's epoch
+/// rides every following `Snap`; the `latency` cell exercises it.
 pub const RESET_RETRY_TICKS: u64 = 75;
 
 /// Asks one press (or one scheduled reset) may send in total. The epoch
