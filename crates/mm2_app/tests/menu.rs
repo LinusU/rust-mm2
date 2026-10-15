@@ -7632,3 +7632,332 @@ fn cruise_conditions_survive_a_restart() {
         None
     );
 }
+
+/// The lesson journey install: the Crash Course fixture with the slalom
+/// gates faced down the +x lane (so a straight drive sweeps them) and
+/// `limit` seconds on the lesson's leg.
+fn lesson_install(limit: u32) -> tempfile::TempDir {
+    let tmp = crash_install();
+    let mut course = WAYPOINTS.to_string();
+    for x in [60.0f32, 110.0, 140.0, 165.0, 180.0] {
+        course.push_str(&format!("{x},0,140,-90,15,0,0,0,\n"));
+    }
+    write(tmp.path(), "race/testcity/slalom.csv", course);
+    let crashdata =
+        "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\n";
+    for stem in ["crash0", "crash1"] {
+        for suffix in ["data", "data_p"] {
+            write(
+                tmp.path(),
+                &format!("race/testcity/{stem}{suffix}.csv"),
+                format!("{crashdata}slalom,7,1,{limit},0.05,0,0,0,0,0,0\n"),
+            );
+        }
+    }
+    tmp
+}
+
+/// Production systems a lesson needs beyond a race's, as the binary
+/// schedules them.
+fn add_lesson_systems(app: &mut App) {
+    app.add_message::<mm2_vehicle::ResetVehicle>()
+        .add_systems(
+            FixedLast,
+            (
+                mm2_app::lesson::arm_stop_lead_damage,
+                mm2_app::lesson::drive_lesson,
+            )
+                .chain()
+                .after(mm2_app::race::advance_race)
+                .before(mm2_app::progression::record_session_results),
+        )
+        .add_systems(Update, mm2_vehicle::systems::vehicle_reset);
+}
+
+fn launch_lesson1(app: &mut App) {
+    activate_row(app, "Events");
+    activate_row(app, "testcity");
+    activate_row(app, "Crash Course");
+    activate_row(app, "Lesson 1");
+    assert!(
+        run_until(app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the lesson never launched: {:?}",
+        phase(app)
+    );
+}
+
+fn results_texts(app: &mut App) -> Vec<String> {
+    use mm2_app::results::ResultsUi;
+    app.update();
+    let mut q = app.world_mut().query_filtered::<&Text, With<ResultsUi>>();
+    q.iter(app.world()).map(|t| t.0.clone()).collect()
+}
+
+/// Leave the results overlay through its named row.
+fn results_row(app: &mut App, rows_down: usize) {
+    for _ in 0..rows_down {
+        press(app, KeyCode::ArrowDown);
+    }
+    press(app, KeyCode::Enter);
+}
+
+/// F31-B.3 / F31-AC03 (lesson), synthetic: one scripted run over the
+/// production menu → lesson → results → profile path with no direct
+/// state writes. A lesson left idle runs out its clock and fails
+/// (nothing is credited, the midterm stays shut), "Retry lesson" begins
+/// a fresh generation under a fresh lesson driver, driving the gates
+/// passes it (credited once on the saved profile, midterm opened), and
+/// "Continue to menu" returns to a menu that shows the midterm open.
+/// Open: the original evaluators and pass/fail rules per lesson
+/// (UNK-14/35, `docs/original-rules.md`) — this runs the self-authored
+/// gate-run fixture only.
+#[test]
+fn a_lesson_fails_retries_passes_and_returns_to_the_menu() {
+    let tmp = lesson_install(30);
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    add_race_and_progression(&mut app);
+    add_lesson_systems(&mut app);
+    app.update();
+
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+    type_text(&mut app, "Ada");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Escape);
+    app.update();
+    let id = app
+        .world()
+        .get_resource::<ActiveProfile>()
+        .expect("naming a driver binds it")
+        .profile
+        .id
+        .clone();
+    let lesson_passed = |store: &ProfileStore| {
+        store
+            .load(&id)
+            .unwrap()
+            .profile
+            .progress
+            .events
+            .iter()
+            .any(|r| r.key.stem == "crash0" && r.is_beaten())
+    };
+
+    // Launch and leave the car idle: the clock runs out.
+    launch_lesson1(&mut app);
+    let first = app.world().resource::<Session>().generation();
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::lesson::LessonDriver>()
+            .is_some()
+    );
+    let mut over = false;
+    for _ in 0..3000 {
+        app.update();
+        if phase(&app) == SessionPhase::Results {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "the idle lesson never ended: {:?}", phase(&app));
+    let shown = results_texts(&mut app);
+    assert!(
+        shown.iter().any(|t| t.starts_with("Lesson failed")),
+        "{shown:?}"
+    );
+    assert!(
+        shown.iter().any(|t| t.contains("Retry lesson")),
+        "{shown:?}"
+    );
+    assert!(!lesson_passed(&store), "a failed lesson credits nothing");
+
+    // Retry: a fresh generation with a fresh lesson run.
+    results_row(&mut app, 1);
+    assert!(
+        run_until(&mut app, 24, |a| {
+            matches!(phase(a), SessionPhase::Countdown | SessionPhase::Playing)
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the retry never began: {:?}",
+        phase(&app)
+    );
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::lesson::LessonDriver>()
+            .is_some_and(|d| !d.is_over()),
+        "the retry runs under a fresh lesson"
+    );
+
+    // Drive the gates: the lesson passes and is credited on disk.
+    assert!(drive_until_results(&mut app, 1500), "{:?}", phase(&app));
+    let shown = results_texts(&mut app);
+    assert!(
+        shown.iter().any(|t| t.starts_with("Lesson passed")),
+        "{shown:?}"
+    );
+    assert!(lesson_passed(&store), "the pass is saved before the menu");
+
+    // Continue: back at the menu the midterm is now open.
+    results_row(&mut app, 0);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::lesson::LessonDriver>()
+            .is_none()
+    );
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Crash Course");
+    let midterm = shell(&app)
+        .rows
+        .iter()
+        .find(|r| r.text == "Midterm 1")
+        .map(|r| r.enabled.clone())
+        .expect("the midterm is listed");
+    assert!(midterm.is_ok(), "{midterm:?}");
+}
+
+/// F31-B.3 / F31-AC03 (Cops & Robbers), synthetic: the production menu
+/// starts a single-player round, the production match systems seat the
+/// local car, driving to the gold picks it up (the rules own the grant),
+/// the clock running out decides the match, the results screen offers
+/// *Play again* into a fresh undecided match, and quitting returns to
+/// the menu with the match torn down. Open: what knocks gold loose,
+/// pickup radius, respawn and out-of-bounds are unrecovered original
+/// rules (UNK-10, `docs/original-rules.md`); the AI cops/robbers of a
+/// single-player round are not part of the rules core, so only the
+/// local seat is exercised.
+#[test]
+fn a_cops_and_robbers_round_is_played_from_the_menu_and_left() {
+    use mm2_app::cnr::{
+        CnrEvent, CnrHost, cnr_host_step, end_decided_match, enroll_cnr_participants,
+    };
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let mut app = menu_app(tmp.path(), None);
+    app.add_message::<CnrEvent>()
+        .add_systems(FixedLast, (enroll_cnr_participants, cnr_host_step).chain());
+    app.add_systems(Update, end_decided_match.after(session::drive_session));
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Limit:"); // 5 minutes
+    activate_row(&mut app, "Start match");
+    assert!(
+        run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing),
+        "the round never reached Playing: {:?}",
+        phase(&app)
+    );
+    let first = app.world().resource::<Session>().generation();
+
+    // The production step seats the local car on a side.
+    app.update();
+    let me = local_player(&mut app);
+    let seat = |app: &App| {
+        app.world()
+            .resource::<CnrHost>()
+            .game
+            .side_of(mm2_app::cnr::participant_id(
+                &mm2_game::Player {
+                    id: me,
+                    control: mm2_game::PlayerControl::Local,
+                },
+                None,
+            ))
+    };
+    assert!(seat(&app).is_some(), "the local car is seated");
+
+    // Drive at the gold; the production step grants the pickup.
+    let gold = app
+        .world()
+        .resource::<CnrHost>()
+        .game
+        .gold_position()
+        .expect("a fresh round has gold on the ground");
+    let me_id = mm2_app::cnr::participant_id(
+        &mm2_game::Player {
+            id: me,
+            control: mm2_game::PlayerControl::Local,
+        },
+        None,
+    );
+    // The car spawns past the gold facing away from it: back up to it.
+    let mut grabbed = false;
+    for _ in 0..1200 {
+        let car = app
+            .world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .iter(app.world())
+            .next()
+            .unwrap();
+        *app.world_mut()
+            .get_mut::<mm2_vehicle::VehicleInput>(car)
+            .unwrap() = mm2_vehicle::VehicleInput {
+            brake: 1.0,
+            ..default()
+        };
+        app.update();
+        if app.world().resource::<CnrHost>().game.carrier() == Some(me_id) {
+            grabbed = true;
+            break;
+        }
+    }
+    assert!(
+        grabbed,
+        "the car never picked the gold up (gold {gold:?}, carrier {:?})",
+        app.world().resource::<CnrHost>().game.carrier()
+    );
+
+    // Run the match clock out; the screen opens and offers a rematch.
+    {
+        let mut host = app.world_mut().resource_mut::<CnrHost>();
+        for _ in 0..(5 * 60 * mm2_game::RACE_TICK_HZ) {
+            host.game.tick();
+        }
+        assert!(host.game.outcome().is_some());
+    }
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Results);
+    let shown = results_texts(&mut app);
+    assert!(shown.iter().any(|t| t == "Cops & Robbers"), "{shown:?}");
+    assert!(shown.iter().any(|t| t.contains("Play again")), "{shown:?}");
+    results_row(&mut app, 1);
+    assert!(
+        run_until(&mut app, 24, |a| {
+            phase(a) == SessionPhase::Playing
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the rematch never started: {:?}",
+        phase(&app)
+    );
+    {
+        let host = app.world().resource::<CnrHost>();
+        assert!(host.game.outcome().is_none());
+        assert_eq!(
+            host.game.carrier(),
+            None,
+            "a fresh round starts empty-handed"
+        );
+    }
+
+    // Leave: the menu returns and the match is gone.
+    quit_session(&mut app);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    assert!(app.world().get_resource::<CnrHost>().is_none());
+    assert!(shell(&app).active);
+}
