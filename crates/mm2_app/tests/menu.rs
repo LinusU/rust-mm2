@@ -1889,6 +1889,113 @@ fn profiles_bind_create_and_delete() {
     );
 }
 
+/// F16-AC06: the delete confirmation is a deliberate gate — backing out
+/// (the `Cancel` row, and `Esc`/Back) returns to the profile list with
+/// every profile intact, the targeted one included, and the bound
+/// profile unchanged. Only a confirmed delete removes a profile, and it
+/// removes only the one the confirmation named.
+#[test]
+fn profiles_delete_confirmation_can_be_cancelled() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let bob = store
+        .create("Bob", Difficulty::Professional, ProfileKind::Standard)
+        .unwrap();
+    let carol = store
+        .create("Carol", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    // Bind Bob so the path has a bound profile a cancel must leave
+    // untouched — and which deleting a different profile must not
+    // disturb.
+    activate_row(&mut app, "Bob");
+    let active_before = store.active().unwrap();
+    assert_eq!(
+        active_before.as_ref().map(ProfileId::as_str),
+        Some(bob.id.as_str()),
+        "the setup binds Bob"
+    );
+
+    // X opens the confirmation — a deliberate step before any delete.
+    focus_row(&mut app, "Alice");
+    press(&mut app, KeyCode::KeyX);
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::ConfirmDelete { .. }),
+        "X should open the delete confirmation"
+    );
+
+    // Activating `Cancel` backs out to the profile list with the store
+    // untouched: the targeted profile and every other one still load,
+    // and the bound profile is unchanged.
+    activate_row(&mut app, "Cancel");
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::Profiles),
+        "Cancel returns to the profile list"
+    );
+    store
+        .load(&alice.id)
+        .expect("a cancelled delete keeps Alice");
+    store.load(&bob.id).expect("a cancelled delete keeps Bob");
+    store
+        .load(&carol.id)
+        .expect("a cancelled delete keeps Carol");
+    assert_eq!(
+        store.active().unwrap(),
+        active_before,
+        "a cancelled delete must not change the bound profile"
+    );
+
+    // `Esc` (Back) is the same deliberate back-out, driven from the open
+    // confirmation.
+    focus_row(&mut app, "Alice");
+    press(&mut app, KeyCode::KeyX);
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::ConfirmDelete { .. }),
+        "X reopens the confirmation for the Back leg"
+    );
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::Profiles),
+        "Back from the confirmation returns to the profile list"
+    );
+    store
+        .load(&alice.id)
+        .expect("a backed-out delete keeps Alice");
+    assert_eq!(
+        store.active().unwrap(),
+        active_before,
+        "Back must not change the bound profile"
+    );
+
+    // Only a confirmed delete removes a profile — and only the one the
+    // confirmation named; every other profile still loads.
+    focus_row(&mut app, "Alice");
+    press(&mut app, KeyCode::KeyX);
+    activate_row(&mut app, "Delete");
+    assert!(
+        store.load(&alice.id).is_err(),
+        "the confirmed delete removes the targeted profile"
+    );
+    store
+        .load(&bob.id)
+        .expect("the other profiles survive the delete");
+    store
+        .load(&carol.id)
+        .expect("the other profiles survive the delete");
+    assert_eq!(
+        store.active().unwrap(),
+        active_before,
+        "deleting a non-bound profile leaves the bound one alone"
+    );
+}
+
 /// F17-AC02: the Root difficulty row persists its pick on the bound
 /// profile — per driver, so switching profiles swaps both the displayed
 /// and effective difficulty, and re-binding a driver restores their own
