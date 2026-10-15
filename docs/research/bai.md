@@ -83,7 +83,9 @@ occupies each room.
   London's authored heads. `trafficLightAxis` is the cross-road unit
   vector described under *Traffic-signal units and the axis convention*
   below; the runtime preserves the pair verbatim, and the original's
-  signal-unit draw/state semantics remain unverified (UNK-12).
+  signal-unit *draw* (which variant, pole/arm placement) stays
+  unverified; its state timing is now recovered — see *Junction signal
+  timing and ambient population* below (UNK-12).
 - `london_sup.bai`/`sf_sup.bai` share the `CAI1` magic but do not fit
   this layout under either field reading — reported `unsupported`; their
   record structure is uninvestigated.
@@ -106,8 +108,11 @@ occupies each room.
 - `misc[40]` contents, `RoadEnd.unknown1`, the `fill0`/`END_FILL` fill
   values: **unknown**, preserved raw.
 - Semantics (how the runtime consumes lanes, lights, bubbles, ambient
-  types): **documented claims in R3**, runtime behavior unverified —
-  see `docs/original-rules.md` UNK-12.
+  types): **partly recovered** — signal phase timing, the `vehicleRule`
+  gate and the per-room cull-list population rule are read from
+  `Midtown2.exe` (see *Junction signal timing and ambient population*);
+  the rest stays at R3's documented claims, runtime behavior unverified
+  — see `docs/original-rules.md` UNK-12.
 
 ## Implementation
 
@@ -189,9 +194,128 @@ source.
 is 0 (1080 London, 758 SF — the `ends:` line), the intersection record is
 only `id`/`room`/`centre`/counterclockwise road list, and no `.aimap`
 section holds a phase or interval; the culling lists select *which* roads
-are simulated per room, not *when*. The original's phase length, all-red
-clearance, stop dwell and spawn ring are executable-only and stay
-unverified (UNK-12).
+are simulated per room, not *when* (they are the population rule — see
+*Junction signal timing and ambient population* below). The original's
+phase length, all-red clearance, stop dwell and population rule are
+executable-only; they are now recovered from `Midtown2.exe` and written
+up in the next section (UNK-12).
+
+## Junction signal timing and ambient population (F10-SIGNAL-TIMING, recovered 2026-10-15)
+
+Neither timing nor population distance is authored anywhere, so these
+values exist only in `Midtown2.exe`. They were read from the disassembly
+(image base `0x400000`, x86-32 PE32) and the Kuna v1.833 decompiler;
+every constant below is cited by address and re-readable with
+`llvm-objdump -d -M intel --start-address=<addr> Midtown2.exe`.
+
+### The signal controller
+
+A traffic-light controller is built per junction by `0x53c020` (vtable
+`0x5b4528`), reset by `0x53c440`, and ticked by `0x53c490` (vtable slot
+`+0x08`). Its fields:
+
+| Field | Meaning |
+| --- | --- |
+| `+0x18` | pointer array of member signal (lamp) objects |
+| `+0x1c` | the junction's intersection/road-list record |
+| `+0x22` u16 | index of the member currently holding the phase |
+| `+0x24` u16 | member (lamp) count |
+| `+0x26` u16 | control type (0/1/2 — selected once, below) |
+| `+0x28` u16 | all-red clearance in progress |
+| `+0x2c` f32 | phase length (s) |
+| `+0x30` f32 | phase timer (s) |
+
+A lamp object's state word is at `lamp+0x3c`: **3 = green**, **2 =
+amber**, **1 = red**, **4/5 = the all-red clearance** (5 during its
+second half). Recovered timings (`verified_original`):
+
+- **Phase = 6.0 s.** `0x53c04f` stores the literal `0x40c00000` into
+  `+0x2c`. The tick adds a fixed **1/60 s** step (`0x5cd820` =
+  `0x3c888889`) to the timer (`0x53c49c`, `0x53c4a3`) and advances when
+  the timer passes the phase length, so one phase is 360 ticks.
+- **Amber = 3.0 s.** During the phase's last 3 s — the test subtracts
+  `dat_5af4e8 = 3.0f` from the phase length at `0x53c61c` — the holding
+  lamp switches to amber (`lamp+0x3c = 2`, `0x53c640`).
+- **All-red clearance = one whole phase, 6.0 s**, for control types 1
+  and 2 only. When the member list wraps, the timer is reset to 0, the
+  `+0x28` flag is set and every lamp goes to state 4 (`0x53c4f4`–
+  `0x53c53f`); in its last 3 s (`0x53c689`–`0x53c69d`) they go to state
+  5; at the next phase boundary the update calls the reset method
+  (vtable slot `+0x0c`, `0x53c440`). A type-0 junction wraps straight to
+  the next member with no all-red (`0x53c517`).
+- The control type is chosen once in `0x53c160`: **type 2** when the
+  junction has four roads and the helpers `0x549d70()` and `0x549d40()`
+  both return 4; **type 1** when the lamp-member count equals
+  `0x549d40()`'s count; otherwise **type 0**. `0x549d40` counts roads
+  whose reverse end-ref (`+0x118`) points back at the junction (or whose
+  `+0x38` is set), `0x549d70` counts roads carrying a flag bit — the
+  exact flag is `inferred`.
+
+The `vehicleRule` code is decoded through the jump table at `0x540b54`
+inside `0x540a00`: **0 = StopSign** (`0x540aa3`), **1 = TrafficLight**
+(`0x540a64`), **2 = AlwaysStop** (`0x540b27`, which prints an
+"ERROR: Yield - Unsuported intersection control type" string — authored
+nowhere on retail),
+**3 = NeverStop** (`0x540a17`, returns "may proceed" unconditionally).
+The green test (`0x540a64`–`0x540aa0`) reads the approach's member index
+(`+0x11c` / `+0x140`), then the junction's controller
+(`[end+0x118]+0x20`), its lamp array (`+0x18`) and admits the approach
+iff the member's lamp state word is exactly 3. `specials.md` already
+records this same gate for the cable car.
+
+**A stop sign has no dwell timer.** `0x540aa3` requires the car nearly
+stopped — speed `< 0.5` (`dat_5af360 = 0x3f000000`) — and within `1.5 m`
+of the line (`dat_5b017c = 0x3fc00000`) before it may enqueue on a
+per-road-end first-come-first-served queue (`0x54a3a0` enqueues,
+`0x54a4c0` picks the head, called again each tick while waiting). A car
+that reaches the line without meeting *both* tests is simply told "no"
+that tick; the "dwell" the docs describe is the wait for the queue head,
+not a fixed timer. The head is the vehicle with the least per-vehicle
+value from vtable `+0x48` (an arrival/fairness value — the accessor is
+not pinned).
+
+### Ambient population: bubbles, not rings
+
+There is **no spawn/despawn distance ring**. The AI map manager keeps two
+per-room cull-list tables — a large bubble at `+0x174` and a small one at
+`+0x178` — each an array of `{ u16 count; u16 *roads }` entries indexed
+by room; `0x543dc0` allocates an entry's road list. On a player's room
+change the manager calls `0x539db0(old_room, new_room, player)`, which
+diffs the two rooms' lists and, per road, despawns cars that left the
+bubble (`0x547a30` tests, `0x547be0` pops) and spawns cars on roads that
+entered it. So the original's simulated set is exactly the authored
+per-room cull list this port already imports (the BAI bubble), not a
+radius around the player. Two placement constants sit inside `0x539db0`:
+
+- **Minimum separation = 50 m.** A candidate position is rejected while
+  any existing ambient-vehicle body is closer than `sqrt(dat_5aff6c)`;
+  the compared quantity is full 3-D squared distance and
+  `dat_5aff6c = 2500.0f` (`0x53a2f5`, `0x53a4cf`).
+- **Density scale = 0.2.** The map's ambient density is clamped to
+  `[0, 1]` (`dat_5af40c = 0.0f`, `dat_5af364 = 1.0f`) and multiplied by
+  `dat_5af618 = 0.2f` into the manager field `+0x3c` (`0x53551d`).
+
+The spawn loop also uses `dat_5af418 = 5.0f` (a spacing term) and a
+`10.0f` sine amplitude (`dat_5af428`) when it turns "distance into the
+road" into a spawn position, and walks the ambient-vehicle array at
+`+0x68`/`+0x6c` with a stride of **0x9794 bytes** (`0x25e5` dwords).
+
+### What remains unknown
+
+- Whether the two cull bubbles are the *only* population rule: the room
+  diff explains add/remove on a room change, but `0x539db0` also runs
+  from non-room-change paths (`0x53b6a4`/`0x53b74f`), so there is a
+  second trigger not yet identified.
+- The `[Ambient Types/Density]` flag/weight semantics and the pool size
+  (WLD-20) — this code sizes the pool but the flag is not decoded.
+- The stop-sign queue head's per-vehicle value (vtable `+0x48`).
+- Whether an amber/all-red lamp is shown via the state word alone or by
+  swapping the authored lamp geometry (the PKG lamp states above).
+- The port's `JunctionPolicy` stays a set of designed values; where they
+  now coincide with the original (`green_ticks` = 6 s) is deliberate,
+  and where they differ (`clear_ticks` = 1 s vs. a full 6 s phase, no
+  amber, a 0.75 s stop dwell vs. none, a 2.5 m stop inset vs. 1.5 m) is
+  a port choice still to reconcile — filed as a follow-up task.
 
 ## Lane direction and the navigation graph (F09-B.1)
 

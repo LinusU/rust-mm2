@@ -154,9 +154,10 @@ the session clock.
   the junction, and the Hermite it draws roads with, are not reproduced.
 - The controller (`CableMotion`) is the one above, step for step. The
   road-end answer is the ambient-traffic junction controller
-  (`Junctions::gate_approach`, the same gate lane followers use — its
-  signal timing is itself a designed value, UNK-12), or open when the
-  session has no ambient traffic. The car ahead is another cable car on
+  (`Junctions::gate_approach`, the same gate lane followers use — the
+  original's timing it approximates is recovered, F10-SIGNAL-TIMING /
+  `bai.md`, while the port's own values stay designed, UNK-12), or open
+  when the session has no ambient traffic. The car ahead is another cable car on
   the same circuit.
 - **Which side of a road a car runs on is a choice**: forward (with the
   sections) takes the right-side tram curve, backward the left, so cars

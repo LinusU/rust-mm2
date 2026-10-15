@@ -819,9 +819,15 @@ pub fn follow_speed(
 /// code on every road end (`mm2_formats::bai::RoadEnd::vehicle_rule`)
 /// documents `StopSign` ("longest waiting vehicle drives first"),
 /// `TrafficLight` ("one road at a time"), `AlwaysStop` and
-/// `NeverStop`. The timing and distance values are designed: the
-/// original's signal period, stop dwell, stop-line placement and
-/// entry clearance are unverified (UNK-12).
+/// `NeverStop`. The timing and distance values are this port's choices:
+/// the original's are recovered (`docs/research/bai.md`,
+/// F10-SIGNAL-TIMING) but not yet adopted here. The original runs a
+/// 6 s phase (so `green_ticks` matches), a 3 s amber the port does not
+/// draw, an all-red clearance of one whole phase rather than the port's
+/// one second, and **no stop dwell** — it admits a stop-signed car once
+/// it is nearly stopped within 1.5 m of the line, where the port waits
+/// `stop_dwell_ticks` after a 2.5 m `stop_inset`. Where each value
+/// differs from the original is called out in the ledger (UNK-12).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JunctionPolicy {
     /// Ticks each light-controlled member road holds green — at the
@@ -891,8 +897,10 @@ pub enum JunctionGate {
 }
 
 /// What an authored traffic signal shows, per
-/// [`Junctions::signal_aspect`] — a designed presentation mapping the
-/// approach's *rule* admission, not a recovered original display
+/// [`Junctions::signal_aspect`] — a presentation mapping the
+/// approach's *rule* admission, not the original's lamp states. The
+/// original's timing is recovered (F10-SIGNAL-TIMING,
+/// `docs/research/bai.md`) but its lamp *draw* is not reproduced
 /// (UNK-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalAspect {
