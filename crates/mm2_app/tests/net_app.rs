@@ -12254,3 +12254,221 @@ fn an_active_prop_moves_smoothly_between_the_hosts_frames() {
         "a blend toward a forward target never moves backward"
     );
 }
+
+/// F28-AC05 end to end: a client that joins a Cruise whose host has
+/// already run its authored movers for half a minute lands on the
+/// host's mover poses, not on their start phase. The clock frame is
+/// world state, not a per-vehicle row, so an actor kilometres from the
+/// joiner converges as well as one beside it. The host runs the
+/// production `capture_world_start`/`advance_world_clock` on a manual
+/// 60 Hz step, a ferry loop and an Underground train (past its
+/// station wait, so it is mid-run) as the actors; the joiner stamps
+/// the same actors at their start phase, then both are compared at the
+/// same world tick. Synthetic paths, real loopback socket.
+#[test]
+fn a_late_joiner_lands_on_the_hosts_ferry_and_train_phase() {
+    use mm2_app::movers::{Mover, MoverFamily, Train};
+    use mm2_app::worldclock::{
+        WorldClock, advance_world_clock, capture_world_start, replay_follower, replay_train,
+    };
+    use mm2_game::movers::{FERRY_SPEED, PathFollower, TRAIN_WAIT, TrainMotion};
+
+    const DT: f32 = 1.0 / 60.0;
+    // Half a minute of world time: past the train's wait, a few
+    // hundred metres into its run, and a ferry lap in progress.
+    const HOST_HEAD_START_TICKS: u64 = 60 * 30;
+    // The joiner's seat is at the origin; the actors are 20 km away.
+    const FAR: f32 = 20_000.0;
+
+    let ring = |n: usize, radius: f32| -> Vec<Vec3> {
+        (0..n)
+            .map(|i| {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                Vec3::new(FAR + radius * a.cos(), 0.0, radius * a.sin())
+            })
+            .collect()
+    };
+    let line: Vec<Vec3> = (0..9)
+        .map(|i| Vec3::new(FAR + i as f32 * 80.0, -13.0, 400.0))
+        .collect();
+    let stamp = |app: &mut App| {
+        let follower = PathFollower::new(ring(12, 150.0), FERRY_SPEED * 20.0).unwrap();
+        let ferry = app
+            .world_mut()
+            .spawn(Mover {
+                family: MoverFamily::Ferry,
+                follower,
+                lift: 0.0,
+            })
+            .id();
+        let train = app
+            .world_mut()
+            .spawn(Train {
+                motion: TrainMotion::new(&line).unwrap(),
+                cars: Vec::new(),
+                lift: 0.0,
+            })
+            .id();
+        (ferry, train)
+    };
+    let wire_clock = |app: &mut App| {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            f64::from(DT),
+        )))
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
+        .init_resource::<WorldClock>()
+        .add_systems(
+            FixedLast,
+            (capture_world_start, advance_world_clock).chain(),
+        );
+    };
+
+    // What `drive_movers` does each fixed step, minus the physics
+    // bodies this test has no use for.
+    let step_movers = |app: &mut App| {
+        let mut ferries = app.world_mut().query::<&mut Mover>();
+        for mut m in ferries.iter_mut(app.world_mut()) {
+            m.follower.advance(DT);
+        }
+        let mut trains = app.world_mut().query::<&mut Train>();
+        for mut t in trains.iter_mut(app.world_mut()) {
+            t.motion.step(DT);
+        }
+    };
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host = host_app(host_vfs, link);
+    wire_clock(&mut host);
+    // The host starts alone and runs its world on.
+    hosted_playing(&mut host);
+    let (host_ferry, host_train) = stamp(&mut host);
+    while host.world().resource::<WorldClock>().ticks < HOST_HEAD_START_TICKS {
+        host.update();
+        step_movers(&mut host);
+    }
+    let train_start = host
+        .world()
+        .get::<Train>(host_train)
+        .unwrap()
+        .motion
+        .car_pose(0)
+        .0;
+    assert!(
+        TRAIN_WAIT < 30.0 && train_start.x > FAR + 1.0,
+        "the host's train never left its station: {train_start}"
+    );
+
+    let client_link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "latecomer".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), client_link);
+    wire_clock(&mut client);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    // Bounded: the host owns the late join and the begin.
+    let mut begun = false;
+    for _ in 0..400 {
+        host.update();
+        client.update();
+        if session_phase(&client) != SessionPhase::Menu {
+            begun = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(begun, "the running session never reached the late joiner");
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let (client_ferry, client_train) = stamp(&mut client);
+    let at_start = client
+        .world()
+        .get::<Train>(client_train)
+        .unwrap()
+        .motion
+        .car_pose(0)
+        .0;
+    assert!(
+        at_start.distance(train_start) > 100.0,
+        "the joiner starts at the station, the host is {train_start}"
+    );
+
+    // Converge: the joiner's clock lands on the host's frame. Compare
+    // at the same world tick by replaying the host's recorded start to
+    // the joiner's tick — the host is the truth for the phase.
+    let mut converged = false;
+    for _ in 0..800 {
+        host.update();
+        step_movers(&mut host);
+        client.update();
+        step_movers(&mut client);
+        thread::sleep(Duration::from_millis(5));
+        let landed = client
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .world_seeks;
+        if landed > 0 {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "the host's clock frame never re-seeked the joiner"
+    );
+    // The queued seek is carried out by the next fixed step.
+    client.update();
+    step_movers(&mut client);
+    let ticks = client.world().resource::<WorldClock>().ticks;
+    assert!(
+        ticks >= HOST_HEAD_START_TICKS,
+        "the joiner's clock is at {ticks}, not the host's"
+    );
+    let client_ferry_now = client.world().get::<Mover>(client_ferry).unwrap();
+    let client_train_now = client.world().get::<Train>(client_train).unwrap();
+    // The joiner's pose is its start replayed to its tick (the seek's
+    // law), and that tick is the host's world time within the
+    // tolerance, so it is where the host's actors stand now.
+    let drift = host.world().resource::<WorldClock>().ticks.abs_diff(ticks);
+    assert!(
+        drift <= 4 * mm2_app::worldclock::SYNC_TOLERANCE_TICKS + 20,
+        "clocks differ by {drift} ticks"
+    );
+    // Walk the host's actors to the joiner's tick for an exact compare.
+    let host_ferry_start = host
+        .world()
+        .get::<mm2_app::worldclock::WorldStart<PathFollower>>(host_ferry)
+        .unwrap()
+        .0
+        .clone();
+    let host_train_start = host
+        .world()
+        .get::<mm2_app::worldclock::WorldStart<TrainMotion>>(host_train)
+        .unwrap()
+        .0
+        .clone();
+    let want_ferry = replay_follower(&host_ferry_start, ticks, DT).pose().0;
+    let want_train = replay_train(&host_train_start, ticks, DT).car_pose(0).0;
+    let tolerance = 3.0;
+    let ferry_gap = client_ferry_now.follower.pose().0.distance(want_ferry);
+    let train_gap = client_train_now.motion.car_pose(0).0.distance(want_train);
+    assert!(
+        ferry_gap < tolerance && train_gap < tolerance,
+        "ferry off by {ferry_gap} m, train off by {train_gap} m at tick {ticks}"
+    );
+    assert!(
+        client_train_now.motion.car_pose(0).0.distance(at_start) > 100.0,
+        "the joiner's train is still at its station"
+    );
+}
