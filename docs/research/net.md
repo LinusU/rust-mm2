@@ -2182,8 +2182,9 @@ wire actually moved rather than an in-process mailbox's contents.
   drove both of her follower wheels (`xwhl=2/2`); the host granted the
   ask (`req1g`) and kept no trailer (`live0`). 5/5 isolated passes
   (~2 s). Advances F25-AC05's extra-wheel-presentation half; still open:
-  the lossy reset, trailer reverse presentation, reset-while-moving
-  divergence. Loopback, dev world with a retail vehicle.
+  the lossy reset and reset-while-moving divergence (a trailer has no
+  authored reverse presentation to assert, DSN-119). Loopback, dev world
+  with a retail vehicle.
 - **Reset on an impaired link (F25-C.5).** The ask is one frame, and a
   lossy link may eat it — which the first leg could not survive. The
   scheduled ask now behaves like a driver whose `R` seemed to do
