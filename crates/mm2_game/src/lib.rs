@@ -148,7 +148,7 @@ pub use traffic::{
     Junctions, KnockPolicy, LaneAdvance, LaneCursor, SignalAspect, SpawnDirective, SpawnDraw,
     SpawnPolicy, StuckPolicy, StuckWindow, TrafficIssue, advance_lane_cursor, corridor_gap,
     draw_spawn, eligible_lanes, follow_speed, in_spawn_band, inside_junction_zone, junction_speed,
-    junction_zone, plan_ambient, spawn_occupied, within_interest,
+    junction_zone, plan_ambient, spawn_occupied, too_close_to_ambient, within_interest,
 };
 
 /// What the app should do at startup.

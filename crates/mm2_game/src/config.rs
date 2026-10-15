@@ -683,6 +683,12 @@ pub struct DevOverrides {
     /// the recovered ×32 default (evidence/diagnostic runs — never a
     /// session-legal parameter).
     pub banger_pool: Option<usize>,
+    /// Replaces the recovered 50 m minimum ambient spawn separation
+    /// (`SpawnPolicy::min_ambient_separation`) — synthetic fixture
+    /// cities are a few tens of metres across and cannot host two
+    /// cars 50 m apart. Programmatic only (no CLI flag); never a
+    /// session-legal parameter.
+    pub ambient_separation: Option<f32>,
     /// `--traction` fixed environment traction multiplier applied to
     /// every tire contact: pins the session's modifier outright for
     /// evidence runs — it *overrides* the weather-derived wetness

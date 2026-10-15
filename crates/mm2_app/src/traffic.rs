@@ -943,7 +943,10 @@ pub fn load_ambient_traffic(
         .or(authored_density)
         .or(setup.city_density)
         .unwrap_or(config.densities.traffic);
-    let policy = SpawnPolicy::default();
+    let mut policy = SpawnPolicy::default();
+    if let Some(separation) = config.dev.ambient_separation {
+        policy.min_ambient_separation = separation;
+    }
     let interest_set: Vec<[f32; 3]> = interest.iter().map(|p| p.to_array()).collect();
     let plan = plan_ambient(
         &build.graph,

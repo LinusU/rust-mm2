@@ -1229,6 +1229,7 @@ fn main() {
             nav_overlay: nav_overlay_cfg,
             spawn: spawn_pose,
             banger_pool: cli.banger_pool,
+            ambient_separation: None,
             traction,
             pause: cli.pause,
             pause_map: cli.pause_map,

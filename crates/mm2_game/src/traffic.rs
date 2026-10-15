@@ -170,9 +170,16 @@ impl AmbientRoster {
 }
 
 /// Spawn/despawn policy constants the ambient system runs under.
-/// All values are designed defaults: the original's ambient pool size
-/// and bubble distances are unverified, so these are implementation
-/// choices, not recovered rules.
+/// The original's ambient pool size and bubble distances are
+/// unverified, so those are designed implementation choices.
+/// `min_ambient_separation` is recovered (`docs/research/bai.md`,
+/// F10-SIGNAL-TIMING): a new ambient car sits >= 50 m from every
+/// existing one (`dat_5aff6c = 2500.0f` squared, `0x53a2f5`). The
+/// original has no spawn ring — its simulated set is the authored
+/// per-room cull bubble (`0x539db0`) — and maps density as
+/// `clamp(density, 0, 1) * 0.2` (`dat_5af618`, `0x53551d`); the port
+/// keeps its designed `max_active` scaling instead, because the
+/// original's pool size the 0.2 multiplies is unrecovered (UNK-12).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnPolicy {
     /// Bound on simultaneously active ambient vehicles — the density
@@ -206,6 +213,13 @@ pub struct SpawnPolicy {
     /// Vertical exclusion (m) — a car on an overpass above the spawn
     /// point does not occupy it.
     pub spawn_max_rise: f32,
+    /// Minimum distance (m) from a new spawn to every occupied point
+    /// — live ambient cars and earlier placements (participants are
+    /// already held `min_player_distance` away). Recovered from
+    /// `Midtown2.exe`: `dat_5aff6c = 2500.0f` is a squared 50 m,
+    /// tested at `0x53a2f5`. Whether the original measures in 3D or
+    /// on the ground plane is unrecovered; the port uses 3D.
+    pub min_ambient_separation: f32,
 }
 
 impl Default for SpawnPolicy {
@@ -218,6 +232,7 @@ impl Default for SpawnPolicy {
             spawn_clearance: 5.0,
             spawn_half_width: 2.0,
             spawn_max_rise: 3.0,
+            min_ambient_separation: 50.0,
         }
     }
 }
@@ -436,6 +451,26 @@ pub fn spawn_occupied(sample: &LaneSample, occupied: &[[f32; 3]], policy: &Spawn
     })
 }
 
+/// Whether `sample` is within `policy.min_ambient_separation` of an
+/// occupied point — the original's 50 m squared-distance spawn test
+/// (`dat_5aff6c`, `0x53a2f5`; `docs/research/bai.md`).
+pub fn too_close_to_ambient(
+    sample: &LaneSample,
+    occupied: &[[f32; 3]],
+    policy: &SpawnPolicy,
+) -> bool {
+    let min = policy.min_ambient_separation.max(0.0);
+    let min2 = min * min;
+    occupied.iter().any(|o| {
+        let d = [
+            o[0] - sample.position[0],
+            o[1] - sample.position[1],
+            o[2] - sample.position[2],
+        ];
+        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < min2
+    })
+}
+
 /// Whether `position` lies inside the union of player interest areas
 /// the spawn band declares (F10 spec req 2): within
 /// `policy.recycle_distance` of *at least one* interest point — inside
@@ -499,7 +534,8 @@ pub fn draw_spawn(
     }
     // Rejected before the class pick so an occupied spot never burns
     // a roster draw.
-    if spawn_occupied(&sample, occupied, policy) {
+    if spawn_occupied(&sample, occupied, policy) || too_close_to_ambient(&sample, occupied, policy)
+    {
         return SpawnDraw::Occupied;
     }
     match roster.pick(rng) {
@@ -819,15 +855,22 @@ pub fn follow_speed(
 /// code on every road end (`mm2_formats::bai::RoadEnd::vehicle_rule`)
 /// documents `StopSign` ("longest waiting vehicle drives first"),
 /// `TrafficLight` ("one road at a time"), `AlwaysStop` and
-/// `NeverStop`. The timing and distance values are this port's choices:
-/// the original's are recovered (`docs/research/bai.md`,
-/// F10-SIGNAL-TIMING) but not yet adopted here. The original runs a
-/// 6 s phase (so `green_ticks` matches), a 3 s amber the port does not
-/// draw, an all-red clearance of one whole phase rather than the port's
-/// one second, and **no stop dwell** — it admits a stop-signed car once
-/// it is nearly stopped within 1.5 m of the line, where the port waits
-/// `stop_dwell_ticks` after a 2.5 m `stop_inset`. Where each value
-/// differs from the original is called out in the ledger (UNK-12).
+/// `NeverStop`.
+///
+/// Recovered from `Midtown2.exe` (F10-SIGNAL-TIMING,
+/// `docs/research/bai.md`, `verified_original`): a 6 s phase
+/// (`0x53c04f`, ticked at 1/60 s `0x53c490`) → `green_ticks`; an
+/// all-red clearance of one whole phase, 6 s, for control types 1 and
+/// 2 (`0x53c4f4`–`0x53c53f`) → `clear_ticks`; **no stop dwell** — a
+/// stop-signed car joins the FCFS queue once nearly stopped
+/// (< 0.5 m/s, `dat_5af360`, `0x5af360`) within 1.5 m of the line
+/// (`dat_5b017c`, `0x5b017c`) → `stop_dwell_ticks = 0`, `stop_inset`.
+/// The original also shows a 3 s amber in the last third of a phase
+/// (`dat_5af4e8`, `0x53c61c`, lamp state 2); the port models no amber
+/// — it is presentation only and the amber cars still hold their
+/// green here. Everything else (`stop_line_tolerance`, approach ramp,
+/// decel, entry clearance, box sizing) stays designed/unrecovered
+/// (UNK-12).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JunctionPolicy {
     /// Ticks each light-controlled member road holds green — at the
@@ -836,8 +879,9 @@ pub struct JunctionPolicy {
     /// All-red clearance ticks between member greens, so a crossing
     /// car clears the junction before the next road is admitted.
     pub clear_ticks: u64,
-    /// Ticks a car must stand at a stop sign before it may take the
-    /// junction — the "stop" half of the documented stop-sign rule.
+    /// Ticks a car must queue at a stop sign before it may take the
+    /// junction. Original: none (0) — standing at the line is the
+    /// whole "stop" (`0x5af360`/`0x5b017c`); kept as a knob.
     pub stop_dwell_ticks: u64,
     /// Distance before the lane end marking the stop line (m) — about
     /// a car half-length, so a held car's nose stays out of the box.
@@ -872,9 +916,9 @@ impl Default for JunctionPolicy {
     fn default() -> Self {
         Self {
             green_ticks: 6 * u64::from(crate::race::RACE_TICK_HZ),
-            clear_ticks: u64::from(crate::race::RACE_TICK_HZ),
-            stop_dwell_ticks: 3 * u64::from(crate::race::RACE_TICK_HZ) / 4,
-            stop_inset: 2.5,
+            clear_ticks: 6 * u64::from(crate::race::RACE_TICK_HZ),
+            stop_dwell_ticks: 0,
+            stop_inset: 1.5,
             stop_line_tolerance: 0.1,
             approach_time: 1.0,
             decel: 9.0,

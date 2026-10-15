@@ -597,6 +597,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("spawn"))
     } else if dev.banger_pool.is_some() {
         Err(Ineligible::DevOverride("banger-pool"))
+    } else if dev.ambient_separation.is_some() {
+        Err(Ineligible::DevOverride("ambient-separation"))
     } else if dev.traction.is_some() {
         // No value-based exemption is possible: `Some(1.0)` is not a
         // guaranteed no-op — it dries a session whose effective

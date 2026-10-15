@@ -52,6 +52,15 @@ fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
 /// the 60 m spawn bubble does not cover the whole ~110 m fixture
 /// network — `dev.spawn` is the designed escape hatch for exactly
 /// this kind of evidence run.
+/// No dev pose, but the fixture city is ~100 m across: the recovered
+/// 50 m ambient separation would field one car.
+fn fixture_dev() -> DevOverrides {
+    DevOverrides {
+        ambient_separation: Some(0.0),
+        ..DevOverrides::default()
+    }
+}
+
 fn city_config() -> SessionConfig {
     SessionConfig {
         world: WorldMode::City {
@@ -62,7 +71,7 @@ fn city_config() -> SessionConfig {
                 position: Vec3::new(0.0, 1.5, 200.0),
                 yaw: 0.0,
             }),
-            ..DevOverrides::default()
+            ..fixture_dev()
         },
         ..SessionConfig::default()
     }
@@ -453,7 +462,7 @@ fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
         config.authority = authority;
         // Dev overrides are not network-legal (the lobby refuses to
         // advertise them) — the networked legs run a clean config.
-        config.dev = DevOverrides::default();
+        config.dev = fixture_dev();
         let mut app = test_app(config, vfs_of(install.path()));
         assert!(
             run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
@@ -556,7 +565,7 @@ fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
 fn client_app(install: &Path) -> App {
     let mut config = city_config();
     config.authority = SessionAuthority::Remote;
-    config.dev = DevOverrides::default();
+    config.dev = fixture_dev();
     let mut app = test_app(config, vfs_of(install));
     app.init_resource::<mm2_app::netdrive::RemoteSnaps>();
     app.add_systems(Update, mm2_app::worldtraffic::apply_traffic);
@@ -663,7 +672,7 @@ fn a_client_copies_the_hosts_traffic_and_retires_it_when_frames_stop() {
     let install = city_install();
     let mut config = city_config();
     config.authority = SessionAuthority::Host;
-    config.dev = DevOverrides::default();
+    config.dev = fixture_dev();
     let mut host = test_app(config, vfs_of(install.path()));
     let mut client = client_app(install.path());
     assert!(run_until(&mut host, 12, |a| phase_is(
@@ -836,7 +845,7 @@ fn the_traffic_copies_converge_through_each_impairment_cell() {
     for (index, (name, impair)) in crate::support::impair_cells().into_iter().enumerate() {
         let mut config = city_config();
         config.authority = SessionAuthority::Host;
-        config.dev = DevOverrides::default();
+        config.dev = fixture_dev();
         let mut host_sim = test_app(config, vfs_of(install.path()));
         let mut client_sim = client_app(install.path());
         assert!(run_until(&mut host_sim, 12, |a| phase_is(
@@ -1038,7 +1047,7 @@ fn a_client_copies_the_hosts_cable_car_and_a_late_joiner_finds_it_in_place() {
     ambient_assets(install.path(), "va_cablecar_f");
     let mut config = city_config();
     config.authority = SessionAuthority::Host;
-    config.dev = DevOverrides::default();
+    config.dev = fixture_dev();
     let mut host = test_app(config, vfs_of(install.path()));
     let mut client = client_app(install.path());
     assert!(run_until(&mut host, 12, |a| phase_is(
@@ -1137,7 +1146,7 @@ fn a_client_without_the_cable_model_counts_the_rows_and_spawns_nothing() {
     let install = city_install();
     let mut config = city_config();
     config.authority = SessionAuthority::Host;
-    config.dev = DevOverrides::default();
+    config.dev = fixture_dev();
     let mut host = test_app(config, vfs_of(install.path()));
     let mut client = client_app(install.path());
     assert!(run_until(&mut host, 12, |a| phase_is(
@@ -2445,7 +2454,7 @@ fn a_red_window_holds_the_approach_until_its_road_greens() {
         }
         if green != Some(0) {
             red_ticks += 1;
-            assert!(pos.z < -6.4, "crossed the stop line on red: {pos:?}");
+            assert!(pos.z < -5.4, "crossed the stop line on red: {pos:?}");
             stood_at_line |= cur.along >= 23.0 && speed <= 1.0;
         }
     }
@@ -2750,7 +2759,10 @@ fn respawns_reject_space_a_live_car_occupies() {
 
     // Control: the same session under the default box refills — the
     // rejection above was the box, not a broken respawner.
-    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy::default();
+    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy {
+        min_ambient_separation: 0.0,
+        ..SpawnPolicy::default()
+    };
     run(&mut app, 120);
     assert!(
         app.world().resource::<AmbientTraffic>().spawned > spawned0,
@@ -2800,7 +2812,10 @@ fn respawns_reject_space_a_participant_occupies() {
     assert!(ambient_cars(&mut app).is_empty(), "no respawn may land");
 
     // Same control: the default box refills again.
-    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy::default();
+    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy {
+        min_ambient_separation: 0.0,
+        ..SpawnPolicy::default()
+    };
     run(&mut app, 120);
     assert!(
         app.world().resource::<AmbientTraffic>().spawned > spawned0,
@@ -2857,7 +2872,7 @@ fn a_participant_in_the_box_yields_the_green_approach() {
         };
         let (pos, speed, cur) = car_state(&mut app, car).expect("the yielded car despawned");
         assert_eq!(cur.lane, lane_r0, "entered an occupied box");
-        // The stop line sits at z = −6.5; the lane end at −4. Held at
+        // The stop line sits at z = −5.5 (1.5 m inset); the lane end at −4. Held at
         // the line means z < −5 — the occupied-exit revert alone would
         // leave the car oscillating at the lane end (along ≈ 26).
         assert!(
@@ -2865,7 +2880,7 @@ fn a_participant_in_the_box_yields_the_green_approach() {
             "past the stop line inside an occupied box: {pos:?}"
         );
         assert!(
-            cur.along <= 24.0,
+            cur.along <= 25.0,
             "oscillating at the lane end — the yield never ran: {cur:?}"
         );
         if green == Some(0) && cur.along >= 23.0 && speed <= 1.0 {
@@ -2918,7 +2933,7 @@ fn an_ambient_car_in_the_box_yields_the_stop_sign_head() {
         let (pos, speed, cur) = car_state(&mut app, car).expect("the yielded car despawned");
         assert_eq!(cur.lane, lane_r0, "entered an occupied box");
         assert!(
-            cur.along <= 24.0,
+            cur.along <= 25.0,
             "held at the lane end instead of the stop line — the yield never ran: {cur:?}"
         );
         assert!(
@@ -4223,7 +4238,7 @@ fn a_knocked_wreck_occupies_the_junction_box() {
             "past the stop line inside an occupied box: {pos:?}"
         );
         assert!(
-            cur.along <= 24.0,
+            cur.along <= 25.0,
             "oscillating at the lane end — the yield never ran: {cur:?}"
         );
         if green == Some(0) && cur.along >= 23.0 && speed <= 1.0 {
@@ -4412,7 +4427,7 @@ fn a_remote_client_renders_the_authored_signal_heads() {
     config.authority = SessionAuthority::Remote;
     // Dev overrides are not network-legal — the lobby refuses to
     // advertise them, so a real client runs a clean config.
-    config.dev = DevOverrides::default();
+    config.dev = fixture_dev();
     let mut app = test_app(config, vfs_of(install.path()));
     assert!(run_until(&mut app, 12, |a| phase_is(
         a,

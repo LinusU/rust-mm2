@@ -119,6 +119,16 @@ fn bai(roads: Vec<Road>) -> Bai {
 }
 
 /// Two parallel vehicle roads (0 and 1), each 100 m long.
+/// The default policy with the recovered 50 m ambient separation
+/// off: the fixture networks are a few tens of metres across, so the
+/// separation would admit one car. The separation has its own tests.
+fn fixture_spawn_policy() -> SpawnPolicy {
+    SpawnPolicy {
+        min_ambient_separation: 0.0,
+        ..SpawnPolicy::default()
+    }
+}
+
 fn two_roads() -> NavGraph {
     NavGraph::build(&bai(vec![road_x(0, 0.0, 0), road_x(1, 20.0, 0)])).graph
 }
@@ -332,7 +342,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         42,
         0.5,
         &[CLEAR],
-        &SpawnPolicy::default(),
+        &fixture_spawn_policy(),
     );
     let b = plan_ambient(
         &g,
@@ -341,7 +351,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         42,
         0.5,
         &[CLEAR],
-        &SpawnPolicy::default(),
+        &fixture_spawn_policy(),
     );
     assert_eq!(a.spawns, b.spawns, "same seed must replay identically");
     assert_eq!(a.spawns.len(), a.target);
@@ -353,7 +363,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         7,
         0.5,
         &[CLEAR],
-        &SpawnPolicy::default(),
+        &fixture_spawn_policy(),
     );
     assert_ne!(a.spawns, c.spawns, "different seed, different draw");
 }
@@ -364,7 +374,7 @@ fn plan_bounds_output_and_scales_with_density() {
     let r = roster(&[("va_a", 1.0)]);
     let policy = SpawnPolicy {
         max_active: 10,
-        ..SpawnPolicy::default()
+        ..fixture_spawn_policy()
     };
     let full = plan_ambient(&g, &NavOverrides::default(), &r, 1, 1.0, &[CLEAR], &policy);
     assert_eq!(full.target, 10);
@@ -381,7 +391,7 @@ fn plan_bounds_output_and_scales_with_density() {
 #[test]
 fn plan_honours_closed_roads_and_pedestrian_only_sides() {
     let r = roster(&[("va_a", 1.0)]);
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
 
     // Road 0 closed by the event overrides: every spawn lands on road 1.
     let g = two_roads();
@@ -413,7 +423,7 @@ fn plan_honours_closed_roads_and_pedestrian_only_sides() {
 #[test]
 fn plan_flags_unspawnable_and_empty_rosters() {
     let g = two_roads();
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
 
     // A class with no resolved tuning stays in the weight table; draws
     // landing on it spawn nothing and report once per id.
@@ -457,7 +467,7 @@ fn plan_never_spawns_inside_the_player_bubble() {
     // every directive drops rather than materialising on the player.
     let policy = SpawnPolicy {
         min_player_distance: 200.0,
-        ..SpawnPolicy::default()
+        ..fixture_spawn_policy()
     };
     let plan = plan_ambient(
         &g,
@@ -472,7 +482,7 @@ fn plan_never_spawns_inside_the_player_bubble() {
     assert_eq!(plan.dropped, plan.target);
 
     // With a sane bubble every surviving spawn is outside it.
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
     let player = [10.0, 0.0, 50.0];
     let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[player], &policy);
     for s in &plan.spawns {
@@ -547,7 +557,7 @@ fn plan_skips_non_finite_lane_geometry() {
         &[CLEAR],
         &SpawnPolicy {
             max_active: 12,
-            ..SpawnPolicy::default()
+            ..fixture_spawn_policy()
         },
     );
     assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
@@ -593,7 +603,7 @@ fn plan_skips_roads_with_non_finite_scalars_and_frames() {
         &[CLEAR],
         &SpawnPolicy {
             max_active: 12,
-            ..SpawnPolicy::default()
+            ..fixture_spawn_policy()
         },
     );
     assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
@@ -852,7 +862,7 @@ fn a_crossing_preserves_lane_rank() {
 fn plan_never_spawns_beyond_the_recycle_radius() {
     let g = two_roads();
     let r = roster(&[("va_a", 1.0)]);
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
     // The whole network sits past 400 m — every attempt is out of
     // band, so the directives drop rather than spawning churn.
     let plan = plan_ambient(
@@ -896,7 +906,7 @@ fn plan_never_spawns_beyond_the_recycle_radius() {
 /// `within_interest` is the matching any-bubble survival test.
 #[test]
 fn spawn_band_is_the_union_of_player_interest_areas() {
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
     let a = [0.0, 0.0, 0.0];
     let b = [350.0, 0.0, 0.0];
 
@@ -933,7 +943,7 @@ fn spawn_band_is_the_union_of_player_interest_areas() {
 fn plan_populates_through_any_interest_area() {
     let g = two_roads();
     let r = roster(&[("va_a", 1.0)]);
-    let policy = SpawnPolicy::default();
+    let policy = fixture_spawn_policy();
     let plan = plan_ambient(
         &g,
         &NavOverrides::default(),
@@ -1165,11 +1175,12 @@ fn a_routed_car_is_gated_like_a_lane_follower_on_the_same_approach() {
 }
 
 #[test]
-fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
+fn a_stop_sign_admits_the_first_arrival_without_a_dwell() {
     // StopSign on both approaches into the same junction.
     let g = chain_with_rules(0, 0);
     let mut j = Junctions::default();
-    let dwell = j.policy.stop_dwell_ticks;
+    // The original has no dwell timer (`0x5af360`/`0x5b017c`).
+    assert_eq!(j.policy.stop_dwell_ticks, 0);
     let r0 = lane_id(0, Side::Right, 0);
     let r1 = lane_id(1, Side::Left, 0);
 
@@ -1181,11 +1192,11 @@ fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
     );
     assert_eq!(j.waiting(), 0);
 
-    // A stands at its line and registers; the dwell still holds it.
+    // A stands at its line, registers and is admitted at once.
     j.advance_tick();
     assert_eq!(
         j.gate(&g, r0, car(1), true, true, false),
-        JunctionGate::Closed
+        JunctionGate::Open
     );
     assert_eq!(j.waiting(), 1);
 
@@ -1197,11 +1208,8 @@ fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
     );
     assert_eq!(j.waiting(), 2);
 
-    // A's dwell elapses → A alone may go; B stays closed — FCFS is
-    // one-at-a-time, not simultaneous.
-    for _ in 0..dwell {
-        j.advance_tick();
-    }
+    // A alone may go; B stays closed — FCFS is one-at-a-time, not
+    // simultaneous.
     assert_eq!(
         j.gate(&g, r0, car(1), true, true, false),
         JunctionGate::Open
@@ -1211,7 +1219,7 @@ fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
         JunctionGate::Closed
     );
 
-    // A departs: B heads the queue and its own dwell has long passed.
+    // A departs: B heads the queue.
     j.depart(car(1));
     assert_eq!(
         j.gate(&g, r1, car(2), true, true, false),
@@ -1589,7 +1597,7 @@ fn stuck_window_resets_on_progress_and_expires_stationary() {
 /// neighbouring lane or on an overpass does not.
 #[test]
 fn spawn_occupied_boxes_the_sample_tangent() {
-    let p = SpawnPolicy::default(); // 5.0 along / 2.0 lateral / 3.0 rise
+    let p = fixture_spawn_policy(); // 5.0 along / 2.0 lateral / 3.0 rise
     let sample = LaneSample {
         position: [0.0, 0.0, 0.0],
         tangent: [0.0, 0.0, 1.0],
@@ -1627,7 +1635,7 @@ fn draw_spawn_rejects_occupied_space() {
         spawn_clearance: 500.0,
         spawn_half_width: 500.0,
         spawn_max_rise: 500.0,
-        ..SpawnPolicy::default()
+        ..fixture_spawn_policy()
     };
     let mut rng = NavRng::new(7);
     for _ in 0..8 {
@@ -1657,7 +1665,7 @@ fn draw_spawn_rejects_occupied_space() {
             &mut rng,
             &[CLEAR],
             &[[0.0, 0.0, 0.0]],
-            &SpawnPolicy::default(),
+            &fixture_spawn_policy(),
         ),
         SpawnDraw::Placed(_)
     ));
@@ -1672,7 +1680,7 @@ fn plan_keeps_same_lane_spawns_clear_of_each_other() {
     let r = roster(&[("va_a", 1.0)]);
     let policy = SpawnPolicy {
         max_active: 24,
-        ..SpawnPolicy::default()
+        ..fixture_spawn_policy()
     };
     let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[CLEAR], &policy);
     assert!(
@@ -1705,7 +1713,7 @@ fn plan_drops_directives_past_a_lane_s_capacity() {
     let policy = SpawnPolicy {
         max_active: 6,
         spawn_clearance: 500.0,
-        ..SpawnPolicy::default()
+        ..fixture_spawn_policy()
     };
     let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[CLEAR], &policy);
     assert_eq!(
@@ -1997,4 +2005,32 @@ fn of_phase_agrees_with_signal_aspect_for_every_head() {
         }
         j.advance_tick();
     }
+}
+
+#[test]
+fn spawn_keeps_the_recovered_50m_separation_from_ambient_cars() {
+    // `dat_5aff6c = 2500.0f` (squared 50 m), `0x53a2f5`.
+    let p = SpawnPolicy::default();
+    assert_eq!(p.min_ambient_separation, 50.0);
+    let g = two_roads();
+    let sample = g.sample_lane(lane_id(0, Side::Right, 0), 1.0).unwrap();
+    let at = |d: f32| {
+        [[
+            sample.position[0] + d,
+            sample.position[1],
+            sample.position[2],
+        ]]
+    };
+    assert!(too_close_to_ambient(&sample, &at(49.9), &p));
+    assert!(!too_close_to_ambient(&sample, &at(50.1), &p));
+}
+
+#[test]
+fn recovered_junction_timing_is_the_default() {
+    let p = JunctionPolicy::default();
+    let hz = u64::from(mm2_game::race::RACE_TICK_HZ);
+    assert_eq!(p.green_ticks, 6 * hz);
+    assert_eq!(p.clear_ticks, 6 * hz);
+    assert_eq!(p.stop_dwell_ticks, 0);
+    assert_eq!(p.stop_inset, 1.5);
 }
