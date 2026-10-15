@@ -236,12 +236,20 @@ drawbridge leaf deck; filed as #1450. SF `checkpoint:11` is the same in
 both (`fl_embarcramp01_f`, 16 vs 15 frames, peak 3.7 m/s). The other 20
 rows have no prop launch either way.
 
-Residual, authored: the Marin side bound's land apron (`pl_ggbridge_marin_side_f`
-grass triangles) is flat at y = 30.40 across the carriageway where the
-road ends at 30.25 (the sidewalk-top height), a 0.15 m lip at
-z ≈ −2078; the render mesh's triangles there dip to 27.8 instead. It
-hops a car at 12 m/s by ~0.6 m. Not changed here: the bound is authored
-and nothing says which of road or apron the original lets win.
+Residual, authored (#1451): the Marin side bound's land apron
+(`pl_ggbridge_marin_side_f` grass triangles) is flat at y = 30.40. Probed
+with downward rays at the three lane x's, every 2 m: the PSDL road is
+30.25 up to z -2086, then climbs ~0.015 m/m (30.28 at -2082, 30.40 at
+-2074, 30.62 at -2060), so the apron stands 0.09–0.15 m proud of it only
+over z -2084..-2080 (~4 m) and the road is above it from z -2078 on; past
+the lip the bound drops away (29.6 → 25 m). The render mesh's triangles
+dip to 27.8 there instead, so the bound is not a copy of the mesh. The
+retail data has nothing that makes the road win: both are authored, the
+lip is the bound's own height, and the original's prop-versus-road
+precedence is unknown. Left as authored — no offset, no clipping; a car at
+12 m/s hops ~0.6 m over a 0.15 m step. `tests/golden_gate.rs`
+(`the_marin_end_apron_is_no_more_than_its_authored_lip_over_the_road`)
+pins the lip at ≤ 0.15 m and that nothing else stands in the lanes.
 
 ## Bridge ends: the bound is flush with the closed leaf (#1450)
 

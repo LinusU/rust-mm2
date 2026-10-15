@@ -144,3 +144,68 @@ fn nothing_but_the_road_stands_in_a_lane_of_the_golden_gate_deck() {
         })
         .expect("deck rays run");
 }
+
+/// #1451: the Marin end. The side piece's authored bound has a flat land
+/// apron at y = 30.40 where the PSDL road (30.25 at z -2086, climbing to
+/// 30.62 by z -2060) meets it. The apron stands proud of the road by at
+/// most `MARIN_APRON_LIP` for ~4 m (z -2084..-2080), then the road rises
+/// through it. Both are authored data; this pins that nothing else stands
+/// in the lanes there and the lip stays the authored size.
+const MARIN_APRON_LIP: f32 = 0.15;
+
+#[test]
+fn the_marin_end_apron_is_no_more_than_its_authored_lip_over_the_road() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; the Marin end was NOT checked");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    let mut app = retail_city_app(vfs, "city/sf.psdl");
+    app.world_mut()
+        .run_system_once(|spatial: SpatialQuery, names: Query<&Name>| {
+            let mut worst = f32::MIN;
+            let mut sampled = 0usize;
+            for z in (-2100..=-2060).step_by(2) {
+                for x in LANE_X {
+                    let hits = spatial.ray_hits(
+                        Vec3::new(x, 60.0, z as f32),
+                        Dir3::NEG_Y,
+                        80.0,
+                        64,
+                        true,
+                        &SpatialQueryFilter::default(),
+                    );
+                    let name = |e: Entity| names.get(e).map(|n| n.to_string()).unwrap_or_default();
+                    let Some(road) = hits
+                        .iter()
+                        .filter(|h| !name(h.entity).starts_with("prop-"))
+                        .map(|h| 60.0 - h.distance)
+                        .reduce(f32::max)
+                    else {
+                        continue;
+                    };
+                    sampled += 1;
+                    for h in hits.iter().filter(|h| name(h.entity).starts_with("prop-")) {
+                        let y = 60.0 - h.distance;
+                        if y < road + CLEARANCE {
+                            worst = worst.max(y - road);
+                        }
+                    }
+                }
+            }
+            assert!(
+                sampled > 100,
+                "only {sampled} Marin-end samples found a road"
+            );
+            assert!(
+                worst <= MARIN_APRON_LIP + 0.01,
+                "a prop stands {worst:.3} m over the road at the Marin end"
+            );
+            assert!(
+                worst > 0.05,
+                "the authored apron lip is gone ({worst:.3} m); update docs/research/placement.md"
+            );
+        })
+        .expect("Marin end rays run");
+}
