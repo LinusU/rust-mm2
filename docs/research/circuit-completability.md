@@ -98,3 +98,27 @@ the old scripted controller, not
 the `.opp` route data or the lap length. No code change. The re-anchor
 recovery was not widened. Evidence level: synthetic integration (headless,
 retail data), no rendered check.
+
+## Re-measure of london circuit:7/8/9 after the neural driver (#1403)
+
+The same sweep flags (`--headless --parked --no-profile --until-opponents
+--frames 43200`, release build, Amateur and `--pro`):
+
+| event | diff | finished | re-anchors | slowest finisher |
+|---|---|---|---|---|
+| london circuit:7 | Amateur | 6/6 | 47 | 652 s |
+| london circuit:7 | Pro | 6/6 | 40 | 583 s |
+| london circuit:8 | Amateur | 6/6 | 45 | 561 s |
+| london circuit:8 | Pro | 5/6 at 717 s | 48 | 806 s (slot 4) |
+| london circuit:9 | Amateur | 6/6 | 1 | 497 s |
+| london circuit:9 | Pro | 6/6 | 6 | 294 s |
+
+The old zero-finish stalls are gone: the `.opp` route data and the lap
+length are not the cause. The one miss, london circuit:8 Pro, is the
+12-minute frame cap, not a stall: slot 4 (`vppanozgt`, 16 re-anchors) was at
+7 of 12 checkpoints at 717 s; re-run to 86400 frames (deterministic, same
+other results) it finishes at 806 s. Residual signal for the owner (policy
+side, not diagnosed here): london circuits 7 and 8 have 40-48 re-anchors
+per race, concentrated in the `vpdb7`/`vppanozgt` slots. No code change; the
+re-anchor recovery was not widened. Evidence level: synthetic integration
+(headless, retail data), no rendered check.
