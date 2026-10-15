@@ -831,6 +831,7 @@ pub fn pause_present(
     mut pause: ResMut<PauseMenu>,
     view: PauseView,
     roots: Query<Entity, (With<PauseUi>, Without<ChildOf>)>,
+    cameras: Query<(Entity, &Camera), crate::hudmap::WorldCamera3d>,
 ) {
     // F22-A.1/HUD-4: Q's full-screen map *replaces* the pause overlay —
     // while it is up the dimmed rows must not draw over the map. If the
@@ -942,41 +943,56 @@ pub fn pause_present(
         Color::srgb(0.5, 0.5, 0.55),
     ));
 
-    commands
-        .spawn((
-            PauseUi,
-            // Session-owned UI: teardown removes it wholesale on
-            // quit/restart, and the `!Paused` arm above removes it on
-            // resume — the two paths never double-despawn.
-            SessionEntity(session.generation()),
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                bottom: Val::Px(0.0),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(4.0),
-                ..default()
-            },
-            // Dim the frozen world rather than hiding it — pause sits
-            // over the session, and the HUD stays readable around the
-            // panel.
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.07, 0.72)),
-        ))
-        .with_children(|parent| {
-            for (text, size, color) in lines {
-                parent.spawn((
-                    PauseUi,
-                    Text::new(text),
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(size),
-                        ..default()
-                    },
-                    TextColor(color),
-                ));
+    // A redraw respawns the whole tree on every selection change, and
+    // `camera::retarget_hud` only stamps `UiTargetCamera` after the
+    // spawn commands land — so for one rendered frame the fresh tree had
+    // no target and drew against the wrong camera (the "menu flashes at
+    // the top" report). Stamp the same pick it would make at spawn.
+    let target = cameras
+        .iter()
+        .find(|(_, c)| c.is_active)
+        .map(|(e, _)| UiTargetCamera(e));
+
+    let mut root = commands.spawn((
+        PauseUi,
+        // Session-owned UI: teardown removes it wholesale on
+        // quit/restart, and the `!Paused` arm above removes it on
+        // resume — the two paths never double-despawn.
+        SessionEntity(session.generation()),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(0.0),
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            bottom: Val::Px(0.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(4.0),
+            ..default()
+        },
+        // Dim the frozen world rather than hiding it — pause sits
+        // over the session, and the HUD stays readable around the
+        // panel.
+        BackgroundColor(Color::srgba(0.02, 0.03, 0.07, 0.72)),
+    ));
+    if let Some(target) = target.clone() {
+        root.insert(target);
+    }
+    root.with_children(|parent| {
+        for (text, size, color) in lines {
+            let mut row = parent.spawn((
+                PauseUi,
+                Text::new(text),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(size),
+                    ..default()
+                },
+                TextColor(color),
+            ));
+            if let Some(target) = target.clone() {
+                row.insert(target);
             }
-        });
+        }
+    });
 }

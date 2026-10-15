@@ -6222,6 +6222,66 @@ fn the_pause_menu_answers_any_pad() {
     assert_eq!(phase(&app), SessionPhase::Playing, "Start resumes");
 }
 
+/// Every redraw respawns the pause overlay. The fresh tree must already
+/// carry the active world camera as its `UiTargetCamera` on the frame it
+/// appears: `camera::retarget_hud` only stamps it after the spawn lands,
+/// so an unstamped tree drew for one frame against the wrong camera
+/// (the "pause text flashes at the top on Up/Down" report).
+#[test]
+fn a_redrawn_pause_menu_is_on_the_world_camera_the_frame_it_appears() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+    // The same pick `camera::retarget_hud` makes: the first active
+    // world camera (the harness may already own one).
+    let cam = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(Entity, &Camera), mm2_app::hudmap::WorldCamera3d>();
+        q.iter(world).find(|(_, c)| c.is_active).map(|(e, _)| e)
+    }
+    .unwrap_or_else(|| {
+        app.world_mut()
+            .spawn((
+                Camera3d::default(),
+                Camera {
+                    is_active: true,
+                    ..default()
+                },
+            ))
+            .id()
+    });
+
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    let mut stray = 0;
+    let mut ids = Vec::new();
+    for key in [
+        KeyCode::ArrowDown,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowUp,
+    ] {
+        press(&mut app, key);
+        let world = app.world_mut();
+        let mut q =
+            world.query_filtered::<(Entity, Option<&UiTargetCamera>), With<pause::PauseUi>>();
+        let nodes: Vec<_> = q.iter(world).collect();
+        assert!(!nodes.is_empty(), "the overlay is drawn after {key:?}");
+        stray += nodes
+            .iter()
+            .filter(|(_, t)| t.map(|t| t.0) != Some(cam))
+            .count();
+        ids.push(nodes[0].0);
+    }
+    assert_eq!(stray, 0, "a redrawn node had no world-camera target");
+    ids.dedup();
+    assert!(ids.len() > 1, "each selection change really redraws");
+}
+
 /// A rebind made from the pause overlay is the map the main menu's
 /// Controls screen shows after quitting, and a later menu edit keeps it
 /// (the menu's copy re-syncs from the live resource instead of
