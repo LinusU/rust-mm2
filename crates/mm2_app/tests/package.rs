@@ -882,12 +882,26 @@ fn the_default_layout_assembles_every_layout_this_platform_ships() {
 /// layout) in an unrelated working directory and return the mount line.
 fn mount_line_of(exe: &Path) -> String {
     let cwd = tempfile::tempdir().unwrap();
-    let out = Command::new(exe)
-        .args(["--headless", "--dev-world", "--frames", "5"])
-        .current_dir(cwd.path())
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("spawn the relocated mm2");
+    // Another test thread forking while this exe's copy was still open for
+    // writing leaves the file "busy" (ETXTBSY) until that child execs, so
+    // retry the spawn on that one error against a bounded deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let out = loop {
+        match Command::new(exe)
+            .args(["--headless", "--dev-world", "--frames", "5"])
+            .current_dir(cwd.path())
+            .env_remove("RUST_LOG")
+            .output()
+        {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            other => break other.expect("spawn the relocated mm2"),
+        }
+    };
     let log = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
