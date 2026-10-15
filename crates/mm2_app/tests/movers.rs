@@ -10,8 +10,10 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::drawbridge::{DrawbridgeLeaf, drive_drawbridges};
 use mm2_app::layers::GameLayer;
 use mm2_app::movers::{Mover, MoverFamily, Train, TrainCar, drive_movers};
+use mm2_game::drawbridge::{CLOSED_WAIT, DrawbridgeMode, LeafMotion, OPEN_ANGLE, RAISE_RATE};
 use mm2_game::movers::{
     FERRY_SPEED, PathFollower, TRAIN_CARS, TRAIN_SPEED, TRAIN_WAIT, TrainMotion, mover_rotation,
 };
@@ -519,4 +521,110 @@ fn a_restart_returns_the_movers_and_the_clock_to_the_start_phase() {
         now.distance(start_pose)
     );
     assert_coherent(&mut app, "second generation");
+}
+
+/// A timed drawbridge leaf (hinge 10 m up, a 12 × 1 × 20 m deck reaching
+/// along local −Z, top face at the hinge's height) with a crate standing
+/// on it, driven by the production `drive_drawbridges` through a whole
+/// open / hold / close cycle (F28-AC03).
+#[test]
+fn a_crate_on_a_drawbridge_leaf_rides_a_whole_cycle_without_tunnelling_or_a_kick() {
+    let mut app = app_in(SessionPhase::Playing);
+    app.add_systems(FixedLast, drive_drawbridges);
+    let hinge = Vec3::new(0.0, 10.0, 0.0);
+    let mut motion = LeafMotion::new(DrawbridgeMode::Timed);
+    // Start the lift on the first step instead of after the 10 s wait.
+    motion.timer = CLOSED_WAIT - 0.01;
+    let leaf = DrawbridgeLeaf {
+        motion,
+        partner: None,
+        hinge,
+        base: Quat::IDENTITY,
+        slot: 0,
+    };
+    let deck = Collider::compound(vec![(
+        Vec3::new(0.0, -0.5, -10.0),
+        Quat::IDENTITY,
+        Collider::cuboid(12.0, 1.0, 20.0),
+    )]);
+    let leaf_entity = app
+        .world_mut()
+        .spawn((
+            RigidBody::Kinematic,
+            CenterOfMass(Vec3::ZERO),
+            NoAutoCenterOfMass,
+            deck,
+            GameLayer::scenery(),
+            Position(hinge),
+            Rotation(Quat::IDENTITY),
+            Transform::from_translation(hinge),
+            leaf,
+        ))
+        .id();
+    // A 2×1×4 crate 8 m out along the deck: its base sits on the top.
+    let crate_at = hinge + Vec3::new(0.0, 0.52, -8.0);
+    let cargo = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(2.0, 1.0, 4.0),
+            // Grip enough to hold the 27° lift (tan 27° ≈ 0.51); this
+            // test is about contact stability, not about tyre grip.
+            Friction::new(1.0),
+            Position(crate_at),
+            Transform::from_translation(crate_at),
+        ))
+        .id();
+
+    // The lever arm is 8 m, so the deck carries the crate at most
+    // `RAISE_RATE · 8.5` m/s; anything near a metre per second is a kick.
+    let rider_speed = RAISE_RATE * 8.5;
+    let mut peak_angle = 0.0_f32;
+    let (mut worst_depth, mut worst_lift, mut worst_speed) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for _ in 0..(32 * 60) {
+        app.update();
+        let l = app
+            .world()
+            .get::<DrawbridgeLeaf>(leaf_entity)
+            .unwrap()
+            .clone();
+        peak_angle = peak_angle.max(l.motion.angle);
+        let frame = l.rotation_at(l.motion.angle);
+        let local = frame.inverse() * (app.world().get::<Position>(cargo).unwrap().0 - hinge);
+        assert!(local.is_finite(), "crate pose went non-finite: {local}");
+        // The crate's centre is 0.5 above the deck top when resting.
+        worst_depth = worst_depth.max(0.5 - local.y);
+        worst_lift = worst_lift.max(local.y - 0.5);
+        let speed = app.world().get::<LinearVelocity>(cargo).unwrap().0.length();
+        worst_speed = worst_speed.max(speed);
+    }
+
+    assert!(
+        peak_angle >= OPEN_ANGLE,
+        "the leaf never reached its raised angle: {peak_angle}"
+    );
+    assert!(
+        worst_depth < 0.1,
+        "the crate sank {worst_depth} m into the deck"
+    );
+    assert!(
+        worst_lift < 0.2,
+        "the crate was thrown {worst_lift} m off the deck"
+    );
+    assert!(
+        worst_speed < rider_speed + 0.5,
+        "an impulse: the crate reached {worst_speed} m/s (rider speed {rider_speed})"
+    );
+    // Back at rest on the closed deck, where it started in the deck's frame.
+    let end = app
+        .world()
+        .get::<DrawbridgeLeaf>(leaf_entity)
+        .unwrap()
+        .clone();
+    let local = end.rotation_at(end.motion.angle).inverse()
+        * (app.world().get::<Position>(cargo).unwrap().0 - hinge);
+    assert!(
+        (local.z + 8.0).abs() < 1.0 && local.x.abs() < 0.5,
+        "the crate slid on the deck: {local}"
+    );
 }
