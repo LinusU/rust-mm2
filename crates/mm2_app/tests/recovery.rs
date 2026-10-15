@@ -1099,10 +1099,37 @@ fn an_out_of_bounds_fall_recovers_once_whatever_the_step_parity() {
 /// production race driver runs beside the recovery pair; the car is
 /// released and anchored before the function returns.
 fn gated_recovery_app(gate_x: f32, gate_height: f32) -> (App, Entity) {
+    use mm2_game::{CheckpointRule, EventParams, RaceDefinition};
+
+    race_recovery_app(RaceDefinition {
+        checkpoints: vec![gate(gate_x, gate_height)],
+        finish: None,
+        rule: CheckpointRule::AnyOrder,
+        laps: 1,
+        time_limit_ticks: None,
+        params: EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    })
+}
+
+/// A 15 m radius gate on the x axis, heading −90°, direction ignored.
+fn gate(x: f32, height: f32) -> mm2_game::Checkpoint {
+    mm2_game::Checkpoint {
+        center: Vec3::new(x, 0.0, 0.0),
+        radius: 15.0,
+        height,
+        heading_deg: -90.0,
+        require_direction: false,
+    }
+}
+
+/// `recovery_app` for an event session running `def` beside the
+/// recovery pair, the car released and anchored before it returns.
+fn race_recovery_app(def: mm2_game::RaceDefinition) -> (App, Entity) {
     use mm2_app::race::{advance_race, reanchor_teleported_participants};
     use mm2_game::{
-        Checkpoint, CheckpointRule, EventParams, EventRef, EventTableKind, RaceDefinition,
-        RaceProgress, RaceStarted, RaceState, ResultLedger, SessionMode,
+        EventRef, EventTableKind, RaceProgress, RaceStarted, RaceState, ResultLedger, SessionMode,
     };
 
     let config = SessionConfig {
@@ -1114,22 +1141,6 @@ fn gated_recovery_app(gate_x: f32, gate_height: f32) -> (App, Entity) {
         ..SessionConfig::default()
     };
     let (mut app, car, _object) = recovery_app_with(config, Vec3::new(0.0, 1.2, 0.0));
-    let def = RaceDefinition {
-        checkpoints: vec![Checkpoint {
-            center: Vec3::new(gate_x, 0.0, 0.0),
-            radius: 15.0,
-            height: gate_height,
-            heading_deg: -90.0,
-            require_direction: false,
-        }],
-        finish: None,
-        rule: CheckpointRule::AnyOrder,
-        laps: 1,
-        time_limit_ticks: None,
-        params: EventParams::default(),
-        countdown_ticks: 0,
-        start_slots: Vec::new(),
-    };
     let generation = app.world().resource::<Session>().generation();
     app.world_mut()
         .insert_resource(RaceState::new(def.clone(), generation));
@@ -1167,6 +1178,73 @@ fn carry_unswept(app: &mut App, car: Entity, to: Vec3) {
         .unwrap()
         .break_segment();
     teleport(app, car, to);
+}
+
+#[test]
+fn a_rescue_across_the_finish_trigger_does_not_finish_a_cleared_course() {
+    // AnyOrder with a separate finish trigger (RACE-7): the lone
+    // checkpoint is driven, which arms the finish at x = 120. A car
+    // drowned beyond it is rescued back across the trigger.
+    use mm2_game::{CheckpointRule, EventParams, RaceDefinition};
+    let (mut app, car) = race_recovery_app(RaceDefinition {
+        checkpoints: vec![gate(-30.0, 8.0)],
+        finish: Some(gate(120.0, 400.0)),
+        rule: CheckpointRule::AnyOrder,
+        laps: 1,
+        time_limit_ticks: None,
+        params: EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    });
+    teleport(&mut app, car, Vec3::new(-30.0, 1.2, 0.0));
+    run(&mut app, 4);
+    assert_eq!(
+        standing(&app, car),
+        (1, true, 0),
+        "course cleared, finish armed"
+    );
+
+    carry_unswept(&mut app, car, Vec3::new(WATER_AT.x, 1.0, WATER_AT.z));
+    run(&mut app, 100);
+    assert_eq!(report(&app).recovered, 1, "the rescue ran");
+    assert_eq!(
+        standing(&app, car),
+        (1, true, 0),
+        "the rescue's path over the finish trigger records no result"
+    );
+
+    teleport(&mut app, car, Vec3::new(120.0, 1.2, 0.0));
+    run(&mut app, 4);
+    assert_eq!(standing(&app, car).2, 1, "driving through it finishes");
+}
+
+#[test]
+fn a_rescue_never_advances_an_ordered_circuit() {
+    // Ordered, two laps over two gates either side of the anchor: a
+    // fall from beyond gate 1 is rescued across both without clearing
+    // either, and the circuit still needs every gate driven.
+    use mm2_game::{CheckpointRule, EventParams, RaceDefinition};
+    let (mut app, car) = race_recovery_app(RaceDefinition {
+        checkpoints: vec![gate(300.0, 400.0), gate(150.0, 400.0)],
+        finish: None,
+        rule: CheckpointRule::Ordered,
+        laps: 2,
+        time_limit_ticks: None,
+        params: EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    });
+    assert_eq!(standing(&app, car), (0, true, 0));
+    carry_unswept(&mut app, car, Vec3::new(500.0, 5.0, 0.0));
+    run(&mut app, 150);
+    assert_eq!(report(&app).out_of_bounds, 1);
+    assert_eq!(report(&app).recovered, 1, "the rescue ran");
+    run(&mut app, 30);
+    assert_eq!(
+        standing(&app, car),
+        (0, true, 0),
+        "no gate of lap one is credited by the rescue"
+    );
 }
 
 #[test]
