@@ -332,12 +332,14 @@ pub fn spawn_dash(
             for part in &model.parts {
                 // The rotation pivot is the part's `.mtx` *pivot* — the
                 // quad's authored centre in the shared cluster space.
-                // Stock dashes author `origin` 0 (the geometry already
-                // sits in cluster space) and the centre in `pivot`;
-                // vp4x4/vpdune carry the centre in both. Reading
-                // `origin` here left every gauge rotating about the
-                // cluster origin instead of its own hub, which threw
-                // the steering wheel across the cockpit as steering
+                // Most stock dashes author `origin` 0 (the geometry
+                // already sits in cluster space) and the centre in
+                // `pivot`; the other ten of the 24 (vp4x4, vpcab,
+                // vpsemi, the dunes…) carry the centre in both, so the
+                // two fields agree there. Reading `origin` here left
+                // every gauge — the steering wheel worst — rotating
+                // about the cluster origin instead of its own hub,
+                // which threw the wheel across the cockpit as steering
                 // turned it. The field shares `build_model`'s usable
                 // gate — an astronomical pivot reads unauthored (the
                 // part falls back to the in-place pose).
