@@ -1706,6 +1706,7 @@ fn main() {
     .init_resource::<session::SessionNote>()
     .init_resource::<pause::PauseMenu>()
     .init_resource::<results::ResultsMenu>()
+    .init_resource::<mm2_app::readiness::SimulationGate>()
     .init_resource::<results::NextRace>()
     .add_systems(FixedUpdate, advance_session_tick)
     // Sample the human steering ramp once per simulation tick. Update
@@ -1732,6 +1733,13 @@ fn main() {
     // device's own limit, before the first loader decodes anything.
     .add_systems(PreStartup, mm2_app::texture_budget::adopt_render_device)
     .add_systems(First, mm2_app::texture_budget::adopt_render_device)
+    // #1446: drop a map load's wall time instead of replaying it as a
+    // burst of catch-up fixed steps once the world exists. `First`, ahead
+    // of `TimeSystems`, so the ceiling shapes the frame it is set on.
+    .add_systems(
+        First,
+        mm2_app::readiness::gate_world_simulation.before(bevy::time::TimeSystems),
+    )
     .add_systems(Update, mm2_app::devices::log_pad_connections)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.

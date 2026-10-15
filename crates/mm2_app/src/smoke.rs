@@ -634,6 +634,14 @@ fn run_headless(
         // The record's `opp_drv=` AI-on-AI contact rate.
         .init_resource::<FieldContacts>()
         .add_systems(Update, count_field_contacts)
+        // #1446: drop a map load's wall time instead of replaying it as
+        // catch-up fixed steps once the world exists — the headless app
+        // gets the same barrier the windowed one does.
+        .init_resource::<crate::readiness::SimulationGate>()
+        .add_systems(
+            First,
+            crate::readiness::gate_world_simulation.before(bevy::time::TimeSystems),
+        )
         .add_message::<crate::netdrive::RemoteImpact>()
         .add_message::<DamageEvent>()
         .add_message::<mm2_game::StuckEvent>()
