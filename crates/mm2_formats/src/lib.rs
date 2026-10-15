@@ -21,6 +21,7 @@ pub mod fog;
 pub mod hudmap;
 pub mod info;
 pub mod inst;
+pub mod langdll;
 pub mod ldef;
 pub mod lighting;
 pub mod lmap;
