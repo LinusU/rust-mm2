@@ -275,6 +275,12 @@ impl RunBudget {
 #[derive(Default)]
 struct PaceClock {
     next: Option<std::time::Instant>,
+    /// Playing updates held since the last report, how many of them
+    /// finished past their deadline, and the wall time dropped when the
+    /// clock restarted instead of catching up.
+    steps: u32,
+    late: u32,
+    dropped: Duration,
 }
 
 impl PaceClock {
@@ -284,6 +290,8 @@ impl PaceClock {
     /// from now instead of racing to catch up — a map load or a stalled
     /// machine must not turn into a burst of unpaced steps.
     const SLACK: Duration = Duration::from_millis(200);
+    /// Playing updates between `event=pace` reports (~10 s).
+    const REPORT_STEPS: u32 = 600;
 
     /// Sleep out the rest of this update's step while `playing`; any
     /// other phase restarts the clock.
@@ -295,10 +303,31 @@ impl PaceClock {
         let now = std::time::Instant::now();
         let next = self.next.get_or_insert(now);
         *next += Self::STEP;
+        self.steps += 1;
         if *next > now {
             std::thread::sleep(*next - now);
-        } else if now - *next > Self::SLACK {
-            self.next = Some(now);
+        } else {
+            self.late += 1;
+            if now - *next > Self::SLACK {
+                self.dropped += now - *next;
+                self.next = Some(now);
+            }
+        }
+        if self.steps >= Self::REPORT_STEPS {
+            // Only a clock that fell behind is worth a line: a host that
+            // cannot hold 60 Hz replays a paced client's inputs at a
+            // slower rate than the client predicted them (#1521).
+            if self.late > 0 {
+                eprintln!(
+                    "event=pace steps={} late={} dropped_ms={}",
+                    self.steps,
+                    self.late,
+                    self.dropped.as_millis()
+                );
+            }
+            self.steps = 0;
+            self.late = 0;
+            self.dropped = Duration::ZERO;
         }
     }
 }

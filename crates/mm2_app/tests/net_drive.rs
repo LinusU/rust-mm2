@@ -4254,6 +4254,8 @@ fn a_client_thief_runs_down_the_carrier_and_delivers_the_gold() {
         Err(panic) => {
             eprintln!("--- alice (the thief) ---\n{}", alice.pending());
             eprintln!("--- bob (the carrier) ---\n{}", bob.pending());
+            // `event=pace` lines show a process that could not hold 60 Hz.
+            eprintln!("--- host ---\n{}", host.pending());
             std::panic::resume_unwind(panic);
         }
     };
