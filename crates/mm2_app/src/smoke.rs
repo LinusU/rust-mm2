@@ -1601,7 +1601,9 @@ fn run_headless(
     // rest apart from the authority's copy long enough to be reseated,
     // with `rst`, the authority resets observed (host: landings that
     // bumped a wire epoch; client: epoch-declared teleports applied),
-    // printed only once non-zero so a reset-free record is unchanged.
+    // printed only once non-zero so a reset-free record is unchanged, and
+    // `drf`, the moving-drift corrections applied to the own seat
+    // (printed once non-zero likewise).
     // Absent without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
@@ -1638,6 +1640,10 @@ fn run_headless(
                 r.own_settles
             ) + &if r.resets > 0 {
                 format!(",rst{}", r.resets)
+            } else {
+                String::new()
+            } + &if r.own_drifts > 0 {
+                format!(",drf{}", r.own_drifts)
             } else {
                 String::new()
             }

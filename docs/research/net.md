@@ -2008,10 +2008,26 @@ wire actually moved rather than an in-process mailbox's contents.
   1.0 m agreement floor). Afterwards the leg passed 10/10 in isolation (the bound fired in one
   of them) and 3/3 inside full `network` target runs, where the
   snapshot rate falls to under half the sim rate. `fix1` appears on
-  alice only. Still open: divergence *while moving* has
-  no bound (a reseat there would rubber-band against the lagged
-  copy), and the stronger-shove cause itself (the kinematic copy's
+  alice only. Moving divergence is bounded separately (*Moving drift*
+  below); still open: the stronger-shove cause itself (the kinematic copy's
   infinite mass in the predicted world) is untouched.
+
+- **Moving drift (#1502, designed).** The rest-only bound left a car
+  that is *moving or parked after a ram* unbounded: on retail sf seed
+  1291 a carrier bot sat at the delivery marker by its own prediction
+  for 40k ticks while the host's copy of it was 30 m away on the upper
+  road level, so no `Delivered` could fire (#1423). `netdrive::DriftWatch`
+  now watches the own seat every snap: a gap above `DRIFT_DIST` (15 m;
+  ordinary latency is speed × round trip, ≈ 6 m at 40 m/s over 150 ms,
+  under every impairment recipe's measured error) for `DRIFT_SNAPS` (30,
+  ≈ 0.5 s) in a row pulls the predicted position and heading
+  `DRIFT_PULL` (15 %) of the remaining gap per snap — a glide over about
+  twenty snaps, velocity left to the local sim. A gap past
+  `CORRECTION_SNAP_DIST` (20 m) that persists is a teleport and takes the
+  reset-style snap. No handling parameter or physics step is touched.
+  Counted as `drf<N>` in the `net=` record (printed once non-zero).
+  Evidence level: unit tests (`drift_watch_*`, `repeated_pulls_*`);
+  the retail sf process run is not part of this change.
 
 - **Shove on an impaired link (F25-C.3).** The same scenario with both
   clients behind a seeded `ImpairProxy` armed with the matrix's

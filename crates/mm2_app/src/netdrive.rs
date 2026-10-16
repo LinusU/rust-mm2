@@ -97,8 +97,8 @@
 //!   seat — sub-epoch divergence stays local, which is what `Predicted`
 //!   means, with one bound: a car at rest more than [`SETTLE_DIST`]
 //!   from the authority's copy for [`SETTLE_SNAPS`] snaps in a row is
-//!   reseated on it (F25-C); continuous drift correction while moving
-//!   is named later scope. The `R`
+//!   reseated on it (F25-C), and a gap beyond [`DRIFT_DIST`] for
+//!   [`DRIFT_SNAPS`] snaps is pulled in (#1502). The `R`
 //!   key is the exception to a client's inertness: it sends a
 //!   `ResetRequest` up (F25-B), and the host's granted answer arrives
 //!   back as the own-seat epoch snap — the requester's car teleports to
@@ -236,6 +236,63 @@ impl SettleWatch {
         }
         self.snaps = 0;
         true
+    }
+}
+
+/// Moving-drift bound for the *own* seat (F25-C, designed): a predicted
+/// car more than this far from the authority's copy of it for
+/// [`DRIFT_SNAPS`] snaps in a row is pulled toward that copy. Snapshots
+/// lag the prediction by the round trip, so ordinary latency shows up as
+/// a gap of speed × lag (≈ 6 m at 40 m/s over a 150 ms round trip);
+/// 15 m is past every impairment recipe's measured error. What reaches
+/// it is a contact the two sims resolved differently — the host's copy
+/// of a rammed client sat 30 m away on another road level while the
+/// client's car parked at the delivery marker (#1423).
+const DRIFT_DIST: f32 = 15.0;
+
+/// Consecutive snaps beyond [`DRIFT_DIST`] before the pull starts
+/// (~0.5 s at the snapshot rate): a transient gap never corrects.
+const DRIFT_SNAPS: u32 = 30;
+
+/// Fraction of the remaining gap closed per snap while pulling: the car
+/// glides over ~20 snaps rather than jumping. A gap beyond
+/// [`CORRECTION_SNAP_DIST`] is a teleport and takes the reset-style snap.
+const DRIFT_PULL: f32 = 0.15;
+
+/// What [`DriftWatch::observe`] asks of the caller.
+#[derive(Debug, PartialEq)]
+pub enum Drift {
+    /// Within bounds (or not yet sustained): leave the car alone.
+    None,
+    /// Move the car this fraction of the way to the asserted pose.
+    Pull(f32),
+    /// Take the asserted pose outright.
+    Snap,
+}
+
+/// Counts the own seat's consecutive snaps beyond [`DRIFT_DIST`].
+#[derive(Debug, Default)]
+pub struct DriftWatch {
+    snaps: u32,
+}
+
+impl DriftWatch {
+    /// Feed one snap's local/asserted positions.
+    pub fn observe(&mut self, local: Vec3, wire: Vec3) -> Drift {
+        let gap = local.distance(wire);
+        if !gap.is_finite() || gap <= DRIFT_DIST {
+            self.snaps = 0;
+            return Drift::None;
+        }
+        self.snaps = (self.snaps + 1).min(DRIFT_SNAPS);
+        if self.snaps < DRIFT_SNAPS {
+            Drift::None
+        } else if gap > CORRECTION_SNAP_DIST {
+            self.snaps = 0;
+            Drift::Snap
+        } else {
+            Drift::Pull(DRIFT_PULL)
+        }
     }
 }
 
@@ -461,6 +518,8 @@ pub struct RemoteSnaps {
     pending: VecDeque<(u64, SnapImpact)>,
     /// The own seat's settled-divergence count ([`SettleWatch`]).
     own_settle: SettleWatch,
+    /// The own seat's moving-drift count ([`DriftWatch`]).
+    own_drift: DriftWatch,
     /// Per-seat repair ledger: the (generation, snap tick) of the
     /// newest `damage` byte `>0 → 0` transition the apply pass
     /// performed — the wire's repair signal. A pending impact row
@@ -965,6 +1024,7 @@ impl RemoteSnaps {
         self.dropped += self.pending.len() as u64;
         self.pending.clear();
         self.own_settle = SettleWatch::default();
+        self.own_drift = DriftWatch::default();
         self.repaired.clear();
         self.seen.clear();
         self.seen_order.clear();
@@ -1024,6 +1084,8 @@ pub struct NetDriveReport {
     /// Times the own seat sat at rest apart from the authority's copy
     /// long enough to be reseated on it ([`SettleWatch`]).
     pub own_settles: u64,
+    /// Own-seat moving-drift corrections applied ([`DriftWatch`]).
+    pub own_drifts: u64,
     /// Driver reset requests this client sent on `R`/pad — the
     /// predicted-session form of the local reset key (F25-B).
     pub requests_sent: u64,
@@ -3482,18 +3544,33 @@ fn apply_snap_frame(
                         to_pos,
                         asserted_vel.length(),
                     );
-                if authority_reset || settled {
+                let drift = if authority_reset || settled {
+                    Drift::None
+                } else {
+                    snaps.own_drift.observe(pos.0, to_pos)
+                };
+                if let Drift::Pull(f) = drift {
+                    // Blend position and heading only: velocity stays the
+                    // local sim's, so the driver keeps the car they feel.
+                    *pos = Position(pos.0.lerp(to_pos, f));
+                    *rot = Rotation(rot.0.slerp(to_rot, f));
+                    report.own_drifts += 1;
+                }
+                if authority_reset || settled || drift == Drift::Snap {
                     *pos = Position(to_pos);
                     *rot = Rotation(to_rot);
                     *vel = LinearVelocity(asserted_vel);
                     *ang = AngularVelocity(Vec3::from(entry.angvel));
                     commands.entity(entity).insert(Teleported);
+                    snaps.own_drift = DriftWatch::default();
                     if authority_reset {
                         snaps.own_settle = SettleWatch::default();
                         report.resets += 1;
                         report.own_resets += 1;
-                    } else {
+                    } else if settled {
                         report.own_settles += 1;
+                    } else {
+                        report.own_drifts += 1;
                     }
                 }
                 break;
@@ -3804,6 +3881,49 @@ mod tests {
         }
         assert!(watch.observe(here, 0.0, there, 0.0));
         assert!(!watch.observe(here, 0.0, there, 0.0));
+    }
+
+    /// Moving drift: only an unbroken run beyond the bound pulls, the
+    /// pull is partial, and a teleport-sized gap snaps.
+    #[test]
+    fn drift_watch_pulls_only_a_sustained_gap_and_snaps_a_teleport() {
+        let here = Vec3::ZERO;
+        let near = Vec3::new(DRIFT_DIST * 0.9, 0.0, 0.0);
+        let far = Vec3::new(DRIFT_DIST * 1.2, 0.0, 0.0);
+        let teleport = Vec3::new(CORRECTION_SNAP_DIST * 1.5, 0.0, 0.0);
+        let mut watch = DriftWatch::default();
+        for _ in 0..DRIFT_SNAPS * 3 {
+            assert_eq!(watch.observe(here, near), Drift::None);
+        }
+        for _ in 0..DRIFT_SNAPS - 1 {
+            assert_eq!(watch.observe(here, far), Drift::None);
+        }
+        // One agreeing snap restarts the run.
+        assert_eq!(watch.observe(here, here), Drift::None);
+        for _ in 0..DRIFT_SNAPS - 1 {
+            assert_eq!(watch.observe(here, far), Drift::None);
+        }
+        assert_eq!(watch.observe(here, far), Drift::Pull(DRIFT_PULL));
+        assert_eq!(watch.observe(here, far), Drift::Pull(DRIFT_PULL));
+        assert_eq!(watch.observe(here, teleport), Drift::Snap);
+        // A snap starts the run over.
+        assert_eq!(watch.observe(here, teleport), Drift::None);
+        // A non-finite pose never corrects.
+        assert_eq!(watch.observe(here, Vec3::NAN), Drift::None);
+    }
+
+    /// Repeated pulls converge on the asserted pose.
+    #[test]
+    fn repeated_pulls_close_the_gap_below_the_bound() {
+        let to = Vec3::new(DRIFT_DIST * 1.2, 0.0, 0.0);
+        let mut at = Vec3::ZERO;
+        let mut watch = DriftWatch::default();
+        for _ in 0..DRIFT_SNAPS + 40 {
+            if let Drift::Pull(f) = watch.observe(at, to) {
+                at = at.lerp(to, f);
+            }
+        }
+        assert!(at.distance(to) <= DRIFT_DIST, "{at}");
     }
 
     /// The scheduled reset ask goes out at its tick, waits while the
