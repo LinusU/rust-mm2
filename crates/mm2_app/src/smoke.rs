@@ -249,6 +249,15 @@ impl StopWhen {
 pub struct RunBudget {
     pub frames: u32,
     pub stop: StopWhen,
+    /// Hold every `Playing` update to the wall-clock 60 Hz step
+    /// (`--paced`). A headless update is otherwise exactly one 60 Hz
+    /// step run as fast as the CPU allows, so two processes of one
+    /// session tick at unrelated rates and the authority's copy of a
+    /// peer's car replays that peer's inputs against a different tick
+    /// alignment than the peer predicted them on — a precise drive (a
+    /// road-graph `--bot` on a client seat) then ends the match in two
+    /// places. Paced, the processes share a clock as live play does.
+    pub paced: bool,
 }
 
 impl RunBudget {
@@ -257,6 +266,39 @@ impl RunBudget {
         Self {
             frames,
             stop: StopWhen::default(),
+            paced: false,
+        }
+    }
+}
+
+/// The wall-clock deadline of a `--paced` run's next `Playing` update.
+#[derive(Default)]
+struct PaceClock {
+    next: Option<std::time::Instant>,
+}
+
+impl PaceClock {
+    /// The wall-clock length of one fixed step.
+    const STEP: Duration = Duration::from_micros(16_667);
+    /// How far behind a slow update may fall before the clock restarts
+    /// from now instead of racing to catch up — a map load or a stalled
+    /// machine must not turn into a burst of unpaced steps.
+    const SLACK: Duration = Duration::from_millis(200);
+
+    /// Sleep out the rest of this update's step while `playing`; any
+    /// other phase restarts the clock.
+    fn hold(&mut self, playing: bool) {
+        if !playing {
+            self.next = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let next = self.next.get_or_insert(now);
+        *next += Self::STEP;
+        if *next > now {
+            std::thread::sleep(*next - now);
+        } else if now - *next > Self::SLACK {
+            self.next = Some(now);
         }
     }
 }
@@ -1273,6 +1315,7 @@ fn run_headless(
     let mut stop_watch = StopWatch::new(budget.stop);
     let mut stopped: Option<StopReason> = None;
     let mut ran = 0u32;
+    let mut pace = budget.paced.then(PaceClock::default);
     for f in 0..frames {
         // The player entity is re-resolved every frame: a mid-run
         // session restart (`RestartEvent` disabled outcome, `--restart`)
@@ -1310,6 +1353,10 @@ fn run_headless(
         }
         let t0 = std::time::Instant::now();
         app.update();
+        if let Some(pace) = pace.as_mut() {
+            let playing = app.world().resource::<Session>().is_playing();
+            pace.hold(playing);
+        }
         ran = f + 1;
         // A lobby run parked at `Menu` is waiting on the wire in wall
         // time — parked updates are near-free, so without a small pause
@@ -3251,6 +3298,37 @@ mod tests {
             .resource_mut::<crate::netdrive::NetDriveReport>()
             .remotes = 1;
         assert_eq!(watch.fired(&world), Some(StopReason::SnapTick));
+    }
+
+    /// A paced run sleeps out each `Playing` step, holds nothing in any
+    /// other phase, and restarts rather than bursting after a stall.
+    #[test]
+    fn the_pace_clock_holds_playing_steps_to_wall_time() {
+        let mut clock = PaceClock::default();
+        let start = std::time::Instant::now();
+        for _ in 0..4 {
+            clock.hold(true);
+        }
+        assert!(
+            start.elapsed() >= PaceClock::STEP * 4,
+            "{:?}",
+            start.elapsed()
+        );
+
+        let idle = std::time::Instant::now();
+        for _ in 0..50 {
+            clock.hold(false);
+        }
+        assert!(idle.elapsed() < PaceClock::STEP * 4);
+        assert!(clock.next.is_none(), "a non-playing phase restarts it");
+
+        // A stall past the slack drops the debt instead of racing it.
+        clock.hold(true);
+        std::thread::sleep(PaceClock::SLACK + Duration::from_millis(50));
+        clock.hold(true);
+        let before = std::time::Instant::now();
+        clock.hold(true);
+        assert!(before.elapsed() >= PaceClock::STEP / 2);
     }
 
     #[test]
