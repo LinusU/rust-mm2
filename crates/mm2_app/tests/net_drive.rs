@@ -817,6 +817,10 @@ fn a_reset_extra_wheel_rig_drives_its_remote_wheels_across_processes() {
             "300",
             "--until-snap-tick",
             "700",
+            // Alice's exit triggers the roster removal bob would apply
+            // before his own stop tick on a loaded machine, so she holds
+            // her seat until bob leaves: bob's record always holds her.
+            "--hold-until-peer-left",
             "--deadline",
             "90",
         ]
