@@ -24,6 +24,7 @@ mod bind;
 mod cnr;
 mod crashcourse;
 mod event;
+mod glb;
 mod inventory;
 mod peds;
 mod placement;
@@ -656,6 +657,35 @@ enum Command {
         /// Path to the MM2 installation directory.
         dir: PathBuf,
     },
+    /// Write a vehicle as binary glTF (`.glb`) with embedded PNG
+    /// textures, built by the game's own vehicle loader: parts at their
+    /// `.mtx` origins, wheels, fenders, breakables and any trailer, the
+    /// selected paint job's shaders. Light glows are left out unless
+    /// `--lights` is given.
+    ExportGlb {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Vehicle id (e.g. `vpbug`) or unique display-name alias.
+        car: String,
+        /// Paint-job index to export (zero-based).
+        #[arg(long, default_value_t = 0, conflicts_with = "all_paints")]
+        paint: usize,
+        /// Export every paint job, one file each: `-o` is then a directory
+        /// receiving `<id>_paint<N>.glb`.
+        #[arg(long)]
+        all_paints: bool,
+        /// Extra `.ar` archive (e.g. a downloaded car pack) mounted above
+        /// the install and below `--mods`. Repeatable; later ones win.
+        #[arg(long = "ar", value_name = "FILE")]
+        archives: Vec<PathBuf>,
+        /// Include the headlight, tail/brake/reverse-light glows and the
+        /// siren/headlight flare quads.
+        #[arg(long)]
+        lights: bool,
+        /// Output `.glb` file (a directory with `--all-paints`).
+        #[arg(short = 'o', long = "out", value_name = "OUT")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -676,6 +706,23 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
+        Command::ExportGlb {
+            dir,
+            car,
+            paint,
+            all_paints,
+            archives,
+            lights,
+            out,
+        } => export_glb(
+            dir,
+            cli.mods.as_deref(),
+            archives,
+            car,
+            (!*all_paints).then_some(*paint),
+            *lights,
+            out,
+        ),
         Command::Scan { dir, strict } => scan(dir, cli.mods.as_deref(), *strict),
         Command::List { dir, prefix } => list(dir, cli.mods.as_deref(), prefix.as_deref()),
         Command::Resolve { dir, logical } => resolve(dir, cli.mods.as_deref(), logical),
@@ -870,6 +917,60 @@ fn build_vfs_report(dir: &Path, mods: Option<&Path>) -> Result<(Vfs, MountReport
         report.mods = manifests;
     }
     Ok((vfs, report))
+}
+
+/// `export-glb`: load `car` through the production loader and write one
+/// GLB per requested paint job (`paint: None` = all of them).
+fn export_glb(
+    dir: &Path,
+    mods: Option<&Path>,
+    archives: &[PathBuf],
+    car: &str,
+    paint: Option<usize>,
+    lights: bool,
+    out: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut vfs, _) = build_vfs_report(dir, mods)?;
+    // Packs sit above the install (archives and loose files) and below
+    // mods, whatever order they are mounted in — the VFS ranks by
+    // priority first, then later mounts win ties.
+    for ar in archives {
+        vfs.mount_archive(ar, mm2_assets::priority::OVERRIDE)?;
+        eprintln!("mounted archive {}", ar.display());
+    }
+    // The model does not depend on the paint job; loading with the
+    // requested index validates it against the shader table.
+    let def = mm2_content::load_by_id(&vfs, car, paint.unwrap_or(0))?;
+    let jobs: Vec<(usize, PathBuf)> = match paint {
+        Some(p) => vec![(p, out.to_path_buf())],
+        None => {
+            std::fs::create_dir_all(out)?;
+            (0..def.model.paint_jobs.max(1))
+                .map(|p| (p, out.join(format!("{}_paint{p}.glb", def.id))))
+                .collect()
+        }
+    };
+    for (paint, path) in jobs {
+        let opts = glb::ExportOptions { paint, lights };
+        let (bytes, stats) = glb::export_vehicle(&vfs, &def, &opts);
+        std::fs::write(&path, &bytes)?;
+        let paint_name = def.paints.get(paint).map(String::as_str).unwrap_or("-");
+        println!(
+            "{}: {} paint {paint} ({paint_name}): {} nodes, {} meshes, {} triangles, {} materials, {} textures, {} KiB",
+            path.display(),
+            def.id,
+            stats.nodes,
+            stats.meshes,
+            stats.triangles,
+            stats.materials,
+            stats.images,
+            bytes.len() / 1024,
+        );
+        for stem in &stats.missing_textures {
+            eprintln!("  missing texture {stem} (fallback material)");
+        }
+    }
+    Ok(())
 }
 
 /// Build the VFS exactly like the game does: install (archives + loose

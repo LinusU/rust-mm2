@@ -390,6 +390,20 @@ cargo run -p mm2_inspect -- psdl    "/path/to/MM2" city/london.psdl
 # all commands accept --mods <dir>, mounted exactly as in the game
 ```
 
+`export-glb` writes a car as binary glTF with embedded PNG textures, built
+by the game's own vehicle loader (parts at their `.mtx` origins, the paint
+job's shaders, any trailer at its hitch). `--ar` mounts a downloaded car
+pack above the install; `--lights` adds the light glows:
+
+```sh
+cargo run -p mm2_inspect -- export-glb "/path/to/MM2" vpbug --paint 2 -o vpbug.glb
+cargo run -p mm2_inspect -- export-glb "/path/to/MM2" vpsemi --all-paints --lights -o out/
+cargo run -p mm2_inspect -- export-glb "/path/to/MM2" mycar --ar mycar.ar -o mycar.glb
+```
+
+Vertices stay in MM2 vehicle space (`+Y` up, `−Z` forward), so Blender
+shows the car nose along `+Y`.
+
 ## Workspace layout
 
 ```
