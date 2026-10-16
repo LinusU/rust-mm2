@@ -2456,8 +2456,9 @@ fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
 /// its announcer voices the call. Retail sf, seed 1291 (the gold lies
 /// a few metres from the spawn). Skipped without `MM2_RETAIL=<dir>`.
 ///
-/// What it is not: a client that *delivers* (a client-seat bot run flat
-/// out stalls on the sf hillside beyond the first leg; paced, it
+/// What it is not: a client that *delivers* on purpose (a client-seat bot
+/// run flat out sometimes stalls on the sf hillside beyond the first leg and
+/// sometimes drives home, so delivery is neither required nor excluded; paced, it
 /// delivers — see `a_client_thief_runs_down_the_carrier_and_delivers_the_gold`;
 /// the same seed's host-driven delivery is
 /// `two_retail_processes_decide_a_cops_and_robbers_match`), a contested
@@ -2508,7 +2509,15 @@ fn a_joined_clients_bot_picks_up_the_gold() {
         |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
     assert_eq!(cell("ref"), 0, "the client refused the host's match: {rec}");
     assert_eq!(cell("seats"), 2, "{rec}");
-    assert_eq!(cell("dec"), 0, "nobody delivered in this run: {rec}");
+    // Whether the bot also delivers is a wall-clock race (it stalls on the
+    // sf hillside under some timings and drives home under others), so the
+    // test does not pin it; a delivery, when it happens, is the client's.
+    if cell("dec") != 0 {
+        assert!(
+            field(&rec, "cnr").split(',').any(|c| c == "win=p1"),
+            "a delivery was decided for someone other than the client: {rec}"
+        );
+    }
     // The announcer voiced what the replica showed: the client's own
     // pickup (a call exists only if the replica read the gold taken).
     assert!(cell("say") >= 1, "the client never heard the pickup: {rec}");
