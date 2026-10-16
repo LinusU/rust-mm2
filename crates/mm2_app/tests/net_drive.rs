@@ -3443,8 +3443,17 @@ fn side_effects_are_applied_once_under_reconciliation_on_an_impaired_link() {
         .unwrap_or_else(|| panic!("spk= has no replicated share: {bob_rec}"));
     assert_eq!(replicated, bob.impacts_applied, "{bob_rec}");
     assert!(lead(&bob_rec, "spk") >= replicated, "{bob_rec}");
-    let splats = lead(&bob_rec, "txl");
-    assert!(splats > 0 && splats <= bob.impacts_applied, "{bob_rec}");
+    // The texel pipeline sees every impact the client presents, local
+    // ones included, so the same split applies: its impact count is the
+    // replicated rows plus no more than the local bursts (measured: 171
+    // impacts for 131 applied rows, 40 of them local).
+    let texel_impacts = lead(&bob_rec, "txl");
+    let local_bursts = lead(&bob_rec, "spk") - replicated;
+    assert!(
+        texel_impacts >= bob.impacts_applied && texel_impacts <= bob.impacts_applied + local_bursts,
+        "texel impacts do not match rows plus local bursts: {bob_rec}"
+    );
+    assert!(texel_impacts > 0, "{bob_rec}");
     // The impact voice is at most one per applied row: spawned voices
     // plus scrape-held re-contacts never exceed the rows applied.
     let aud = field(&bob_rec, "aud");
