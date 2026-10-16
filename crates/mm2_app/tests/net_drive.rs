@@ -4180,12 +4180,11 @@ fn a_retail_stock_event_journey_runs_from_the_lobby_to_leave() {
 /// outruns the thief's road-graph chase on sf), and packet loss and a
 /// second contender for the same pickup stay open (F27-AC02/AC05).
 ///
-/// Reliability: 7 of 7 sequential local runs passed (3-6 min each) on
-/// the tree that removed the old `#[ignore]` (an earlier 4-of-5 had one
-/// run that never delivered). An uncapped carrier was tried and still
-/// fails: the thief's predicted car sits ~15 m from the host's copy of
-/// it, pulled on every drift window, and never reaches the marker. When
-/// a wait fails the clients' `event=own_correction` records are printed.
+/// Reliability: 17 of 18 sequential local runs passed (3-6 min each). The
+/// failure showed the host's copy of a paced client seat lagging its
+/// prediction by ~15 m for the whole drive (#1521). An uncapped carrier
+/// has not been tried. When a wait fails the clients' `event=own_correction`
+/// records are printed.
 #[test]
 fn a_client_thief_runs_down_the_carrier_and_delivers_the_gold() {
     const SEED: u64 = 1291;
