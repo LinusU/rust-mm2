@@ -96,11 +96,13 @@ Recorded run (2026-10-12, Apple M1, release, 3000 frames, shared machine,
 commit `a21df6d` plus this change): race **pass**; network host **pass**;
 network client **fail on overload only** (one 1135 ms render-stage stall,
 906 ms of game time discarded; entities, voices and queues passed). The
-stall did not recur in the host process and is unexplained: it is recorded,
-not waved through. Entities were flat (race 41,820 to 42,444, host 40,715 to
-40,729, client 40,847 to 40,796), voices peaked at 38/17/17 and queue depth
-never exceeded 1. A 600-frame race run failed the voice check (25 to 34)
-because the ambient voices were still filling; at 3000 frames it passed.
+stall did not recur in the host process and was unexplained at the time: it
+is recorded, not waved through. Its class is diagnosed under "Explaining
+the client's 1135 ms render-stage stall". Entities were flat (race 41,820
+to 42,444, host 40,715 to 40,729, client 40,847 to 40,796), voices peaked
+at 38/17/17 and queue depth never exceeded 1. A 600-frame race run failed
+the voice check (25 to 34) because the ambient voices were still filling;
+at 3000 frames it passed.
 
 Evidence level: original-content, rendered, local, one machine, one event
 and one car. The network leg is a two-process loopback, not a LAN; the host
@@ -196,26 +198,26 @@ thread's whole schedule, `render` the `Render` set, all in ms):
 |---|---|---|---|
 | pair3 | 428 | 8887.5 | 8930.9 = 3.3 + 1.5 + 26.8 + **8899.3** + 0.0 |
 | pair1 | 247 | 9734.7 | 38.3 = 0.2 + 0.8 + 27.3 + **10.0** + 0.1 |
-| pair1 | 1664 | 265.5 | 356.7 = 0.1 + 1.3 + 21.9 + **322.5** + 0.1 |
-| pair2 | 1706 | 213.1 | 217.8 = 0.0 + 0.5 + 165.1 + **32.4** + 0.0 |
+| pair1 | 1664 | 265.5 | 356.7 = 0.5 + 1.3 + 21.9 + **322.5** + 10.4 |
+| pair2 | 1706 | 213.1 | 217.8 = 19.0 + 0.5 + 165.1 + **32.4** + 0.9 |
 
 Both classes appear. Frame 428 is a render-thread stall in the `Render`
 set — the render graph, submit or `window.present` — at 8899 ms the largest
 part of the 8931 ms; frame 247 is the opposite, a 9.7 s main-thread/OS
-stall during which the render thread did only 38 ms of work. The
-`render`-segment stalls seen span 213-8899 ms, bracketing the original
-1135 ms. The hosts, drawing the same event, never exceeded 230 ms on the
-main `render` stage.
+stall during which the render thread did only 38 ms of work. The stalls
+seen run from a 213 ms main `render` stage to an 8899 ms render-thread
+`Render` segment, bracketing the original 1135 ms. The hosts, over the
+measured frames, never exceeded 231 ms on the main `render` stage.
 
-So the 2026-10-12 1135 ms client stall is not game logic (its `fixed` and
-`update` stages were normal, 26 / 20 ms) and not an asset load
-(`prepare_assets` stayed under 2 ms): it is a GPU/driver/display wait in
-the render thread's `Render` set, the same class as the frame-428 stall, or
-less often a main-thread/OS stall like frame 247. The two are now told
-apart by the report instead of by guesswork. The stall did not recur at one
-pair in two 3000-frame runs (the 2026-10-12 run and one fresh run);
-reproducing it took six concurrent GPU-bound processes, so on the soak's
-normal single pair it stays rare.
+So the 2026-10-12 1135 ms client stall is not game logic and not an asset
+load: the reproduced stalls kept `fixed` and `update` normal (26 / 20 ms at
+frame 428) and `prepare_assets` under 2 ms, so the time is a
+GPU/driver/display wait in the render thread's `Render` set, the same class
+as the frame-428 stall, or less often a main-thread/OS stall like frame
+247. The two are now told apart by the report instead of by guesswork. The
+stall did not recur on the soak's normal single pair in a fresh 3000-frame
+run or in the 10,000-frame runs; reproducing it took six concurrent
+GPU-bound processes, so it stays rare there.
 
 Evidence level: original-content, rendered, local, one machine, one event
 and one car, release, 3000 requested frames. The reproducing load is a
