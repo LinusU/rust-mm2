@@ -107,6 +107,45 @@ and one car. The network leg is a two-process loopback, not a LAN; the host
 and client each ran a bot. F30-AC02 is advanced, not closed: a longer run,
 more events and cities, and an explanation of the client stall remain open.
 
+### Longer and wider soak (2026-10-16)
+
+`scripts/soak.sh` now reads `SOAK_CITY`, `SOAK_EVENT` and `SOAK_LEGS`
+(`race`, `network`, or both; default `sf`, `checkpoint:0`, both), so a run
+on another event is `SOAK_CITY=london SOAK_EVENT=circuit:0 SOAK_LEGS=race
+scripts/soak.sh target/soak-x 10000`. Every row below is 10,000 requested
+frames, release, vsync off, Apple M1, shared machine, one run each, base
+`main` at `6432c0d` plus the script change. Every verdict is `pass`
+(including the zero-discarded-game-time overload check) and the script
+exited 0 in all four runs. "Entities" is the recorder's first sample and the
+last sample (the verdict compares the middle and last third peaks, which are
+listed after it).
+
+| event | process | entities first / last (thirds' peaks mid / last) | voices first / last (thirds' peaks) | queue depth |
+|---|---|---|---|---|
+| sf checkpoint:0 | race | 47,010 / 47,228 (47,228 / 47,228) | 17 / 36 (36 / 36) | 1 / 0 |
+| sf checkpoint:0 | host | 40,783 / 40,813 (40,836 / 40,821) | 10 / 15 (18 / 17) | 1 / 0 |
+| sf checkpoint:0 | client | 40,785 / 40,843 (40,942 / 40,939) | 10 / 15 (17 / 17) | 1 / 0 |
+| london checkpoint:0 | race | 48,449 / 48,594 (48,598 / 48,598) | 17 / 36 (39 / 39) | 1 / 0 |
+| london checkpoint:0 | host | 40,803 / 40,831 (40,862 / 40,866) | 9 / 16 (20 / 19) | 1 / 0 |
+| london checkpoint:0 | client | 40,804 / 40,841 (40,958 / 40,942) | 9 / 15 (16 / 16) | 1 / 0 |
+| sf circuit:0 | race | 47,074 / 47,212 (47,218 / 47,273) | 12 / 25 (28 / 32) | 1 / 0 |
+| london circuit:0 | race | 48,902 / 49,075 (49,597 / 49,206) | 19 / 42 (55 / 47) | 1 / 0 |
+
+Reading it: entity counts move by at most a few hundred over 10,000 frames
+and the last third never exceeds the middle by more than the slack (about
+1%); voices fluctuate with what is audible (peaks 16 to 56) and fall or stay
+level between the two judged thirds; queue depth never exceeded 1. The
+earlier 3000-frame client stall (one 1135 ms render stage) did not recur in
+either network client at 10,000 frames, which neither explains nor rules out
+it. The Circuit legs are single-process only: no networked Circuit run exists
+(`docs/multiplayer-coverage.md`).
+
+Evidence level: original-content, rendered, local, one machine, one run per
+cell, bot-driven. A leak under about 1% of the entity peak per third would
+still hide inside the slack. F30-AC02 stays open for a LAN or multi-machine
+network run, repeated runs for variance, and an explanation of the earlier
+client stall.
+
 ## What it shows (first run)
 
 - Entity and voice counts are flat in both scenes over 1380 measured

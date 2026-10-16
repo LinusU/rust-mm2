@@ -4,7 +4,8 @@
 # process. Each report's `timings.soak` judges entity, voice and queue growth
 # and discarded game time; this script fails when any verdict is `fail`.
 #
-#   MM2_RETAIL=<install> scripts/soak.sh [out-dir] [frames]
+#   MM2_RETAIL=<install> [SOAK_CITY=sf] [SOAK_EVENT=checkpoint:0] \
+#       [SOAK_LEGS="race network"] scripts/soak.sh [out-dir] [frames]
 #
 # Needs a display, a GPU and the original install (read only). Loopback only;
 # every process runs under `timeout` and is killed by PID on exit. Frames
@@ -16,6 +17,9 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 : "${MM2_RETAIL:?set MM2_RETAIL to the original install}"
+city=${SOAK_CITY:-sf}
+event=${SOAK_EVENT:-checkpoint:0}
+legs=${SOAK_LEGS:-race network}
 out=${1:-target/soak}
 frames=${2:-3000}
 limit=$(((frames + 1500) / 10 + 240))
@@ -27,23 +31,26 @@ common="--mm2-path $MM2_RETAIL --car vpauditt --bot --frames $frames --no-vsync"
 pids=""
 trap 'for p in $pids; do kill "$p" 2>/dev/null || true; done' EXIT
 
-echo "== race (sf checkpoint:0, $frames frames)"
+case " $legs " in *" race "*)
+echo "== race ($city $event, $frames frames)"
 # shellcheck disable=SC2086
-timeout "$limit" "$bin" $common --city sf --event checkpoint:0 \
+timeout "$limit" "$bin" $common --city "$city" --event "$event" \
     --perf-log "$out/race.csv" 2>&1 | tee "$out/race.summary.txt" | tail -40
+;; esac
 
+case " $legs " in *" network "*)
 # The host and the client count --frames from process start, lobby wait
 # included; the recorder opens only once the session counts down, so the
 # lobby budget below is slack and not measurement.
 lobby=1500
 nframes=$((frames + lobby))
-echo "== network (loopback host + client, $frames frames after the lobby)"
+echo "== network ($city $event, loopback host + client, $frames frames after the lobby)"
 fifo="$out/host.stdin"
 rm -f "$fifo" "$out/host.log" "$out/client.log"
 mkfifo "$fifo"
 # shellcheck disable=SC2086
 timeout "$limit" "$bin" --mm2-path "$MM2_RETAIL" --car vpauditt --bot \
-    --frames "$nframes" --no-vsync --city sf --event checkpoint:0 --host \
+    --frames "$nframes" --no-vsync --city "$city" --event "$event" --host \
     --perf-log "$out/host.csv" <"$fifo" >"$out/host.log" 2>&1 &
 host=$!
 pids="$host"
@@ -71,11 +78,15 @@ wait "$client" || true
 exec 3>&-
 grep '^perf:' "$out/host.log" | tail -4
 grep '^perf:' "$out/client.log" | tail -4
+;; esac
 
 # A verdict only counts for a populated, long-enough run: a `pass` over a
 # parked lobby (hundreds of entities) or a few frames proves nothing.
 status=0
-for r in race host client; do
+results=""
+case " $legs " in *" race "*) results="race" ;; esac
+case " $legs " in *" network "*) results="$results host client" ;; esac
+for r in $results; do
     result=$(python3 -I -c '
 import json, sys
 j = json.load(open(sys.argv[1]))
