@@ -395,6 +395,16 @@ impl Proc {
         }
     }
 
+    /// Every stdout line that has arrived and not been read yet, plus the
+    /// child's stderr so far — what a failing leg prints about a child it
+    /// was not waiting on.
+    pub fn pending(&self) -> String {
+        let mut out: Vec<String> = self.lines.try_iter().collect();
+        let stderr = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
+        out.push(format!("stderr:\n{stderr}"));
+        out.join("\n")
+    }
+
     /// One operator command on the child's stdin (`start`, `cancel`,
     /// `ready`, `vehicle …`, `quit`).
     pub fn cmd(&mut self, command: &str) {

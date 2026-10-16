@@ -3553,6 +3553,32 @@ fn apply_snap_frame(
                 } else {
                     snaps.own_drift.observe(pos.0, to_pos)
                 };
+                if drift != Drift::None || settled || authority_reset {
+                    // One record per correction of the predicted seat:
+                    // the process tests print them when a leg fails, so a
+                    // host copy that parted from the prediction shows
+                    // where and by how much.
+                    println!(
+                        "event=own_correction kind={} tick={} local={:.1},{:.1},{:.1} wire={:.1},{:.1},{:.1} gap={:.1}",
+                        if authority_reset {
+                            "reset"
+                        } else if settled {
+                            "settle"
+                        } else if drift == Drift::Snap {
+                            "snap"
+                        } else {
+                            "pull"
+                        },
+                        snap.tick,
+                        pos.0.x,
+                        pos.0.y,
+                        pos.0.z,
+                        to_pos.x,
+                        to_pos.y,
+                        to_pos.z,
+                        pos.0.distance(to_pos),
+                    );
+                }
                 if let Drift::Pull(f) = drift {
                     // Blend position and heading only: velocity stays the
                     // local sim's, so the driver keeps the car they feel.
