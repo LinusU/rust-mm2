@@ -4030,3 +4030,84 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
         );
     }
 }
+
+/// F31-AC03 / F31-B.6 (retail-data multiplayer journey), original-content
+/// validation: the lobby → event → start → race → results → end-round →
+/// leave journey of `net_app`'s synthetic F31-B.4 leg, over a real
+/// stock event. A hosted `mm2 --host --city london --event blitz:0`
+/// (the authored "London's Calling", 3 gates and a finish on a 25 s
+/// clock) and one joined `mm2 --join` client are two production
+/// processes on loopback: the client readies in the lobby, the host
+/// starts, both load the authored `london.psdl` world and `blitz0`
+/// course from retail data, the host's scripted `--bot` finishes the
+/// course and the client's parked car is timed out by the authority.
+/// Both processes must reach `Results` with a recorded result on their
+/// own ledger; the client then leaves (its `--until-results` run ends on
+/// the verdict) and the host's frame cap ends its run on the `Results`
+/// screen.
+///
+/// Skipped without `MM2_RETAIL=<dir>`. What it is not: a human-driven
+/// finish, a lossy link (the lossy journey is F31-B.4's synthetic leg;
+/// `a_networked_retail_race_agrees_across_an_impaired_link` is the
+/// impaired retail race), a second client, or rendered output. The
+/// host's cancel/rematch edge with a seated client stays `net_app`'s
+/// in-process assertion: the host's record prints only at process exit,
+/// and a cancelled round no longer holds its ledger.
+#[test]
+fn a_retail_stock_event_journey_runs_from_the_lobby_to_leave() {
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 40_000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(
+        ["--city", "london", "--event", "blitz:0", "--bot"]
+            .into_iter()
+            .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let mut client_args = join_args(&retail, addr, "alice", 45_000);
+    client_args.extend(["--parked".into(), "--until-results".into()]);
+    let client = Proc::spawn(MM2_EXE, &client_args);
+
+    // Lobby → start: bounded waits on the records, never frame counts.
+    start_when_ready(&mut host, 1);
+    let bound = Duration::from_secs(600);
+    let rec = client.until_within("smoke=headless-physics", bound);
+    client.wait_success("alice", &rec);
+    eprintln!("client {rec}");
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&rec, "stop"), "results", "{rec}");
+    assert_eq!(field(&rec, "phase"), "results", "{rec}");
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
+    // The client built the host's authored course, not a private one.
+    assert!(field(&rec, "cp").ends_with("/3"), "{rec}");
+    let results: u64 = field(&rec, "results").parse().unwrap();
+    assert!(results >= 1, "no result reached the client: {rec}");
+    // Its own parked seat carries the authority's word only.
+    if let Some(outcome) = rec
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("outcome="))
+    {
+        assert_eq!(outcome, "timed-out", "{rec}");
+    }
+
+    // Disconnect → end round: the finished client has left; the host
+    // has no results stop, so its frame cap decides when its record
+    // prints, from the Results screen.
+    let host_rec = host.until_within("smoke=headless-physics", host.budget().unwrap_or(bound));
+    eprintln!("host   {host_rec}");
+    assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
+    assert_eq!(field(&host_rec, "phase"), "results", "{host_rec}");
+    assert_eq!(field(&host_rec, "outcome"), "finished", "{host_rec}");
+    let host_results: u64 = field(&host_rec, "results").parse().unwrap();
+    assert!(host_results >= 1, "the host recorded no result: {host_rec}");
+    assert_eq!(
+        field(&host_rec, "cp").split_once('/').map(|(_, n)| n),
+        Some("3"),
+        "{host_rec}"
+    );
+    host.wait_success("host", &host_rec);
+}
