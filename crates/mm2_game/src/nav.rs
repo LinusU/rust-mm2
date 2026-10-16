@@ -285,6 +285,24 @@ fn nav_signal(end: &mm2_formats::bai::RoadEnd) -> Option<NavSignal> {
     Some(NavSignal { origin, axis })
 }
 
+/// The horizontal unit vector from `origin` toward the centre line of
+/// the road whose end section is `section` (the section's `x_axis` is
+/// the cross-road direction; the origin's signed offset along it names
+/// the side the head stands on).
+fn across_road(origin: [f32; 3], section: Option<&mm2_formats::bai::RoadSection>) -> [f32; 3] {
+    let Some(section) = section else {
+        return [0.0; 3];
+    };
+    let x = [section.x_axis[0], 0.0, section.x_axis[2]];
+    let len = (x[0] * x[0] + x[2] * x[2]).sqrt();
+    let side = (origin[0] - section.origin[0]) * x[0] + (origin[2] - section.origin[2]) * x[2];
+    if !(len > 1e-3 && side.is_finite() && side.abs() > 1e-3 * len) {
+        return [0.0; 3];
+    }
+    let k = -side.signum() / len;
+    [x[0] * k, 0.0, x[2] * k]
+}
+
 /// An authored signal head on a road end whose junction reference
 /// resolved — the road-end furniture the original draws at every
 /// nonzero `trafficLightOrigin` (R3). This is the *full* authored
@@ -304,6 +322,13 @@ pub struct EndSignal {
     pub rule_code: u16,
     /// The authored marker pair.
     pub signal: NavSignal,
+    /// Horizontal unit vector from the head's origin across the
+    /// carriageway toward the road's centre line, read off the end
+    /// section's frame: the origin's side of the centre line, not the
+    /// authored `axis` sign (which is mixed and tracks nothing — see
+    /// `docs/research/bai.md`). `[0,0,0]` when the end has no section
+    /// or the origin lies on the centre line.
+    pub across: [f32; 3],
 }
 
 impl EndSignal {
@@ -977,13 +1002,16 @@ impl NavGraph {
 
             // Every authored signal head on a resolved end — arc or
             // not, the original draws the head it authored (F10-B.7).
-            for (junction, end) in [(start_int, &road.start), (end_int, &road.end)] {
+            for (junction, end, section) in
+                [(start_int, &road.start, first), (end_int, &road.end, last)]
+            {
                 if let (Some(ix), Some(signal)) = (junction, nav_signal(end)) {
                     signals.push(EndSignal {
                         road: ri as u16,
                         junction: ix,
                         rule_code: end.vehicle_rule_code,
                         signal,
+                        across: across_road(signal.origin, section),
                     });
                 }
             }

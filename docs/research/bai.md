@@ -184,8 +184,26 @@ as authored geometry, not a recoloured material:
 that geometry at each origin (pole base on the origin, DAY lamp chunks
 toggled per aspect); which variant each head gets and which way it faces
 remain unrecovered, so the runtime picks single/dual by approach-lane
-count and faces the lamps along the road away from the junction
-(designed). The four `sp_traflit*` rows in `city/phys/props.pathset` (a
+count (designed) and turns the unit so its mast arm (local −X) reaches
+across the carriageway toward the road's centre line, read from which
+side of the end section's centre line the origin stands (measured: the
+origins stand beside the approach, mostly on the −`x_axis` side of an
+`end` section and the +`x_axis` side of a `start` section — SF 3 of
+376 and 4 of 269 stand on the other side; the authored `axis` sign, by
+contrast, points toward the road's end-section centre on only 119 of
+SF's 645 directed heads, so it is not used). The arm fixes the lamp facing
+(local +Z), which is therefore not verified against the original.
+
+**Chunk frames in the signal-unit PKGs (measured, #1520).** The body
+chunks (`H`, `BREAK01/02`) are authored centred on the pole's
+mid-height (Y ±3.89 m on both default units, `offset` chunk zero),
+while the lamp chunks (`*GLOW{DAY,NIGHT}_H`, `{WALK,NOWALK}_*_H`) are
+authored on the ground-based frame: the DAY glows' Y spans (5.65–8.06
+single, 5.11–8.52 dual) centre on the three lamp slots of the head
+housing (body Y 2.33–3.69) only once the body alone is lifted by its
+−min Y (3.89 m); the walk signs then land at 1.8–2.7 m on the pole.
+Lifting the lamps with the body floated every glow 3.9 m above its
+head. The four `sp_traflit*` rows in `city/phys/props.pathset` (a
 dev set no session loads) are a demo layout — the nearest SF authored
 origin is 33 m away, the farthest 56 m (horizontal) — not the placement
 source.

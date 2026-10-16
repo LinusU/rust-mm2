@@ -1910,6 +1910,9 @@ fn signals_lists_every_lit_resolved_end() {
                 origin: [1.0, 5.0, -1.0],
                 axis: [0.0, 1.0, 0.0],
             },
+            // The origin stands at +X of the road's centre line, so the
+            // arm reaches toward −X whatever the (junk) authored axis.
+            across: [-1.0, 0.0, 0.0],
         }
     );
     assert_eq!(at(1).rule_code, 3, "road 1's entry-only head lists");
@@ -2033,4 +2036,24 @@ fn recovered_junction_timing_is_the_default() {
     assert_eq!(p.clear_ticks, 6 * hz);
     assert_eq!(p.stop_dwell_ticks, 0);
     assert_eq!(p.stop_inset, 1.5);
+}
+
+/// A head's `across` points from its origin toward the road's centre
+/// line, whichever kerb it stands on and whatever sign its authored
+/// axis carries; an origin on the centre line has no side.
+#[test]
+fn a_head_reaches_across_toward_its_roads_centre_line() {
+    let across = |origin: [f32; 3], axis: [f32; 3]| {
+        let g = chain_with_signal(signal_end(0, 0, 1, origin, axis), 1);
+        g.signals()
+            .iter()
+            .find(|s| s.road == 0)
+            .expect("head")
+            .across
+    };
+    for axis in [[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0; 3]] {
+        assert_eq!(across([3.0, 5.0, 99.0], axis), [-1.0, 0.0, 0.0]);
+        assert_eq!(across([-3.0, 5.0, 99.0], axis), [1.0, 0.0, 0.0]);
+    }
+    assert_eq!(across([0.0, 5.0, 99.0], [0.0; 3]), [0.0; 3]);
 }

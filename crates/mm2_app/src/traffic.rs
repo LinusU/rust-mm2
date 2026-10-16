@@ -162,7 +162,9 @@
 //! the aimap's `[Traffic Lights]` models or the executable defaults,
 //! single or dual by approach-lane count (designed), standing on the
 //! origin with its lamps facing along the road away from the junction
-//! (axis sign unverified, so the facing is designed); a model that does
+//! (the arm reaches toward the road centre line from the origin's side
+//! of the end section; which way the lamps face along it is thereby
+//! fixed, not verified); a model that does
 //! not resolve is reported, not replaced. `drive_signals` then sets each indicator's
 //! aspect off the authoritative [`Junctions`] controller every tick —
 //! green while the approach's road holds the signal phase, red out of
@@ -396,6 +398,12 @@ pub(crate) struct SignalModel {
     lamps: Vec<(LampState, Vec<ModelPart>)>,
     /// Lift (m) that stands the body's lowest vertex on the anchor —
     /// the unbound-prop ground convention (`stamp_content_offset`).
+    /// Applies to the body only: the body chunks are authored centred
+    /// on the pole's mid-height (Y ±3.89 m on both retail units) while
+    /// the lamp chunks (glows, walk signs) are authored on the
+    /// ground-based frame — their Y range is the housing's once the
+    /// body is lifted by exactly this amount — so a lamp lifted with
+    /// the body floats this far above its head.
     lift: f32,
     /// How far the body reaches along its local −X (the mast arm), m.
     reach: f32,
@@ -601,23 +609,27 @@ pub(crate) struct SignalHead {
     pub approach_lanes: usize,
 }
 
-/// The horizontal direction a head faces. The authored axis is a unit
-/// vector across the carriageway stored as `origin + axis`
-/// (docs/research/bai.md), so the lamps face along the road, at right
-/// angles to it; its sign is mixed and tracks nothing measurable, so
-/// the facing is signed to point away from the junction (designed —
-/// heads face the approaching traffic). A head with no usable axis (4
-/// SF ends author `axis == origin`) faces straight away from the
-/// junction centre.
-fn signal_facing(origin: Vec3, axis_point: Vec3, center: Vec3) -> Vec3 {
+/// The horizontal direction a head faces. The unit's mast arm reaches
+/// along its local −X and its lamps face local +Z, so the facing follows
+/// from which way the arm must reach: over the carriageway, toward the
+/// road's centre line (`across`, the origin's side of the end section's
+/// centre line: retail origins stand beside the approach). The
+/// authored axis is a unit vector across the carriageway stored as
+/// `origin + axis` (docs/research/bai.md) but its sign is mixed and
+/// tracks nothing measurable — orienting the arm by it left the arm
+/// pointing away from the road on 526 of 645 SF heads — so it is not
+/// read. A head whose end carries no usable section frame (`across`
+/// zero) falls back to facing straight away from the junction centre
+/// (designed).
+fn signal_facing(origin: Vec3, across: Vec3, center: Vec3) -> Vec3 {
     let outward = Vec3::new(origin.x - center.x, 0.0, origin.z - center.z);
-    let across = Vec3::new(axis_point.x - origin.x, 0.0, axis_point.z - origin.z);
-    let along = across
-        .try_normalize()
-        .map(|a| Vec3::new(-a.z, 0.0, a.x))
-        .filter(|f| f.is_finite());
-    match (along, outward.try_normalize()) {
-        (Some(f), Some(o)) if f.dot(o) < 0.0 => -f,
+    match (
+        Vec3::Y
+            .cross(across)
+            .try_normalize()
+            .filter(|f| f.is_finite()),
+        outward.try_normalize(),
+    ) {
         (Some(f), _) => f,
         (None, Some(o)) => o,
         (None, None) => Vec3::Z,
@@ -657,13 +669,7 @@ pub(crate) fn authored_signal_heads(
             rule: head.rule(),
             member: member_set.contains(&head.road),
             origin,
-            facing: signal_facing(
-                origin,
-                Some(Vec3::from(head.signal.axis))
-                    .filter(|a| *a != Vec3::ZERO)
-                    .unwrap_or(origin),
-                center,
-            ),
+            facing: signal_facing(origin, Vec3::from(head.across), center),
             approach_lanes: graph.road(head.road).map_or(0, |road| {
                 road.arcs
                     .iter()
@@ -1130,6 +1136,8 @@ fn spawn_signal_head(
         for (mesh, material) in &model.body {
             children.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), lift));
         }
+        // The lamp chunks are authored on the ground-based frame (see
+        // [`SignalModel::lift`]) and stand on the origin as they are.
         for (state, parts) in &model.lamps {
             let visibility = if state.lit(aspect) {
                 Visibility::Inherited
@@ -1141,7 +1149,7 @@ fn spawn_signal_head(
                     SignalLamp(*state),
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(material.clone()),
-                    lift,
+                    Transform::IDENTITY,
                     visibility,
                 ));
             }
@@ -2573,21 +2581,79 @@ mod signal_unit_tests {
 
     use super::*;
 
+    /// The unit's mast arm direction in the world: its local −X under
+    /// the spawn rotation of [`spawn_signal_head`].
+    fn arm_direction(face: Vec3) -> Vec3 {
+        Quat::from_mat3(&Mat3::from_cols(Vec3::Y.cross(face), Vec3::Y, face)) * -Vec3::X
+    }
+
     #[test]
-    fn a_head_faces_along_the_road_away_from_the_junction_whatever_the_axis_sign() {
-        let origin = Vec3::new(10.0, 5.0, 0.0);
+    fn the_arm_reaches_across_the_road_whichever_kerb_the_head_stands_on() {
         let center = Vec3::ZERO;
-        // The axis runs across the road (±Z); the face is along ±X.
-        for axis in [Vec3::Z, -Vec3::Z] {
-            let face = signal_facing(origin, origin + axis, center);
-            assert!((face - Vec3::X).length() < 1e-5, "{face:?}");
+        // The road runs along X; the head stands on either kerb and the
+        // arm must reach toward the centre line from both.
+        for (origin, across) in [
+            (Vec3::new(10.0, 5.0, 4.0), -Vec3::Z),
+            (Vec3::new(10.0, 5.0, -4.0), Vec3::Z),
+        ] {
+            let arm = arm_direction(signal_facing(origin, across, center));
+            assert!((arm - across).length() < 1e-5, "{origin:?}: {arm:?}");
         }
     }
 
     #[test]
-    fn a_head_with_no_axis_faces_straight_out_of_the_junction() {
+    fn a_head_with_no_road_side_faces_straight_out_of_the_junction() {
         let origin = Vec3::new(0.0, 3.0, -8.0);
-        assert!((signal_facing(origin, origin, Vec3::ZERO) + Vec3::Z).length() < 1e-5);
+        assert!((signal_facing(origin, Vec3::ZERO, Vec3::ZERO) + Vec3::Z).length() < 1e-5);
+    }
+
+    /// Original-content level: on retail SF every authored head knows
+    /// which side of its road it stands on, and the arm the spawn
+    /// rotation gives its unit reaches toward the road's centre line
+    /// (the signed offset from the end section along the section's
+    /// cross-road axis shrinks along the arm).
+    #[test]
+    fn retail_sf_heads_reach_their_arm_over_their_road() {
+        let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+            eprintln!("skipped: MM2_RETAIL is not set; retail signal arms NOT checked");
+            return;
+        };
+        let mut vfs = Vfs::new();
+        mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
+            .expect("the install mounts");
+        let build = mm2_content::load_nav_graph(&vfs, "sf").expect("sf nav graph");
+        let (heads, _) = authored_signal_heads(&build.graph, &JunctionPolicy::default());
+        assert!(heads.len() > 500, "{} heads", heads.len());
+        let mut sided = 0;
+        for head in &heads {
+            let signal = build
+                .graph
+                .signals()
+                .iter()
+                .find(|s| {
+                    s.road == head.road
+                        && s.junction == head.junction
+                        && Vec3::from(s.signal.origin) == head.origin
+                })
+                .expect("head's record");
+            let across = Vec3::from(signal.across);
+            if across == Vec3::ZERO {
+                continue;
+            }
+            sided += 1;
+            let arm = arm_direction(head.facing);
+            assert!(
+                arm.dot(across) > 0.999,
+                "{head:?}: arm {arm:?} across {across:?}",
+                head = head.origin
+            );
+        }
+        eprintln!("{sided} of {} heads carry a road side", heads.len());
+        assert!(
+            sided * 100 >= heads.len() * 99,
+            "{sided} of {}",
+            heads.len()
+        );
     }
 
     #[test]
@@ -2628,6 +2694,73 @@ mod signal_unit_tests {
             ]
         );
         assert!(assets.model_for(4).is_none());
+    }
+
+    /// Original-content level: the lamp chunks are authored on the same
+    /// ground-based frame the lifted body ends up in. Each day glow's
+    /// centre sits inside the vertical span of the signal housing
+    /// (the body's `s_stoplight_f` box) once only the body is lifted;
+    /// lifting the lamps too floats them `lift` metres above it.
+    #[test]
+    fn retail_glow_chunks_sit_on_their_lifted_housing() {
+        use mm2_formats::pkg::{Pkg, PkgChunk, lod_split};
+        let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+            eprintln!("skipped: MM2_RETAIL is not set; retail glow frames NOT checked");
+            return;
+        };
+        let mut vfs = Vfs::new();
+        mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
+            .expect("the install mounts");
+        for name in ["sp_traflitsingle_f", "sp_traflitdual_f"] {
+            let resolved = vfs
+                .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
+                .expect("unit resolves");
+            let pkg = Pkg::parse(&vfs.read(&resolved).unwrap()).unwrap();
+            let mut body = pkg.clone();
+            body.files.retain(|f| {
+                !matches!(f.data, PkgChunk::Geometry(_))
+                    || !LampState::is_lamp_stem(&lod_split(&f.name).0)
+            });
+            let lift = -mm2_game::local_geometry_verts(&body)
+                .iter()
+                .map(|v| v[1])
+                .fold(f32::MAX, f32::min);
+            // The housing: body vertices out on the arm (x < −4 m) and
+            // above the arm's lower edge — the head box at the arm's end.
+            let housing: Vec<f32> = mm2_game::local_geometry_verts(&body)
+                .iter()
+                .filter(|v| v[0] < -4.4 && v[0] > -5.2 && v[1] > 2.3 && v[1] < 3.7)
+                .map(|v| v[1] + lift)
+                .collect();
+            let (lo, hi) = (
+                housing.iter().cloned().fold(f32::MAX, f32::min),
+                housing.iter().cloned().fold(f32::MIN, f32::max),
+            );
+            assert!(housing.len() > 8, "{name}: housing vertices found");
+            for (stem, geo) in pkg.geometries() {
+                let (stem, _) = lod_split(stem);
+                if !matches!(
+                    stem.as_str(),
+                    "redglowday" | "yellowglowday" | "greenglowday"
+                ) {
+                    continue;
+                }
+                let ys: Vec<f32> = geo
+                    .sections
+                    .iter()
+                    .flat_map(|s| &s.strips)
+                    .flat_map(|s| &s.vertices)
+                    .map(|v| v.position[1])
+                    .collect();
+                let mid = (ys.iter().cloned().fold(f32::MAX, f32::min)
+                    + ys.iter().cloned().fold(f32::MIN, f32::max))
+                    / 2.0;
+                assert!(
+                    (lo..=hi).contains(&mid),
+                    "{name} {stem}: glow centre {mid} outside housing {lo}..{hi}"
+                );
+            }
+        }
     }
 
     /// Original-content level: both retail defaults and the London
