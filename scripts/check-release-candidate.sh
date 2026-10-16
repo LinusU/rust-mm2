@@ -3,7 +3,7 @@
 # evidence commands against a release candidate and, with `--baseline`,
 # against the unoptimized build, and compare the smoke records.
 #
-#   scripts/check-release-candidate.sh --bin <mm2> [--baseline <mm2>] [--out <dir>]
+#   scripts/check-release-candidate.sh --bin <mm2> [--baseline <mm2>] [--out <dir>] [--render]
 #
 # The candidate is normally the `mm2` a package carries (release profile,
 # stripped): point `--bin` at `<package>/mm2`. The baseline is the
@@ -17,6 +17,14 @@
 # counted as a pass. This is original-content / local evidence (F30-AC06),
 # so it is not run from hosted CI.
 #
+# With `--render` (opt-in; needs a GPU and MM2_RETAIL) it also renders the
+# fixed `--cam` pose below with `--frames 90 --screenshot` on the candidate
+# and, with `--baseline`, on the baseline, and requires the two PNGs to be
+# byte-identical (input is frozen during a capture, so equal builds draw
+# equal frames). Without MM2_RETAIL the render case is `skipped`; a run
+# that writes no screenshot (no usable GPU, a crash) FAILS. Captures go
+# under `--out` (default under target/) and are never committed.
+#
 # Exit status: 0 every command ran and matched, 1 a command failed,
 # differed or was skipped, 2 a usage error.
 set -eu
@@ -26,13 +34,15 @@ cd "$root"
 
 bin=
 baseline=
+render=0
 out=target/release-candidate
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) [ $# -ge 2 ] || { echo "error: --bin needs a value" >&2; exit 2; }; bin=$2; shift 2 ;;
         --baseline) [ $# -ge 2 ] || { echo "error: --baseline needs a value" >&2; exit 2; }; baseline=$2; shift 2 ;;
         --out) [ $# -ge 2 ] || { echo "error: --out needs a value" >&2; exit 2; }; out=$2; shift 2 ;;
-        -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --render) render=1; shift ;;
+        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -112,6 +122,47 @@ run_case sf-cruise 1 "$bin" --city sf --headless --frames 600
 run_case london-blitz-hold 1 "$bin" --city london --event blitz:0 --headless --frames 2400
 run_case london-blitz-bot 1 "$bin" --city london --event blitz:0 --headless --bot --frames 2400
 run_case sf-checkpoint-bot 1 "$bin" --city sf --event checkpoint:0 --headless --bot --frames 3000
+
+# run_render <name> <args...>: one screenshot per binary, compared byte for
+# byte. The pose is the AGENTS.md San Francisco view.
+run_render() {
+    name=$1
+    shift
+    if [ -z "$retail" ]; then
+        echo "== $name: skipped (MM2_RETAIL is not set)"
+        skipped=$((skipped + 1))
+        return
+    fi
+    shot="$out/$name.$(basename "$bin").png"
+    rm -f "$shot"
+    "$bin" --mm2-path "$retail" "$@" --screenshot "$shot" >"$out/$name.candidate.out" 2>&1 || true
+    if [ ! -s "$shot" ]; then
+        echo "== $name: FAIL (no screenshot written; no usable GPU? see $out/$name.candidate.out)"
+        fail=$((fail + 1))
+        return
+    fi
+    if [ -n "$baseline" ]; then
+        base_shot="$out/$name.baseline.png"
+        rm -f "$base_shot"
+        "$baseline" --mm2-path "$retail" "$@" --screenshot "$base_shot" >"$out/$name.baseline.out" 2>&1 || true
+        if [ ! -s "$base_shot" ]; then
+            echo "== $name: FAIL (baseline wrote no screenshot; see $out/$name.baseline.out)"
+            fail=$((fail + 1))
+            return
+        fi
+        if ! cmp -s "$shot" "$base_shot"; then
+            echo "== $name: DIFFER ($shot vs $base_shot)"
+            fail=$((fail + 1))
+            return
+        fi
+    fi
+    echo "== $name: pass"
+    pass=$((pass + 1))
+}
+
+if [ "$render" = 1 ]; then
+    run_render sf-cam --city sf --cam=-747.5,42.4,275.0,179,-15 --frames 90
+fi
 
 echo "--"
 echo "candidate: $bin"

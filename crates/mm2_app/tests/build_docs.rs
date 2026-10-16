@@ -351,4 +351,74 @@ mod release_candidate {
             "the install path split: {log}"
         );
     }
+
+    /// A stub that prints a pass record and, given `--screenshot <file>`,
+    /// writes `pixels` there (nothing when `pixels` is empty).
+    fn renderer(dir: &Path, name: &str, pixels: &str) -> PathBuf {
+        let body = format!(
+            "#!/bin/sh\nprev=\nfor a in \"$@\"; do\n  if [ \"$prev\" = --screenshot ] && [ -n '{pixels}' ]; then printf '%s' '{pixels}' > \"$a\"; fi\n  prev=$a\ndone\necho 'smoke=x status=pass'\n"
+        );
+        executable(dir, name, &body)
+    }
+
+    fn render_run(dir: &Path, candidate: &Path, baseline: &Path, retail: bool) -> Output {
+        let evidence = dir.join("evidence");
+        let install = dir.join("retail");
+        std::fs::create_dir_all(&install).unwrap();
+        run(
+            &[
+                "--bin",
+                candidate.to_str().unwrap(),
+                "--baseline",
+                baseline.to_str().unwrap(),
+                "--out",
+                evidence.to_str().unwrap(),
+                "--render",
+            ],
+            retail.then(|| install.to_str().unwrap()),
+        )
+    }
+
+    fn stdout(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn render_mode_passes_identical_captures_and_fails_differing_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = renderer(dir.path(), "a", "same");
+        let b = renderer(dir.path(), "b", "same");
+        let c = renderer(dir.path(), "c", "other");
+        let out = render_run(dir.path(), &a, &b, true);
+        assert_eq!(code(&out), 0, "{}", stdout(&out));
+        assert!(stdout(&out).contains("== sf-cam: pass"), "{}", stdout(&out));
+        let out = render_run(dir.path(), &a, &c, true);
+        assert_eq!(code(&out), 1);
+        assert!(
+            stdout(&out).contains("== sf-cam: DIFFER"),
+            "{}",
+            stdout(&out)
+        );
+    }
+
+    #[test]
+    fn render_mode_fails_without_a_screenshot_and_skips_without_retail() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = renderer(dir.path(), "ok", "same");
+        let none = renderer(dir.path(), "none", "");
+        let out = render_run(dir.path(), &none, &ok, true);
+        assert_eq!(code(&out), 1);
+        assert!(
+            stdout(&out).contains("== sf-cam: FAIL (no screenshot"),
+            "{}",
+            stdout(&out)
+        );
+        let out = render_run(dir.path(), &ok, &ok, false);
+        assert_eq!(code(&out), 1, "a skipped render is not a pass");
+        assert!(
+            stdout(&out).contains("== sf-cam: skipped"),
+            "{}",
+            stdout(&out)
+        );
+    }
 }

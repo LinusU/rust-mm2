@@ -254,6 +254,17 @@ binary. Without `--bot` the headless smoke reports `status=fail ... car
 never drove` for both, because the default driver holds no input. That is
 the smoke's own verdict, not a packaging fault.
 
+`--render` adds an opt-in rendered check (GPU and `MM2_RETAIL` needed): the
+San Francisco `--cam=-747.5,42.4,275.0,179,-15 --frames 90 --screenshot`
+pose runs on the candidate and, with `--baseline`, the baseline, and the
+two PNGs must be byte-identical (input is frozen during a capture). No
+install is `skipped`; a run that writes no screenshot (no GPU, a crash)
+fails. Captures land under `--out` (`target/release-candidate` by default)
+and are never committed. Byte equality is the only tolerance: a
+legitimate GPU-driver or optimisation-induced difference is reported as
+`DIFFER` for a human to look at. The rendered mode has not yet been run
+on a release package with a GPU; the evidence below is headless only.
+
 Verified 2026-10-12 on macOS arm64 (commit `ca3511f`): `scripts/package.sh
 --out target/f30-layouts` (a release build, `--layout all`) assembled and
 checked all three layouts — the flat folder, `rust-mm2.app` and the prefix
@@ -378,10 +389,6 @@ The README documents the flags in context; `mm2 --help` lists them all.
   with `open` (see above) but is only ad-hoc signed, has no icon and
   needs the owner's Apple credentials to be notarized. A launch from
   Finder's GUI (as opposed to `open`) was not exercised.
-- A *rendered* release-candidate check: `scripts/check-release-candidate.sh`
-  runs the headless commands, not the `--cam` captures, so it shows the
-  optimised package loads the same content and reaches the same race
-  outcomes, not that a scene's geometry or textures still draw.
 - A hosted CI job that runs `scripts/package.sh`. The non-gating
   `build-check` job is green on `macos-latest` and `windows-latest`
   (commit `895e89a`), but it is a `cargo check`, not a package build or a
