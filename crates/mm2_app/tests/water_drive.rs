@@ -1,4 +1,4 @@
-//! F28-AC04 (#1468): a physics drive through London's Thames tunnel and
+//! F28-AC04 (#1468, #1505): a physics drive through London's Thames tunnel and
 //! over its bridges against the city's real `CityWater`, asserting the
 //! production recovery detector never classifies the car as drowned or
 //! out of bounds.
@@ -22,9 +22,11 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::city::load_city;
 use mm2_app::contracts::ImpactFilter;
+use mm2_app::drawbridge::DrawbridgeLeaf;
 use mm2_app::recovery::{self, RecoveryReport};
 use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_assets::Vfs;
+use mm2_game::drawbridge::{CLOSED_WAIT, DrawbridgeMode, LeafMotion};
 use mm2_game::{
     Player, PlayerControl, RecoveryEvent, RecoveryPolicy, Session, SessionConfig, SessionEntity,
     SessionPhase, VehicleRecovery, advance_session_tick,
@@ -45,6 +47,22 @@ const LOOKAHEAD: f32 = 7.0;
 /// The loaded London with the production recovery stack and a player
 /// car at `start`, facing `yaw`.
 fn london_drive_app(vfs: Vfs, start: Vec3, yaw: f32) -> (App, Entity) {
+    london_drive_app_with(vfs, start, yaw, Leaves::None)
+}
+
+/// What London's drawbridge leaves do in a drive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Leaves {
+    /// No leaves are spawned (the PSDL rooms under them have no deck).
+    None,
+    /// Spawned and held closed for the whole drive.
+    Closed,
+    /// Spawned and run by the production `drive_drawbridges` timers,
+    /// every leaf force-started in the opening phase.
+    Opening,
+}
+
+fn london_drive_app_with(vfs: Vfs, start: Vec3, yaw: f32, leaves: Leaves) -> (App, Entity) {
     let mut session = Session::new();
     session.begin(SessionConfig::default()).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
@@ -85,6 +103,9 @@ fn london_drive_app(vfs: Vfs, start: Vec3, yaw: f32) -> (App, Entity) {
             FixedLast,
             (recovery::track_recovery, recovery::resolve_recovery).chain(),
         );
+    if leaves == Leaves::Opening {
+        app.add_systems(FixedUpdate, mm2_app::drawbridge::drive_drawbridges);
+    }
     app.finish();
     app.cleanup();
 
@@ -115,6 +136,48 @@ fn london_drive_app(vfs: Vfs, start: Vec3, yaw: f32) -> (App, Entity) {
     app.insert_resource(water);
     if let Some(floor) = loaded.floor {
         app.insert_resource(floor);
+    }
+
+    if leaves != Leaves::None {
+        let report = app
+            .world_mut()
+            .run_system_once(
+                |mut commands: Commands,
+                 vfs: Res<VfsRes>,
+                 mut meshes: ResMut<Assets<Mesh>>,
+                 mut images: ResMut<Assets<Image>>,
+                 mut materials: ResMut<Assets<StandardMaterial>>| {
+                    mm2_app::drawbridge::spawn_drawbridges(
+                        &mut commands,
+                        &vfs.0,
+                        "london",
+                        None,
+                        &mut meshes,
+                        &mut images,
+                        &mut materials,
+                        SessionEntity(1),
+                    )
+                },
+            )
+            .expect("spawn_drawbridges system runs");
+        assert!(
+            report.leaves() > 0 && report.missing_models.is_empty(),
+            "London's drawbridge leaves did not all spawn: {report:?}"
+        );
+        let mut q = app.world_mut().query::<&mut DrawbridgeLeaf>();
+        for mut leaf in q.iter_mut(app.world_mut()) {
+            leaf.motion = match leaves {
+                // Whatever the authored mode, the leaf stays down.
+                Leaves::Closed => LeafMotion::new(DrawbridgeMode::Inactive),
+                // Every leaf lifts from the first step, as a timed leaf
+                // does once its closed wait is over.
+                _ => {
+                    let mut m = LeafMotion::new(DrawbridgeMode::Timed);
+                    m.timer = CLOSED_WAIT;
+                    m
+                }
+            };
+        }
     }
 
     let rot = Quat::from_rotation_y(yaw);
@@ -268,8 +331,12 @@ struct Drive {
 /// Drive `path` end to end with a pursuit controller on the production
 /// vehicle step, watching the car against the real `CityWater`.
 fn drive(vfs: Vfs, path: &[Vec3]) -> Drive {
+    drive_with(vfs, path, Leaves::None)
+}
+
+fn drive_with(vfs: Vfs, path: &[Vec3], leaves: Leaves) -> Drive {
     let start = path[0] + Vec3::Y * 0.8;
-    let (mut app, car) = london_drive_app(vfs, start, heading(path[0], path[1]));
+    let (mut app, car) = london_drive_app_with(vfs, start, heading(path[0], path[1]), leaves);
     let length: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
     let budget = (length / (CRUISE * 0.3) * 60.0) as usize + 600;
     let end = *path.last().unwrap();
@@ -334,6 +401,13 @@ fn drive(vfs: Vfs, path: &[Vec3]) -> Drive {
 }
 
 fn assert_clean(what: &str, d: &Drive) {
+    assert_safe(what, d);
+    assert!(d.reached, "{what}: the car never finished the lane");
+}
+
+/// The drowning and recovery claims alone: they hold for a drive that
+/// did not finish its lane as well.
+fn assert_safe(what: &str, d: &Drive) {
     eprintln!(
         "{what}: reached={} in {} frames, {} frames over the footprint, y {:.1}..{:.1}, \
          {} frames in deadly water, recovered {} (submerged {}, out of bounds {})",
@@ -347,7 +421,6 @@ fn assert_clean(what: &str, d: &Drive) {
         d.submerged,
         d.out_of_bounds
     );
-    assert!(d.reached, "{what}: the car never finished the lane");
     assert_eq!(d.deadly_frames, 0, "{what}: the car stood in deadly water");
     assert_eq!(
         (d.recovered, d.submerged, d.out_of_bounds),
@@ -356,7 +429,7 @@ fn assert_clean(what: &str, d: &Drive) {
     );
 }
 
-fn london_stretches() -> Option<(Vec<Stretch>, Vec<Stretch>)> {
+fn london_stretches() -> Option<(Vec<Stretch>, Vec<Stretch>, Vec<Stretch>)> {
     let vfs = retail_vfs("the Thames drives")?;
     let (mut app, _car) = london_drive_app(vfs, Vec3::new(0.0, 50.0, 0.0), 0.0);
     let water = app.world().resource::<mm2_app::water::CityWater>();
@@ -365,8 +438,8 @@ fn london_stretches() -> Option<(Vec<Stretch>, Vec<Stretch>)> {
     // A bridge lane with no static collider within 5 m under some
     // vertex — Tower Bridge's and Waterloo's drawbridge leaves are not
     // PSDL geometry (`spawn_drawbridges` places them, timer-driven) —
-    // has nothing to drive on in this app; those roads are listed, not
-    // driven (a leaf can also be raised under the car).
+    // has nothing to drive on without the leaves; those lanes are
+    // returned separately and driven with the leaves spawned.
     // A lane that merely clips the footprint's edge proves nothing.
     let mut bridges = Some(
         bridges
@@ -397,7 +470,7 @@ fn london_stretches() -> Option<(Vec<Stretch>, Vec<Stretch>)> {
         driven.iter().map(|b| &b.name).collect::<Vec<_>>(),
         leaves.iter().map(|b| &b.name).collect::<Vec<_>>()
     );
-    Some((tunnels, driven))
+    Some((tunnels, driven, leaves))
 }
 
 /// The Thames tunnel (its lane runs ~10 m under the −3.8 river
@@ -406,7 +479,7 @@ fn london_stretches() -> Option<(Vec<Stretch>, Vec<Stretch>)> {
 /// deadly volume and the recovery detector never fires.
 #[test]
 fn a_car_drives_the_thames_tunnel_both_ways_without_drowning() {
-    let Some((tunnels, _)) = london_stretches() else {
+    let Some((tunnels, ..)) = london_stretches() else {
         return;
     };
     assert!(!tunnels.is_empty(), "London lost its Thames tunnel lane");
@@ -442,7 +515,7 @@ fn a_car_drives_the_thames_tunnel_both_ways_without_drowning() {
 /// overlay's vertical bound keeps it dry.
 #[test]
 fn a_car_drives_each_london_bridge_over_the_river_without_drowning() {
-    let Some((_, bridges)) = london_stretches() else {
+    let Some((_, bridges, _)) = london_stretches() else {
         return;
     };
     let mut crossed = Vec::new();
@@ -475,7 +548,7 @@ fn a_car_drives_each_london_bridge_over_the_river_without_drowning() {
 /// unarmed detector.
 #[test]
 fn a_car_dropped_into_the_river_under_a_bridge_still_drowns() {
-    let Some((_, bridges)) = london_stretches() else {
+    let Some((_, bridges, _)) = london_stretches() else {
         return;
     };
     let bridge = bridges.first().expect("a London bridge");
@@ -504,4 +577,59 @@ fn a_car_dropped_into_the_river_under_a_bridge_still_drowns() {
         report.submerged >= 1 && report.recovered >= 1,
         "dropped into the Thames at {spot:?} and never recovered: {report:?}, car at {pos:?}"
     );
+}
+
+/// The drawbridge-leaf lanes (no static deck: roads 407, 415, 483, 508)
+/// are driven with the retail leaves spawned by `spawn_drawbridges` and
+/// held closed: the leaf is the deck, so the car rides it over the river
+/// and the detector stays quiet.
+#[test]
+fn a_car_drives_each_closed_drawbridge_leaf_over_the_river_without_drowning() {
+    let Some((_, _, lanes)) = london_stretches() else {
+        return;
+    };
+    assert!(!lanes.is_empty(), "London lost its drawbridge-leaf lanes");
+    let mut crossed = Vec::new();
+    for lane in lanes {
+        let d = drive_with(retail_vfs(&lane.name).unwrap(), &lane.path, Leaves::Closed);
+        // Safety holds for every drive; road 415's lane is left
+        // unfinished by the pursuit controller before it reaches the
+        // river (0 frames over the footprint), which says nothing
+        // about the leaf, so only the drives that crossed count.
+        assert_safe(&lane.name, &d);
+        assert!(d.min_y > -3.8 + 0.5, "{}: the car sank", lane.name);
+        if d.over_frames > 0 {
+            crossed.push(lane.name);
+        }
+    }
+    eprintln!("crossed the river on a closed leaf: {crossed:?}");
+    assert!(
+        !crossed.is_empty(),
+        "no leaf lane was driven over the river"
+    );
+}
+
+/// Leaves lifting under a car that is already on them: the car is never
+/// reported in deadly water while it is carried up, and nothing is
+/// recovered. (The leaf rises 0.05 rad/s, so the lane is driven within
+/// the opening phase.)
+#[test]
+fn a_car_on_an_opening_drawbridge_leaf_is_never_in_deadly_water() {
+    let Some((_, _, lanes)) = london_stretches() else {
+        return;
+    };
+    for lane in lanes {
+        let d = drive_with(retail_vfs(&lane.name).unwrap(), &lane.path, Leaves::Opening);
+        eprintln!(
+            "{} (opening): reached={}, deadly {}",
+            lane.name, d.reached, d.deadly_frames
+        );
+        assert_eq!(d.deadly_frames, 0, "{}: stood in deadly water", lane.name);
+        assert_eq!(
+            (d.recovered, d.submerged, d.out_of_bounds),
+            (0, 0, 0),
+            "{}: recovered",
+            lane.name
+        );
+    }
 }
