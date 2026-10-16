@@ -49,6 +49,8 @@
 
 use avian3d::prelude::{Position, SpatialQuery};
 use bevy::prelude::*;
+use mm2_content::LessonObjective;
+use mm2_content::lesson_text::LessonLine;
 use mm2_game::{
     DamageTier, EventKey, LeadObservation, LegFailure, LegObservation, LegReport, LegRule,
     LessonPass, LessonPhase, LessonRun, MPH_PER_MS, PURSUER_SIGHT_RANGE_M, ParticipantState,
@@ -117,6 +119,10 @@ pub struct LessonDriver {
     /// ([`lesson_callout_cue`]). Appended by [`drive_lesson`] on the
     /// clearing tick and drained the same frame.
     pending_callouts: Vec<usize>,
+    /// Message lines a leg's verdict called for, awaiting the HUD
+    /// ([`crate::lesson_text::drive_lesson_subtitles`]). Appended by
+    /// [`drive_lesson`] on the verdict's tick and drained the same frame.
+    pending_lines: Vec<(LessonObjective, LessonLine)>,
 }
 
 impl LessonDriver {
@@ -131,7 +137,13 @@ impl LessonDriver {
             stop_lead_armed: false,
             callout_mask: 0,
             pending_callouts: Vec::new(),
+            pending_lines: Vec::new(),
         }
+    }
+
+    /// Drain the message lines the legs' verdicts have called for.
+    pub fn take_lines(&mut self) -> Vec<(LessonObjective, LessonLine)> {
+        std::mem::take(&mut self.pending_lines)
     }
 
     /// The lesson's stable save identity.
@@ -416,7 +428,21 @@ pub fn drive_lesson(
         newly &= newly - 1;
     }
     let ticks = race.clock;
-    match driver.observe(&progress.state, &obs, ticks) {
+    let objective = driver.current_leg().map(|leg| leg.objective);
+    let step = driver.observe(&progress.state, &obs, ticks);
+    // The verdict's outcome line (F21 req 4): the leg that just ended,
+    // read before the sequencer moved on.
+    if let Some(objective) = objective {
+        let line = match step {
+            LegStep::Next { .. } | LegStep::Passed => Some(LessonLine::Cleared),
+            LegStep::Failed { failure, .. } => failure_line(objective, failure),
+            _ => None,
+        };
+        if let Some(line) = line {
+            driver.pending_lines.push((objective, line));
+        }
+    }
+    match step {
         LegStep::Next { leg } => {
             let Some(next) = driver.race_state(session.generation()) else {
                 return;
@@ -466,6 +492,22 @@ pub fn drive_lesson(
             "lesson leg rule could not be evaluated — the leg holds"
         ),
         LegStep::Hold | LegStep::Stale(_) => {}
+    }
+}
+
+/// The outcome line a failed leg of `objective` shows. A leg's own
+/// rule failure is the family's own line: the cop chase's "a cop still
+/// sees you", the follow and stop legs' lost-lead / lead-arrived lines;
+/// the jump and maneuver families have no rule failure, so none.
+fn failure_line(objective: LessonObjective, failure: LegFailure) -> Option<LessonLine> {
+    match failure {
+        LegFailure::TimedOut => Some(LessonLine::TimedOut),
+        LegFailure::Disabled => Some(LessonLine::Wrecked),
+        LegFailure::Objective => match objective {
+            LessonObjective::CopChase => Some(LessonLine::CopsStillClose),
+            LessonObjective::Follow | LessonObjective::Stop => Some(LessonLine::ObjectiveFailed),
+            _ => None,
+        },
     }
 }
 
@@ -597,7 +639,37 @@ mod tests {
             stop_lead_armed: false,
             callout_mask: 0,
             pending_callouts: Vec::new(),
+            pending_lines: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_failed_legs_outcome_line_is_the_familys_own() {
+        use LessonLine::*;
+        assert_eq!(
+            failure_line(LessonObjective::Jump, LegFailure::TimedOut),
+            Some(TimedOut)
+        );
+        assert_eq!(
+            failure_line(LessonObjective::Jump, LegFailure::Disabled),
+            Some(Wrecked)
+        );
+        assert_eq!(
+            failure_line(LessonObjective::CopChase, LegFailure::Objective),
+            Some(CopsStillClose)
+        );
+        assert_eq!(
+            failure_line(LessonObjective::Follow, LegFailure::Objective),
+            Some(ObjectiveFailed)
+        );
+        assert_eq!(
+            failure_line(LessonObjective::Stop, LegFailure::Objective),
+            Some(ObjectiveFailed)
+        );
+        assert_eq!(
+            failure_line(LessonObjective::Maneuver, LegFailure::Objective),
+            None
+        );
     }
 
     fn id() -> ResultId {

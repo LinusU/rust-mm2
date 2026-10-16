@@ -36,6 +36,7 @@ pub mod input;
 pub mod layers;
 pub mod leafnet;
 pub mod lesson;
+pub mod lesson_text;
 pub mod lobby_systems;
 pub mod lobby_view;
 pub mod manual_gear;

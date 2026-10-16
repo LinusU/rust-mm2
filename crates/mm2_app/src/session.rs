@@ -306,6 +306,7 @@ pub fn drive_session(
             // session state — a stale one would hold the next session's
             // results and steer its race (a restart reinstalls leg 0).
             commands.remove_resource::<crate::lesson::LessonDriver>();
+            commands.remove_resource::<crate::lesson_text::LessonMessages>();
             // F27-B.2: a Cops & Robbers match dies with its session; the
             // gold load reconciles away with it (F27-AC04 — no handling
             // leak into a later race).
@@ -2056,6 +2057,12 @@ pub fn load_session_world(
             commands.insert_resource(RaceState::new(def, session.generation()));
             if let Some(driver) = lesson_driver {
                 lesson_installed = true;
+                // F21 req 4: the lesson's instruction / Ready / Set / Go
+                // and outcome lines, read from the install's `mmlang.dll`.
+                commands.insert_resource(crate::lesson_text::LessonMessages::new(
+                    crate::lesson_text::load_string_table(&vfs.0),
+                ));
+                crate::lesson_text::spawn_lesson_subtitle(&mut commands, owner);
                 commands.insert_resource(driver);
             }
             session

@@ -984,3 +984,116 @@ fn a_stop_leg_arms_the_leads_damage_bounds() {
     assert_eq!(damage.spec.max_damage, STOP_LEAD_MAX_DAMAGE);
     assert_eq!(damage.spec.med_damage, STOP_LEAD_MAX_DAMAGE * 0.5);
 }
+
+/// F21 req 4: a synthetic string table stands in for `mmlang.dll`
+/// (ids 241–245 are the maneuver family's); the line on the HUD follows
+/// the leg's pre-race sequence and then its verdict.
+fn subtitle_app(setup: LessonSetup) -> (App, Entity) {
+    use mm2_app::lesson_text::{LessonMessages, LessonSubtitleText, drive_lesson_subtitles};
+    let (mut app, car) = lesson_app(setup);
+    let table = mm2_formats::langdll::StringTable::from_pairs(
+        [
+            (241, "ready"),
+            (242, "set"),
+            (243, "go"),
+            (244, "times up"),
+            (609, "cleared"),
+        ]
+        .map(|(id, text)| (id, text.to_string())),
+    );
+    let generation = app.world().resource::<Session>().generation();
+    app.init_resource::<mm2_app::hud::HudVisible>()
+        .insert_resource(LessonMessages::new(Ok(table)))
+        .add_systems(Update, drive_lesson_subtitles);
+    app.world_mut().spawn((
+        SessionEntity(generation),
+        mm2_app::lesson_text::LessonSubtitle,
+        Visibility::Hidden,
+    ));
+    app.world_mut().spawn((LessonSubtitleText, Text::new("")));
+    (app, car)
+}
+
+fn subtitle(app: &mut App) -> (String, Visibility) {
+    use mm2_app::lesson_text::{LessonSubtitle, LessonSubtitleText};
+    let world = app.world_mut();
+    let text = world
+        .query_filtered::<&Text, With<LessonSubtitleText>>()
+        .single(world)
+        .unwrap()
+        .0
+        .clone();
+    let vis = *world
+        .query_filtered::<&Visibility, With<LessonSubtitle>>()
+        .single(world)
+        .unwrap();
+    (text, vis)
+}
+
+#[test]
+fn a_legs_prerace_sequence_shows_one_and_a_half_seconds_each() {
+    let (mut app, _car) = subtitle_app(two_leg_setup(None));
+    run(&mut app, 30); // 0.5 s
+    assert_eq!(subtitle(&mut app), ("ready".into(), Visibility::Visible));
+    run(&mut app, 90); // 2.0 s
+    assert_eq!(subtitle(&mut app).0, "set");
+    run(&mut app, 90); // 3.5 s
+    assert_eq!(subtitle(&mut app).0, "go");
+    run(&mut app, 90); // 5.0 s
+    assert_eq!(subtitle(&mut app).1, Visibility::Hidden);
+}
+
+#[test]
+fn a_timed_out_leg_shows_its_outcome_line_for_five_seconds() {
+    let (mut app, _car) = subtitle_app(two_leg_setup(Some(20)));
+    // The 20-tick limit expires at once; the verdict line queues behind
+    // the 4.5 s pre-race sequence.
+    run(&mut app, 280);
+    assert_eq!(subtitle(&mut app), ("times up".into(), Visibility::Visible));
+    run(&mut app, 340);
+    assert_eq!(subtitle(&mut app).1, Visibility::Hidden);
+    assert_eq!(
+        app.world()
+            .resource::<mm2_app::lesson_text::LessonMessages>()
+            .missing,
+        0
+    );
+}
+
+#[test]
+fn clearing_a_leg_shows_the_cleared_line_before_the_next_legs_sequence() {
+    let (mut app, car) = subtitle_app(two_leg_setup(None));
+    clear_leg(
+        &mut app,
+        car,
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+    );
+    assert_eq!(driver(&app).run().current_leg(), Some(1));
+    // Leg 0's remaining pre-race lines are still ahead of the verdict.
+    run(&mut app, 280);
+    assert_eq!(subtitle(&mut app).0, "cleared");
+    run(&mut app, 300); // 5 s of outcome, then leg 1's "ready"
+    assert_eq!(subtitle(&mut app).0, "ready");
+}
+
+/// The install's own `mmlang.dll` reaches the message line through the
+/// VFS (skipped without `MM2_RETAIL`; nothing of its text is kept).
+#[test]
+fn retail_the_install_string_table_loads_through_the_vfs() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL") else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    vfs.mount_dir(std::path::Path::new(&retail), 0).unwrap();
+    let table = mm2_app::lesson_text::load_string_table(&vfs).unwrap();
+    assert!(table.len() > 600);
+    let mut messages = mm2_app::lesson_text::LessonMessages::new(Ok(table));
+    messages.begin_leg(LessonObjective::CopChase);
+    assert!(messages.current().is_some_and(|t| !t.trim().is_empty()));
+    assert_eq!(messages.missing, 0);
+    // A bare directory has no DLL: counted and surfaced, not substituted.
+    let empty = mm2_assets::Vfs::new();
+    assert!(mm2_app::lesson_text::load_string_table(&empty).is_err());
+}

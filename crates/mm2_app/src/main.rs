@@ -22,10 +22,10 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, contracts, controls, crowd, damage,
-    damage_fx, dash, display_trial, environment, hud, hudmap, input, lesson, menu, nav_overlay,
-    navarrow, net, netdrive, oppind, opponents, pause, pedestrian, perf, police, police_debug,
-    precip, profile, progression, pvs, race, racestat, racetime, recovery, results, scripted,
-    sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    damage_fx, dash, display_trial, environment, hud, hudmap, input, lesson, lesson_text, menu,
+    nav_overlay, navarrow, net, netdrive, oppind, opponents, pause, pedestrian, perf, police,
+    police_debug, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
+    scripted, sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -2007,6 +2007,8 @@ fn main() {
             hud::update_hud,
         ),
     )
+    // F21 req 4: the lesson's message line (idle without a lesson).
+    .add_systems(Update, lesson_text::drive_lesson_subtitles)
     // F22-A.1: the HUD map tracks every frame — eased zoom and a
     // rotating map should animate through pause/countdown alike, and a
     // `--pause-map` capture needs it live while input is frozen

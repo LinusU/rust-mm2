@@ -965,6 +965,7 @@ type HudNodes = Or<(
     With<crate::pause::PauseUi>,
     With<crate::results::ResultsUi>,
     With<crate::race::CountdownBanner>,
+    With<crate::lesson_text::LessonSubtitle>,
     With<crate::navarrow::NavArrow>,
     With<crate::navarrow3d::NavArrowView>,
     With<crate::race::LowTimeWarning>,

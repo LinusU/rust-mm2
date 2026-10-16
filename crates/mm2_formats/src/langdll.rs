@@ -137,6 +137,15 @@ impl StringTable {
         Ok(Self { strings })
     }
 
+    /// A table over `pairs` (id, text) — for callers and tests that
+    /// need a table without a DLL. A later pair replaces an earlier one
+    /// with the same id; empty texts are dropped, as the parser does.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (u32, String)>) -> Self {
+        Self {
+            strings: pairs.into_iter().filter(|(_, t)| !t.is_empty()).collect(),
+        }
+    }
+
     /// The text for string id `id`, if the table has one.
     pub fn get(&self, id: u32) -> Option<&str> {
         self.strings.get(&id).map(String::as_str)
