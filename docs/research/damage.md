@@ -589,7 +589,8 @@ per-vehicle renderer and the impact feed.
   is unrecovered, so the binding is a designed choice on a
   recovered asset.
 - `SparkFxReport` counts bursts/emitted/expired — the headless
-  record's `spk=<b>b/<e>e/<x>x` field, emitted only on activity so
+  record's `spk=<b>b/<e>e/<x>x/<r>r` field (`r` = the bursts drawn
+  from replicated impact rows), emitted only on activity so
   impact-free runs stay bit-identical.
 
 `TextelDamageRadius`/`ImpactsTable` texel damage is consumed by
