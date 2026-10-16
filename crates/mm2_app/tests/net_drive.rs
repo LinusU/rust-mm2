@@ -2103,8 +2103,10 @@ fn two_retail_processes_play_a_started_cops_and_robbers_match() {
 /// seated. Skipped without the operator's install (`MM2_RETAIL=<dir>`).
 ///
 /// What it is not: a contested steal, a client that carries or delivers
-/// (the client is parked, so F27-AC01's multi-client cycle and AC02's
-/// simultaneous requests stay open), packet loss, or a rendered match.
+/// (the client is parked; the client-seat cycle is
+/// `a_client_thief_runs_down_the_carrier_and_delivers_the_gold`, and
+/// AC02's simultaneous requests stay open), packet loss, or a rendered
+/// match.
 /// The seed is one the `mm2-inspect cnr` reach audit lists (every site
 /// of its opening draw on a routable lane — most retail sf sites are
 /// not, and the bot follows roads) that a local `--bot` run measured to
@@ -2454,8 +2456,9 @@ fn a_late_joiner_reads_the_cops_and_robbers_verdict_on_an_impaired_link() {
 /// its announcer voices the call. Retail sf, seed 1291 (the gold lies
 /// a few metres from the spawn). Skipped without `MM2_RETAIL=<dir>`.
 ///
-/// What it is not: a client that *delivers* (with this seat the bot
-/// stalls on the sf hillside beyond the first leg — see the PLAN row;
+/// What it is not: a client that *delivers* (a client-seat bot run flat
+/// out stalls on the sf hillside beyond the first leg; paced, it
+/// delivers — see `a_client_thief_runs_down_the_carrier_and_delivers_the_gold`;
 /// the same seed's host-driven delivery is
 /// `two_retail_processes_decide_a_cops_and_robbers_match`), a contested
 /// steal, packet loss, or a rendered match.
