@@ -105,7 +105,8 @@ because the ambient voices were still filling; at 3000 frames it passed.
 Evidence level: original-content, rendered, local, one machine, one event
 and one car. The network leg is a two-process loopback, not a LAN; the host
 and client each ran a bot. F30-AC02 is advanced, not closed: a longer run,
-more events and cities, and an explanation of the client stall remain open.
+more events and cities, and an explanation of the client stall's exact
+trigger remain open.
 
 ### Longer and wider soak (2026-10-16)
 
@@ -136,15 +137,89 @@ and the last third never exceeds the middle by more than the slack (about
 1%); voices fluctuate with what is audible (peaks 16 to 56) and fall or stay
 level between the two judged thirds; queue depth never exceeded 1. The
 earlier 3000-frame client stall (one 1135 ms render stage) did not recur in
-either network client at 10,000 frames, which neither explains nor rules out
-it. The Circuit legs are single-process only: no networked Circuit run exists
+either network client at 10,000 frames; it needed GPU contention to
+reproduce and is placed in the next subsection. The Circuit legs are
+single-process only: no networked Circuit run exists
 (`docs/multiplayer-coverage.md`).
 
 Evidence level: original-content, rendered, local, one machine, one run per
 cell, bot-driven. A leak under about 1% of the entity peak per third would
 still hide inside the slack. F30-AC02 stays open for a LAN or multi-machine
-network run, repeated runs for variance, and an explanation of the earlier
-client stall.
+network run, repeated runs for variance, and the client stall's exact
+trigger (next subsection).
+
+### Explaining the client's 1135 ms render-stage stall (#1473, 2026-10-16)
+
+The 2026-10-12 client leg failed on one 1135 ms `render`-stage frame, and
+the stage alone says only *that* the main thread spent 1.1 s in `render`,
+not *where*. Bevy renders on a second thread: the main schedule runs first,
+then the main thread blocks handing the render world back and forth
+(`bevy_render::pipelined_rendering`, `renderer_extract` after `Main`), so a
+shader/pipeline compile, a render-asset GPU upload, a driver wait and an OS
+preemption all hide inside that one stage.
+
+`perf.rs` now splits the render thread's own schedule. Stub systems stamp
+the `RenderSystems` set boundaries into a clock the main world shares, and
+each row records the split the render thread last published (the one that
+row's `render` stage waited on). The CSV gains `rthread_total_ms`,
+`rthread_extract_ms`, `rthread_assets_ms`, `rthread_views_ms`,
+`rthread_draw_ms` and `rthread_cleanup_ms`; the report gains
+`timings.render_stage_ms` (`worst_frame` and `per_segment_max`). One
+frame's segments add up to its `total`.
+
+In order: `extract_commands` (`ExtractCommands`); `prepare_assets`
+(`PrepareAssets`), where a lazily loaded mesh/texture is uploaded to the
+GPU; `views` (`PrepareMeshes`..`Prepare`), material specialization,
+shadow-view creation, phase sort and bind groups; `render` (the `Render`
+set), `PipelineCache::process_pipeline_queue_system` then `render_system`
+— the render graph, command-buffer submit and `window.present`; and
+`cleanup`. Read a stall by comparing the render thread's worst `total` with
+the main `render` stage max: if they match, `per_segment_max` names the
+segment it stalled in; if the main max is far above the render thread's
+worst, the block was the main thread or the OS (`renderer_extract`, or a
+descheduled process) and no render work explains it.
+
+A fresh loopback soak at 3000 frames passed with no stall (single pair;
+client median frame 24 ms, render thread median `total` 22.7 ms, split
+`views` 9.3 + `render` 11.8 + `prepare-assets` 1.0 + `extract` 0.2 +
+`cleanup` 0.1 ms; worst measured frame 55.5 ms, still `views`). The only
+large frames were the first two (warm-up, excluded from the stats): frame 1
+was `prepare-assets` 160.8 + `views` 177.6 ms, the initial GPU upload and
+specialization, which is exactly where a lazy asset lands.
+
+A three-pair contention soak (six GPU-bound processes on one 8-core
+machine, load ~8) reproduced the stall class and the instrumentation named
+it. On the clients, over the measured frames (`total` is the render
+thread's whole schedule, `render` the `Render` set, all in ms):
+
+| client | frame | main `render` | render-thread `total` = extract + assets + views + **render** + cleanup |
+|---|---|---|---|
+| pair3 | 428 | 8887.5 | 8930.9 = 3.3 + 1.5 + 26.8 + **8899.3** + 0.0 |
+| pair1 | 247 | 9734.7 | 38.3 = 0.2 + 0.8 + 27.3 + **10.0** + 0.1 |
+| pair1 | 1664 | 265.5 | 356.7 = 0.1 + 1.3 + 21.9 + **322.5** + 0.1 |
+| pair2 | 1706 | 213.1 | 217.8 = 0.0 + 0.5 + 165.1 + **32.4** + 0.0 |
+
+Both classes appear. Frame 428 is a render-thread stall in the `Render`
+set — the render graph, submit or `window.present` — at 8899 ms the largest
+part of the 8931 ms; frame 247 is the opposite, a 9.7 s main-thread/OS
+stall during which the render thread did only 38 ms of work. The
+`render`-segment stalls seen span 213-8899 ms, bracketing the original
+1135 ms. The hosts, drawing the same event, never exceeded 230 ms on the
+main `render` stage.
+
+So the 2026-10-12 1135 ms client stall is not game logic (its `fixed` and
+`update` stages were normal, 26 / 20 ms) and not an asset load
+(`prepare_assets` stayed under 2 ms): it is a GPU/driver/display wait in
+the render thread's `Render` set, the same class as the frame-428 stall, or
+less often a main-thread/OS stall like frame 247. The two are now told
+apart by the report instead of by guesswork. The stall did not recur at one
+pair in two 3000-frame runs (the 2026-10-12 run and one fresh run);
+reproducing it took six concurrent GPU-bound processes, so on the soak's
+normal single pair it stays rare.
+
+Evidence level: original-content, rendered, local, one machine, one event
+and one car, release, 3000 requested frames. The reproducing load is a
+stress condition, not the soak's normal single pair.
 
 ## What it shows (first run)
 
@@ -230,5 +305,10 @@ else are unchanged, and repeated runs after the change are identical.
 - A baseline on an idle machine, and a scene set that includes a race and
   a networked session (this run covers free-roam SF and London only).
 - Draw calls, GPU memory, allocations and network bandwidth columns.
+- The client stall's exact trigger: the render-stage stall is now named
+  (a `Render`-set GPU/driver/display wait, see "Explaining the client's
+  1135 ms render-stage stall"), but which of pipeline compilation, submit
+  or `window.present` blocks is not yet split out, and it still needs six
+  concurrent GPU-bound processes to reproduce.
 - AC02's longer and wider soaks (see above), and the unresolved ~+60 entities per
   600 frames wander seen in the longer SF run noted in the soak history.
