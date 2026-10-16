@@ -2883,7 +2883,17 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
 }
 
 /// The shove's settle span in simulated seconds (see `run_shove_trio`).
-const SHOVE_SETTLE_SECS: u64 = 43;
+///
+/// The shoved seats are at rest on the authority by ~41 s, but alice's
+/// predicted copy of her own seat is only pulled back onto the authority's
+/// pose by the settled-divergence bound (`netdrive::SettleWatch`), which
+/// needs `SETTLE_SNAPS` (~1 s) of at-rest, diverged snaps *after* both
+/// sides stop. Under CPU load her local sim comes to rest later and her
+/// residual grows (CI saw a 1.10 m jitter cell at a 43 s stop, past the 1 m
+/// bound but inside the 0.75 m reseat's reach had it had time; a loaded
+/// local run measured 0.54 m), so the stop sits several seconds past rest
+/// to leave the bound room to act.
+const SHOVE_SETTLE_SECS: u64 = 50;
 
 /// One lobby of three processes on the dev world where the *host*
 /// drives (`--ram`, or `--parked` for the control) at the neighbouring
