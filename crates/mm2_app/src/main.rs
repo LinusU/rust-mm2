@@ -449,6 +449,14 @@ struct Cli {
     #[arg(long, value_name = "secs", requires = "headless")]
     deadline: Option<u64>,
 
+    /// Hold a `--headless` run to the wall-clock 60 Hz step while the
+    /// session is `Playing`, instead of stepping as fast as the CPU
+    /// allows. Peers of one networked session then share a clock, which
+    /// a precise client-seat drive (`--bot`) needs for the host's copy
+    /// of its car to follow the car it predicts.
+    #[arg(long, requires = "headless")]
+    paced: bool,
+
     /// Scripted course-follower: the player vehicle steers at the live
     /// race objective (the RACE-6 target / next ordered gate) instead of
     /// waiting for keyboard/gamepad input. An evidence driver for
@@ -1456,6 +1464,7 @@ fn main() {
                 opponents_done: cli.until_opponents,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
+            paced: cli.paced,
         };
         let car = SelectedCar {
             def: selected,
