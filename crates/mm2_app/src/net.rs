@@ -416,7 +416,8 @@ pub struct LobbyLink {
     seen_ready: Option<bool>,
     seen_pick: Option<VehiclePick>,
     /// The ask was made against a roster that already matched it: it may
-    /// only be cleared by a roster that arrives after a repeat went out.
+    /// only be cleared once a roster has disagreed with it or a repeat
+    /// has gone out.
     unproven_ready: bool,
     unproven_pick: bool,
     /// When the newest intent copy went out — the clock the repeat rides.
@@ -499,19 +500,32 @@ impl LobbyLink {
         self.ctl.set_vehicle(vehicle, paint)
     }
 
-    /// Repeat whichever intent the roster has not echoed yet, at most
-    /// once per [`KEEPALIVE_INTERVAL`]. A no-op once both match.
-    fn resend_intents(&mut self, roster: &[RosterEntry]) {
-        if self.leaving() || self.closed {
-            return;
-        }
+    /// Weigh one roster against the asks still outstanding: drop the ones
+    /// it echoes. Called for every roster that arrives, not once per
+    /// frame — two rosters drained in one frame (the host's reset, then
+    /// its answer to our ask) must both be seen.
+    fn observe_roster(&mut self, roster: &[RosterEntry]) {
         let ours = roster.iter().find(|e| e.player_id == self.player_id);
         self.seen_ready = ours.map(|e| e.ready);
         self.seen_pick = ours.and_then(|e| e.pick.clone());
         // A roster that matched the ask before it was made is not an
         // echo: the host may have reset our flags since, and the one
-        // copy of the ask may be the one the link dropped. Wait for a
-        // match that postdates a repeat.
+        // copy of the ask may be the one the link dropped. Wait for
+        // proof that the stale roster is behind us — a roster that
+        // disagrees (the reset arrived) or a repeat having gone out.
+        if self
+            .want_ready
+            .is_some_and(|r| ours.is_some_and(|e| e.ready != r))
+        {
+            self.unproven_ready = false;
+        }
+        if self
+            .want_pick
+            .as_ref()
+            .is_some_and(|p| ours.is_some_and(|e| e.pick.as_ref() != Some(p)))
+        {
+            self.unproven_pick = false;
+        }
         if !self.unproven_ready
             && self
                 .want_ready
@@ -527,6 +541,15 @@ impl LobbyLink {
         {
             self.want_pick = None;
         }
+    }
+
+    /// Repeat whichever intent the roster has not echoed yet, at most
+    /// once per [`KEEPALIVE_INTERVAL`]. A no-op once both match.
+    fn resend_intents(&mut self, roster: &[RosterEntry]) {
+        if self.leaving() || self.closed {
+            return;
+        }
+        self.observe_roster(roster);
         if (self.want_ready.is_none() && self.want_pick.is_none())
             || self
                 .intent_sent
@@ -769,7 +792,10 @@ pub fn drive_lobby(
                 Ok(_) => lobby.advertised = Some(ad),
                 Err(why) => refuse(&mut link, &mut lobby, why),
             },
-            LobbyEvent::Message(Message::Roster { players }) => lobby.roster = players,
+            LobbyEvent::Message(Message::Roster { players }) => {
+                link.observe_roster(&players);
+                lobby.roster = players;
+            }
             LobbyEvent::Message(Message::VehicleRefused { reason }) => {
                 // A refused pick must not be repeated forever.
                 link.want_pick = None;

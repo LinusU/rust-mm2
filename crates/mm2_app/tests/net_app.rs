@@ -593,9 +593,11 @@ fn a_resent_cancel_does_not_ready_the_client_twice() {
         session.transition(SessionPhase::Playing).unwrap();
     }
 
-    host.ctl()
-        .broadcast(&Message::Cancel { generation: 1 })
-        .unwrap();
+    // The host's own cancel resets every readiness flag before it sends
+    // `Cancel`, as production does; a bare broadcast would leave the
+    // roster showing `ready`, and the client would rightly repeat its
+    // answer (#1514).
+    host.cancel().unwrap();
     // Let the client drain the cancel, return to `Menu` and answer.
     for _ in 0..40 {
         app.update();
