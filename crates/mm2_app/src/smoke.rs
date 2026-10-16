@@ -2510,12 +2510,18 @@ fn run_headless(
             dead => format!(" imp={}i/{}r/{}d", r.impaired, r.restored, dead),
         })
         .unwrap_or_default();
-    // F05-B.8 spark evidence: bursts/emitted/expired counts. Same
+    // F05-B.8 spark evidence: bursts/emitted/expired counts plus the
+    // replicated-row share (`r`). Same
     // presence rule — an impact-free run stays bit-identical.
     let spk_detail = world_ecs
         .get_resource::<crate::spark_fx::SparkFxReport>()
         .filter(|r| r.bursts + r.emitted + r.expired > 0)
-        .map(|r| format!(" spk={}b/{}e/{}x", r.bursts, r.emitted, r.expired))
+        .map(|r| {
+            format!(
+                " spk={}b/{}e/{}x/{}r",
+                r.bursts, r.emitted, r.expired, r.replicated_bursts
+            )
+        })
         .unwrap_or_default();
     // F18-B.2 precipitation evidence: `ppt=<name>:<e>e/<x>x` on a
     // bound session — emitted/expired drop counts with `+Nc`

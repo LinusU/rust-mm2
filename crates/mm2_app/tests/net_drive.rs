@@ -3431,7 +3431,18 @@ fn side_effects_are_applied_once_under_reconciliation_on_an_impaired_link() {
     // authored: measured 299 splats for 300 rows), so a replayed row
     // would overshoot both.
     let lead = |rec: &str, key: &str| leading_u64(field(rec, key));
-    assert_eq!(lead(&bob_rec, "spk"), bob.impacts_applied, "{bob_rec}");
+    // Only the replicated share pairs with the rows: a predicted
+    // client's own physics stream may add local bursts of its own
+    // (`spk=<b>b/<e>e/<x>x/<r>r`, `r` = bursts from replicated rows).
+    let spk = field(&bob_rec, "spk");
+    let replicated: u64 = spk
+        .rsplit('/')
+        .next()
+        .and_then(|c| c.strip_suffix('r'))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("spk= has no replicated share: {bob_rec}"));
+    assert_eq!(replicated, bob.impacts_applied, "{bob_rec}");
+    assert!(lead(&bob_rec, "spk") >= replicated, "{bob_rec}");
     let splats = lead(&bob_rec, "txl");
     assert!(splats > 0 && splats <= bob.impacts_applied, "{bob_rec}");
     // The impact voice is at most one per applied row: spawned voices

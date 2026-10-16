@@ -69,6 +69,12 @@ pub struct SparkFx {
 pub struct SparkFxReport {
     /// Impact bursts drawn this session.
     pub bursts: u64,
+    /// Of [`Self::bursts`], those drawn from a replicated impact row
+    /// (`RemoteImpact`) rather than the local physics stream. On a
+    /// predicted client the local stream may also burst — its own
+    /// contacts the authority resolved differently — so only this
+    /// count pairs one-to-one with the rows applied.
+    pub replicated_bursts: u64,
     /// Streaks spawned this session.
     pub emitted: u64,
     /// Streaks expired and despawned this session.
@@ -222,33 +228,35 @@ pub fn emit_sparks(
     let mut live: HashMap<Entity, usize> = HashMap::new();
     // The shared burst tail: `point`/`outward`/`severity` are the
     // RadialBlast primitives whichever stream delivered them.
-    let mut burst_at = |entity: Entity, point: Vec3, outward: Vec3, severity: f32| {
-        let Ok(mut rig) = rigs.get_mut(entity) else {
-            return;
+    let mut burst_at =
+        |entity: Entity, point: Vec3, outward: Vec3, severity: f32, replicated: bool| {
+            let Ok(mut rig) = rigs.get_mut(entity) else {
+                return;
+            };
+            let live_now = *live
+                .entry(entity)
+                .or_insert_with(|| sparks.iter().filter(|s| s.emitter == entity).count());
+            let burst = rig.burst(point, outward, severity, live_now, entity);
+            if !burst.is_empty() {
+                report.bursts += 1;
+                report.replicated_bursts += u64::from(replicated);
+                live.insert(entity, live_now + burst.len());
+            }
+            for spark in burst {
+                let mut material = base.clone();
+                material.base_color =
+                    Color::srgba(SPARK_TINT[0], SPARK_TINT[1], SPARK_TINT[2], spark.alpha());
+                let transform = streak_transform(&spark);
+                commands.spawn((
+                    owner,
+                    spark,
+                    Mesh3d(fx.assets.mesh.clone()),
+                    MeshMaterial3d(materials.add(material)),
+                    transform,
+                ));
+                report.emitted += 1;
+            }
         };
-        let live_now = *live
-            .entry(entity)
-            .or_insert_with(|| sparks.iter().filter(|s| s.emitter == entity).count());
-        let burst = rig.burst(point, outward, severity, live_now, entity);
-        if !burst.is_empty() {
-            report.bursts += 1;
-            live.insert(entity, live_now + burst.len());
-        }
-        for spark in burst {
-            let mut material = base.clone();
-            material.base_color =
-                Color::srgba(SPARK_TINT[0], SPARK_TINT[1], SPARK_TINT[2], spark.alpha());
-            let transform = streak_transform(&spark);
-            commands.spawn((
-                owner,
-                spark,
-                Mesh3d(fx.assets.mesh.clone()),
-                MeshMaterial3d(materials.add(material)),
-                transform,
-            ));
-            report.emitted += 1;
-        }
-    };
     for event in reader.read() {
         if event.generation != generation {
             continue;
@@ -272,14 +280,20 @@ pub fn emit_sparks(
             } else {
                 event.normal
             };
-            burst_at(entity, event.point, outward, event.severity);
+            burst_at(entity, event.point, outward, event.severity, false);
         }
     }
     // The replicated stream — remote copies' impacts delivered by the
     // v10 snap tail; `apply_snapshots` already resolved, sanitized and
     // deduped each row, and the receiver's own seat never appears.
     for impact in remote_reader.read() {
-        burst_at(impact.entity, impact.point, impact.normal, impact.severity);
+        burst_at(
+            impact.entity,
+            impact.point,
+            impact.normal,
+            impact.severity,
+            true,
+        );
     }
 }
 
