@@ -176,6 +176,10 @@ struct NetField {
     surfaces_sent: u64,
     surfaces_applied: u64,
     own_settles: u64,
+    /// Own-seat moving-drift corrections (`drf`; #1502), printed only
+    /// once non-zero.
+    #[allow(dead_code)]
+    own_drifts: u64,
     requests_sent: u64,
     requests_granted: u64,
     requests_dropped: u64,
@@ -204,9 +208,15 @@ fn net_field(line: &str) -> NetField {
     let surf = cells(parts[12], "surf");
     let own_settles = leading_u64(parts[13].strip_prefix("fix").unwrap());
     let req = cells(parts[3], "req");
-    let resets = parts
-        .get(14)
-        .map_or(0, |p| leading_u64(p.strip_prefix("rst").unwrap()));
+    // `rst` and `drf` are each printed only once non-zero, in that order.
+    let optional = |prefix: &str| {
+        parts[14..]
+            .iter()
+            .find_map(|p| p.strip_prefix(prefix))
+            .map_or(0, leading_u64)
+    };
+    let resets = optional("rst");
+    let own_drifts = optional("drf");
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -232,6 +242,7 @@ fn net_field(line: &str) -> NetField {
         requests_granted: req[1],
         requests_dropped: req[2],
         resets,
+        own_drifts,
     }
 }
 
