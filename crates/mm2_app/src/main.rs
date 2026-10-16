@@ -1298,30 +1298,31 @@ fn main() {
             std::process::exit(2);
         }
         let hello = mm2_net::hello(smoke::COMMIT.to_string(), driver, fingerprint.hash);
-        let link = match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
-            Ok(link) => link.keep_ready(cli.ready),
-            Err(e) => {
-                // A refused or unreachable lobby is a named failure on the
-                // process's own stdout too, so a script driving `mm2 --join`
-                // sees the same `event=join_failed` record `mm2-join` writes
-                // rather than having to scrape the log line.
-                println!("event=join_failed reason={e:?}");
-                error!(peer = %addr, error = %e, "join failed");
-                std::process::exit(1);
-            }
-        };
+        let mut link =
+            match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
+                Ok(link) => link.keep_ready(cli.ready),
+                Err(e) => {
+                    // A refused or unreachable lobby is a named failure on the
+                    // process's own stdout too, so a script driving `mm2 --join`
+                    // sees the same `event=join_failed` record `mm2-join` writes
+                    // rather than having to scrape the log line.
+                    println!("event=join_failed reason={e:?}");
+                    error!(peer = %addr, error = %e, "join failed");
+                    std::process::exit(1);
+                }
+            };
         // Offer our pick immediately — the roster should show what
         // we'll drive, and the host's catalog gate confirms it can
         // spawn. `--ready` opts into the start gate.
         match net::encode_pick(&session_config.vehicle) {
-            Ok(pick) => drop(link.ctl().set_vehicle(&pick.vehicle, pick.paint)),
+            Ok(pick) => drop(link.set_vehicle(&pick.vehicle, pick.paint)),
             Err(e) => {
                 error!(error = %e, "cannot offer the --car/--paint pick");
                 std::process::exit(2);
             }
         }
         if cli.ready {
-            let _ = link.ctl().set_ready(true);
+            let _ = link.set_ready(true);
         }
         info!(peer = %addr, driver = %link.driver(), id = link.player_id(), "joined lobby");
         Some(link)

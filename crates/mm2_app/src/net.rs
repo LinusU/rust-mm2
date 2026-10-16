@@ -51,8 +51,9 @@ use mm2_game::{
     VehicleSelection, Weather, WorldMode,
 };
 use mm2_net::{
-    Client, ClientCtl, Hello, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause,
-    MAX_PLAYERS, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement, VehiclePick,
+    Client, ClientCtl, Hello, Host, HostConfig, HostCtl, HostEvent, KEEPALIVE_INTERVAL, LateJoin,
+    LeaveCause, MAX_PLAYERS, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement,
+    VehiclePick,
 };
 use serde::{Deserialize, Serialize};
 
@@ -400,6 +401,15 @@ pub struct LobbyLink {
     /// closes a session, so a client that asked to be ready (`--ready`)
     /// would otherwise sit out the rematch with no one to press `Enter`.
     keep_ready: bool,
+    /// The readiness we last asked for. `SetReady` is one frame with no
+    /// reply, so the ask is level-triggered: [`drive_lobby`] repeats it
+    /// until the roster echoes it (see [`LobbyLink::resend_intents`]).
+    want_ready: Option<bool>,
+    /// The pick we last asked for, repeated the same way until the
+    /// roster shows it or the host refuses it.
+    want_pick: Option<VehiclePick>,
+    /// When the newest intent copy went out — the clock the repeat rides.
+    intent_sent: Option<Instant>,
 }
 
 impl LobbyLink {
@@ -436,7 +446,66 @@ impl LobbyLink {
             ended,
             reliable_leave: false,
             keep_ready: false,
+            want_ready: None,
+            want_pick: None,
+            intent_sent: None,
         })
+    }
+
+    /// Ask the host to mark us ready (or not). The ask is remembered and
+    /// repeated by [`drive_lobby`] until the roster echoes it, so a
+    /// dropped datagram cannot leave us unready on the host.
+    pub fn set_ready(&mut self, ready: bool) -> Result<(), NetError> {
+        self.want_ready = Some(ready);
+        self.intent_sent = Some(Instant::now());
+        self.ctl.set_ready(ready)
+    }
+
+    /// Offer a vehicle pick, remembered and repeated like
+    /// [`LobbyLink::set_ready`] until the roster shows it.
+    pub fn set_vehicle(&mut self, vehicle: &str, paint: u8) -> Result<(), NetError> {
+        self.want_pick = Some(VehiclePick {
+            vehicle: vehicle.to_string(),
+            paint,
+        });
+        self.intent_sent = Some(Instant::now());
+        self.ctl.set_vehicle(vehicle, paint)
+    }
+
+    /// Repeat whichever intent the roster has not echoed yet, at most
+    /// once per [`KEEPALIVE_INTERVAL`]. A no-op once both match.
+    fn resend_intents(&mut self, roster: &[RosterEntry]) {
+        if self.leaving() || self.closed {
+            return;
+        }
+        let ours = roster.iter().find(|e| e.player_id == self.player_id);
+        if self
+            .want_ready
+            .is_some_and(|r| ours.is_some_and(|e| e.ready == r))
+        {
+            self.want_ready = None;
+        }
+        if self
+            .want_pick
+            .as_ref()
+            .is_some_and(|p| ours.is_some_and(|e| e.pick.as_ref() == Some(p)))
+        {
+            self.want_pick = None;
+        }
+        if (self.want_ready.is_none() && self.want_pick.is_none())
+            || self
+                .intent_sent
+                .is_some_and(|at| at.elapsed() < KEEPALIVE_INTERVAL)
+        {
+            return;
+        }
+        self.intent_sent = Some(Instant::now());
+        if let Some(pick) = self.want_pick.clone() {
+            let _ = self.ctl.set_vehicle(&pick.vehicle, pick.paint);
+        }
+        if let Some(ready) = self.want_ready {
+            let _ = self.ctl.set_ready(ready);
+        }
     }
 
     /// Stay ready across rounds: send `ready` again each time the host
@@ -665,6 +734,8 @@ pub fn drive_lobby(
             },
             LobbyEvent::Message(Message::Roster { players }) => lobby.roster = players,
             LobbyEvent::Message(Message::VehicleRefused { reason }) => {
+                // A refused pick must not be repeated forever.
+                link.want_pick = None;
                 lobby.notice = Some(reason);
             }
             LobbyEvent::Message(Message::Start {
@@ -724,8 +795,11 @@ pub fn drive_lobby(
                 cancel(&mut lobby, &mut session, &mut control, generation);
                 // The host cleared every ready flag before it sent this,
                 // so our answer lands after the reset, never before it.
+                // A readiness we still owed the host died with that reset
+                // unless we keep it.
+                link.want_ready = None;
                 if link.keep_ready && !link.leaving() {
-                    let _ = link.ctl.set_ready(true);
+                    let _ = link.set_ready(true);
                 }
             }
             LobbyEvent::Closed(reason) => {
@@ -764,6 +838,7 @@ pub fn drive_lobby(
     // dropped copy cannot leave a ghost seat on the host or its other
     // clients.
     link.retry_leave();
+    link.resend_intents(&lobby.roster);
 
     // A link ending — our `leave()` or a dead host — takes a live
     // session down with it; the teardown rides the normal
@@ -995,7 +1070,7 @@ pub fn lobby_input(
             .roster
             .iter()
             .any(|e| e.player_id == link.player_id() && e.ready);
-        let _ = link.ctl().set_ready(ready);
+        let _ = link.set_ready(ready);
     }
     // Left/Right step the car, Up/Down its paint: the pick offered is
     // always a garage entry, so the host's validator takes it.
@@ -1020,7 +1095,7 @@ pub fn lobby_input(
         if let Some((id, paint)) =
             crate::lobby_view::cycle_pick(garage, current, car, if car != 0 { 0 } else { paint })
         {
-            let _ = link.ctl().set_vehicle(&id, paint);
+            let _ = link.set_vehicle(&id, paint);
         }
     }
 }
@@ -2088,8 +2163,8 @@ fn plan_menu_join(
 /// [`MenuDial`]'s thread. A refused or unreachable lobby is a named
 /// error for the menu's status line, never a silent local session.
 fn dial_menu_join(addr: SocketAddr, plan: JoinPlan) -> Result<LobbyLink, MenuJoinError> {
-    let link = LobbyLink::join(addr, &plan.hello, plan.mods_active, DevOverrides::default())?;
-    let _ = link.ctl().set_vehicle(&plan.pick.vehicle, plan.pick.paint);
+    let mut link = LobbyLink::join(addr, &plan.hello, plan.mods_active, DevOverrides::default())?;
+    let _ = link.set_vehicle(&plan.pick.vehicle, plan.pick.paint);
     Ok(link)
 }
 

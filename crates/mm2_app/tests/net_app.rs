@@ -12498,30 +12498,30 @@ fn spin_journey(apps: &mut [&mut App], what: &str, pred: impl Fn(&[&mut App]) ->
     panic!("the journey never reached: {what}");
 }
 
-/// Ready both clients up on a lossy link. `SetReady`/`SetVehicle` are
-/// one frame with no ack (filed as #1488), so, as a player clicking
-/// again would, the intents are re-issued until the roster echoes them.
-// TODO(set-ready-lossy): drop the re-issue once #1488 lands.
+/// Ready both clients up on a lossy link, with the first `SetVehicle` and
+/// `SetReady` frames of each client dropped for certain: the client link
+/// repeats its intents until the roster echoes them (#1488), so the
+/// ask is issued exactly once and the roster must still converge.
 fn journey_ready_up(host: &mut App, alice: &mut JourneyClient, bob: &mut JourneyClient) {
-    let mut resent = Instant::now() - Duration::from_secs(1);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !(journey_ready(&alice.app) && journey_ready(&bob.app)) {
-        assert!(Instant::now() < deadline, "the journey never readied up");
-        if resent.elapsed() > Duration::from_millis(250) {
-            resent = Instant::now();
-            for c in [&*alice, &*bob] {
-                if !journey_ready(&c.app) {
-                    let ctl = c.app.world().resource::<LobbyLink>().ctl();
-                    ctl.set_vehicle("", 0).unwrap();
-                    ctl.set_ready(true).unwrap();
-                }
-            }
+    for c in [&mut *alice, &mut *bob] {
+        let up = c.proxy.impair(LinkDir::Up);
+        let dropped = c.proxy.stats(LinkDir::Up).dropped;
+        c.proxy.set(LinkDir::Up, Impair { loss: 1.0, ..up });
+        let mut link = c.app.world_mut().resource_mut::<LobbyLink>();
+        link.set_vehicle("", 0).unwrap();
+        link.set_ready(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while c.proxy.stats(LinkDir::Up).dropped < dropped + 2 {
+            assert!(Instant::now() < deadline, "the first frames never dropped");
+            thread::sleep(Duration::from_millis(2));
         }
-        host.update();
-        alice.app.update();
-        bob.app.update();
-        thread::sleep(Duration::from_millis(4));
+        c.proxy.set(LinkDir::Up, up);
     }
+    spin_journey(
+        &mut [host, &mut alice.app, &mut bob.app],
+        "both clients ready with a pick",
+        |a| journey_ready(&*a[1]) && journey_ready(&*a[2]),
+    );
 }
 
 fn journey_ready(app: &App) -> bool {
