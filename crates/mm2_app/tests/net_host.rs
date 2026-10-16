@@ -231,14 +231,15 @@ fn a_dedicated_host_process_runs_start_and_cancel() {
 
     // Cancel returns everyone to the lobby; readiness reset is visible
     // on the rebroadcast roster. alice may still have bob's join roster
-    // queued ahead of the Cancel — skip roster traffic to it.
+    // and a re-sent `Start` (F31-B.4 / #1489) queued ahead of the Cancel
+    // — skip that lobby traffic to it.
     host.cmd("cancel");
     assert_eq!(host.line(), "event=cancelled generation=1");
     for client in [&mut alice, &mut bob] {
         loop {
             match client.recv().unwrap() {
                 Message::Cancel { generation: 1 } => break,
-                Message::Roster { .. } => continue,
+                Message::Roster { .. } | Message::Start { .. } => continue,
                 other => panic!("expected Cancel, got {other:?}"),
             }
         }
@@ -361,13 +362,14 @@ fn an_event_host_closes_joins_at_start() {
     );
 
     // Cancel re-opens the lobby: the same join now succeeds and is
-    // served the advertised event session with no `Start` behind it.
+    // served the advertised event session with no `Start` behind it. A
+    // re-sent `Start` (F31-B.4 / #1489) may still be in flight.
     host.cmd("cancel");
     assert_eq!(host.line(), "event=cancelled generation=1");
     loop {
         match alice.recv().unwrap() {
             Message::Cancel { generation: 1 } => break,
-            Message::Roster { .. } => continue,
+            Message::Roster { .. } | Message::Start { .. } => continue,
             other => panic!("expected Cancel, got {other:?}"),
         }
     }
@@ -389,14 +391,15 @@ fn an_event_host_closes_joins_at_start() {
         Message::Roster { players } => assert_eq!(players.len(), 2),
         other => panic!("expected Roster, got {other:?}"),
     }
-    // The lobby is in lobby phase again: nothing follows the roster.
+    // The lobby is in lobby phase again: no `Start` follows the roster.
+    // The `Cancel` re-send (F31-B.4 / #1489) and the periodic roster may
+    // still cross — both are lobby traffic, neither is a session.
     bob.set_timeout(Some(Duration::from_millis(300))).unwrap();
-    match bob.recv() {
-        Err(NetError::Io(e)) => assert!(matches!(
-            e.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        )),
-        other => panic!("expected a quiet socket post-cancel, got {other:?}"),
+    let quiet_until = std::time::Instant::now() + Duration::from_millis(300);
+    while std::time::Instant::now() < quiet_until {
+        if let Ok(Message::Start { .. }) = bob.recv() {
+            panic!("a Start followed the cancel");
+        }
     }
 
     host.cmd("quit");

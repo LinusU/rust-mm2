@@ -518,6 +518,232 @@ fn a_client_without_keep_ready_stays_unready_after_a_cancel() {
     assert!(!readied_again_after_cancel(false));
 }
 
+/// F31-B.4 / #1489: the host re-sends `Start` (a bounded repeat, or the
+/// wire's own duplicate) naming a generation the client already entered.
+/// The client must read it as the same session — not the "restart" path
+/// a *newer* generation takes — so it stays in the running session.
+#[test]
+fn a_resent_start_does_not_restart_the_running_session() {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, link, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link);
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    let generation = until_started(&host);
+    until_begun(&mut app);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // The same `Start` again, both as the host's own bounded re-send and
+    // as a straight duplicate.
+    let ad = net::advertise(&dev_cruise()).unwrap();
+    for _ in 0..3 {
+        host.ctl()
+            .broadcast(&Message::Start {
+                generation,
+                session: ad.clone(),
+                host_pick: None,
+            })
+            .unwrap();
+    }
+    for _ in 0..60 {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let session = app.world().resource::<Session>();
+    assert_eq!(
+        session.phase(),
+        &SessionPhase::Playing,
+        "a resent Start tore the running session down"
+    );
+    assert_eq!(session.wire_generation(), generation);
+    assert!(
+        !app.world().resource::<SessionControl>().quit,
+        "a resent Start asked the live session to yield"
+    );
+    assert!(app.world().resource::<LobbyState>().pending_start.is_none());
+    host.shutdown();
+}
+
+/// F31-B.4 / #1489: the host re-sends `Cancel` for its bounded window.
+/// Only the first copy names a session the client holds; the repeats
+/// must not re-ready a `--ready` client a second time (each re-ready is
+/// a wire `SetReady` the host rebroadcasts to the whole lobby).
+#[test]
+fn a_resent_cancel_does_not_ready_the_client_twice() {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, link, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    let id = link.player_id();
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link.keep_ready(true));
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    host.ctl()
+        .broadcast(&Message::Cancel { generation: 1 })
+        .unwrap();
+    // Let the client drain the cancel, return to `Menu` and answer.
+    for _ in 0..40 {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The re-send, which names a generation the client no longer holds.
+    host.ctl()
+        .broadcast(&Message::Cancel { generation: 1 })
+        .unwrap();
+
+    let mut readied = 0;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        app.update();
+        while let Ok(event) = host.try_recv() {
+            if matches!(
+                event,
+                HostEvent::ReadyChanged { id: who, ready: true } if who == id
+            ) {
+                readied += 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(readied, 1, "a resent Cancel re-readied the client");
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    host.shutdown();
+}
+
+/// F31-B.4 / #1489 acceptance: the seeded lossy proxy drops the *first*
+/// `Start` and the *first* `Cancel` outright, and the host's bounded
+/// repeat still carries the client into the session and back out of it.
+/// The journey test only makes that loss *possible* (20 %); here it is
+/// guaranteed, the way the `Leave` legs make theirs: a dead Down lane
+/// while the one frame is written — no `update` runs and nothing else is
+/// in flight, so the dropped frame is that one — then the lane recovers
+/// and the repeat must land.
+#[test]
+fn a_dropped_start_and_cancel_are_recovered_by_the_hosts_repeat() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    // Handshake clean, then only the lifecycle frames are impaired — the
+    // ledger names the first `Start`/`Cancel` as the dropped one.
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1489).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link);
+    until_ready(&mut app);
+
+    // The first `Start` is written into a dead Down lane: it cannot reach
+    // the client, whose lobby stays at the menu.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    host.start(LateJoin::Open).unwrap();
+    let generation = until_started(&host);
+    let dropped = Instant::now() + Duration::from_secs(2);
+    while proxy.stats(LinkDir::Down).dropped < 1 {
+        assert!(Instant::now() < dropped, "the Start was never dropped");
+        thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..20 {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        session_phase(&app),
+        SessionPhase::Menu,
+        "a client that missed the only Start must not have begun"
+    );
+
+    // The lane recovers; the host's bounded repeat delivers the `Start`
+    // and the client begins under the same generation.
+    proxy.set(LinkDir::Down, Impair::default());
+    spin(&mut app, |a| session_phase(a) != SessionPhase::Menu);
+    assert_eq!(
+        app.world().resource::<Session>().wire_generation(),
+        generation,
+        "the repeated Start must start the same session, not a new one"
+    );
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // The same for `Cancel`: the first copy is dropped, so the client
+    // keeps playing until the repeat lands and returns it to the lobby.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    host.cancel().unwrap();
+    let cancelled = Instant::now() + WAIT;
+    loop {
+        match host.recv_timeout(Duration::from_millis(200)) {
+            Ok(HostEvent::Cancelled { generation: g }) => {
+                assert_eq!(g, generation);
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => assert!(Instant::now() < cancelled, "the host never cancelled"),
+        }
+    }
+    let before = proxy.stats(LinkDir::Down).dropped;
+    for _ in 0..20 {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        proxy.stats(LinkDir::Down).dropped > before,
+        "the Cancel was never dropped"
+    );
+    assert_ne!(
+        session_phase(&app),
+        SessionPhase::Menu,
+        "a client that missed the only Cancel must stay in the session"
+    );
+
+    // Recovery: the host's bounded `Cancel` repeat reaches the client,
+    // which leaves the ended session for the lobby.
+    proxy.set(LinkDir::Down, Impair::default());
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Menu);
+    assert!(
+        app.world().resource::<LobbyState>().generation.is_none(),
+        "the cancel must clear the client's session generation"
+    );
+    host.shutdown();
+}
+
 /// A `Start` drained while a session is still live cannot legally
 /// `Menu → Loading` — it parks in `pending_start`, asks the lifecycle
 /// for teardown, and begins only once `Menu` returns. (The host's own
@@ -12640,18 +12866,16 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
         a[1].world().resource::<LobbyState>().advertised.as_ref() == Some(&race_ad)
             && a[2].world().resource::<LobbyState>().advertised.as_ref() == Some(&race_ad)
     });
-    // The ad change reset readiness: re-consent, then start.
+    // The ad change reset readiness: re-consent, then start. The `Start`
+    // crosses the lossy lane: the host repeats it until every client
+    // reports liveness in the running generation, and a repeat that
+    // names a generation the client already entered is ignored.
     journey_ready_up(&mut host, alice, bob);
-    // `Start` and `Cancel` are single frames with no repeat or ack
-    // (filed as #1489: a duplicate `Start` must first be made
-    // harmless on the client; TODO(start-cancel-lossy)), so they cross a transparent lane here.
-    arm(false, [&*alice, &*bob]);
     commands.send(HostCommand::Start).unwrap();
     all!("everyone begins the event under generation 1", |a| {
         a.iter().all(|app| session_phase(app) != SessionPhase::Menu)
     });
     assert_eq!(host.world().resource::<Session>().wire_generation(), 1);
-    arm(true, [&*alice, &*bob]);
 
     // Race: stand the worlds up the way the result legs do, then play
     // the host's finish and the deadline through the lossy link.
@@ -12788,9 +13012,9 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
         assert_eq!(standing(state).0, "timed-out");
     }
 
-    // Rematch: the host ends the round; Cancel reaches both clients,
-    // who stay connected. The next round changes difficulty and seed.
-    arm(false, [&*alice, &*bob]);
+    // Rematch: the host ends the round; the `Cancel` crosses the lossy
+    // lane as a bounded repeat, reaching both clients, who stay
+    // connected. The next round changes difficulty and seed.
     host.world_mut().resource_mut::<SessionControl>().quit = true;
     all!("everyone back at the lobby", |a| {
         a.iter().all(|app| {
@@ -12798,7 +13022,6 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
                 && app.world().resource::<LobbyState>().generation.is_none()
         })
     });
-    arm(true, [&*alice, &*bob]);
     let rematch = SessionConfig {
         difficulty: mm2_game::Difficulty::Professional,
         seed: 0x5eed,
@@ -12818,7 +13041,6 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
             && a[2].world().resource::<LobbyState>().advertised.as_ref() == Some(&rematch_ad)
     });
     journey_ready_up(&mut host, alice, bob);
-    arm(false, [&*alice, &*bob]);
     commands.send(HostCommand::Start).unwrap();
     all!("everyone begins the rematch under generation 2", |a| {
         a.iter().all(|app| {
@@ -12833,7 +13055,6 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
         );
     }
 
-    arm(true, [&*alice, &*bob]);
     // Disconnect: bob leaves; the host reaps the seat and alice's
     // roster converges on the removal despite the lossy link. Then
     // alice leaves and the host's roster empties.

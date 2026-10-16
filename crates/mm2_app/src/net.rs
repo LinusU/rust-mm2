@@ -410,6 +410,14 @@ pub struct LobbyLink {
     want_pick: Option<VehiclePick>,
     /// When the newest intent copy went out — the clock the repeat rides.
     intent_sent: Option<Instant>,
+    /// The newest `Start` generation this link adopted — entered (the
+    /// session began) or parked (`pending_start`). Generations climb
+    /// within one authority's link, so a `Start` naming a generation at
+    /// or below this is the host's bounded re-send (F31-B.4 / #1489), not
+    /// a new session: acting on it would restart the running one. The
+    /// field lives on the link, not [`LobbyState`], because a fresh
+    /// authority replaces the link and restarts its numbering at 1.
+    entered_generation: Option<u64>,
 }
 
 impl LobbyLink {
@@ -449,6 +457,7 @@ impl LobbyLink {
             want_ready: None,
             want_pick: None,
             intent_sent: None,
+            entered_generation: None,
         })
     }
 
@@ -792,14 +801,22 @@ pub fn drive_lobby(
                 snaps.push_cnr(generation, &frame)
             }
             LobbyEvent::Message(Message::Cancel { generation }) => {
-                cancel(&mut lobby, &mut session, &mut control, generation);
+                // A `Cancel` for a generation this link never entered is
+                // the host's bounded re-send or a reordered duplicate
+                // (F31-B.4 / #1489) — a no-op, never a re-ready.
+                let acted = cancel(&mut lobby, &mut session, &mut control, generation);
                 // The host cleared every ready flag before it sent this,
                 // so our answer lands after the reset, never before it.
-                // A readiness we still owed the host died with that reset
-                // unless we keep it.
-                link.want_ready = None;
-                if link.keep_ready && !link.leaving() {
-                    let _ = link.set_ready(true);
+                // A repeated `Cancel` names a generation we no longer
+                // hold — a no-op: re-readying (or clearing the intent we
+                // re-armed) would answer the same frame twice.
+                if acted {
+                    // A readiness we still owed the host died with that
+                    // reset unless we keep it.
+                    link.want_ready = None;
+                    if link.keep_ready && !link.leaving() {
+                        let _ = link.set_ready(true);
+                    }
                 }
             }
             LobbyEvent::Closed(reason) => {
@@ -942,6 +959,17 @@ fn start(
         Ok(config) => config,
         Err(why) => return refuse(link, lobby, why),
     };
+    // A `Start` the host re-sends (F31-B.4 / #1489) names a generation
+    // this link already adopted — entering or parking the same session
+    // again would restart it. Ignore it; every genuine start mints a
+    // higher generation within one link's authority.
+    if link
+        .entered_generation
+        .is_some_and(|entered| generation <= entered)
+    {
+        return;
+    }
+    link.entered_generation = Some(generation);
     lobby.host_pick = host_pick;
     // The pick is roster state, not session params.
     config.vehicle = start_pick(&lobby.roster, link.player_id(), offered_selection(selected));
@@ -988,23 +1016,29 @@ fn start(
 
 /// `Cancel` — the host closed the running session. The generation names
 /// *which* session: a stray cancel for one we never entered (a pending
-/// start we never began) only clears that pending begin.
+/// start we never began) only clears that pending begin. Returns whether
+/// it named a session we held, so the caller re-readies only on a real
+/// transition — a `Cancel` the host re-sends (F31-B.4 / #1489) is the
+/// same frame again and must not re-ready a client that already answered.
 fn cancel(
     lobby: &mut LobbyState,
     session: &mut Session,
     control: &mut SessionControl,
     generation: u64,
-) {
+) -> bool {
+    let mut acted = false;
     if lobby
         .pending_start
         .as_ref()
         .is_some_and(|(g, _)| *g == generation)
     {
         lobby.pending_start = None;
+        acted = true;
     }
     if lobby.generation == Some(generation) {
         lobby.generation = None;
         lobby.host_pick = None;
+        acted = true;
         if !matches!(
             session.phase(),
             SessionPhase::Menu | SessionPhase::Unloading
@@ -1012,6 +1046,7 @@ fn cancel(
             control.quit = true;
         }
     }
+    acted
 }
 
 /// The roster-echoed pick into the car resources `load_session_world`

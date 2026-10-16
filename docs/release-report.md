@@ -194,8 +194,11 @@ Cross-cutting, from `docs/coverage-audit.md` §4 and re-confirmed here:
 6. **Mod coverage is uneven.** Override infrastructure exists; no audit
    shows every consumer honours it (F29-AC01/AC05; filed as #1495).
 7. **One-shot network messages.** A lossy link found `SetReady`/`SetVehicle`
-   (#1488) and `Start`/`Cancel` (#1489) are not loss-safe; the journey
-   test re-issues them rather than routing around the gap.
+   (#1488) and `Start`/`Cancel` (#1489) were not loss-safe. Both are now:
+   the client repeats `SetReady`/`SetVehicle` until the roster echoes them
+   (#1488) and the host repeats `Start`/`Cancel` for a bounded window while
+   the client ignores a repeat (#1489), so the journey crosses all of them
+   on the lossy lane.
 8. **Circuit/opponent pacing.** The scripted 597 s sweep left some
    circuits short; the neural-driver re-measure completed every circuit it
    re-ran, but `london circuit:8` Professional is slower than the 12-minute

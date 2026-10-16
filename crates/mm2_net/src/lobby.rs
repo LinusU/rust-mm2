@@ -81,6 +81,18 @@ const WRITE_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
 /// for longer than this. Designed, not recovered from the original.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long after a `Start`/`Cancel` the host keeps re-sending that
+/// lifecycle frame on the keepalive tick (F31-B.4 / #1489). Unlike the
+/// repeat-safe `Roster` and advertised `Session`, `Start` and `Cancel`
+/// change the receiver's phase, so a client that misses the single
+/// frame never enters or never leaves the session; the re-send gives a
+/// lossy link several chances to deliver one. A `Start` also stops
+/// early once every rostered peer is demonstrably in the session (its
+/// first `Input`/`ResetRequest` for the generation), so an acknowledged
+/// start does not resend the (possibly large) session blob; the window
+/// is what bounds a peer that never answers.
+pub const LIFECYCLE_RESEND_WINDOW: Duration = Duration::from_secs(5);
+
 /// How long a joined [`Client`] may hear nothing from the host — not
 /// even a keepalive — before `recv` fails with a timeout: a host that
 /// keeps its socket open but stopped speaking (stopped process, wedged
@@ -419,6 +431,20 @@ impl RemoteInputs {
             .inputs
             .get(&id)
             .cloned()
+    }
+
+    /// Whether `id` has shown it entered `generation` — its newest
+    /// `Input` sample or pending `ResetRequest` was minted against it.
+    /// The host loop reads this to stop resending a session's `Start` to
+    /// a peer that is demonstrably in the session (F31-B.4 / #1489); a
+    /// sample from a previous generation does not count, so a peer still
+    /// driving the old session keeps being told the new one.
+    fn entered(&self, id: u16, generation: u64) -> bool {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.inputs
+            .get(&id)
+            .is_some_and(|s| s.input.generation == generation)
+            || mail.resets.get(&id).is_some_and(|g| *g == generation)
     }
 
     /// Record `id`'s `ResetRequest` — the newest requested generation
@@ -1015,6 +1041,14 @@ fn run(
     let mut next_id: u16 = 1;
 
     let mut last_sent = Instant::now();
+    // `Start`/`Cancel` are each a single frame — a client that misses
+    // one sits in the wrong phase — so the loop re-sends the newest of
+    // each on the keepalive tick until `now` passes the deadline
+    // (F31-B.4 / #1489). A fresh start or cancel supersedes the other.
+    // A `Start` also clears the moment every rostered peer has shown it
+    // entered the generation, so an acknowledged start stops resending.
+    let mut start_resend: Option<(u64, Instant)> = None;
+    let mut cancel_resend: Option<(u64, Instant)> = None;
     loop {
         // Wake for the next keepalive even when no message arrives.
         let wait = KEEPALIVE_INTERVAL.saturating_sub(last_sent.elapsed());
@@ -1045,6 +1079,45 @@ fn run(
                         &events,
                         &inputs,
                     );
+                }
+                // F31-B.4 / #1489: the one-shot lifecycle frames repeat
+                // too, bounded rather than forever — a receiver ignores a
+                // repeat (its generation only climbs). A `Start` stops
+                // once every peer has shown it entered the session.
+                let now = Instant::now();
+                if let Phase::InSession {
+                    generation: g,
+                    session: started,
+                    ..
+                } = &phase
+                {
+                    match start_resend {
+                        Some((rg, until)) if rg == *g && now < until => {
+                            if players.keys().all(|id| inputs.entered(*id, *g)) {
+                                start_resend = None;
+                            } else {
+                                let msg = Message::Start {
+                                    generation: *g,
+                                    session: started.clone(),
+                                    host_pick: config.host_pick.clone(),
+                                };
+                                broadcast(&mut players, &msg, &events, &inputs);
+                            }
+                        }
+                        Some(_) => start_resend = None,
+                        None => {}
+                    }
+                } else if let Some((rg, until)) = cancel_resend {
+                    if now < until {
+                        broadcast(
+                            &mut players,
+                            &Message::Cancel { generation: rg },
+                            &events,
+                            &inputs,
+                        );
+                    } else {
+                        cancel_resend = None;
+                    }
                 }
                 broadcast_roster(&mut players, &events, &inputs);
                 continue;
@@ -1335,6 +1408,13 @@ fn run(
                         if !broadcast(&mut players, &msg, &events, &inputs) {
                             broadcast_roster(&mut players, &events, &inputs);
                         }
+                        // Re-send `Start` until every peer is in the
+                        // session or the window elapses (F31-B.4 /
+                        // #1489). A new session supersedes any pending
+                        // `Cancel` re-send: the repeat is a duplicate the
+                        // receiver ignores, never the phase it wants.
+                        start_resend = Some((generation, Instant::now() + LIFECYCLE_RESEND_WINDOW));
+                        cancel_resend = None;
                         let _ = events.send(HostEvent::Started { generation });
                     }
                 }
@@ -1357,6 +1437,12 @@ fn run(
                     // Departures under the `Cancel` send and the
                     // readiness reset both changed the roster.
                     broadcast_roster(&mut players, &events, &inputs);
+                    // Keep re-sending `Cancel` for a bounded window
+                    // (F31-B.4 / #1489): the single frame may be lost, and
+                    // a client still in the ended session would never
+                    // return to the lobby. A fresh start supersedes it.
+                    cancel_resend = Some((generation, Instant::now() + LIFECYCLE_RESEND_WINDOW));
+                    start_resend = None;
                 }
             }
             LoopMsg::PeerGone { id, cause } => {
@@ -2538,9 +2624,14 @@ mod tests {
             Ok(HostEvent::Cancelled { generation: 1 }) => {}
             other => panic!("expected Cancelled{{1}}, got {other:?}"),
         }
-        match alice.recv().unwrap() {
-            Message::Cancel { generation: 1 } => {}
-            other => panic!("expected Cancel, got {other:?}"),
+        // The `Start` may be re-sent over the window, and the session ad
+        // repeats in the lobby — skip to the `Cancel`.
+        loop {
+            match alice.recv().unwrap() {
+                Message::Cancel { generation: 1 } => break,
+                Message::Start { .. } | Message::Roster { .. } | Message::Session(_) => continue,
+                other => panic!("expected Cancel, got {other:?}"),
+            }
         }
         // Readiness reset for the next round; the pick survives.
         let roster = recv_roster(&mut alice, 1);
@@ -2563,6 +2654,100 @@ mod tests {
             Ok(HostEvent::Started { generation: 2 }) => {}
             other => panic!("expected Started{{2}}, got {other:?}"),
         }
+    }
+
+    /// F31-B.4 / #1489: `Start` is a single frame, so a client that
+    /// misses it never begins. The host re-sends it on the keepalive
+    /// tick until every peer shows it entered the session (an `Input` /
+    /// `ResetRequest` for the generation), so an acknowledged start
+    /// stops resending.
+    #[test]
+    fn a_lost_start_is_resent_until_the_peer_enters() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        ready_up(&host, &mut alice, "vpbug");
+        host.start(LateJoin::Closed).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+
+        // The frame a peer missing the first copy would still see.
+        assert_eq!(recv_start(&mut alice), (1, ad("go")));
+        alice.set_timeout(Some(KEEPALIVE_INTERVAL * 3)).unwrap();
+        assert_eq!(recv_start(&mut alice), (1, ad("go")));
+
+        // The peer shows it is in the session, so the re-send stops.
+        alice.ctl().unwrap().send_input(drive_input(1)).unwrap();
+        let landed = Instant::now() + WAIT;
+        while !host.remote_inputs().entered(1, 1) {
+            assert!(Instant::now() < landed, "the input never landed");
+            thread::sleep(Duration::from_millis(2));
+        }
+        // A repeat sent by a tick that fired just before the input
+        // landed can still be in flight; drain one tick of it, then the
+        // stream goes quiet of `Start`.
+        alice.set_timeout(Some(KEEPALIVE_INTERVAL)).unwrap();
+        let grace = Instant::now() + KEEPALIVE_INTERVAL;
+        while Instant::now() < grace {
+            let _ = alice.recv();
+        }
+        let quiet = Instant::now() + KEEPALIVE_INTERVAL * 2;
+        while Instant::now() < quiet {
+            if let Ok(Message::Start { .. }) = alice.recv() {
+                panic!("the Start was re-sent after the peer entered the session");
+            }
+        }
+    }
+
+    /// F31-B.4 / #1489: `Cancel` is a single frame too, so the host
+    /// re-sends it for a bounded window — a client that missed it would
+    /// otherwise stay in the ended session forever.
+    #[test]
+    fn a_lost_cancel_is_resent_for_a_bounded_window() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        ready_up(&host, &mut alice, "vpbug");
+        host.start(LateJoin::Closed).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+        recv_start(&mut alice);
+
+        host.cancel().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Cancelled { generation: 1 }) => {}
+            other => panic!("expected Cancelled{{1}}, got {other:?}"),
+        }
+        // The first `Cancel` may be preceded by a `Start` re-send still
+        // in flight and is followed by the lobby's ad/roster traffic.
+        alice.set_timeout(Some(KEEPALIVE_INTERVAL * 3)).unwrap();
+        let mut cancels = 0;
+        let deadline = Instant::now() + KEEPALIVE_INTERVAL * 3;
+        while cancels < 2 && Instant::now() < deadline {
+            match alice.recv().unwrap() {
+                Message::Cancel { generation: 1 } => cancels += 1,
+                Message::Start { .. } | Message::Roster { .. } | Message::Session(_) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(cancels, 2, "the Cancel was not re-sent");
+    }
+
+    /// The predicate the `Start` re-send terminates on: a seat counts as
+    /// entered a generation when its newest `Input` or `ResetRequest`
+    /// names it — a sample from the previous session does not.
+    #[test]
+    fn entered_tracks_the_running_generation() {
+        let inputs = RemoteInputs::default();
+        inputs.store(1, drive_input(1));
+        assert!(inputs.entered(1, 1));
+        assert!(!inputs.entered(1, 2), "an old generation is not liveness");
+        inputs.request_reset(2, 5);
+        assert!(inputs.entered(2, 5));
+        assert!(!inputs.entered(2, 4));
+        // A departed seat's liveness goes with it.
+        inputs.remove(1);
+        assert!(!inputs.entered(1, 1));
     }
 
     /// A `Leave` reaps the seat in a *running* session too — the
