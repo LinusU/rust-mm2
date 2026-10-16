@@ -60,6 +60,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -68,6 +69,7 @@ use avian3d::dynamics::solver::SolverDiagnostics;
 use bevy::ecs::entity::Entities;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
+use bevy::render::{Render as RenderSchedule, RenderApp, RenderSystems};
 use mm2_game::{Mm2Vfs, Session, SessionPhase};
 
 use crate::audio::AudioVoice;
@@ -330,6 +332,200 @@ struct Row {
     /// Wall time beyond the virtual clock's `max_delta` that the frame
     /// discarded instead of simulating (zero for a frame within the cap).
     clamped: Duration,
+    /// The render thread's own schedule split (see [`RenderStages`]) for
+    /// the frame whose hand-back the `render` stage above waited on. Zero
+    /// when no render thread reported (headless, or before its first frame).
+    render_stages: RenderStages,
+}
+
+/// Where the *render thread* spent its frame, split by the render
+/// schedule's [`RenderSystems`] sets.
+///
+/// The main thread's `render` stage is mostly the wait for the pipelined
+/// render thread to hand the render world back
+/// (`bevy_render::pipelined_rendering::renderer_extract` blocks on `recv`
+/// inside `App::update`, after `Last`). A frame wall-clock says the render
+/// stage stalled but not *where*: a shader/pipeline compile, a render-asset
+/// GPU upload and a driver wait all look the same from the main thread. A
+/// handful of systems in the render app's `Render` schedule stamp the
+/// boundaries of its sets into an `Arc<Mutex<..>>` the main world shares,
+/// so the row can name the segment instead of the stage.
+///
+/// `total` is the whole render-thread schedule; the segments are the gaps
+/// between the stamps (the first segment starts where the render schedule
+/// starts, so the small `First` schedule and the executor's own setup are
+/// outside it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RenderStages {
+    /// Render-thread frames completed when this snapshot was taken. Zero
+    /// before the thread's first frame (or when there is no render thread).
+    frames: u64,
+    /// `RenderSystems::ExtractCommands`: applying extract commands.
+    extract_commands: Duration,
+    /// `RenderSystems::PrepareAssets`: preparing render assets (GPU upload
+    /// of meshes/textures) — where a lazily loaded asset lands.
+    prepare_assets: Duration,
+    /// `PrepareMeshes` through `Prepare`: views, specialization, queue,
+    /// phase sort and bind groups — where a new material *specialization*
+    /// lands (the pipeline key, not the compiled object).
+    views: Duration,
+    /// `RenderSystems::Render`: `PipelineCache::process_pipeline_queue_system`
+    /// (deferred pipeline compilation), the render graph, submit and present.
+    /// A one-off shader/pipeline compile or a driver wait lands here.
+    render: Duration,
+    /// `Cleanup` and `PostCleanup`.
+    cleanup: Duration,
+    /// The whole render-thread schedule, stamp to stamp.
+    total: Duration,
+}
+
+impl RenderStages {
+    /// `extract-commands A + prepare-assets B + views C + render D + cleanup E` (ms).
+    ///
+    /// These are the five segments of one frame, so they sum to that frame's
+    /// `total`; use it only for a single frame (the worst one), never for the
+    /// per-segment maxima, whose parts come from different frames.
+    fn segments(&self) -> String {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        format!(
+            "extract-commands {ec:.2} + prepare-assets {pa:.2} + \
+             views {v:.2} + render {r:.2} + cleanup {c:.2}",
+            ec = ms(self.extract_commands),
+            pa = ms(self.prepare_assets),
+            v = ms(self.views),
+            r = ms(self.render),
+            c = ms(self.cleanup),
+        )
+    }
+
+    /// The whole of one frame, so the parts add up:
+    /// `total X = extract-commands A + ... + cleanup E` (ms).
+    fn frame_line(&self) -> String {
+        format!(
+            "total {tot:.2} = {segments}",
+            tot = self.total.as_secs_f64() * 1000.0,
+            segments = self.segments(),
+        )
+    }
+
+    fn json(&self) -> Value {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        json!({
+            "frames": self.frames,
+            "ms": {
+                "extract_commands": ms(self.extract_commands),
+                "prepare_assets": ms(self.prepare_assets),
+                "views": ms(self.views),
+                "render": ms(self.render),
+                "cleanup": ms(self.cleanup),
+                "total": ms(self.total),
+            },
+        })
+    }
+}
+
+/// The render thread's in-flight frame and the last one it published. The
+/// render thread writes `current` during its schedule and copies it to
+/// `completed` when the frame ends; the main thread reads `completed` after
+/// the hand-back, which is the only point the two threads are synchronised.
+/// The `Mutex` guards both because the two run concurrently.
+#[derive(Default)]
+struct RenderClock {
+    current: RenderStages,
+    completed: RenderStages,
+    /// When the current render frame's first stamp fired.
+    start: Option<Instant>,
+    /// The previous stamp, for the next segment.
+    last: Option<Instant>,
+    /// Frames the render thread has begun.
+    begun: u64,
+}
+
+impl RenderClock {
+    /// A render frame is starting: reset the accumulator and stamp it.
+    fn begin(&mut self, now: Instant) {
+        self.begun += 1;
+        self.current = RenderStages {
+            frames: self.begun,
+            ..default()
+        };
+        self.start = Some(now);
+        self.last = Some(now);
+    }
+
+    /// Close the segment that `stage` names with the time since the last
+    /// stamp, then move the stamp forward.
+    fn mark(&mut self, now: Instant, stage: RenderStage) {
+        let elapsed = self.last.map_or(Duration::ZERO, |last| now - last);
+        match stage {
+            RenderStage::ExtractCommands => self.current.extract_commands = elapsed,
+            RenderStage::PrepareAssets => self.current.prepare_assets = elapsed,
+            RenderStage::Views => self.current.views = elapsed,
+            RenderStage::Render => self.current.render = elapsed,
+            RenderStage::Cleanup => self.current.cleanup = elapsed,
+        }
+        self.last = Some(now);
+    }
+
+    /// The render frame is done: close the tail segment, total it, and
+    /// publish it for the main thread.
+    fn finish(&mut self, now: Instant) {
+        self.mark(now, RenderStage::Cleanup);
+        if let Some(start) = self.start {
+            self.current.total = now - start;
+        }
+        self.completed = self.current;
+    }
+}
+
+/// Which render-set boundary a stamp closes.
+#[derive(Clone, Copy, Debug)]
+enum RenderStage {
+    ExtractCommands,
+    PrepareAssets,
+    Views,
+    Render,
+    Cleanup,
+}
+
+/// The shared render-stage clock, inserted into the render world. The main
+/// world holds a clone of the same [`Arc`] (in [`PerfLog::render_probe`]) and
+/// reads the published snapshot from it.
+#[derive(Resource)]
+struct RenderStageProbe(Arc<Mutex<RenderClock>>);
+
+fn render_probe_start(probe: Res<RenderStageProbe>) {
+    if let Ok(mut clock) = probe.0.lock() {
+        clock.begin(Instant::now());
+    }
+}
+
+fn render_probe_mark(probe: &RenderStageProbe, stage: RenderStage) {
+    if let Ok(mut clock) = probe.0.lock() {
+        clock.mark(Instant::now(), stage);
+    }
+}
+
+fn render_probe_extract_commands(probe: Res<RenderStageProbe>) {
+    render_probe_mark(&probe, RenderStage::ExtractCommands);
+}
+
+fn render_probe_prepare_assets(probe: Res<RenderStageProbe>) {
+    render_probe_mark(&probe, RenderStage::PrepareAssets);
+}
+
+fn render_probe_views(probe: Res<RenderStageProbe>) {
+    render_probe_mark(&probe, RenderStage::Views);
+}
+
+fn render_probe_render(probe: Res<RenderStageProbe>) {
+    render_probe_mark(&probe, RenderStage::Render);
+}
+
+fn render_probe_finish(probe: Res<RenderStageProbe>) {
+    if let Ok(mut clock) = probe.0.lock() {
+        clock.finish(Instant::now());
+    }
 }
 
 /// Wall time a frame of `real` length lost to a virtual clock capped at
@@ -384,6 +580,12 @@ struct Stats {
     clamped_total: f64,
     clamped_worst: f64,
     max_steps: u32,
+    /// The render thread's stage split: the per-segment maximum across the
+    /// measured frames, and the split of the frame with the largest
+    /// render-thread total (the frame that stalled, if any). Defaults to
+    /// zero in a headless run or before the thread's first frame.
+    render_stage_max: RenderStages,
+    render_stage_worst: RenderStages,
     /// The soak budgets' verdict (F30-AC02).
     soak: Soak,
 }
@@ -422,6 +624,9 @@ struct PerfLog {
     /// Filled by [`capture_adapter`] once the renderer exists; stays
     /// `None` in a run that never created one.
     gpu: Option<Gpu>,
+    /// The render thread's stage clock, shared with the render world.
+    /// `None` in a run with no render thread (headless).
+    render_probe: Option<Arc<Mutex<RenderClock>>>,
 }
 
 impl PerfLog {
@@ -431,6 +636,7 @@ impl PerfLog {
             context,
             content: None,
             gpu: None,
+            render_probe: None,
             rows: Vec::new(),
             frame: 0,
             frame_start: None,
@@ -458,6 +664,16 @@ impl PerfLog {
         } else if let (Some(start), Some(main_end)) = (self.frame_start, self.main_end) {
             let total = now - start;
             let main = main_end - start;
+            // The render thread handed this frame back before the main
+            // thread woke, so its last published split is the one this
+            // row's `render` stage waited on: the two threads hand one
+            // frame back per main frame, and the wait happens just
+            // before `frame_begin` (see `RenderStages`).
+            let render_stages = self
+                .render_probe
+                .as_ref()
+                .and_then(|probe| probe.lock().ok().map(|clock| clock.completed))
+                .unwrap_or_default();
             self.rows.push(Row {
                 frame: self.frame,
                 total,
@@ -473,6 +689,7 @@ impl PerfLog {
                 voices: self.voices,
                 queues: self.queues,
                 clamped: self.clamped,
+                render_stages,
             });
         }
         self.clamped = Duration::ZERO;
@@ -504,6 +721,7 @@ impl PerfLog {
             .count();
         let worst = *rows.iter().max_by_key(|r| r.total).expect("rows non-empty");
         let stage_max = |f: fn(&Row) -> Duration| ms(rows.iter().map(f).max().unwrap());
+        let stage_max_dur = |f: fn(&Row) -> Duration| rows.iter().map(f).max().unwrap_or_default();
         let mean = |f: fn(&Row) -> Duration| {
             rows.iter().map(|r| ms(f(r))).sum::<f64>() / rows.len() as f64
         };
@@ -545,6 +763,24 @@ impl PerfLog {
             clamped_total: rows.iter().map(|r| ms(r.clamped)).sum(),
             clamped_worst: stage_max(|r| r.clamped),
             max_steps: rows.iter().map(|r| r.steps).max().unwrap_or(0),
+            render_stage_max: RenderStages {
+                frames: rows
+                    .iter()
+                    .map(|r| r.render_stages.frames)
+                    .max()
+                    .unwrap_or(0),
+                extract_commands: stage_max_dur(|r| r.render_stages.extract_commands),
+                prepare_assets: stage_max_dur(|r| r.render_stages.prepare_assets),
+                views: stage_max_dur(|r| r.render_stages.views),
+                render: stage_max_dur(|r| r.render_stages.render),
+                cleanup: stage_max_dur(|r| r.render_stages.cleanup),
+                total: stage_max_dur(|r| r.render_stages.total),
+            },
+            render_stage_worst: rows
+                .iter()
+                .map(|r| r.render_stages)
+                .max_by_key(|s| s.total)
+                .unwrap_or_default(),
             soak: Soak::judge(rows),
         })
     }
@@ -572,7 +808,9 @@ impl PerfLog {
              | live entities first {ef} last {el} max {em} \
              | live voices first {vf} last {vl} max {vm} | queue depth first {qf} last {ql} max {qm}\n\
              perf: overload: {cf} frames over the {cap} virtual cap discarded {ct:.1} ms of \
-             game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}\n{soak}",
+             game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}\n\
+             perf: render thread stage, worst frame: {rtw} | per-segment max: {rtx} \
+             (worst total {rtt:.2} ms)\n{soak}",
             n = st.frames,
             median = st.median,
             p95 = st.p95,
@@ -614,6 +852,9 @@ impl PerfLog {
             ct = st.clamped_total,
             cw = st.clamped_worst,
             msx = st.max_steps,
+            rtw = st.render_stage_worst.frame_line(),
+            rtx = st.render_stage_max.segments(),
+            rtt = ms(st.render_stage_max.total),
             soak = st.soak.line(),
         )
     }
@@ -701,6 +942,10 @@ impl PerfLog {
                     "worst_frame_discarded_ms": st.clamped_worst,
                     "max_fixed_steps_in_a_frame": st.max_steps,
                 },
+                "render_stage_ms": {
+                    "worst_frame": st.render_stage_worst.json(),
+                    "per_segment_max": st.render_stage_max.json(),
+                },
                 "soak": st.soak.json(),
                 "worst_frame": {
                     "frame": st.worst.frame,
@@ -764,13 +1009,14 @@ impl PerfLog {
         let mut out = BufWriter::new(File::create(&self.path)?);
         writeln!(
             out,
-            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices,queues,clamped_ms"
+            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices,queues,clamped_ms,rthread_total_ms,rthread_extract_ms,rthread_assets_ms,rthread_views_ms,rthread_draw_ms,rthread_cleanup_ms"
         )?;
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         for r in &self.rows {
+            let rt = r.render_stages;
             writeln!(
                 out,
-                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{},{},{:.3}",
+                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                 r.frame,
                 ms(r.total),
                 ms(r.fixed),
@@ -784,7 +1030,13 @@ impl PerfLog {
                 r.entities,
                 r.voices,
                 r.queues,
-                ms(r.clamped)
+                ms(r.clamped),
+                ms(rt.total),
+                ms(rt.extract_commands),
+                ms(rt.prepare_assets),
+                ms(rt.views),
+                ms(rt.render),
+                ms(rt.cleanup)
             )?;
         }
         out.flush()
@@ -975,6 +1227,33 @@ pub fn enable(app: &mut App, path: PathBuf, context: RunContext) {
         .world()
         .get_resource::<Mm2Vfs>()
         .map(|vfs| fingerprint(&vfs.0));
+    // The render thread owns the render stage's cost; share a clock with it
+    // so a stall names the render set it happened in. A run without a render
+    // world (headless) keeps the field `None` and records zeros.
+    let probe = Arc::new(Mutex::new(RenderClock::default()));
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        log.render_probe = Some(probe.clone());
+        render_app.insert_resource(RenderStageProbe(probe));
+        render_app.add_systems(
+            RenderSchedule,
+            (
+                render_probe_start.before(RenderSystems::ExtractCommands),
+                render_probe_extract_commands
+                    .after(RenderSystems::ExtractCommands)
+                    .before(RenderSystems::PrepareAssets),
+                render_probe_prepare_assets
+                    .after(RenderSystems::PrepareAssets)
+                    .before(RenderSystems::PrepareMeshes),
+                render_probe_views
+                    .after(RenderSystems::Prepare)
+                    .before(RenderSystems::Render),
+                render_probe_render
+                    .after(RenderSystems::Render)
+                    .before(RenderSystems::Cleanup),
+                render_probe_finish.after(RenderSystems::PostCleanup),
+            ),
+        );
+    }
     app.insert_resource(log)
         .add_systems(First, frame_begin)
         .add_systems(
@@ -1017,6 +1296,7 @@ mod tests {
             voices: 0,
             queues: 0,
             clamped: Duration::ZERO,
+            render_stages: RenderStages::default(),
         }
     }
 
@@ -1244,6 +1524,88 @@ mod tests {
         let s = log.summary();
         assert!(
             s.contains("live entities first 1000 last 1200 max 1500"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn the_render_clock_segments_the_render_schedule_and_publishes_it() {
+        let t0 = Instant::now();
+        let mut clock = RenderClock::default();
+        clock.begin(t0);
+        clock.mark(t0 + Duration::from_millis(1), RenderStage::ExtractCommands);
+        clock.mark(t0 + Duration::from_millis(3), RenderStage::PrepareAssets);
+        clock.mark(t0 + Duration::from_millis(10), RenderStage::Views);
+        clock.mark(t0 + Duration::from_millis(60), RenderStage::Render);
+        clock.finish(t0 + Duration::from_millis(65));
+        let done = clock.completed;
+        assert_eq!(done.frames, 1);
+        assert_eq!(done.extract_commands, Duration::from_millis(1));
+        assert_eq!(done.prepare_assets, Duration::from_millis(2));
+        assert_eq!(done.views, Duration::from_millis(7));
+        assert_eq!(done.render, Duration::from_millis(50));
+        assert_eq!(done.cleanup, Duration::from_millis(5));
+        assert_eq!(done.total, Duration::from_millis(65));
+        // The next frame never publishes a stale segment.
+        clock.begin(t0 + Duration::from_millis(100));
+        clock.mark(
+            t0 + Duration::from_millis(102),
+            RenderStage::ExtractCommands,
+        );
+        clock.finish(t0 + Duration::from_millis(104));
+        assert_eq!(clock.completed.frames, 2);
+        assert_eq!(clock.completed.extract_commands, Duration::from_millis(2));
+        assert_eq!(clock.completed.views, Duration::ZERO);
+        assert_eq!(clock.completed.render, Duration::ZERO);
+        assert_eq!(clock.completed.total, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn the_report_names_the_render_thread_stage_of_the_worst_frame() {
+        let mut log = long_log(RunContext::default());
+        for (i, r) in log.rows.iter_mut().enumerate() {
+            r.render_stages = if i == WARMUP_FRAMES + 40 {
+                RenderStages {
+                    frames: 200,
+                    extract_commands: Duration::from_millis(1),
+                    prepare_assets: Duration::from_millis(2),
+                    views: Duration::from_millis(3),
+                    render: Duration::from_millis(1100),
+                    cleanup: Duration::from_millis(4),
+                    total: Duration::from_millis(1110),
+                }
+            } else {
+                RenderStages {
+                    frames: i as u64,
+                    render: Duration::from_millis(8),
+                    total: Duration::from_millis(10),
+                    ..default()
+                }
+            };
+        }
+        let report = log.report();
+        let stage = &report["timings"]["render_stage_ms"];
+        assert_eq!(stage["worst_frame"]["ms"]["render"], 1100.0);
+        assert_eq!(stage["worst_frame"]["ms"]["total"], 1110.0);
+        assert_eq!(stage["worst_frame"]["ms"]["prepare_assets"], 2.0);
+        assert_eq!(stage["per_segment_max"]["ms"]["render"], 1100.0);
+        assert_eq!(stage["per_segment_max"]["ms"]["prepare_assets"], 2.0);
+        let s = log.summary();
+        assert!(
+            s.contains(
+                "render thread stage, worst frame: total 1110.00 = extract-commands 1.00 + \
+                 prepare-assets 2.00 + views 3.00 + render 1100.00 + cleanup 4.00"
+            ),
+            "{s}"
+        );
+        // The per-segment maxima are five independent maxima, so they are
+        // listed without an "=" and the worst-frame total is given apart.
+        // Here the worst frame dominates every segment.
+        assert!(
+            s.contains(
+                "per-segment max: extract-commands 1.00 + prepare-assets 2.00 + \
+                 views 3.00 + render 1100.00 + cleanup 4.00 (worst total 1110.00 ms)"
+            ),
             "{s}"
         );
     }
@@ -1536,8 +1898,12 @@ mod tests {
         let cells: Vec<_> = lines.next().unwrap().split(',').collect();
         let at = |name: &str| header.iter().position(|h| *h == name).unwrap();
         assert_eq!(header.len(), cells.len());
-        assert_eq!(header.last(), Some(&"clamped_ms"));
+        // The stage columns are last; `clamped_ms` is still present, just
+        // no longer the final one.
+        assert_eq!(header.last(), Some(&"rthread_cleanup_ms"));
         assert_eq!(cells.last(), Some(&"0.000"));
+        assert_eq!(cells[at("clamped_ms")], "0.000");
+        assert_eq!(cells[at("rthread_total_ms")], "0.000");
         assert_eq!(cells[at("voices")], "7");
         assert_eq!(cells[at("entities")], "321");
     }
