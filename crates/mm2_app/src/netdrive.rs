@@ -1106,9 +1106,9 @@ pub struct NetDriveReport {
     /// record has no component to write and never counts.
     pub damage_synced: u64,
     /// `Snap.trailers` rows applied to a live trailer entity (client
-    /// side, F25-B protocol v9) — remote copies and the own rig's
-    /// trailer on a declared reset; a session with no trailered seats
-    /// never counts.
+    /// side, F25-B protocol v9) — remote copies, and the own rig's
+    /// trailer when its seat reseats (a declared reset or the seat's own
+    /// correction); a session with no trailered seats never counts.
     pub trailers_synced: u64,
     /// Of `trailers_synced`, the rows that reseated a trailer because
     /// its towing seat's reset epoch advanced (F25-AC05) — a trailer
