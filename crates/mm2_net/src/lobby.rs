@@ -90,7 +90,9 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 /// early once every rostered peer is demonstrably in the session (its
 /// first `Input`/`ResetRequest` for the generation), so an acknowledged
 /// start does not resend the (possibly large) session blob; the window
-/// is what bounds a peer that never answers.
+/// is what bounds a peer that never answers. Admitting a late joiner
+/// into an `Open` session re-arms the window, since that peer's own
+/// `Start` is otherwise the one remaining one-shot.
 pub const LIFECYCLE_RESEND_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long a joined [`Client`] may hear nothing from the host — not
@@ -1258,6 +1260,16 @@ fn run(
                     if failed && remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs)
                     {
                         broadcast_roster(&mut players, &events, &inputs);
+                    } else if players.contains_key(&id) {
+                        // The newcomer's own `Start` is as one-shot as the
+                        // original broadcast was, and it may join long
+                        // after that start's window closed — re-arm the
+                        // bounded repeat on admission so a dropped copy
+                        // still lands (F31-B.4 / #1489). It stops once
+                        // every peer (the newcomer included) has shown
+                        // liveness in the generation, or the window ends.
+                        start_resend =
+                            Some((*generation, Instant::now() + LIFECYCLE_RESEND_WINDOW));
                     }
                 }
             }
@@ -2605,6 +2617,42 @@ mod tests {
             other => panic!("expected Session, got {other:?}"),
         }
         recv_roster(&mut bob, 2);
+        assert_eq!(recv_start(&mut bob), (1, ad("go")));
+    }
+
+    /// F31-B.4 / #1489: the admission `Start` is the last one-shot copy —
+    /// a newcomer can join long after the original start's window closed.
+    /// Admission re-arms the bounded repeat so a newcomer that missed the
+    /// single copy still begins.
+    #[test]
+    fn an_admitted_late_joiner_gets_a_repeated_start() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        ready_up(&host, &mut alice, "vpbug");
+        host.start(LateJoin::Open).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+        assert_eq!(recv_start(&mut alice), (1, ad("go")));
+
+        // Outlast the start's own window: from here only a fresh re-arm
+        // on admission can produce another `Start`.
+        thread::sleep(LIFECYCLE_RESEND_WINDOW + KEEPALIVE_INTERVAL);
+
+        let mut bob = join(host.addr(), "bob");
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Joined { id: 2, .. }) => {}
+            other => panic!("expected Joined, got {other:?}"),
+        }
+        match bob.recv().unwrap() {
+            Message::Session(_) => {}
+            other => panic!("expected Session, got {other:?}"),
+        }
+        recv_roster(&mut bob, 2);
+        assert_eq!(recv_start(&mut bob), (1, ad("go")));
+        // The re-armed repeat — the copy a newcomer that missed the only
+        // admission `Start` would still see.
+        bob.set_timeout(Some(KEEPALIVE_INTERVAL * 3)).unwrap();
         assert_eq!(recv_start(&mut bob), (1, ad("go")));
     }
 
