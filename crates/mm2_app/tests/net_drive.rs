@@ -3847,7 +3847,12 @@ fn a_scheduled_reset_comes_back_on_every_impairment_recipe() {
 /// thief *recovers* what fell and *delivers* it. The host's own log
 /// names each step and who took it, and both clients' replicas must
 /// read the same decided match: the thief's win, the same per-seat
-/// scores, every seat seated. Retail sf, seed 1291 (the seed the
+/// scores, every seat seated. A round may contain more than the one
+/// drop and recovery the chase is written around — the thief's own gold
+/// can be knocked loose and retaken, and a parked car inside the pickup
+/// radius takes dropped gold — so the replicas' board is compared to
+/// the *sum* of every scoring event the host logged, not to the first
+/// of each kind. Retail sf, seed 1291 (the seed the
 /// host-driven delivery test uses). Skipped without `MM2_RETAIL=<dir>`.
 ///
 /// Honest limits: the robbed carrier is a speed-capped bot and the
@@ -3897,26 +3902,53 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
     host.cmd("start");
     host.until_within("event=started generation=1", STEP);
 
-    // The host's own log is the authority's account of the cycle.
+    // The host's own log is the authority's account of the whole round.
+    // Read it through the decided end in one pass, keeping every line:
+    // the rules let one round contain more than one drop and recovery (a
+    // thief's own gold can be knocked loose and retaken) and let any
+    // connected car inside the pickup radius take dropped gold, so the
+    // board is the sum of *every* scoring event the host logged, not
+    // only the first of each kind.
     let bound = Duration::from_secs(300);
-    let picked = host.until_within("Picked {", bound);
-    let dropped = host.until_within("Dropped {", bound);
-    let recovered = host.until_within("Picked {", bound);
-    let delivered = host.until_within("Delivered {", bound);
-    let ended = host.until_within("Ended(", bound);
-    for line in [&picked, &dropped, &recovered, &delivered, &ended] {
+    let (first_picked, _prelude) = host.until_within_collect("Picked {", bound);
+    let (ended, between) = host.until_within_collect("Ended(", bound);
+    let mut all = between;
+    all.insert(0, first_picked);
+    all.push(ended.clone());
+    let events: Vec<String> = all
+        .into_iter()
+        .filter(|line| line.contains("cops and robbers event"))
+        .collect();
+    for line in &events {
         eprintln!("host   {line}");
     }
+    let at = |from: usize, needle: &str| {
+        events[from..]
+            .iter()
+            .position(|line| line.contains(needle))
+            .map(|i| i + from)
+            .unwrap_or_else(|| panic!("no {needle:?} after event {from}"))
+    };
+    let picked = &events[0];
+    assert!(picked.contains("Picked {"), "{picked}");
     assert!(picked.contains("player: PlayerId(2)"), "{picked}");
     assert!(picked.contains("recovered: false"), "{picked}");
+    let dropped_at = at(1, "Dropped {");
+    let dropped = &events[dropped_at];
     assert!(dropped.contains("player: PlayerId(2)"), "{dropped}");
     assert!(
         dropped.contains("cause: Knocked { by: Some(PlayerId(0)) }"),
         "the gold was not rammed loose by the thief: {dropped}"
     );
+    let recovered = &events[at(dropped_at + 1, "Picked {")];
     assert!(recovered.contains("player: PlayerId(0)"), "{recovered}");
     assert!(recovered.contains("recovered: true"), "{recovered}");
+    let delivered = &events[at(dropped_at + 1, "Delivered {")];
     assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    assert!(
+        events.last().is_some_and(|line| line.contains("Ended(")),
+        "the host log did not end with the verdict"
+    );
     assert!(ended.contains("reason: PointLimit"), "{ended}");
     assert!(ended.contains("winner: Player(PlayerId(0))"), "{ended}");
 
@@ -3944,8 +3976,12 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
         // robbery, the recovery and the stash.
         assert!(cell("say") >= 3, "{who} heard too few calls: {rec}");
     }
-    // Both replicas hold the same board, and it credits the thief with
-    // the delivery the host logged.
+    // Both replicas hold the same board, and that board is exactly the
+    // sum of what the host logged: every pickup, recovery and delivery
+    // awards its `points:` once to the seat it names, so a host that
+    // scored the intended theft and delivery plus a knocked-loose
+    // re-take (or a parked car that took dropped gold) reads the same
+    // on the wire.
     let pts = |rec: &str| {
         field(rec, "cnr")
             .split(',')
@@ -3954,24 +3990,33 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
             .to_string()
     };
     assert_eq!(pts(&alice_rec), pts(&bob_rec), "the boards differ");
-    // The board is the sum of what the host logged: the thief's recovery
-    // and its delivery, and the robbed carrier's one pickup.
-    let points = |line: &str| {
-        let at = line.find("points: ").expect("an event with points") + "points: ".len();
-        leading_u64(&line[at..])
+    let scored = |line: &str| -> Option<(u16, u64)> {
+        if !line.contains("Picked {") && !line.contains("Delivered {") {
+            return None;
+        }
+        let at = line.find("player: PlayerId(")? + "player: PlayerId(".len();
+        let end = line[at..].find(')')? + at;
+        let player: u16 = line[at..end].parse().ok()?;
+        let at = line.find("points: ")? + "points: ".len();
+        Some((player, leading_u64(&line[at..])))
     };
+    let mut awarded: std::collections::BTreeMap<u16, u64> = std::collections::BTreeMap::new();
+    for line in &events {
+        if let Some((player, points)) = scored(line) {
+            *awarded.entry(player).or_default() += points;
+        }
+    }
     let board = pts(&alice_rec);
-    let seat = |id: u16| {
-        board
+    for id in 0..3u16 {
+        let got = board
             .split('/')
-            .find_map(|c| c.strip_prefix(&format!("{id}:")).map(str::to_string))
-            .unwrap_or_else(|| panic!("seat {id} is not on the board {board}"))
-    };
-    assert_eq!(
-        seat(0),
-        (points(&recovered) + points(&delivered)).to_string(),
-        "the thief's score: {board}"
-    );
-    assert_eq!(seat(2), points(&picked).to_string(), "bob's score: {board}");
-    assert_eq!(seat(1), "0", "alice never touched the gold: {board}");
+            .find_map(|c| c.strip_prefix(&format!("{id}:")))
+            .unwrap_or_else(|| panic!("seat {id} is not on the board {board}"));
+        let want = awarded.get(&id).copied().unwrap_or(0);
+        assert_eq!(
+            got.parse::<u64>().unwrap(),
+            want,
+            "seat {id} is not the sum of the host's scoring events: {board}"
+        );
+    }
 }

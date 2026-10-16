@@ -336,6 +336,38 @@ impl Proc {
         }
     }
 
+    /// Lines until one contains `needle`, waiting up to `bound` — or the
+    /// child's own derived bound when that is larger — in all, returning
+    /// the matching line and every line consumed on the way. A leg that
+    /// must read a whole stretch of the child's log, not only the line it
+    /// waited for, uses this instead of [`Self::until_within`], which
+    /// discards the lines it passes. Same deadline, same failure
+    /// reporting.
+    pub fn until_within_collect(&self, needle: &str, bound: Duration) -> (String, Vec<String>) {
+        let bound = bound.max(self.bound);
+        let deadline = Instant::now() + bound;
+        let mut through = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    if line.contains(needle) {
+                        return (line, through);
+                    }
+                    through.push(line);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "no {needle:?} from child within {bound:?} (still running)\n{}",
+                    self.describe()
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                    "the child closed its stdout before {needle:?} (it exited or crashed)\n{}",
+                    self.describe()
+                ),
+            }
+        }
+    }
+
     /// Wait, bounded, until the child's stderr contains `needle` and return
     /// everything it has written so far. The drain thread runs behind the
     /// child, so a record already read from stdout may precede its stderr.
