@@ -395,6 +395,11 @@ Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
   exit junction — the raw `nav --gaps` census reported median
   transfer chords of 92 m (max 1643 m) on SF; after normalization
   the medians are ~20–26 m (a real junction box) with max 87 m.
+  London is not exempt: `city/london.bai` road 496's right lane 0
+  stores its 16 vertices end→start against the road's 16 sections
+  (measured 2026-10-16), so reading the raw order while applying
+  section tangents bends that riverside lane out off the bank and
+  over the Thames — into the quay wall between it and the water.
 
 `mm2_game::nav` turns `Bai` into an immutable `NavGraph`: directed
 arcs, lane sampling, full-3D `nearest_lane` (bridge decks do not snap

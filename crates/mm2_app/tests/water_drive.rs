@@ -217,23 +217,37 @@ struct Stretch {
 /// road's authored section tangents, one point per ~2 m. The sections
 /// sit up to 200 m apart on the Thames tunnel, and the straight chord
 /// between them leaves the road.
+///
+/// BAI stores a curve's vertices in authoring order, which may run
+/// end→start against the road's sections (measured on `sf.bai`, and on
+/// London road 496 right lane 0). Normalize the curve to section order
+/// first — the way `NavGraph::orient_curve` does — so vertex `i` pairs
+/// with section `i`'s tangent. Pairing the raw order with section order
+/// bends the arc off the road; on road 496 it bends the riverside lane
+/// out over the Thames and into a quay wall that stands between the
+/// lane and the water.
 fn densify(pts: &[Vec3], road: &mm2_formats::bai::Road) -> Vec<Vec3> {
     if pts.len() != road.sections.len() {
         return pts.to_vec();
     }
-    // A lane may run against the section order's travel direction.
-    let sign = road
-        .sections
-        .iter()
-        .zip(pts.windows(2))
-        .map(|(sec, w)| Vec3::from(sec.tangent).dot(w[1] - w[0]))
-        .sum::<f32>()
-        .signum();
+    let mut pts = pts.to_vec();
+    if let (Some(&p0), Some(&pn), Some(s0), Some(sn)) = (
+        pts.first(),
+        pts.last(),
+        road.sections.first(),
+        road.sections.last(),
+    ) {
+        let fwd = p0.distance(Vec3::from(s0.origin)) + pn.distance(Vec3::from(sn.origin));
+        let rev = p0.distance(Vec3::from(sn.origin)) + pn.distance(Vec3::from(s0.origin));
+        if rev < fwd {
+            pts.reverse();
+        }
+    }
     let mut out = Vec::new();
     for (i, w) in pts.windows(2).enumerate() {
         let len = w[0].distance(w[1]);
-        let m0 = Vec3::from(road.sections[i].tangent).normalize_or_zero() * sign * len;
-        let m1 = Vec3::from(road.sections[i + 1].tangent).normalize_or_zero() * sign * len;
+        let m0 = Vec3::from(road.sections[i].tangent).normalize_or_zero() * len;
+        let m1 = Vec3::from(road.sections[i + 1].tangent).normalize_or_zero() * len;
         let steps = (len / 2.0).ceil().max(1.0) as usize;
         for k in 0..steps {
             let t = k as f32 / steps as f32;
@@ -511,17 +525,22 @@ fn a_car_drives_the_thames_tunnel_both_ways_without_drowning() {
 }
 
 /// Every London bridge lane over a deadly room that has a static deck
-/// is driven: the car rides the deck above the surface and the
-/// overlay's vertical bound keeps it dry.
+/// is driven: the car rides the deck above the surface, the overlay's
+/// vertical bound keeps it dry, and every driven lane really crosses
+/// the water. The riverside lane (road 496 right lane 0 hugs a quay
+/// wall on the bank) is only over the footprint when its curve is read
+/// in authoring order; in section order — the order [`densify`] and
+/// `NavGraph` use — it stays on land, so it is not a bridge here.
 #[test]
 fn a_car_drives_each_london_bridge_over_the_river_without_drowning() {
     let Some((_, bridges, _)) = london_stretches() else {
         return;
     };
+    assert!(!bridges.is_empty(), "London lost its bridge lanes");
     let mut crossed = Vec::new();
-    for bridge in bridges {
+    for bridge in &bridges {
         let d = drive(retail_vfs(&bridge.name).unwrap(), &bridge.path);
-        // Safety holds for every drive, crossing or not.
+        // Safety holds for every drive.
         assert_clean(&bridge.name, &d);
         assert!(
             d.min_y > -3.8 + 0.5,
@@ -529,17 +548,16 @@ fn a_car_drives_each_london_bridge_over_the_river_without_drowning() {
             bridge.name,
             d.min_y
         );
-        // A lane the car drifted off (road 496 runs along a room wall
-        // the pursuit controller does not clear) proves nothing about
-        // the deck: count only the drives that were over the water.
         if d.over_frames > 0 {
-            crossed.push(bridge.name);
+            crossed.push(bridge.name.clone());
         }
     }
     eprintln!("crossed the river on: {crossed:?}");
-    assert!(
-        crossed.len() >= 4,
-        "bridge lanes driven over the river: {crossed:?}"
+    assert_eq!(
+        crossed.len(),
+        bridges.len(),
+        "every driven bridge lane must cross the river; crossed {crossed:?} of {:?}",
+        bridges.iter().map(|b| &b.name).collect::<Vec<_>>()
     );
 }
 
