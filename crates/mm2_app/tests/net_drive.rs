@@ -4180,12 +4180,13 @@ fn a_retail_stock_event_journey_runs_from_the_lobby_to_leave() {
 /// outruns the thief's road-graph chase on sf), and packet loss and a
 /// second contender for the same pickup stay open (F27-AC02/AC05).
 ///
-/// Ignored: 4 of 5 sequential local runs passed (447-688 s); the failing
-/// run recovered the gold but never delivered within 900 s, so the host's
-/// copy of the thief's car still drifts from the client's prediction after
-/// the recovery ram. Run it with `-- --ignored` until that is fixed.
+/// Reliability: 7 of 7 sequential local runs passed (3-6 min each) on
+/// the tree that removed the old `#[ignore]` (an earlier 4-of-5 had one
+/// run that never delivered). An uncapped carrier was tried and still
+/// fails: the thief's predicted car sits ~15 m from the host's copy of
+/// it, pulled on every drift window, and never reaches the marker. When
+/// a wait fails the clients' `event=own_correction` records are printed.
 #[test]
-#[ignore = "reliable only 4 of 5 local runs, ~10 min each; see doc comment"]
 fn a_client_thief_runs_down_the_carrier_and_delivers_the_gold() {
     const SEED: u64 = 1291;
     const STEP: Duration = Duration::from_secs(60);
@@ -4229,11 +4230,25 @@ fn a_client_thief_runs_down_the_carrier_and_delivers_the_gold() {
 
     // The host's own log is the authority's account of the cycle.
     let bound = Duration::from_secs(900);
-    let picked = host.until_within("Picked {", bound);
-    let dropped = host.until_within("Dropped {", bound);
-    let recovered = host.until_within("Picked {", bound);
-    let delivered = host.until_within("Delivered {", bound);
-    let ended = host.until_within("Ended(", bound);
+    // A wait that fails prints what the clients said meanwhile: their
+    // `own_correction` records show where the host's copy of the thief
+    // parted from the prediction.
+    let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let picked = host.until_within("Picked {", bound);
+        let dropped = host.until_within("Dropped {", bound);
+        let recovered = host.until_within("Picked {", bound);
+        let delivered = host.until_within("Delivered {", bound);
+        let ended = host.until_within("Ended(", bound);
+        (picked, dropped, recovered, delivered, ended)
+    }));
+    let (picked, dropped, recovered, delivered, ended) = match waited {
+        Ok(lines) => lines,
+        Err(panic) => {
+            eprintln!("--- alice (the thief) ---\n{}", alice.pending());
+            eprintln!("--- bob (the carrier) ---\n{}", bob.pending());
+            std::panic::resume_unwind(panic);
+        }
+    };
     for line in [&picked, &dropped, &recovered, &delivered, &ended] {
         eprintln!("host   {line}");
     }
