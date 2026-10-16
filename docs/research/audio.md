@@ -1,13 +1,13 @@
 # Audio formats (`aud/**`)
 
 Measured on the retail install (VFS fingerprint `fnv1a64:e91e6cd4b2ae30d9`,
-2026-09-24) with `mm2-inspect audio <install>` — **3 256 files** under
+2026-10-16) with `mm2-inspect audio <install>` — **3 256 files** under
 `aud/`, all of them now classified and the two content-bearing families
 fully decoded:
 
 ```
-2503 waves, 124 tables, 526 deferred text csv, 0 binary csv,
-3 extras (.bat), 0 failures, 0 issues, 35 quirks, 1 finding, 1 dead ref
+2503 waves, 124 tables, 0 deferred text csv, 0 binary csv,
+3 extras (.bat), 0 failures, 0 issues, 36 quirks, 1 finding, 1 dead ref
 ```
 
 F07-A.2 adds the first runtime consumer: the local vehicle's authored

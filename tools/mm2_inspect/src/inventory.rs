@@ -578,9 +578,10 @@ fn placement(vfs: &Vfs, paths: &[String]) -> Family {
 }
 
 /// `aud/<family>/` — presence of the retail audio directories. Content
-/// is verified by the dedicated `audio` audit (waves decode, cardata
-/// tables parse); the inventory still counts per-file records as
-/// unverified since no runtime consumer exists.
+/// is verified by the dedicated `audio` audit (waves decode and the
+/// cardata/creaturedata/spchdata grammars parse); this inventory only
+/// checks that each family is present, so it counts the per-file
+/// records as unverified.
 fn audio(paths: &[String]) -> Family {
     let mut f = Family::new("audio families");
     f.expected = EXPECTED_AUDIO_FAMILIES.len();
@@ -616,7 +617,7 @@ fn audio(paths: &[String]) -> Family {
             .join(", ")
     ));
     f.notes.push(
-        "audited by `mm2-inspect audio`: .wav files decode, aud/cardata + aud/ambient tables parse, DirectMusic containers classify by RIFF form; spchdata/creaturedata tables stay unparsed (F08) — no runtime consumer yet".into(),
+        "audited by `mm2-inspect audio`: .wav files decode, aud/cardata + aud/ambient tables parse, DirectMusic containers classify by RIFF form; aud/creaturedata voice tables parse through mm2_formats::creaturedata (read by the ped scream rig, DSN-109) and aud/spchdata cue tables through mm2_formats::spchdata (the prerace families are bound, DSN-63)".into(),
     );
     f
 }
