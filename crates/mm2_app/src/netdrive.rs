@@ -3440,6 +3440,10 @@ fn apply_snap_frame(
     // entity/wire pair the own rig's trailer keys off.
     let mut reset_owners: HashSet<u16> = HashSet::new();
     let mut own_seat: Option<(Entity, u16)> = None;
+    // Whether this frame reseated the local seat outright (an epoch
+    // reset, a settled divergence, or a drift past the snap bound) —
+    // the own rig's trailer reseats with it and never on its own.
+    let mut own_reseat = false;
     // The frame's `Banger::active` census for the breakaway reconcile's
     // pool claims — one count serves every fragment this frame spawns.
     let mut occupied = None::<usize>;
@@ -3563,6 +3567,7 @@ fn apply_snap_frame(
                     *ang = AngularVelocity(Vec3::from(entry.angvel));
                     commands.entity(entity).insert(Teleported);
                     snaps.own_drift = DriftWatch::default();
+                    own_reseat = true;
                     if authority_reset {
                         snaps.own_settle = SettleWatch::default();
                         report.resets += 1;
@@ -3662,13 +3667,22 @@ fn apply_snap_frame(
             }
             let to_pos = Vec3::from(t.pos);
             let to_rot = wire_quat(t.rot);
-            let snap_to =
-                reset_owners.contains(&t.owner) || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST;
-            // The own rig's trailer is a real body the local hitch
-            // joint owns: like the own seat's epoch-equal entries, the
-            // authority's lagged view of it is dropped — only a
-            // declared reset (or a real divergence) reseats it, never a
-            // ~20 Hz teleport fighting the joint.
+            // Remote copies reseat on the owner's declared reset or a
+            // real divergence past the snap distance. The own rig's
+            // trailer is one body with the seat through the local hitch
+            // joint: it reseats exactly when *our* seat does (a declared
+            // reset or the seat's own teleport correction), never on its
+            // own distance threshold. An independent snap here tears the
+            // rig apart — the seat, still uncorrected inside its drift
+            // debounce, stays put and the joint stretches until the
+            // solver launches both bodies. Otherwise the authority's
+            // lagged view of the own trailer is dropped: only a reseat
+            // touches it, never a ~20 Hz teleport fighting the joint.
+            let snap_to = if own_rig {
+                reset_owners.contains(&t.owner) || own_reseat
+            } else {
+                reset_owners.contains(&t.owner) || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST
+            };
             if own_rig && !snap_to {
                 continue;
             }
@@ -4767,6 +4781,142 @@ mod tests {
         );
         assert_eq!(world.get::<SessionEntity>(te).unwrap().0, 7);
         assert!(world.get::<ObjectIdentity>(te).is_some());
+    }
+
+    /// The own rig's tractor and trailer are one pair through the local
+    /// hitch joint, so a snapshot reseats them together: the trailer
+    /// reseats only when the *seat* does (a declared epoch reset or the
+    /// seat's own drift/settle correction), never on its own
+    /// [`CORRECTION_SNAP_DIST`] threshold. An independent trailer
+    /// teleport while the seat stayed put — the seat still inside its
+    /// [`DriftWatch`] debounce — stretched the joint ~20 m and launched
+    /// the rig: the `a_reset_extra_wheel_rig` load flake's ~1e5 m/s
+    /// blow-up and avian AABB panic. Both take the asserted rig in one
+    /// frame once the seat's watch trips.
+    #[test]
+    fn the_own_rigs_trailer_reseats_only_with_its_seat() {
+        let rest_offset = Vec3::new(0.0, 0.0, 4.3);
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let car = app
+            .world_mut()
+            .spawn((
+                NetPlayer(2),
+                Player {
+                    id: mm2_game::PlayerId(4),
+                    control: PlayerControl::Local,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::new(0.0, 0.0, -10.0)),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+        // The own rig's trailer: a real body (`Trailer`, no
+        // `RemoteTrailer`) hitched to the seat at its rest pose.
+        let trailer = app
+            .world_mut()
+            .spawn((
+                car_visual::Trailer {
+                    towing: car,
+                    rest_offset,
+                },
+                Position(rest_offset),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::new(0.0, 0.0, -10.0)),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+        // A wire frame that puts the whole rig ~21 m from where the
+        // client's local sim holds it: past `CORRECTION_SNAP_DIST`, but
+        // the seat is moving (the settle path is out) and its drift
+        // watch has not run long enough yet to correct.
+        let rig_gap = 21.0_f32;
+        let seat_wire = Vec3::new(0.0, 0.0, rig_gap);
+        let push = |app: &mut App, tick: u64| {
+            let mut entry = snap_entry();
+            entry.player = 2;
+            entry.pos = seat_wire.to_array();
+            entry.vel = [0.0, 0.0, -10.0];
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                1,
+                tick,
+                vec![entry],
+                vec![SnapTrailer {
+                    owner: 2,
+                    pos: (seat_wire + rest_offset).to_array(),
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0, 0.0, -10.0],
+                    angvel: [0.0; 3],
+                    spin: 0,
+                    flags: 0,
+                }],
+                Vec::new(),
+                None,
+            );
+        };
+        let car_pos = |app: &App| app.world().get::<Position>(car).unwrap().0;
+        let trl_pos = |app: &App| app.world().get::<Position>(trailer).unwrap().0;
+
+        // One uncorrected frame: the seat holds its predicted pose, so
+        // its jointed trailer must hold too — the hitch stays at rest.
+        push(&mut app, 1);
+        app.update();
+        assert_eq!(
+            car_pos(&app),
+            Vec3::ZERO,
+            "the seat is inside its drift debounce"
+        );
+        assert!(
+            trl_pos(&app).distance(rest_offset) < 1e-3,
+            "the trailer followed the seat, not the wire: {:?}",
+            trl_pos(&app)
+        );
+        assert_eq!(
+            app.world().resource::<NetDriveReport>().trailers_reseated,
+            0
+        );
+
+        // The seat's drift watch then trips on the same far pose: the
+        // seat and its trailer take the asserted rig in one frame, still
+        // hitched at rest.
+        for tick in 2..=u64::from(DRIFT_SNAPS) {
+            push(&mut app, tick);
+            app.update();
+        }
+        assert!(
+            car_pos(&app).distance(seat_wire) < 1e-3,
+            "the sustained drift reseated the seat: {:?}",
+            car_pos(&app)
+        );
+        assert!(
+            trl_pos(&app).distance(seat_wire + rest_offset) < 1e-3,
+            "the trailer reseated with its seat: {:?}",
+            trl_pos(&app)
+        );
     }
 
     fn snap_entry() -> SnapEntry {
