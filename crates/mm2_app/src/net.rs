@@ -408,6 +408,17 @@ pub struct LobbyLink {
     /// The pick we last asked for, repeated the same way until the
     /// roster shows it or the host refuses it.
     want_pick: Option<VehiclePick>,
+    /// What the newest roster we processed said about our own seat. An ask
+    /// that this already satisfies when it is made was not echoed by the
+    /// host: the roster is older than the ask (the host's reset of
+    /// readiness after a `Cancel` or an ad edit can still be in flight),
+    /// so the match proves nothing (see [`LobbyLink::resend_intents`]).
+    seen_ready: Option<bool>,
+    seen_pick: Option<VehiclePick>,
+    /// The ask was made against a roster that already matched it: it may
+    /// only be cleared by a roster that arrives after a repeat went out.
+    unproven_ready: bool,
+    unproven_pick: bool,
     /// When the newest intent copy went out — the clock the repeat rides.
     intent_sent: Option<Instant>,
     /// The newest `Start` generation this link adopted — entered (the
@@ -456,6 +467,10 @@ impl LobbyLink {
             keep_ready: false,
             want_ready: None,
             want_pick: None,
+            seen_ready: None,
+            seen_pick: None,
+            unproven_ready: false,
+            unproven_pick: false,
             intent_sent: None,
             entered_generation: None,
         })
@@ -466,6 +481,7 @@ impl LobbyLink {
     /// dropped datagram cannot leave us unready on the host.
     pub fn set_ready(&mut self, ready: bool) -> Result<(), NetError> {
         self.want_ready = Some(ready);
+        self.unproven_ready = self.seen_ready == Some(ready);
         self.intent_sent = Some(Instant::now());
         self.ctl.set_ready(ready)
     }
@@ -473,10 +489,12 @@ impl LobbyLink {
     /// Offer a vehicle pick, remembered and repeated like
     /// [`LobbyLink::set_ready`] until the roster shows it.
     pub fn set_vehicle(&mut self, vehicle: &str, paint: u8) -> Result<(), NetError> {
-        self.want_pick = Some(VehiclePick {
+        let pick = VehiclePick {
             vehicle: vehicle.to_string(),
             paint,
-        });
+        };
+        self.unproven_pick = self.seen_pick.as_ref() == Some(&pick);
+        self.want_pick = Some(pick);
         self.intent_sent = Some(Instant::now());
         self.ctl.set_vehicle(vehicle, paint)
     }
@@ -488,16 +506,24 @@ impl LobbyLink {
             return;
         }
         let ours = roster.iter().find(|e| e.player_id == self.player_id);
-        if self
-            .want_ready
-            .is_some_and(|r| ours.is_some_and(|e| e.ready == r))
+        self.seen_ready = ours.map(|e| e.ready);
+        self.seen_pick = ours.and_then(|e| e.pick.clone());
+        // A roster that matched the ask before it was made is not an
+        // echo: the host may have reset our flags since, and the one
+        // copy of the ask may be the one the link dropped. Wait for a
+        // match that postdates a repeat.
+        if !self.unproven_ready
+            && self
+                .want_ready
+                .is_some_and(|r| ours.is_some_and(|e| e.ready == r))
         {
             self.want_ready = None;
         }
-        if self
-            .want_pick
-            .as_ref()
-            .is_some_and(|p| ours.is_some_and(|e| e.pick.as_ref() == Some(p)))
+        if !self.unproven_pick
+            && self
+                .want_pick
+                .as_ref()
+                .is_some_and(|p| ours.is_some_and(|e| e.pick.as_ref() == Some(p)))
         {
             self.want_pick = None;
         }
@@ -509,6 +535,8 @@ impl LobbyLink {
             return;
         }
         self.intent_sent = Some(Instant::now());
+        self.unproven_ready = false;
+        self.unproven_pick = false;
         if let Some(pick) = self.want_pick.clone() {
             let _ = self.ctl.set_vehicle(&pick.vehicle, pick.paint);
         }

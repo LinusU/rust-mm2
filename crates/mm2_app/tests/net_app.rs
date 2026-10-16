@@ -12711,6 +12711,17 @@ struct JourneyClient {
 /// holds, on a wall-clock deadline: a lossy link delivers late, never
 /// on a frame count.
 fn spin_journey(apps: &mut [&mut App], what: &str, pred: impl Fn(&[&mut App]) -> bool) {
+    spin_journey_with(apps, what, pred, |_| String::new());
+}
+
+/// [`spin_journey`] whose panic also carries `diagnose`'s account of the
+/// apps' state at the deadline.
+fn spin_journey_with(
+    apps: &mut [&mut App],
+    what: &str,
+    pred: impl Fn(&[&mut App]) -> bool,
+    diagnose: impl Fn(&[&mut App]) -> String,
+) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         for app in apps.iter_mut() {
@@ -12721,7 +12732,30 @@ fn spin_journey(apps: &mut [&mut App], what: &str, pred: impl Fn(&[&mut App]) ->
         }
         thread::sleep(Duration::from_millis(4));
     }
-    panic!("the journey never reached: {what}");
+    panic!("the journey never reached: {what}\n{}", diagnose(apps));
+}
+
+/// What the host and each client hold for every seat's ready flag and pick,
+/// and the client's own still-unechoed intents.
+fn journey_roster_report(apps: &[&mut App]) -> String {
+    let roster = |app: &App| {
+        app.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .map(|e| format!("#{} ready={} pick={:?}", e.player_id, e.ready, e.pick))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let mut out = format!("host roster: [{}]", roster(&*apps[0]));
+    for (i, app) in apps.iter().enumerate().skip(1) {
+        out += &format!(
+            "\nclient {i} (ready+pick: {}) roster: [{}]",
+            journey_ready(app),
+            roster(app)
+        );
+    }
+    out
 }
 
 /// Ready both clients up on a lossy link, with the first `SetVehicle` and
@@ -12743,10 +12777,11 @@ fn journey_ready_up(host: &mut App, alice: &mut JourneyClient, bob: &mut Journey
         }
         c.proxy.set(LinkDir::Up, up);
     }
-    spin_journey(
+    spin_journey_with(
         &mut [host, &mut alice.app, &mut bob.app],
         "both clients ready with a pick",
         |a| journey_ready(&*a[1]) && journey_ready(&*a[2]),
+        journey_roster_report,
     );
 }
 
