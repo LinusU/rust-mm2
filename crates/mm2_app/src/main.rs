@@ -443,6 +443,13 @@ struct Cli {
     #[arg(long, requires = "headless")]
     until_opponents: bool,
 
+    /// End a `--headless` run once the session reaches its results
+    /// screen — a joined client waits for the authority's verdict
+    /// rather than a frame count the match may outlast. The record
+    /// prints `stop=results`.
+    #[arg(long, requires = "headless")]
+    until_results: bool,
+
     /// Wall-clock bound, in seconds, on a `--headless` run's
     /// `--until-*` condition: the run ends when it passes, whether or
     /// not the condition came. The record prints `stop=deadline`.
@@ -1454,6 +1461,7 @@ fn main() {
                 snap_tick: cli.until_snap_tick,
                 hold_peer_left: cli.hold_until_peer_left,
                 opponents_done: cli.until_opponents,
+                results: cli.until_results,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
         };

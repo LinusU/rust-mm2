@@ -3891,12 +3891,19 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
     let mut host = Proc::spawn(MM2_EXE, &host_args);
     let addr = listening_addr(&host);
     // Join order fixes the wire seats: alice 1, bob 2.
-    let mut alice_args = join_args(&retail, addr, "alice", 25_000);
-    alice_args.push("--parked".into());
+    let mut alice_args = join_args(&retail, addr, "alice", 60_000);
+    // The match ends on the host's clock, so the clients end on the
+    // verdict (the frame count is only the ceiling).
+    alice_args.extend(["--parked".into(), "--until-results".into()]);
     let alice = Proc::spawn(MM2_EXE, &alice_args);
     host.until_within("ready=true", STEP);
-    let mut bob_args = join_args(&retail, addr, "bob", 25_000);
-    bob_args.extend(["--bot".into(), "--bot-speed".into(), "6".into()]);
+    let mut bob_args = join_args(&retail, addr, "bob", 60_000);
+    bob_args.extend([
+        "--bot".into(),
+        "--bot-speed".into(),
+        "6".into(),
+        "--until-results".into(),
+    ]);
     let bob = Proc::spawn(MM2_EXE, &bob_args);
     host.until_within("ready=true", STEP);
     host.cmd("start");

@@ -207,6 +207,10 @@ pub struct StopWhen {
     /// timed out. Armed by the first opponent appearing; a race record
     /// then ends when the field does instead of running out its frames.
     pub opponents_done: bool,
+    /// Stop once the session reaches its results screen — a joined
+    /// client that waits for the authority's verdict instead of running
+    /// out a frame budget the match may outlast.
+    pub results: bool,
     /// Stop once this much wall-clock time has passed since the first
     /// update — the bound on a condition that never comes.
     pub deadline: Option<Duration>,
@@ -219,6 +223,7 @@ impl StopWhen {
     pub fn needs_wire(&self) -> bool {
         Self {
             opponents_done: false,
+            results: false,
             ..*self
         }
         .is_armed()
@@ -232,6 +237,7 @@ impl StopWhen {
             || self.peer_left
             || self.hold_peer_left
             || self.opponents_done
+            || self.results
             || self.snap_tick.is_some()
             || self.deadline.is_some()
     }
@@ -265,6 +271,7 @@ enum StopReason {
     PeerLeft,
     SnapTick,
     Opponents,
+    Results,
     Deadline,
 }
 
@@ -277,6 +284,7 @@ impl StopReason {
             Self::PeerLeft => "peer-left",
             Self::SnapTick => "snap-tick",
             Self::Opponents => "opponents",
+            Self::Results => "results",
             Self::Deadline => "deadline",
         }
     }
@@ -288,7 +296,14 @@ struct StopWatch {
     started: std::time::Instant,
     /// The most remote copies this process has held at once.
     peers_peak: usize,
+    /// Updates the session has spent on its results screen.
+    results_updates: u32,
 }
+
+/// Updates a `results` stop holds on the results screen: the closing
+/// call is voiced from the verdict, a frame or more after the phase
+/// flips, and a record taken on the flip itself would miss it.
+const RESULTS_HOLD_UPDATES: u32 = 120;
 
 impl StopWatch {
     fn new(stop: StopWhen) -> Self {
@@ -296,6 +311,7 @@ impl StopWatch {
             stop,
             started: std::time::Instant::now(),
             peers_peak: 0,
+            results_updates: 0,
         }
     }
 
@@ -360,6 +376,19 @@ impl StopWatch {
                 })
             {
                 return Some(StopReason::Opponents);
+            }
+        }
+        if self.stop.results {
+            let on_results = world
+                .get_resource::<Session>()
+                .is_some_and(|s| *s.phase() == SessionPhase::Results);
+            self.results_updates = if on_results {
+                self.results_updates + 1
+            } else {
+                0
+            };
+            if self.results_updates >= RESULTS_HOLD_UPDATES {
+                return Some(StopReason::Results);
             }
         }
         match self.stop.deadline {
@@ -3236,6 +3265,22 @@ mod tests {
         // A hold with no departure to release it is bounded, not hung:
         // the deadline ends it rather than the run never exiting.
         assert_eq!(watch.fired(&world), Some(StopReason::Deadline));
+    }
+
+    #[test]
+    fn a_stop_on_the_results_screen_waits_for_the_verdict() {
+        let stop = StopWhen {
+            results: true,
+            ..default()
+        };
+        assert!(stop.is_armed());
+        // A lone process sees its own results screen: no wire needed.
+        assert!(!stop.needs_wire());
+        let mut world = World::new();
+        let mut watch = StopWatch::new(stop);
+        assert_eq!(watch.fired(&world), None);
+        world.insert_resource(Session::new());
+        assert_eq!(watch.fired(&world), None);
     }
 
     #[test]
