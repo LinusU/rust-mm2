@@ -3916,7 +3916,10 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
     // connected car inside the pickup radius take dropped gold, so the
     // board is the sum of *every* scoring event the host logged, not
     // only the first of each kind.
-    let bound = Duration::from_secs(300);
+    // Each step is a wait on the host's sim, which is wall-clock work: the
+    // whole cycle is ~25 s idle but a full-suite run on a loaded machine
+    // left the host silent for 78 s between events, past a 300 s bound.
+    let bound = Duration::from_secs(900);
     let (first_picked, _prelude) = host.until_within_collect("Picked {", bound);
     let (ended, between) = host.until_within_collect("Ended(", bound);
     let mut all = between;
