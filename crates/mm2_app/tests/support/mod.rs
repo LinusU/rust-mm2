@@ -5,6 +5,7 @@
 //! mount.
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,9 @@ use std::time::{Duration, Instant};
 
 use mm2_assets::{InstallMount, Vfs, mount_install};
 use mm2_game::{EventRef, EventTableKind};
+
+/// How many skipped lines a failed [`Proc::until_within`] reports.
+const SKIPPED_KEPT: usize = 40;
 
 /// How long a leg waits for one record from a child whose `--frames` is
 /// no run budget: a `--host` (its cap is a ceiling an operator's `quit`
@@ -316,6 +320,9 @@ impl Proc {
     pub fn until_within(&self, needle: &str, bound: Duration) -> String {
         let bound = bound.max(self.bound);
         let deadline = Instant::now() + bound;
+        // What was skipped on the way: a bounded wait that fails should
+        // say what the child did say instead.
+        let mut skipped: VecDeque<String> = VecDeque::new();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.lines.recv_timeout(left) {
@@ -323,14 +330,20 @@ impl Proc {
                     if line.contains(needle) {
                         return line;
                     }
+                    if skipped.len() == SKIPPED_KEPT {
+                        skipped.pop_front();
+                    }
+                    skipped.push_back(line);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => panic!(
-                    "no {needle:?} from child within {bound:?} (still running)\n{}",
-                    self.describe()
+                    "no {needle:?} from child within {bound:?} (still running)\n{}\nlast lines read:\n{}",
+                    self.describe(),
+                    skipped.iter().cloned().collect::<Vec<_>>().join("\n")
                 ),
                 Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
-                    "the child closed its stdout before {needle:?} (it exited or crashed)\n{}",
-                    self.describe()
+                    "the child closed its stdout before {needle:?} (it exited or crashed)\n{}\nlast lines read:\n{}",
+                    self.describe(),
+                    skipped.iter().cloned().collect::<Vec<_>>().join("\n")
                 ),
             }
         }
