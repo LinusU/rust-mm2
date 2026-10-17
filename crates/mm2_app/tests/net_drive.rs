@@ -2755,9 +2755,13 @@ fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField,
     // host advances fewer ticks per client frame. The driven run
     // therefore waits on its conditions, not on frames. Bob (the
     // uninvolved client) runs until he has applied the replicated
-    // impact; alice runs until bob has left and her own predicted sim has
-    // registered the contact, so she is still connected
-    // while the impact row rides a snap to him. Frames are only a
+    // impact; alice runs until bob has left, so she is still connected
+    // while the impact row rides a snap to him. She does not wait on her
+    // own predicted contact: the authority can land the hit (and a snap
+    // pull her car past the point of contact) before her local sim
+    // reaches it, after which no local contact ever comes (CI saw bob
+    // apply the impact at 5 s while alice ran to the deadline with
+    // `impacts=0`). Frames are only a
     // ceiling, and a wall-clock deadline bounds a condition that never
     // comes (the exact-count assertions then fail on the missing
     // impact, not on a hang). The control run has no condition to wait
@@ -2771,13 +2775,7 @@ fn run_collision_trio(install: &std::path::Path, alice_rams: bool) -> (NetField,
         (
             with(
                 join_args(install, addr, "alice", 100_000),
-                &[
-                    "--until-peer-left",
-                    "--with-impacts",
-                    "1",
-                    "--deadline",
-                    "150",
-                ],
+                &["--until-peer-left", "--deadline", "150"],
             ),
             with(
                 join_args(install, addr, "bob", 100_000),
@@ -2847,14 +2845,15 @@ fn a_driven_collision_replicates_across_three_processes() {
     assert_eq!(local_impacts(&control_bob), 0, "{control_bob}");
 
     // The driven run: alice's pursuit really drove (her own peak), the
-    // contact happened in her predicted sim and on the authority, and
+    // contact happened on the authority, and
     // the authority's impact stream reached bob — a client that never
     // touched its controls and learned of the collision from the wire
     // alone. Alice's own rows are not asserted: a client replays the
     // authority's rows only for seats it does not predict itself, so
-    // her applied count is legitimately 0 or more by timing.
+    // her applied count is legitimately 0 or more by timing — and so is
+    // her *local* contact count, since the authority's hit can land
+    // before her predicted sim reaches the neighbour.
     assert!(peak(&alice) > 5.0, "alice never got up to speed: {alice}");
-    assert!(local_impacts(&alice) > 0, "{alice}");
     assert!(
         host.impacts_sent > 0,
         "the authority published no impact for the collision: {host:?}"
