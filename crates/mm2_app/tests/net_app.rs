@@ -5849,10 +5849,12 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
     };
     // The local seat — stamped `NetPlayer(our_id)` by the reconcile,
     // the identity the own-seat skip reads.
+    let local_oid = app.world_mut().resource_mut::<Session>().mint_object_id();
     let local = app
         .world_mut()
         .spawn((
             PlayerVehicle,
+            ObjectIdentity(local_oid),
             Player {
                 id: mm2_game::PlayerId(1),
                 control: PlayerControl::Local,
@@ -5865,6 +5867,19 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         ))
         .id();
     spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+    // The predicted sim registered a contact at the first own-seat
+    // row's point (#1532): that row is the same hit, so it is skipped.
+    let local_generation = app.world().resource::<Session>().generation();
+    app.world_mut().write_message(ImpactEvent {
+        id: ImpactId(500),
+        generation: local_generation,
+        tick: 7,
+        participants: (local_oid, ObjectId::WORLD),
+        point: Vec3::new(3.2, 0.4, -1.1),
+        normal: Vec3::Z,
+        severity: 9.0,
+        surface: SurfaceState::default(),
+    });
 
     let entry = |player: u16| SnapEntry {
         player,
@@ -5891,8 +5906,8 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         audio_id: 0,
     };
     // One valid remote-seat row carrying the struck side's authored
-    // selector (v12) plus the traps: the own seat's row (skipped,
-    // never presented), a departed seat's row, and a non-finite row
+    // selector (v12) plus the traps: the own seat's row (skipped, a
+    // local contact matches it), a departed seat's row, and a non-finite row
     // the sanitize drops.
     host.ctl()
         .broadcast(&Message::Snap {
@@ -5947,7 +5962,8 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         let r = app.world().resource::<netdrive::NetDriveReport>();
         assert_eq!(r.impacts_applied, 1);
         // Seat 7 has no spawned participant; the NaN row fails the
-        // sanitize. The own-seat row is skipped by design, not a drop.
+        // sanitize. The own-seat row with a matching local contact is
+        // skipped by design, not a drop.
         assert_eq!(r.impacts_dropped, 2);
     }
 
@@ -5975,6 +5991,43 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             drained.is_empty(),
             "a duplicated frame's rows never double-fire"
         );
+    }
+    // An own-seat row far from any local contact: the predicted sim
+    // never registered this hit (a snap moved the car past it), so
+    // the wire row is presented — once, however often it repeats.
+    let far = SnapImpact {
+        point: [40.0, 0.4, 40.0],
+        ..row(our_id, 2)
+    };
+    for tick in [10, 11] {
+        host.ctl()
+            .broadcast(&Message::Snap {
+                generation,
+                tick,
+                entries: vec![entry(0), entry(our_id)],
+                trailers: Vec::new(),
+                impacts: vec![far],
+                race: None,
+            })
+            .unwrap();
+    }
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_applied
+            > 1
+    });
+    app.update();
+    app.update();
+    {
+        let drained: Vec<netdrive::RemoteImpact> = app
+            .world_mut()
+            .resource_mut::<Messages<netdrive::RemoteImpact>>()
+            .drain()
+            .collect();
+        assert_eq!(drained.len(), 1, "the unmatched own-seat row lands once");
+        assert_eq!(drained[0].entity, local);
+        assert_eq!(drained[0].point, Vec3::new(40.0, 0.4, 40.0));
     }
     // A foreign-generation row drops at the apply-side session gate.
     // The drop count is the arrival signal: the row crosses the host
@@ -6004,9 +6057,180 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             .collect();
         assert!(drained.is_empty());
         let r = app.world().resource::<netdrive::NetDriveReport>();
-        assert_eq!(r.impacts_applied, 1);
+        assert_eq!(r.impacts_applied, 2);
         assert_eq!(r.impacts_dropped, 3, "the foreign-generation row dropped");
     }
+
+    host.shutdown();
+}
+
+/// #1532 on a seeded lossy link: an own-seat impact row the predicted
+/// sim has no local contact for is presented exactly once however the
+/// link drops, repeats and swaps the frames carrying it, and a row
+/// whose hit the local sim did register stays skipped throughout.
+#[test]
+fn an_unmatched_own_seat_impact_row_presents_once_over_a_lossy_link() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1532).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let local_oid = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            ObjectIdentity(local_oid),
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+    // The local sim registered a contact near (3, 0.4, -1) only.
+    let local_generation = app.world().resource::<Session>().generation();
+    app.world_mut().write_message(ImpactEvent {
+        id: ImpactId(500),
+        generation: local_generation,
+        tick: 7,
+        participants: (local_oid, ObjectId::WORLD),
+        point: Vec3::new(3.0, 0.4, -1.0),
+        normal: Vec3::Z,
+        severity: 9.0,
+        surface: SurfaceState::default(),
+    });
+    app.update();
+
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 0.4,
+            duplicate: 0.4,
+            reorder: 0.3,
+            ..Impair::default()
+        },
+    );
+    let entry = |player: u16| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        epoch: 0,
+        steer: 0,
+        spin: 0,
+        compression: 0,
+        flags: 0,
+        damage: 0,
+        breaks: 0,
+        ..SnapEntry::default()
+    };
+    let row = |id: u64, point: [f32; 3]| SnapImpact {
+        seat: our_id,
+        id,
+        tick: 7,
+        point,
+        normal: [0.0, 0.0, 1.0],
+        severity: 12.5,
+        audio_id: 0,
+    };
+    // Every frame repeats both rows, the way a publisher keeps an
+    // impact on the wire for several snaps; the lane loses, repeats
+    // and swaps them. Row 1 matches the local contact, row 2 does not.
+    let deadline = Instant::now() + WAIT;
+    let mut tick = 10;
+    let mut seen: Vec<netdrive::RemoteImpact> = Vec::new();
+    let mut collect = |app: &mut App| {
+        seen.extend(
+            app.world_mut()
+                .resource_mut::<Messages<netdrive::RemoteImpact>>()
+                .drain()
+                .filter(|i| i.entity == local),
+        );
+    };
+    while app
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .impacts_applied
+        < 1
+    {
+        assert!(Instant::now() < deadline, "the unmatched row never landed");
+        tick += 1;
+        host.ctl()
+            .broadcast(&Message::Snap {
+                generation,
+                tick,
+                entries: vec![entry(0), entry(our_id)],
+                trailers: Vec::new(),
+                impacts: vec![row(1, [3.1, 0.4, -1.0]), row(2, [40.0, 0.4, 40.0])],
+                race: None,
+            })
+            .unwrap();
+        app.update();
+        collect(&mut app);
+        thread::sleep(Duration::from_millis(5));
+    }
+    // Let the rest of the repeats and duplicates drain.
+    for _ in 0..40 {
+        tick += 1;
+        host.ctl()
+            .broadcast(&Message::Snap {
+                generation,
+                tick,
+                entries: vec![entry(0), entry(our_id)],
+                trailers: Vec::new(),
+                impacts: vec![row(1, [3.1, 0.4, -1.0]), row(2, [40.0, 0.4, 40.0])],
+                race: None,
+            })
+            .unwrap();
+        app.update();
+        collect(&mut app);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        proxy.stats(LinkDir::Down).dropped > 0,
+        "the lane lost frames"
+    );
+    let drained = seen;
+    assert_eq!(drained.len(), 1, "only the unmatched row, once");
+    assert_eq!(drained[0].point, Vec3::new(40.0, 0.4, 40.0));
 
     host.shutdown();
 }

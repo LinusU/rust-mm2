@@ -1962,11 +1962,22 @@ wire actually moved rather than an in-process mailbox's contents.
   (a snap is a teleport, not a sweep), so her predicted sim never
   touches the neighbour (CI saw bob apply at 5 s while alice ran to
   the deadline with `impacts=0`). That is how reconciliation behaves
-  by design; the own-seat wire row is skipped in
-  `drain_pending_impacts` because the local stream is assumed to have
-  rendered the hit, so in this timing the driver gets no hit effect
-  for that contact. Open as a follow-up, not decided here: whether
-  an own-seat row with no matching local contact should be presented.
+  by design. The own-seat wire row used to be skipped unconditionally
+  in `drain_pending_impacts`, so in this timing the driver got no hit
+  effect for that contact (#1532). It is now skipped only when the
+  predicted sim registered a matching local contact: `ImpactIo` keeps
+  the own seat's `ImpactEvent`s for 1.5 s (`LOCAL_CONTACT_WINDOW`),
+  and a row is matched on seat and a 3 m point radius
+  (`LOCAL_CONTACT_RADIUS`; both designed tolerances, not original
+  values). With no match the row is presented once as a
+  `RemoteImpact` on the own car (the `(seat, id)` dedup already
+  absorbs lossy repeats). The window looks back only: the predicted
+  car runs ahead of the authority, so its own contact normally
+  precedes the row; a local contact arriving later than the row would
+  double. Covered by `a_snapshot_feeds_the_remote_impact_stream`
+  (matched row skipped, unmatched presented, duplicate absorbed) and
+  `an_unmatched_own_seat_impact_row_presents_once_over_a_lossy_link`
+  (seeded loss/duplicate/reorder). Not rendered or played.
   Not asserted, deliberately: *which* parked car is shoved (the
   lobby's connect order picks the seats, so it varies), alice's own
   applied count (a client replays authority rows only for seats it

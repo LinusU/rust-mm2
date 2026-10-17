@@ -471,9 +471,10 @@ pub struct RemoteDrive {
 /// and `normal` position the effect, `severity` drives its strength, and
 /// nothing here writes damage or physics — those stay on the v8 state
 /// byte and the authority's own `ImpactEvent` stream. `entity` is the
-/// resolved local remote copy; the receiver's own seat never gets one —
-/// its predicted physics already rendered the hit through the local
-/// stream, so replaying the wire row would double the effect.
+/// resolved local remote copy; the receiver's own seat gets one only
+/// when its predicted physics registered no matching local contact —
+/// otherwise the local stream already rendered the hit and replaying
+/// the wire row would double the effect.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct RemoteImpact {
     /// The remote participant entity the impact presents on.
@@ -3084,7 +3085,9 @@ pub fn apply_snapshots(
     // Every trailer — remote copies key off `RemoteTrailer::owner`, the
     // own rig's trailer off `Trailer::towing` == the local seat entity.
     mut trailers: Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
-    mut remote_fx: MessageWriter<RemoteImpact>,
+    // The replicated impact rows' writer, plus the recent local
+    // contacts the own-seat gate consults.
+    mut impact_io: ImpactIo,
     // The replicated repair lands here: a snap's damage byte going
     // >0→0 wipes the seat's texel rig like `resolve_disabled`'s own
     // `damage.reset()` + `texel.reset()` pair does on the authority.
@@ -3144,7 +3147,15 @@ pub fn apply_snapshots(
         &render_parts,
         &mut report,
     );
-    drain_pending_impacts(&mut snaps, &session, &players, &mut remote_fx, &mut report);
+    impact_io.record_local(&session, time.elapsed_secs_f64());
+    drain_pending_impacts(
+        &mut snaps,
+        &session,
+        &players,
+        &mut impact_io,
+        time.elapsed_secs_f64(),
+        &mut report,
+    );
     // The v13 race row drains every run like the pending impacts —
     // it stages off the pose watermark precisely because the
     // authority's frozen countdown tick would otherwise hold it.
@@ -3771,6 +3782,87 @@ fn apply_snap_frame(
     report.snaps_applied += 1;
 }
 
+/// How long a local contact stays eligible to suppress the wire row
+/// for the same hit, seconds. The predicted car runs ahead of the
+/// authority, so its own contact precedes the row's arrival by about
+/// the link's one-way delay plus the publish interval; a generous
+/// window covers a bad link without letting an unrelated later hit
+/// hide.
+const LOCAL_CONTACT_WINDOW: f64 = 1.5;
+
+/// How far the wire row's contact point may sit from the local
+/// contact's, metres. The predicted car and the authority's copy of it
+/// disagree by the reconciliation error, so the same hit lands at
+/// slightly different points. This is a designed tolerance, not an
+/// original-game value.
+const LOCAL_CONTACT_RADIUS: f32 = 3.0;
+
+/// A contact the own predicted sim registered, kept to match the
+/// authority's row for the same hit against.
+#[derive(Debug, Clone, Copy)]
+struct LocalContact {
+    seat: u16,
+    point: Vec3,
+    at: f64,
+}
+
+/// Whether any of `recent` is the local registration of a wire row at
+/// `point` for `seat`, judged at `now`.
+fn local_contact_matches(recent: &[LocalContact], seat: u16, point: Vec3, now: f64) -> bool {
+    recent.iter().any(|c| {
+        c.seat == seat
+            && now - c.at <= LOCAL_CONTACT_WINDOW
+            && c.point.distance(point) <= LOCAL_CONTACT_RADIUS
+    })
+}
+
+/// The replicated-impact output and the own-seat contact memory in one
+/// parameter ([`apply_snapshots`] sits at Bevy's system-parameter cap).
+/// `messages` is optional: an app that never registers [`ImpactEvent`]
+/// has no local contacts to remember.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ImpactIo<'w, 's> {
+    fx: MessageWriter<'w, RemoteImpact>,
+    messages: Option<Res<'w, Messages<ImpactEvent>>>,
+    cursor: Local<'s, bevy::ecs::message::MessageCursor<ImpactEvent>>,
+    recent: Local<'s, Vec<LocalContact>>,
+    seats: Query<'w, 's, (&'static NetPlayer, &'static ObjectIdentity)>,
+}
+
+impl ImpactIo<'_, '_> {
+    /// Fold this frame's local [`ImpactEvent`]s into the per-seat
+    /// memory and age out the old ones.
+    fn record_local(&mut self, session: &Session, now: f64) {
+        let wires: HashMap<ObjectId, u16> = self
+            .seats
+            .iter()
+            .map(|(wire, identity)| (identity.0, wire.0))
+            .collect();
+        if let Some(messages) = self.messages.as_deref() {
+            let generation = session.generation();
+            for e in self.cursor.read(messages) {
+                if e.generation != generation || !e.point.is_finite() {
+                    continue;
+                }
+                for who in [e.participants.0, e.participants.1] {
+                    if let Some(&seat) = wires.get(&who) {
+                        self.recent.push(LocalContact {
+                            seat,
+                            point: e.point,
+                            at: now,
+                        });
+                    }
+                }
+            }
+        }
+        self.recent.retain(|c| now - c.at <= LOCAL_CONTACT_WINDOW);
+    }
+
+    fn has_local_contact(&self, seat: u16, point: Vec3, now: f64) -> bool {
+        local_contact_matches(&self.recent, seat, point, now)
+    }
+}
+
 /// The event half of [`apply_snapshots`]: drain the queued replicated
 /// impact rows into the [`RemoteImpact`] stream. Replicated impacts
 /// are events, not state — the queue drains every run, not only when
@@ -3781,15 +3873,18 @@ fn apply_snap_frame(
 /// the authority (splat-then-wipe), so it drops rather than
 /// re-stamping a hit the repair already erased. `push` already
 /// deduped `(seat, id)` and binned foreign generations; here each row
-/// gets the session gate, the own-seat skip — a predicted seat's
-/// local physics stream already rendered the hit, so the wire row
-/// must not double it — the wire sanitize, the repair-ledger
+/// gets the session gate, the own-seat gate — a
+/// predicted seat's local physics stream renders its own hits, so a
+/// wire row with a matching recent local contact is skipped rather
+/// than doubled, while one with none is presented (#1532) — the wire
+/// sanitize, the repair-ledger
 /// staleness check, and the resolve to this process's remote copy.
 fn drain_pending_impacts(
     snaps: &mut RemoteSnaps,
     session: &Session,
     players: &Query<SnapTargetRow<'_>, SnapTargetFilter>,
-    remote_fx: &mut MessageWriter<RemoteImpact>,
+    io: &mut ImpactIo,
+    now: f64,
     report: &mut NetDriveReport,
 ) {
     report.impacts_dropped += snaps.dropped;
@@ -3819,9 +3914,6 @@ fn drain_pending_impacts(
             report.impacts_dropped += 1;
             continue;
         };
-        if is_local {
-            continue;
-        }
         let sane = row.point.iter().all(|v| v.is_finite())
             && row.normal.iter().all(|v| v.is_finite())
             && row.severity.is_finite()
@@ -3841,7 +3933,15 @@ fn drain_pending_impacts(
             report.impacts_dropped += 1;
             continue;
         }
-        remote_fx.write(RemoteImpact {
+        // The own seat's predicted sim renders its own hits through
+        // the local impact stream, so the wire row is skipped when a
+        // local contact matches — and presented when none does (the
+        // authority's hit landed first and a snap moved the predicted
+        // car past the contact, #1531).
+        if is_local && io.has_local_contact(row.seat, Vec3::from_array(row.point), now) {
+            continue;
+        }
+        io.fx.write(RemoteImpact {
             entity,
             point: Vec3::from_array(row.point),
             normal: Vec3::from_array(row.normal)
@@ -3899,6 +3999,25 @@ pub fn drive_remote_lerp(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_local_contact_matches_by_seat_window_and_point() {
+        use super::*;
+        let c = [LocalContact {
+            seat: 2,
+            point: Vec3::new(1.0, 0.0, 1.0),
+            at: 10.0,
+        }];
+        let near = Vec3::new(2.0, 0.0, 1.0);
+        assert!(local_contact_matches(&c, 2, near, 10.5));
+        assert!(!local_contact_matches(&c, 3, near, 10.5), "other seat");
+        assert!(!local_contact_matches(&c, 2, near, 12.0), "aged out");
+        assert!(
+            !local_contact_matches(&c, 2, Vec3::new(30.0, 0.0, 1.0), 10.5),
+            "another place"
+        );
+        assert!(!local_contact_matches(&[], 2, near, 10.5), "no contact");
+    }
+
     use super::*;
 
     /// The settled-divergence count: only an unbroken run of at-rest,
