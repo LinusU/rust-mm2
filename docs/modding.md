@@ -143,6 +143,10 @@ You never need to know which archive or physical file shipped the original.
   for a mod to override. A mod-supplied string table would be a new designed
   format and is not planned.
 
+[mod-coverage.md](mod-coverage.md) audits, per family, which consumer
+reads an override and which test proves it (and which families are not yet
+proven).
+
 Anything without a dedicated importer yet still resolves correctly through
 the VFS — the limitation is on the import side, not resolution.
 
