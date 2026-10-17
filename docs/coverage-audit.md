@@ -47,6 +47,31 @@ rejected:
 | ambient traffic vehicles | – | 23 | 0 | 1 | `va_garbagetruck` lacks model/AI data |
 | breakable props | – | 995 | – | – | no expected count: unverified |
 
+### Expected versus tested (F31-AC02)
+
+*Tested* means the item was exercised through its production consumer by the
+command named, at **retail-data** level (headless parse/build/decode; nothing
+was rendered, heard or driven by a human). Measured 2026-10-17 at commit
+`cbc66b5`, fingerprint `fnv1a64:e91e6cd4b2ae30d9`, using
+`target/debug/mm2-inspect <cmd> $MM2_RETAIL`. The expected denominator is
+never narrowed to what passes: a failing or unsupported item stays counted.
+
+| Family | Expected | Discovered | Tested | Rejected / failed | Unverified | Command (what "tested" means) |
+|---|---|---|---|---|---|---|
+| player vehicles | 21 | 29 | 21 | 8 spare ids (not tested, see above) | driving feel | `validate-cars`: metadata, tuning, model, wheel rig, collider; 21 ok, 0 failed |
+| vehicle paints | 88 declared | 89 jobs on the 21 | 88 | 1 | – | `validate-cars` paints column: `vpford` declares 4 paints but its model has 5 jobs, the fifth is not validated |
+| race events (per city) | 45 rows × 2 cities = 90 | 90 | 90 resolve (`event --all`: 45 ready per city) | strict failures 43 (sf) and 53 (london): extra stems and header typos | playability | `event --all` dependency closure only |
+| race definitions | 64 per city (45 rows × 2 difficulties minus Crash Course) | 64 | 128 built (64 × 2 cities), 0 failed | 52 Crash Course (row × difficulty) cases `unsupported` here, counted not hidden | – | `race-defs` through `CatalogEvent → RaceDefinition` |
+| crash-course lessons | 42 | 42 | 26 (13 per city, `playable` on the gate-run baseline) | 0 | 16 of 42 (the remaining lessons are not in the per-city `crash-course` coverage summary) | `crash-course` |
+| placement sources | 2 | 13 | 13 discovered sources; `pathset` parses 98 of 101 files | 3 pathset parse failures (`race/london/blitz10`, `blitz11`, `london_bridge_blitz10`); banger records 999/999 parse | 157 placement-adjacent records unparsed | `pathset`, `banger`, `banger-bind`, `placement` |
+| audio families | 7 | 7 | 7 (3256 files classified, 2503 waves decoded, 124 tables) | 0 failures; 1 finding (`vpcaddie59` has no tune entry) | listening | `audio` |
+| pedestrian archetypes | 4 | 5 | 4 (each loaded through `PedArchetype`) | `pedmodel_wolf` partial | – | `peds` |
+
+The crash-course "tested" count is the honest 26, not 42: the per-city
+coverage summary names 13 lessons per city and the inventory's 42 is not
+reconciled with it here (the 42 vs 13 × 2 difference is open, not explained).
+No family has a *driven* or *played* count; that remains empty by fact.
+
 Event catalog (`mm2-inspect events`): 45 selectable rows per city
 (12 Checkpoint + 10 Blitz + 10 Circuit + 13 Crash Course) = 90. `race-defs`
 builds 64 definitions per city across both difficulties and reports 26
