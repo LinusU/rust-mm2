@@ -192,3 +192,50 @@ note rather than a fix. The 12-minute result also disagrees with the aggregate
 44/44 race table in [neural-opponents.md](../neural-opponents.md) for
 circuit:8 Professional on current `main`, which is the same slowness #1403
 established.
+
+## Professional block, time-limit-aware run (#1404, F14-AC06)
+
+`scripts/circuit-audit.sh` now takes a difficulty (`amateur`/`pro`), a
+prebuilt binary (`MM2_BIN`) and extra flags (`AUDIT_ARGS`). All 20 circuits
+were run on `main` (release build) as
+`MM2_BIN=target/release/mm2 AUDIT_ARGS="--no-profile --until-opponents"
+scripts/circuit-audit.sh <out> 107820 4 pro`: Professional, parked player,
+cap of 107 820 frames = 1797 s of sim (the circuit time limit), four jobs
+at a time. `--until-opponents` stops a run once every opponent has
+finished, so a row shows when the field was done, not the cap. london 7 and
+8 were re-run by hand with the same flags after the first sweep was cut off
+by the wall limit.
+
+| event | finished | re-anchors | slowest finisher |
+|---|---:|---:|---:|
+| sf 0 | 4/4 | 0 | 171.8 s |
+| sf 1 | 7/7 | 9 | 315.7 s |
+| sf 2 | 6/6 | 4 | 262.0 s |
+| sf 3 | 4/4 | 4 | 263.5 s |
+| sf 4 | 5/5 | 3 | 299.5 s |
+| sf 5 | 7/7 | 4 | 201.1 s |
+| sf 6 | 6/6 | 70 | 516.8 s |
+| sf 7 | 6/6 | 21 | 342.6 s |
+| sf 8 | 4/4 | 0 | 193.4 s |
+| sf 9 | 6/6 | 4 | 246.6 s |
+| london 0 | 7/7 | 0 | 76.2 s |
+| london 1 | 6/6 | 0 | 114.0 s |
+| london 2 | 6/6 | 30 | 443.5 s |
+| london 3 | 6/6 | 6 | 293.6 s |
+| london 4 | 5/5 | 36 | 443.7 s |
+| london 5 | 4/4 | 9 | 234.0 s |
+| london 6 | 7/7 | 15 | 434.9 s |
+| london 7 | 6/6 | 40 | 582.9 s |
+| london 8 | 6/6 | 48 | 806.5 s |
+| london 9 | 6/6 | 6 | 294.3 s |
+
+20/20 circuits complete on Professional with every opponent finishing, all
+inside the 1797 s limit; the slowest is london 8 at 806.5 s (the 720 s
+cap earlier is why it showed 5/6 there: slow, not stalled). The "11
+incomplete circuits at 1797 s" of the original audit no longer exist: none
+is incomplete at either difficulty, so there is nothing left to classify
+as slow versus stalled. The `.opp` route data is not the cause of any
+earlier stall. Re-anchor counts are the same residual signal noted above
+(sf 6, london 7/8); the re-anchor recovery was not widened. Evidence
+level: synthetic integration (headless, retail data, parked player); no
+driving-player run and no rendered check.
