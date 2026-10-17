@@ -290,7 +290,8 @@ no retail path sets as far as read), then switches on the event:
 - `2` — as for `8` but **timer off** (`car+0xbd8 = 0`, `0x41601c`).
   The follow handler never reads the clock, so a follow row's
   `TimeLimit` (36 s, 200 s on retail) does nothing.
-- `1` — matches no branch of the setup; `6` shares the timer-on arm.
+- `1` — matches no branch of the setup (the timer is left as the
+  previous lesson set it); `6` shares the timer-on arm.
 
 ### The per-frame handler (`0x4169a0`) — CC-8
 
@@ -299,12 +300,12 @@ A jump table on the current record's `Event` (`0x416a2c`):
 | `Event` | handler | family |
 | ---: | --- | --- |
 | 0 | `0x4174d0` | jump |
-| 1 | `0x419ca0` | *not decoded — no retail row* |
+| 1 | `0x419ca0` | clean driving — decoded, no retail row (see below) |
 | 2 | `0x417b20` | follow |
 | 3 | `0x416a60` | cop chase |
 | 4 | `0x4187b0` | corner |
 | 5 | `0x418100` | cross-traffic |
-| 6 | `0x417040` | *not decoded — no retail row* |
+| 6 | `0x417040` | stunt acceleration — decoded, no retail row (see below) |
 | 7 | `0x419020` | maneuver |
 | 8 | `0x419600` | stop |
 | 9 | `0x419020` | map — **the same handler as 7** |
@@ -312,6 +313,49 @@ A jump table on the current record's `Event` (`0x416a2c`):
 Anything above 9 logs an error (`0x5c2fd8`). So the family names the
 earlier sections inferred from file stems are exactly the dispatch
 partition, with one refinement: maneuver and map are one rule.
+
+### The two unreferenced handlers (Events 1 and 6, decoded 2026-10-17)
+
+Both have a dispatch slot and speak string ids authored in
+`mmlang.dll`, but no retail `crash<N>data` row selects either Event, so
+no `LegRule` variant is added (nothing authored can reach one). Read
+from the disassembly, not exercised:
+
+**Event 1 (`0x419ca0`) — clean driving.** Lines 210 "Bonnie & Collide"
+(title), 211 "Ready...", 212 "Set...", 213 "Drive as cleanly as you
+can!" (states 0–3, 1.5 s each); outcomes 214 "Time's up!", 215 "Good
+driving!", 216 "Wait...5 second penalty". State `3`, in this order:
+
+1. Timer below `10 s` (`0x5af428`) and `+0x7c` clear: call
+   `0x41a3a0(remaining)` every frame (a HUD countdown; cross-traffic
+   makes the same call at `0x41843a`).
+2. Timer expired (`<= 0`) and `+0x7c` clear → set `+0x7c`, state `4`
+   (failed), 214. Timer before course, like cross-traffic.
+3. Course completes (`+0x34`) → set `+0x7c`, state `6` (passed), 215.
+4. Wrecked (`0x406140`) and `0x6b07ac` zero → state `5` with a **5 s**
+   recovery (the other handlers use 3 s) and the line 216.
+
+So it is the bare skeleton with a wreck that costs a 5 s recovery
+instead of failing the leg.
+
+**Event 6 (`0x417040`) — stunt mode: acceleration.** Lines 199 "Stunt
+Mode: Acceleration" (title), 200 "Race to the end of the pier!", 201 "But
+don't fall in!", 202 "Go!"; outcomes 203 "Put the pedal to the metal!"
+(timer expired), 204 "Great job!  You can stop on a dime!" (cleared).
+The handler adds a state (`0x45`, mapped by a byte table in front of
+the jump table at `0x417458`). State `3`:
+
+1. Wrecked (no `0x6b07ac` test) → state `5`, 3 s recovery. It does not
+   return: the checks below still run that frame.
+2. Course completes → state `0x45` with a **2 s** hold.
+3. Timer expired → `0x41a700(0)`, state `4`, 203, 5 s.
+
+State `0x45` only counts the 2 s down at `1/60` per frame; at zero it
+sets `+0x7c`, enters state `6` with 204 and does the ordinary cleared
+step (next record, or `0x41a700(1)` on the last). It tests neither
+speed, timer nor damage, so "stop on a dime" is flavour, not a rule:
+the rule is the skeleton plus a wreck recovery and a 2 s dwell before
+the clear.
 
 Every handler is the same seven-state machine on `+0x270`: `0`–`2`
 the title / "Ready…" / "Set…" sequence (the title is looked up by the
@@ -474,16 +518,25 @@ any other sub-event of the lesson fires a call-out.
 
 ## Open questions
 
-- Events `1` (`0x419ca0`) and `6` (`0x417040`) have dispatch slots but
-  no retail row; they were not decoded and map to no objective.
-- The polarity of the cop-sight ray query (`0x468e30`) and what the
-  cop entry's `+0x977a` count is; the cop array itself is identified by
-  its accessor's error string.
+- *(Resolved 2026-10-17.)* Events `1` and `6` are decoded above. The
+  cop-sight ray query `0x468e30` returns true when the segment hits
+  something: the caller `0x41a1c0` skips that cop on `jne` and
+  otherwise tests the distance (`< 200`), so a hit blocks sight, the
+  polarity the port assumed. "In the field" is `0x53e3e0`: the cop's
+  16-bit `+0x977a` is nonzero. It is zeroed on removal (`0x53db04`,
+  `0x53f19c`), set to `12` or `2` on placement (`0x53dd04`, `0x53de26`,
+  `0x53dea6`, `0x53e1fc`) and compared with `+0x977c` at `0x53e3f0`;
+  beyond "nonzero = active" its meaning is **not** recovered.
 - The wreck predicate's two damage fields and whether the original's
   damage saturates at the maximum (the port's `DamageState` does).
-- What `0x6b07ac` (a global that suppresses the wreck failure in
-  several handlers) and `0x6b0990` (an integer that overrides the
-  timer) are; neither is set by any path read.
+- *(Partly resolved 2026-10-17.)* `0x6b07ac` comes from the race
+  setup: bit 0 of a packed option word (`0x411512`), copied from the
+  setup object's `+0x808` (`0x4076a4`) and cleared at start-up
+  (`0x5233f8`). Another reader (`0x403c26`) stores `0x6b07ac == 0`
+  into a per-car byte, so "damage off" is the consistent reading; the
+  option's menu name is **inferred**, not read. `0x6b0990` is only
+  zeroed (`0x5234ba`) and read (`0x415dc0`, `0x41b090`): no path
+  writes it, so it is dead in retail.
 - What bit 0 of the course flag (`tail[1]`) draws, and the consumer of
   the `AmbDensity` product in `0x6b1e2c`.
 - Whether `Checkpoints = 0` (no retail row) is a supported "no gates"
@@ -504,9 +557,9 @@ any other sub-event of the lesson fires a call-out.
   243, cleared 609, timer expiry 244, wreck 245. Bound in
   `mm2_content::lesson_text` and checked against the install by
   `tests/lesson_text.rs`; the table is read by
-  `mm2_formats::langdll::StringTable`. Still unrecovered: the
-  cross-traffic (225–230), corner (231–240) and clean-driving
-  (210–216) sequences, follow 223, stop 622, the cop-chase `Go`
+  `mm2_formats::langdll::StringTable`. Events 1 (clean driving, 210–216) and 6 (stunt mode, 199–204) are
+  read in "The two unreferenced handlers" above. Still unrecovered: the
+  cross-traffic (225–230) and corner (231–240) sequences, follow 223, stop 622, the cop-chase `Go`
   alternative (652, 3 s, chosen by a flag at `0x416c8f`), the flag
   argument, and *where on screen* the car's message display draws
   (`0x42e1e0` was not decoded). No authored reference in the lesson
