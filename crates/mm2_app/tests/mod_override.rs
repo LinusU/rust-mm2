@@ -1334,6 +1334,32 @@ fn a_malformed_vehicle_pkg_override_is_refused_and_the_base_does_not_stand_in() 
     );
 }
 
+#[test]
+fn a_malformed_vehicle_bound_override_is_reported_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let m = broken_mod(f._tmp.path(), "badbnd", "bound/vpt_bound.bnd", b"junk");
+    let vfs = mounted(&f.base, &m);
+    let def = load_vehicle(&vfs, "vpt", 0).expect("an undecodable bound is reported, not fatal");
+    assert!(
+        def.report
+            .warnings
+            .iter()
+            .any(|w| w.contains("bound/vpt_bound.bnd") && w.contains("failed to parse")),
+        "{:?}",
+        def.report.warnings
+    );
+    let sibling = load_vehicle(&vfs, "vpu", 0).expect("the sibling still loads");
+    assert!(
+        !sibling
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("_bound.bnd")),
+        "{:?}",
+        sibling.report.warnings
+    );
+}
+
 fn banger_record(mass: f32) -> String {
     format!(
         "type: a\ndgBangerData {{\n  AudioId 0\n  Size 0.5 1.0 0.5\n  CG 0.0 0.5 0.0\n  Mass {mass}\n  Elasticity 0.5\n  Friction 0.9\n  ImpulseLimit2 0\n  SpinAxis 0\n  Flash 0\n  NumParts 0\n  TexNumber 0\n  BillFlags 0\n  YRadius 0.5\n}}\n"

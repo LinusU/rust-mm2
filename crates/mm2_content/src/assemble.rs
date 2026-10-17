@@ -368,9 +368,18 @@ fn load_vehicle_impl(
     }
 
     // Bounds — optional but expected for stock.
-    let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd")).and_then(|(bytes, src)| {
+    // A bound that resolves but does not parse is reported, never silently
+    // replaced by the default chassis.
+    let bound_logical = format!("bound/{id}_bound.bnd");
+    let bound = read_opt(vfs, &bound_logical).and_then(|(bytes, src)| {
         sources.push(src);
-        BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
+        match BndFile::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                damage_warnings.push(format!("{bound_logical}: failed to parse: {e}"));
+                None
+            }
+        }
     });
 
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
@@ -517,9 +526,17 @@ fn load_trailer(
         Pkg::parse(&bytes).map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
     let model = build_model(&pkg, |stem| load_mtx(vfs, &pkg_id, stem));
 
-    let bound = read_opt(vfs, &format!("bound/{pkg_id}_bound.bnd")).and_then(|(bytes, src)| {
+    let bound_logical = format!("bound/{pkg_id}_bound.bnd");
+    let mut bound_warnings: Vec<String> = Vec::new();
+    let bound = read_opt(vfs, &bound_logical).and_then(|(bytes, src)| {
         sources.push(src);
-        BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
+        match BndFile::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                bound_warnings.push(format!("{bound_logical}: failed to parse: {e}"));
+                None
+            }
+        }
     });
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
 
@@ -544,6 +561,7 @@ fn load_trailer(
             .map_err(LoadError::Convert)?;
     let mut report = report;
     report.warnings.extend(model.warnings.iter().cloned());
+    report.warnings.extend(bound_warnings);
 
     // Hitch anchors: authored offsets when present; fall back to the car's
     // rear bound edge and the trailer's front bound edge.
@@ -583,7 +601,8 @@ pub struct AmbientVehicle {
 
 /// Load one ambient class's visual/physical assets. `geometry/<id>.pkg`
 /// is required — a class whose model does not resolve cannot spawn;
-/// the bound is optional (the runtime falls back to a hull over the
+/// the bound is optional when absent, but a bound that resolves and does
+/// not parse is an error (the runtime falls back to a hull over the
 /// tuning's authored `Size`).
 pub fn ambient_vehicle(vfs: &Vfs, id: &str) -> Result<AmbientVehicle, LoadError> {
     let logical = format!("geometry/{id}.pkg");
@@ -591,8 +610,14 @@ pub fn ambient_vehicle(vfs: &Vfs, id: &str) -> Result<AmbientVehicle, LoadError>
     let pkg =
         Pkg::parse(&bytes).map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
     let model = build_model(&pkg, |stem| load_mtx(vfs, id, stem));
-    let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd"))
-        .and_then(|(bytes, _)| BndFile::parse(&String::from_utf8_lossy(&bytes)).ok());
+    let bound_logical = format!("bound/{id}_bound.bnd");
+    let bound = match read_opt(vfs, &bound_logical) {
+        Some((bytes, _)) => Some(
+            BndFile::parse(&String::from_utf8_lossy(&bytes))
+                .map_err(|e| LoadError::Parse(id.into(), format!("{bound_logical}: {e}")))?,
+        ),
+        None => None,
+    };
     Ok(AmbientVehicle {
         id: id.to_string(),
         model,
