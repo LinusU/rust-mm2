@@ -217,10 +217,8 @@ impl Vfs {
         if !mods_dir.is_dir() {
             return Err(AssetsError::MissingDirectory(mods_dir.to_path_buf()));
         }
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(mods_dir)
-            .map_err(AssetsError::io(mods_dir))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
+        let mut dirs: Vec<PathBuf> = list_dir(mods_dir)?
+            .into_iter()
             .filter(|p| p.join(MANIFEST_FILE).is_file())
             .collect();
         dirs.sort();
@@ -504,6 +502,27 @@ impl Vfs {
     }
 }
 
+/// The paths directly inside `dir`, in directory order.
+///
+/// An error on `dir` itself or on any single entry (EIO/ESTALE on flaky
+/// media, a permissions blip) is returned, never dropped: a dropped entry
+/// would silently remove an archive or a mod from the mount.
+pub(crate) fn list_dir(dir: &Path) -> Result<Vec<PathBuf>, AssetsError> {
+    let entries = std::fs::read_dir(dir).map_err(AssetsError::io(dir))?;
+    collect_entry_paths(dir, entries)
+}
+
+/// The fallible-entry half of [`list_dir`], split out so a test can inject
+/// a failing entry, which the real filesystem cannot do portably.
+fn collect_entry_paths(
+    dir: &Path,
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+) -> Result<Vec<PathBuf>, AssetsError> {
+    entries
+        .map(|e| e.map(|e| e.path()).map_err(AssetsError::io(dir)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +533,21 @@ mod tests {
         let p = dir.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, contents).unwrap();
+    }
+
+    #[test]
+    fn entry_error_is_reported_not_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "a.ar", b"x");
+        let injected = std::io::Error::other("injected EIO");
+        let entries = fs::read_dir(tmp.path())
+            .unwrap()
+            .chain(std::iter::once(Err(injected)));
+        match collect_entry_paths(tmp.path(), entries) {
+            Err(AssetsError::Io { path, .. }) => assert_eq!(path, tmp.path()),
+            other => panic!("entry error must surface, got {other:?}"),
+        }
+        assert_eq!(list_dir(tmp.path()).unwrap().len(), 1);
     }
 
     #[test]

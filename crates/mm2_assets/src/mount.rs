@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::ModManifest;
+use crate::vfs::list_dir;
 use crate::{AssetsError, Vfs, priority};
 
 /// How to mount an MM2 installation directory.
@@ -84,9 +85,8 @@ pub fn mount_install(
     let archives: Vec<PathBuf> = match &plan.archives {
         Some(names) => names.iter().map(|n| dir.join(n)).collect(),
         None => {
-            let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-                .map_err(AssetsError::io(dir))?
-                .filter_map(|e| e.ok().map(|e| e.path()))
+            let mut found: Vec<PathBuf> = list_dir(dir)?
+                .into_iter()
                 .filter(|p| {
                     p.extension()
                         .map(|e| e.eq_ignore_ascii_case("ar"))
