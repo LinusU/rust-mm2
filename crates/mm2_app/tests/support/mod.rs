@@ -657,9 +657,18 @@ fn quad_geo(c: [f32; 3], hx: f32, hy: f32, hz: f32) -> Vec<u8> {
 /// A PKG3 with `body_h` plus `whl0..3` — wheels authored in place
 /// (no `.mtx`, so the importer falls back to geometry centres).
 fn car_pkg() -> Vec<u8> {
+    car_pkg_with_body([0.9, 0.5, 1.6])
+}
+
+/// [`car_pkg`] with the `body_h` half-extents replaced — the one visible
+/// difference a model-replacement mod needs (`VehicleModel::body_aabb`).
+pub fn car_pkg_with_body(half: [f32; 3]) -> Vec<u8> {
     let mut d = b"PKG3".to_vec();
     let chunks: &[(&str, Vec<u8>)] = &[
-        ("body_h", quad_geo([0.0, 0.5, 0.0], 0.9, 0.5, 1.6)),
+        (
+            "body_h",
+            quad_geo([0.0, 0.5, 0.0], half[0], half[1], half[2]),
+        ),
         ("whl0_h", quad_geo([0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
         ("whl1_h", quad_geo([-0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
         ("whl2_h", quad_geo([0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
@@ -679,7 +688,7 @@ fn car_pkg() -> Vec<u8> {
 /// An ASCII bound box — without it `convert` falls back to a centred
 /// chassis cuboid whose hull rests high enough that the wheel rays
 /// never reach the ground.
-fn car_bnd() -> String {
+pub fn car_bnd() -> String {
     let mut s = "version: 1.01\nverts: 8\nmaterials: 1\nedges: 0\npolys: 6\n\n".to_string();
     for v in [
         [-0.9f32, 0.05, -1.6],
@@ -712,7 +721,7 @@ fn car_bnd() -> String {
 
 /// A `aud/cardata/player/<id>.csv` the real grammar accepts: the horn
 /// record plus one canonical fade-window engine sample.
-fn car_cardata() -> &'static str {
+pub fn car_cardata() -> &'static str {
     "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,1,REV,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\nEIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n"
 }
 

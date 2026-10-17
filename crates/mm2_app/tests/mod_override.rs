@@ -1249,3 +1249,198 @@ fn a_mod_replaces_menu_art_and_a_malformed_one_is_refused() {
         "menu art is cosmetic"
     );
 }
+
+// ─── Families added to the proven set by F29-AC01 (#1528) ───────────────
+
+/// A `mount` that is the base alone when `m` is `None`.
+fn vfs_of(base: &Path, m: Option<&Path>) -> Vfs {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(base, 0).unwrap();
+    if let Some(m) = m {
+        vfs.mount_mod(m, 300).unwrap();
+    }
+    vfs
+}
+
+/// Body half-extents, chassis size and fingerprint of `id` as loaded.
+fn model_of(vfs: &Vfs, id: &str) -> (([f32; 3], [f32; 3]), String) {
+    let def = load_vehicle(vfs, id, 0).expect("vehicle loads");
+    (
+        def.model.body_aabb.expect("body aabb"),
+        format!("{:?}", def.config.chassis_size),
+    )
+}
+
+/// A mod that swaps `vpt`'s PKG for a longer body and its bound for a
+/// wider one.
+fn model_mod(d: &Path) {
+    manifest(d, "body");
+    write(
+        d,
+        "geometry/vpt.pkg",
+        crate::support::car_pkg_with_body([1.2, 0.5, 2.4]),
+    );
+    write(
+        d,
+        "bound/vpt_bound.bnd",
+        crate::support::car_bnd().replace("0.9", "1.3"),
+    );
+}
+
+#[test]
+fn a_mod_replaces_a_vehicles_model_and_bound_through_load_vehicle() {
+    let f = fixture();
+    let root = f._tmp.path();
+    let m = root.join("body");
+    std::fs::create_dir_all(&m).unwrap();
+    model_mod(&m);
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    let (base_aabb, base_chassis) = model_of(&base, "vpt");
+    let (mod_aabb, mod_chassis) = model_of(&modded, "vpt");
+    assert_ne!(mod_aabb, base_aabb, "the mod's PKG reached the model");
+    assert!(mod_aabb.1[2] > base_aabb.1[2], "the mod's body is longer");
+    assert_ne!(
+        mod_chassis, base_chassis,
+        "the mod's bound reached the chassis"
+    );
+    // The bystander car reads the base files either way.
+    assert_eq!(model_of(&modded, "vpu"), model_of(&base, "vpu"));
+    // Unmounting restores the base.
+    assert_eq!(
+        model_of(&vfs_of(&f.base, None), "vpt"),
+        (base_aabb, base_chassis)
+    );
+
+    // The model is gameplay (collision hull, wheel origins).
+    let plain = fingerprint::gameplay(&base).unwrap().hash;
+    assert_ne!(fingerprint::gameplay(&modded).unwrap().hash, plain);
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!((reports[0].gameplay, reports[0].cosmetic), (2, 0));
+}
+
+#[test]
+fn a_malformed_vehicle_pkg_override_is_refused_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let m = broken_mod(f._tmp.path(), "badpkg", "geometry/vpt.pkg", b"not a pkg");
+    let vfs = mounted(&f.base, &m);
+    let err = load_vehicle(&vfs, "vpt", 0).expect_err("a broken model must not load");
+    assert!(err.to_string().contains("vpt"), "{err}");
+    assert!(
+        load_vehicle(&vfs, "vpu", 0).is_ok(),
+        "the sibling still loads"
+    );
+}
+
+fn banger_record(mass: f32) -> String {
+    format!(
+        "type: a\ndgBangerData {{\n  AudioId 0\n  Size 0.5 1.0 0.5\n  CG 0.0 0.5 0.0\n  Mass {mass}\n  Elasticity 0.5\n  Friction 0.9\n  ImpulseLimit2 0\n  SpinAxis 0\n  Flash 0\n  NumParts 0\n  TexNumber 0\n  BillFlags 0\n  YRadius 0.5\n}}\n"
+    )
+}
+
+#[test]
+fn a_mod_replaces_a_banger_record_through_banger_defs() {
+    use mm2_app::banger::BangerDefs;
+    let f = fixture();
+    let root = f._tmp.path();
+    write(
+        &f.base,
+        "tune/banger/lamp.dgbangerdata",
+        banger_record(40.0),
+    );
+    write(&f.base, "tune/banger/bin.dgbangerdata", banger_record(15.0));
+    let m = root.join("heavy");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "heavy");
+    write(&m, "tune/banger/lamp.dgbangerdata", banger_record(400.0));
+
+    let mass = |vfs: &Vfs, name: &str| BangerDefs::new(vfs).get(name).map(|d| d.mass);
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(mass(&base, "lamp"), Some(40.0));
+    assert_eq!(mass(&modded, "lamp"), Some(400.0), "the mod's record won");
+    assert_eq!(
+        mass(&modded, "bin"),
+        mass(&base, "bin"),
+        "bystander unmoved"
+    );
+    assert_eq!(mass(&base, "tree"), None, "an unbound name stays unbound");
+    assert_eq!(mass(&vfs_of(&f.base, None), "lamp"), Some(40.0), "revert");
+
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash,
+        "banger tuning is gameplay"
+    );
+
+    // A record that does not decode is counted and stamps unbound; the base
+    // record it replaced does not stand in.
+    let bad = broken_mod(
+        root,
+        "badbanger",
+        "tune/banger/lamp.dgbangerdata",
+        b"\x00junk",
+    );
+    let vfs = mounted(&f.base, &bad);
+    let mut defs = BangerDefs::new(&vfs);
+    assert!(defs.get("lamp").is_none());
+    assert_eq!(defs.failed, 1);
+    assert!(defs.get("bin").is_some());
+}
+
+#[test]
+fn a_mod_replaces_a_vehicles_audio_table_and_it_is_cosmetic() {
+    let f = fixture();
+    let root = f._tmp.path();
+    write(
+        &f.base,
+        "aud/cardata/player/vpt.csv",
+        crate::support::car_cardata(),
+    );
+    write(
+        &f.base,
+        "aud/cardata/player/vpu.csv",
+        crate::support::car_cardata(),
+    );
+    let m = root.join("horn");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "horn");
+    write(
+        &m,
+        "aud/cardata/player/vpt.csv",
+        crate::support::car_cardata().replace("TESTHORN", "NEWHORN"),
+    );
+
+    let horn = |vfs: &Vfs, id: &str| load_vehicle(vfs, id, 0).unwrap().audio.map(|a| a.horn.name);
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(horn(&base, "vpt").as_deref(), Some("TESTHORN"));
+    assert_eq!(horn(&modded, "vpt").as_deref(), Some("NEWHORN"));
+    assert_eq!(
+        horn(&modded, "vpu"),
+        horn(&base, "vpu"),
+        "bystander unmoved"
+    );
+    assert_eq!(
+        horn(&vfs_of(&f.base, None), "vpt").as_deref(),
+        Some("TESTHORN")
+    );
+    assert_eq!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash,
+        "an audio table is cosmetic"
+    );
+
+    // Malformed: the table is dropped (no audio), not replaced by the base's.
+    let bad = broken_mod(
+        root,
+        "badcsv",
+        "aud/cardata/player/vpt.csv",
+        b"garbage\n1,2\n",
+    );
+    let vfs = mounted(&f.base, &bad);
+    let def = load_vehicle(&vfs, "vpt", 0).expect("the car itself still loads");
+    assert!(def.audio.is_none(), "the base table must not stand in");
+}
