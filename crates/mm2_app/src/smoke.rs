@@ -361,6 +361,23 @@ impl StopReason {
     }
 }
 
+/// ` seats=<id>:<x>,<z>/…` for every wire seat this process holds, or
+/// empty without one.
+fn seats_detail(world: &mut World) -> String {
+    let mut q = world.query::<(&crate::netdrive::NetPlayer, &Position)>();
+    let mut seats: Vec<(u16, Vec3)> = q.iter(world).map(|(n, p)| (n.0, p.0)).collect();
+    seats.sort_by_key(|(id, _)| *id);
+    if seats.is_empty() {
+        String::new()
+    } else {
+        let rows: Vec<String> = seats
+            .iter()
+            .map(|(id, at)| format!("{id}:{:.1},{:.1}", at.x, at.z))
+            .collect();
+        format!(" seats={}", rows.join("/"))
+    }
+}
+
 /// Evaluates a [`StopWhen`] against the live world once per update.
 struct StopWatch {
     stop: StopWhen,
@@ -384,6 +401,18 @@ impl StopWatch {
             peers_peak: 0,
             results_updates: 0,
         }
+    }
+
+    /// Whether the authority's stop tick has been applied while the
+    /// hold for the peer's departure still keeps this run going.
+    fn snap_tick_held(&self, world: &World) -> bool {
+        self.stop.hold_peer_left
+            && self.stop.snap_tick.is_some_and(|want| {
+                world
+                    .get_resource::<crate::netdrive::RemoteSnaps>()
+                    .and_then(crate::netdrive::RemoteSnaps::applied)
+                    .is_some_and(|(_, tick)| tick >= want)
+            })
     }
 
     fn fired(&mut self, world: &World) -> Option<StopReason> {
@@ -1343,6 +1372,7 @@ fn run_headless(
     let mut bng_reclaims = 0usize;
     let mut stop_watch = StopWatch::new(budget.stop);
     let mut stopped: Option<StopReason> = None;
+    let mut frozen_seats: Option<String> = None;
     let mut ran = 0u32;
     let mut pace = budget.paced.then(PaceClock::default);
     for f in 0..frames {
@@ -1417,6 +1447,9 @@ fn run_headless(
         if let Some(reason) = stop_watch.fired(app.world()) {
             stopped = Some(reason);
             break;
+        }
+        if frozen_seats.is_none() && stop_watch.snap_tick_held(app.world()) {
+            frozen_seats = Some(seats_detail(app.world_mut()));
         }
         if diag {
             let mut q = app.world_mut().query::<(
@@ -1537,22 +1570,10 @@ fn run_headless(
     // authoritative) and each remote copy — so a multi-process test can
     // compare one seat across the processes that see it. Absent without
     // a wire seat, so every non-lobby record stays bit-identical.
-    let seats_detail = {
-        let mut q = app
-            .world_mut()
-            .query::<(&crate::netdrive::NetPlayer, &Position)>();
-        let mut seats: Vec<(u16, Vec3)> = q.iter(app.world()).map(|(n, p)| (n.0, p.0)).collect();
-        seats.sort_by_key(|(id, _)| *id);
-        if seats.is_empty() {
-            String::new()
-        } else {
-            let rows: Vec<String> = seats
-                .iter()
-                .map(|(id, at)| format!("{id}:{:.1},{:.1}", at.x, at.z))
-                .collect();
-            format!(" seats={}", rows.join("/"))
-        }
-    };
+    // A holding run reads the poses it took the moment it reached its
+    // stop tick: the hold can outlast the peer's stop by tens of
+    // seconds on a lossy link, and the field keeps creeping meanwhile.
+    let seats_detail = frozen_seats.unwrap_or_else(|| seats_detail(app.world_mut()));
     // F25-AC05 extra-wheel evidence: a retail car's `whl4`+ "back-back"
     // follower wheels carry no physics wheel of their own — their mount
     // shadows a reference physics wheel by a non-zero `follow_offset`

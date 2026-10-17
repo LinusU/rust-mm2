@@ -2961,10 +2961,11 @@ fn run_shove_trio(
         // her seat past her own stop tick until bob leaves
         // (`--hold-until-peer-left`), so bob always holds her in his
         // record — read from the world as it stood at his stop, with no
-        // later update able to apply a departure. Her own record is taken
-        // after bob left, so it holds the host's seat and her own, all the
-        // checks read; the field is at rest, so it is the same settled
-        // pose. A mid-pursuit leg compares moving seats at one instant and
+        // later update able to apply a departure. Her record is printed
+        // after bob left, but its seat poses are those she held the moment
+        // she reached her stop tick (the hold can run tens of seconds on a
+        // lossy link and the field keeps creeping), so both clients' poses
+        // are the same authority instant. A mid-pursuit leg compares moving seats at one instant and
         // keeps the plain shared tick, no hold.
         //
         // The departure alice waits for must survive a lossy link: a
