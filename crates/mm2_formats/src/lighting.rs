@@ -372,6 +372,33 @@ mod tests {
         assert!(p.validate().is_empty());
     }
 
+    /// SF's near-black facade slab (task #1523, `--city sf
+    /// --cam=-837.4,55.3,1278.0,-53,-1`): the upper floors of the
+    /// building at room 299, texture `sf_4s_officewin07_8_f`, face
+    /// (-0.88, 0, -0.48) — the authored side away from every light of
+    /// `clear-morning` (the preset a default session binds) and so lit by the
+    /// ambient (30, 30, 50) alone. The wall is correctly placed and
+    /// wound; the darkness is the authored rig, not a missing texture.
+    #[test]
+    fn sf_facade_slab_faces_away_from_every_light() {
+        let p = LightingPreset::parse(SAMPLE).unwrap();
+        let facing = [-0.8775179_f32, 0.0, -0.47954392];
+        for (name, light) in [("key", p.key), ("fill1", p.fill1), ("fill2", p.fill2)] {
+            let d = light.to_light_dir();
+            let n_dot_l = facing[0] * d[0] + facing[1] * d[1] + facing[2] * d[2];
+            assert!(n_dot_l <= 0.0, "{name} lights the slab: N.L = {n_dot_l}");
+        }
+        // Sanity: the same rig does light the opposite face.
+        let lit: f32 = [p.key, p.fill1, p.fill2]
+            .iter()
+            .map(|l| {
+                let d = l.to_light_dir();
+                (-(facing[0] * d[0] + facing[2] * d[2])).max(0.0)
+            })
+            .sum();
+        assert!(lit > 0.5, "the opposite face is lit: {lit}");
+    }
+
     #[test]
     fn measured_index_grid() {
         assert_eq!(preset_index(WeatherKind::Clear, TimeOfDay::Morning), 0);

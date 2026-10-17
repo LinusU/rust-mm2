@@ -361,6 +361,27 @@ authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
 
+## Black facade slab at SF `-837.4,55.3,1278.0,-53,-1` (#1523, diagnosed 2026-10-17)
+
+The near-black rectangle above the right retaining wall is the upper
+floors (y 36.5–80.6) of a building in PSDL room 299 (the large block
+room), texture `sf_4s_officewin07_8_f` (texture index 233), the quad
+(-736.58, 1261.77) → (-747.15, 1281.12). Found by bisection: skipping
+INST props did not change it; skipping room 299 / its group 233 removed
+it; flipping group 233's winding replaced it with a lit facade (so the
+face is single-sided and front-facing to the camera). The texture is a
+normal bright 64×64 P8 facade, and the wall's facing agrees with its
+neighbour's under the perimeter convention (visible face left of the
+authored edge).
+
+It is dark because its facing (-0.88, 0, -0.48) has N·L ≤ 0 for all three
+`clear-morning` lights (key -0.13, fill1 -0.88, fill2 -0.11), leaving
+only the authored ambient (30, 30, 50). The same rig shades every
+west-facing wall in that block. Placement, texture and winding are not
+at fault; whether retail's fixed-function lighting also drew such faces
+this dark is unverified here (no retail capture), so no lighting change
+was made — a fill/ambient lift would be a fudge constant.
+
 ## Runtime consumption (F18-A.2 through A.7)
 
 The `.ltNN` presets bind to Bevy lighting and the `_fog.csv` row binds
