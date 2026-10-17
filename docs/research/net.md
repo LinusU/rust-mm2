@@ -1955,8 +1955,18 @@ wire actually moved rather than an in-process mailbox's contents.
   the uninvolved client applied the authority's rows every run
   (`imp0s/2a` in the sampled record) and voiced them as remote
   impacts. Asserted floors: the control moved
-  nothing; alice reached 5 m/s, recorded a local impact and the host
-  published at least one row; bob's client applied at least one row.
+  nothing; alice reached 5 m/s and the host published at least one
+  row; bob's client applied at least one row. Alice's *local* contact
+  is not asserted (#1531): the authority's hit can land first, and the
+  snap that follows moves her predicted car past the contact point
+  (a snap is a teleport, not a sweep), so her predicted sim never
+  touches the neighbour (CI saw bob apply at 5 s while alice ran to
+  the deadline with `impacts=0`). That is how reconciliation behaves
+  by design; the own-seat wire row is skipped in
+  `drain_pending_impacts` because the local stream is assumed to have
+  rendered the hit, so in this timing the driver gets no hit effect
+  for that contact. Open as a follow-up, not decided here: whether
+  an own-seat row with no matching local contact should be presented.
   Not asserted, deliberately: *which* parked car is shoved (the
   lobby's connect order picks the seats, so it varies), alice's own
   applied count (a client replays authority rows only for seats it
