@@ -2284,7 +2284,10 @@ wire actually moved rather than an in-process mailbox's contents.
   `ResetAsk` is keyed by session generation because a `Cancel`/`Start`
   cycle restarts the tick clock (a stale ledger would read the new
   zero-tick as "no time passed"). Now the full 12-ask budget fits inside
-  a 6000-tick run (ticks 1200…2025), leaving `0.6^12` ≈ 0.2 %. The
+  a 6000-tick run (ticks 1200…2025), leaving `0.6^12` ≈ 0.2 %. NET-RESET-ASK-BUDGET then raised
+  `MAX_RESET_ASKS` to 20 (`0.6^20` ≈ 4e-5; 1500 of the 6000 ticks; a silent
+  host is given up on after 25 s instead of 15 s; a clean link still sends
+  exactly one ask). The
   reset legs' `stop=` assertions now name the leg and the missing stop
   (`resets=<n>`) instead of panicking on the bare field. Evidence level:
   CI log (recipe + seed +

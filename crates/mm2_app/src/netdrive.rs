@@ -329,7 +329,13 @@ pub const RESET_RETRY_TICKS: u64 = 75;
 /// declaration is the acknowledgement, so the bound only matters for a
 /// host that never answers (a refused ask, a dead link): it keeps that
 /// from becoming a request every [`RESET_RETRY_TICKS`] forever.
-pub const MAX_RESET_ASKS: u32 = 12;
+///
+/// Designed: 20 asks leave `0.6^20` ≈ 4e-5 of every ask being lost on the
+/// 60 % `loss-heavy` recipe (12 left ≈ 0.2 %, ~1 CI run in 450), and still
+/// fit a 6000-tick evidence run (20 × 75 = 1500 ticks). A clean link stops
+/// at the first answered ask, so only a host that never answers pays the
+/// longer bound: 20 × 1.25 s = 25 s at the 60 Hz step.
+pub const MAX_RESET_ASKS: u32 = 20;
 
 /// A reset ask's retransmission state: the session generation and tick
 /// it last went out on, how many own-seat resets the client had applied
