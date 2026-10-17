@@ -1470,3 +1470,163 @@ fn a_mod_replaces_a_vehicles_audio_table_and_it_is_cosmetic() {
     let def = load_vehicle(&vfs, "vpt", 0).expect("the car itself still loads");
     assert!(def.audio.is_none(), "the base table must not stand in");
 }
+
+/// The music report `music_state` produces for a cruise in `city` over `vfs`.
+fn music_report(vfs: Vfs, city: &str) -> mm2_app::music::MusicReport {
+    use mm2_app::audio::AudioReport;
+    use mm2_app::music::{MusicAudio, music_state};
+    use mm2_game::{Mm2Vfs, SessionMode};
+
+    let mut app = bevy::app::App::new();
+    app.insert_resource(Mm2Vfs(vfs))
+        .init_resource::<AudioReport>()
+        .insert_resource(MusicAudio::bind(Some(city), &SessionMode::Cruise).unwrap())
+        .add_systems(bevy::app::Update, music_state);
+    app.update();
+    app.world()
+        .resource::<AudioReport>()
+        .music
+        .clone()
+        .expect("music binding resolved")
+}
+
+const ROAM_ONE_ROW: &str = "Start Music,Idle Music\nBaseStart,BaseIdle\n";
+
+#[test]
+fn a_mod_replaces_the_music_cue_tables_and_it_is_cosmetic() {
+    let f = fixture();
+    let root = f._tmp.path();
+    write(&f.base, "aud/dmusic/csv_files/singleroam.csv", ROAM_ONE_ROW);
+    write(
+        &f.base,
+        "aud/dmusic/csv_files/testambience.csv",
+        ROAM_ONE_ROW,
+    );
+    let m = root.join("tunes");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "tunes");
+    write(
+        &m,
+        "aud/dmusic/csv_files/singleroam.csv",
+        "Start Music,Idle Music\nModStart,ModIdle\nTwoStart,TwoIdle\n",
+    );
+
+    let rows = |r: &mm2_app::music::MusicReport| -> Vec<(Option<usize>, usize)> {
+        r.tables.iter().map(|t| (t.rows, t.refs)).collect()
+    };
+    let base = music_report(vfs_of(&f.base, None), "test");
+    assert_eq!(rows(&base), [(Some(1), 2), (Some(1), 2)]);
+    let modded = music_report(vfs_of(&f.base, Some(&m)), "test");
+    assert_eq!(
+        rows(&modded),
+        [(Some(2), 4), (Some(1), 2)],
+        "roam replaced, the city ambience table (bystander) comes from the base"
+    );
+    assert_eq!(
+        rows(&music_report(vfs_of(&f.base, None), "test")),
+        rows(&base),
+        "unmounting reverts"
+    );
+    assert_eq!(
+        fingerprint::gameplay(&vfs_of(&f.base, Some(&m)))
+            .unwrap()
+            .hash,
+        fingerprint::gameplay(&vfs_of(&f.base, None)).unwrap().hash,
+        "a music table is cosmetic"
+    );
+
+    // An override with no header at all is reported missing; the base's
+    // rows do not stand in for it.
+    let bad = broken_mod(
+        root,
+        "badmusic",
+        "aud/dmusic/csv_files/singleroam.csv",
+        b"\n",
+    );
+    let report = music_report(mounted(&f.base, &bad), "test");
+    assert_eq!(report.tables[0].rows, None, "{}", report.line());
+    assert!(report.line().contains("singleroam.csv missing"));
+    assert_eq!(report.tables[1].rows, Some(1), "bystander unaffected");
+}
+
+#[test]
+fn a_mod_replaces_a_siren_program_through_siren_audio() {
+    use mm2_app::audio::SirenAudio;
+
+    let f = fixture();
+    let root = f._tmp.path();
+    let program = |a: &str, b: &str| {
+        format!(
+            "Sample name,\n{a},0.9\nplay time,next index\n0.05,1\nSample name,\n{b},0.8\nplay time,next index\n0.05,0\n"
+        )
+    };
+    write(
+        &f.base,
+        "aud/cardata/player/testcitypolicesiren.csv",
+        program("wail_a", "wail_b"),
+    );
+    write(
+        &f.base,
+        "aud/cardata/player/othercitypolicesiren.csv",
+        program("wail_a", "wail_b"),
+    );
+    write(
+        &f.base,
+        "aud/cardata/opponent/policesiren.csv",
+        "Sample name,\nyelp,\nplay time,next index\n60,0\n",
+    );
+    let m = root.join("sirens");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "sirens");
+    write(
+        &m,
+        "aud/cardata/player/testcitypolicesiren.csv",
+        program("modwail", "modyelp"),
+    );
+
+    let names = |vfs: &Vfs, city: &str| -> (Vec<String>, Vec<String>) {
+        let sa = SirenAudio::load(vfs, 1, Some(city)).expect("a program resolves");
+        let of = |s: &Option<mm2_game::audio::SirenSpec>| {
+            s.as_ref()
+                .map(|s| s.samples.iter().map(|x| x.name.clone()).collect())
+                .unwrap_or_default()
+        };
+        (of(&sa.player), of(&sa.opponent))
+    };
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(names(&base, "testcity").0, ["wail_a", "wail_b"]);
+    assert_eq!(names(&modded, "testcity").0, ["modwail", "modyelp"]);
+    assert_eq!(
+        names(&modded, "othercity"),
+        names(&base, "othercity"),
+        "another city's program is a bystander"
+    );
+    assert_eq!(
+        names(&modded, "testcity").1,
+        ["yelp"],
+        "the opponent program is a bystander"
+    );
+    assert_eq!(
+        names(&vfs_of(&f.base, None), "testcity"),
+        names(&base, "testcity"),
+        "unmounting reverts"
+    );
+    assert_eq!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash,
+        "a siren program is cosmetic"
+    );
+
+    // Malformed: the city has no player program (the consumer warns); the
+    // base's table does not stand in. The opponent side still loads.
+    let bad = broken_mod(
+        root,
+        "badsiren",
+        "aud/cardata/player/testcitypolicesiren.csv",
+        b"garbage\n1,2\n",
+    );
+    let (player, opponent) = names(&mounted(&f.base, &bad), "testcity");
+    assert!(player.is_empty(), "base program must not stand in");
+    assert_eq!(opponent, ["yelp"]);
+}
