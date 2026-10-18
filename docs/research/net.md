@@ -824,6 +824,50 @@ ledger and dedup window), so a *different* authority's restarted
 `(generation, tick)` sequence never reads as a straggler of the dead
 stream.
 
+## One-shot message audit (#1611)
+
+*Audit, no code change.* Every variant of `mm2_net::Message`
+(`crates/mm2_net/src/proto.rs`), classified by how a lost frame is
+recovered. The transport is TCP, so a frame is lost only through the
+`ImpairProxy` (or a future unreliable dataplane); the question is what a
+peer's state is if that happens. Classes: **(a)** re-sent every tick or
+snapshot, so loss self-corrects; **(b)** repeated until acknowledged, or
+for a bounded window; **(c)** sent once. Line numbers are in
+`crates/mm2_net/src/lobby.rs` unless a file is named.
+
+| Variant | Direction | Class | What makes it so (code) | Loss matters? |
+|---|---|---|---|---|
+| `Hello` | C→H | (c) | `conn.rs` handshake, one frame | Dial dies at `HANDSHAKE_TIMEOUT`; no stuck state. #1614 |
+| `Accept` | H→C | (c) | `lobby.rs` accept path (~1198) | Client times out while the host has the slot; reaped `Lost`, roster resend heals. #1614 |
+| `Reject` | H→C | (c) | `lobby.rs` (~1172, ~1183) | Refusal reason degrades to a timeout. #1614 |
+| `Welcome` | H→C | (c) | `lobby.rs` (~1199) | As `Accept`. #1614 |
+| `Session` | H→C | (b) | Re-broadcast every keepalive tick while in the lobby (`Phase::Lobby` branch of the timeout arm, ~1075); unicast to a newcomer (~1208) | No: newest-wins, self-heals within a tick |
+| `Roster` | H→C | (a) | `broadcast_roster` on every keepalive tick (~1098) and every membership change | No |
+| `SetReady` | C→H | (b) | `LobbyLink::resend_intents` (`mm2_app/src/net.rs`) repeats until the roster echoes it (#1488) | No |
+| `SetVehicle` | C→H | (b) | Same ledger (`want_pick`, #1488); the host treats an unchanged pick as a no-op | No |
+| `VehicleRefused` | H→C | (b) | A lost refusal leaves `want_pick` armed, so the next repeat is re-validated and re-refused (~1329); the client clears `want_pick` on receipt (`net.rs`) | No: self-heals in one `KEEPALIVE_INTERVAL` |
+| `Leave` | C→H | (b) | `LobbyLink::retry_leave` / `leave_reliably` (`net.rs`) and `mm2_join`'s watchdog thread repeat until the host closes (NET-LEAVE-LOSSY). The raw `LobbyClient::leave` (lobby.rs ~800) stays a single frame and is only for tests and `mm2-join`-style tools that add their own repeat | No for the app paths |
+| `Start` | H→C | (b) | `start_resend` re-sends every keepalive tick for `LIFECYCLE_RESEND_WINDOW` (5 s) until every peer's `Input`/`ResetRequest` shows the generation (`RemoteInputs::entered`); a late join re-arms it (#1489); the client ignores a repeat (`start`, `net.rs`) | No: ack by liveness |
+| `Cancel` | H→C | (b), bounded only | `cancel_resend`, same 5 s window, **no ack** (#1489). A client that misses every copy has live keepalives but a session that never ends | Yes, rarely. #1612 |
+| `Input` | C→H | (a) | One per client tick; mailbox is latest-wins by `seq` | No |
+| `ResetRequest` | C→H | (b) | `netdrive::send_reset_request` repeats every `RESET_RETRY_TICKS`, up to `MAX_RESET_ASKS` (20), until the epoch-declared `Snap` comes back; the host keeps the highest generation | No (budget tested at 60 % loss) |
+| `Snap` pose, trailers, `race`, seat race-progress and damage | H→C | (a) | `publish_snapshots` every update; stale ticks drop on `(generation, tick)` | No |
+| `Snap` terminal (`Results`) frame | H→C | (b) | `RESULTS_FRAME_REPEATS` = 30 extra copies (`netdrive.rs` ~2697) | No |
+| `Snap.impacts` rows | H→C | (c) | Drained from the `ImpactEvent` stream into the one frame being published; the client dedupes but nothing repeats them | Yes, presentation: lost sparks/audio, remote texel deformation stays different. #1613 |
+| `Props` | H→C | (a)/(b) | State frame; active + changed rows plus a rolling `RESEND_WINDOW` of settled/broken rows; late-join snapshot is paced until delivered (F26-A.3) | No |
+| `Traffic` | H→C | (a) | State frame; the client retires a copy only after several frames without it | No |
+| `World` | H→C | (a) | World-clock tick, newest-wins | No |
+| `Cnr` | H→C | (a)/(b) | Published on every `revision` change and periodically; a decided match repeats every `DECIDED_REPEAT_RUNS` until the session ends (see the Cops & Robbers section) | No |
+| `Keepalive` | H→C | (a) | Every `KEEPALIVE_INTERVAL` (~1066) | No: its absence is the signal |
+| `Leaves` | H→C | (a) | State frame, newest-wins | No |
+| `Signals` | H→C | (a) | State frame, newest-wins | No |
+
+Follow-ups: #1612 (`Cancel`), #1613 (`Snap.impacts`), #1614 (handshake).
+`Reject`/`Welcome`/`Accept` are grouped with `Hello` because they are one
+exchange with the same outcome. Everything else is (a) or (b) and already
+has a test or a recorded reason. Evidence level: code reading and the
+existing tests; no new run was made.
+
 ## Measured impairment matrix (F25-AC03)
 
 *Measured evidence — in-process apps over real loopback.*
