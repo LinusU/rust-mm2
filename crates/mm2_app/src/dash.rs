@@ -264,10 +264,19 @@ pub fn spawn_dash(
         report.spec_error = Some(e);
         None
     });
+    let pkg_path = format!("geometry/{car}_dash.pkg");
+    let mut pkg_unparseable = false;
     let model = vfs
-        .read_path(&format!("geometry/{car}_dash.pkg"))
+        .read_path(&pkg_path)
         .ok()
-        .and_then(|(bytes, _)| Pkg::parse(&bytes).ok())
+        .and_then(|(bytes, _)| match Pkg::parse(&bytes) {
+            Ok(pkg) => Some(pkg),
+            Err(e) => {
+                warn!(path = %pkg_path, error = %e, "unparseable dash pkg ignored");
+                pkg_unparseable = true;
+                None
+            }
+        })
         .map(|pkg| {
             build_model(&pkg, |stem| {
                 vfs.read_logical(&format!("geometry/{car}_dash_{stem}.mtx"))
@@ -457,10 +466,23 @@ pub fn spawn_dash(
         }
         (spec_r, model_r) => {
             if !report.cockpit {
+                let asnode = if report.spec_error.is_some() {
+                    "unparseable-asnode"
+                } else {
+                    "missing-asnode"
+                };
+                let pkg = if pkg_unparseable {
+                    "unparseable-pkg"
+                } else {
+                    "missing-pkg"
+                };
                 report.absent = Some(match (spec_r.is_some(), model_r.is_some()) {
-                    (false, false) => "missing-spec+pkg".into(),
-                    (false, true) => "missing-asnode".into(),
-                    (true, false) => "missing-pkg".into(),
+                    (false, false) if report.spec_error.is_none() && !pkg_unparseable => {
+                        "missing-spec+pkg".into()
+                    }
+                    (false, false) => format!("{asnode}+{pkg}"),
+                    (false, true) => asnode.into(),
+                    (true, false) => pkg.into(),
                     (true, true) => unreachable!(),
                 });
             }

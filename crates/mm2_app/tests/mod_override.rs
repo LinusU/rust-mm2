@@ -2730,6 +2730,10 @@ fn dash_base(d: &Path) {
 type DashShape = (usize, Option<f32>, Option<f32>, Option<f32>);
 
 fn dash_shape(vfs: &Vfs, car: &str) -> DashShape {
+    dash_shape_and_absent(vfs, car).0
+}
+
+fn dash_shape_and_absent(vfs: &Vfs, car: &str) -> (DashShape, Option<String>) {
     let mut world = World::new();
     world.init_resource::<Assets<Mesh>>();
     world.init_resource::<Assets<Image>>();
@@ -2778,7 +2782,7 @@ fn dash_shape(vfs: &Vfs, car: &str) -> DashShape {
             speed = (Some(max), Some(t.translation.x));
         }
     }
-    (report.parts, cluster, speed.0, speed.1)
+    ((report.parts, cluster, speed.0, speed.1), report.absent)
 }
 
 #[test]
@@ -2843,17 +2847,20 @@ fn a_mod_replaces_the_dash_cluster_records_through_spawn_dash() {
 }
 
 /// A malformed dash override does not let the base stand in: the cluster
-/// binds nothing and `DashReport` is the only trace — `spawn_dash` drops an
-/// unparseable `asnode`/`pkg` without a `warn!` (filed).
+/// binds nothing, warns, and `DashReport::absent` names the unparseable record.
 #[test]
 fn a_malformed_dash_override_does_not_let_the_base_stand_in() {
     let f = fixture();
     let root = f._tmp.path();
     dash_base(&f.base);
     let bad = broken_mod(root, "badasnode", "tune/vpt_dash.asnode", b"asNode {\n");
-    assert_eq!(dash_shape(&mounted(&f.base, &bad), "vpt").0, 0);
+    let (shape, absent) = dash_shape_and_absent(&mounted(&f.base, &bad), "vpt");
+    assert_eq!(shape.0, 0);
+    assert_eq!(absent.as_deref(), Some("unparseable-asnode"));
     let bad = broken_mod(root, "badpkg", "geometry/vpt_dash.pkg", b"not a pkg");
-    assert_eq!(dash_shape(&mounted(&f.base, &bad), "vpt").0, 0);
+    let (shape, absent) = dash_shape_and_absent(&mounted(&f.base, &bad), "vpt");
+    assert_eq!(shape.0, 0);
+    assert_eq!(absent.as_deref(), Some("unparseable-pkg"));
     assert_eq!(dash_shape(&vfs_of(&f.base, None), "vpt").0, 2);
 }
 
