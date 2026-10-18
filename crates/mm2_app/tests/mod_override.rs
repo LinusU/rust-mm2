@@ -1360,6 +1360,86 @@ fn a_malformed_vehicle_bound_override_is_reported_and_the_base_does_not_stand_in
     );
 }
 
+/// A `vehTrailer` tune with its model and bound, hitched to car `id`.
+fn trailer_for(d: &Path, id: &str) {
+    let wheel = |name: &str| {
+        format!(
+            "  {name} {{\n    SuspensionExtent 0.2\n    SuspensionLimit 0.05\n    SuspensionFactor 1.0\n    SuspensionDampCoef 0.1\n    SteeringLimit 0.5\n    BrakeCoef 0.14\n    TireDispLimitLong 0.075\n    TireDampCoefLong 0.75\n    TireDragCoefLong 0.01\n    TireDispLimitLat 0.075\n    TireDampCoefLat 0.75\n    TireDragCoefLat 0.02\n    OptimumSlipPercent 0.05\n    StaticFric 3.0\n    SlidingFric 2.95\n  }}\n"
+        )
+    };
+    write(
+        d,
+        &format!("tune/vehicle/{id}.vehtrailer"),
+        format!(
+            "type: a\nvehTrailer {{\n  Mass 3000\n  InertiaBox 2.0 2.0 6.0\n{}{}}}\n",
+            wheel("WheelFront"),
+            wheel("WheelBack")
+        ),
+    );
+    write(
+        d,
+        &format!("geometry/{id}_trailer.pkg"),
+        crate::support::car_pkg_with_body([0.9, 0.5, 1.6]),
+    );
+    write(
+        d,
+        &format!("bound/{id}_trailer_bound.bnd"),
+        crate::support::car_bnd(),
+    );
+}
+
+#[test]
+fn a_malformed_trailer_bound_override_is_reported_in_the_cars_report() {
+    let f = fixture();
+    trailer_for(&f.base, "vpt");
+    trailer_for(&f.base, "vpu");
+    let m = broken_mod(
+        f._tmp.path(),
+        "badtrl",
+        "bound/vpt_trailer_bound.bnd",
+        b"junk",
+    );
+    let vfs = mounted(&f.base, &m);
+    let warns = |id: &str| {
+        let def = load_vehicle(&vfs, id, 0).expect("an undecodable trailer bound is not fatal");
+        assert!(def.trailer.is_some(), "{id} keeps its trailer");
+        def.report.warnings
+    };
+    let w = warns("vpt");
+    assert!(
+        w.iter()
+            .any(|w| w.contains("bound/vpt_trailer_bound.bnd") && w.contains("failed to parse")),
+        "{w:?}"
+    );
+    let sibling = warns("vpu");
+    assert!(
+        !sibling.iter().any(|w| w.contains("_bound.bnd")),
+        "{sibling:?}"
+    );
+}
+
+#[test]
+fn a_malformed_ambient_bound_override_is_a_parse_error_and_siblings_load() {
+    let f = fixture();
+    crate::support::ambient_assets(&f.base, "va_test_a");
+    crate::support::ambient_assets(&f.base, "va_test_b");
+    let m = broken_mod(
+        f._tmp.path(),
+        "badamb",
+        "bound/va_test_a_bound.bnd",
+        b"junk",
+    );
+    let vfs = mounted(&f.base, &m);
+    let err = mm2_content::ambient_vehicle(&vfs, "va_test_a")
+        .expect_err("a broken ambient bound must not load");
+    assert!(
+        matches!(&err, mm2_content::LoadError::Parse(id, why)
+            if id == "va_test_a" && why.contains("bound/va_test_a_bound.bnd")),
+        "{err:?}"
+    );
+    assert!(mm2_content::ambient_vehicle(&vfs, "va_test_b").is_ok());
+}
+
 fn banger_record(mass: f32) -> String {
     format!(
         "type: a\ndgBangerData {{\n  AudioId 0\n  Size 0.5 1.0 0.5\n  CG 0.0 0.5 0.0\n  Mass {mass}\n  Elasticity 0.5\n  Friction 0.9\n  ImpulseLimit2 0\n  SpinAxis 0\n  Flash 0\n  NumParts 0\n  TexNumber 0\n  BillFlags 0\n  YRadius 0.5\n}}\n"

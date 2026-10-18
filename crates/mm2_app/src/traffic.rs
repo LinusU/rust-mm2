@@ -2477,6 +2477,32 @@ mod tests {
         let (quiet, notable) = partition_nav_issues(&[]);
         assert!(quiet.is_empty() && notable.is_empty());
     }
+    /// #1533: a class whose resolved `<id>_bound.bnd` does not parse is
+    /// unspawnable (`None`), never a silent size-hull stand-in, and does
+    /// not affect another class.
+    #[test]
+    fn a_class_with_a_malformed_bound_is_skipped_and_others_load() {
+        use mm2_assets::Vfs;
+        use mm2_game::AmbientSpec;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("geometry")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bound")).unwrap();
+        for id in ["va_bad", "va_ok"] {
+            std::fs::write(dir.path().join(format!("geometry/{id}.pkg")), b"PKG3").unwrap();
+        }
+        std::fs::write(dir.path().join("bound/va_bad_bound.bnd"), b"junk").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(dir.path(), 0).unwrap();
+        let spec = |id: &str| AmbientSpec {
+            id: id.into(),
+            cumulative_weight: 1.0,
+            flag: 0,
+            tuning: None,
+        };
+        assert!(super::class_assets(&vfs, &spec("va_bad")).is_none());
+        assert!(super::class_assets(&vfs, &spec("va_ok")).is_some());
+    }
 }
 
 #[cfg(test)]
