@@ -1694,4 +1694,4 @@ pub fn opponent_drive(
 
 /// The size (m: width, height, length) an ambient traffic car is given
 /// as a neighbour — it carries no handling config to read one from.
-const AMBIENT_SIZE: [f32; 3] = [2.0, 1.4, 4.6];
+pub(crate) const AMBIENT_SIZE: [f32; 3] = [2.0, 1.4, 4.6];

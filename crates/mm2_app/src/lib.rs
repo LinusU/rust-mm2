@@ -15,6 +15,7 @@ pub mod camera;
 pub mod car_visual;
 pub mod city;
 pub mod cnr;
+pub mod cnr_bot_drive;
 pub mod cnr_bots;
 pub mod cnrhud;
 pub mod cnrnet;

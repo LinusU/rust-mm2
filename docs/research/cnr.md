@@ -281,8 +281,7 @@ deadly water, ≥25 m from the player's start, ≥15 m from a gold site, ≥20 m
 from another bot) and gives it a stock catalog car; a roster that cannot be
 placed fails the session with per-reason counts. Bots carry `CnrBot` and
 `PlayerControl::Ai`; only that tag lets `enroll_cnr_participants` seat an AI
-car, so traffic, police and race opponents stay out. Bots do not drive yet
-(navigation is CNRBOT-C). Evidence: `tests/cnr_bots.rs` (retail SF and
+car, so traffic, police and race opponents stay out. Evidence: `tests/cnr_bots.rs` (retail SF and
 London, original-content level).
 
 CNRBOT-D (front end): the Cops & Robbers options screen has a `Bots: N`
@@ -292,3 +291,72 @@ CLI `--cnr-bots N` (0..=15, needs `--cnr`, conflicts with `--host`/`--join`)
 and `SessionConfig::default()` stay at 0. *Play again* reuses the retained
 config, so a rematch fields the same roster size on a fresh session; the
 standings list bots as ordinary participants.
+
+## Local solo bots driving (CNRBOT-C) — designed, not original
+
+`mm2_app::cnr_bot_drive::cnr_bot_drive` (`FixedUpdate`, ahead of the physics
+step; the gold step runs in `FixedLast`, so a bot plans from the previous
+step's match) gives each `CnrBot` its pedals. The planner (CNRBOT-B,
+`mm2_game::cnr_tactics`) says what to do; the bot turns that into a `Guide`
+for the **same** `NeuralState` and trained policy race opponents use, and its
+output is the car's own `VehicleInput` on the production rigid body. It never
+moves to a target, writes gold, scores or another car's input: a pickup, a
+steal and a delivery happen because the hull entered a trigger or struck the
+carrier and `cnr_host_step` decided so. Only `CnrBot` cars are driven, only
+with a `CnrHost` and the session's `CnrBotBrain` present, only while the
+session is `Playing` on the authority; paused or decided, every bot holds the
+handbrake.
+
+* **Lines.** Directed street route (`NavGraph::drive_line`) to the objective,
+  run 12 m past it so the car arrives at speed. No route (no lane near an end,
+  unreachable, expansion bound) → a straight line, counted in
+  `BotStats::straight`; within 30 m with the way open to a car → a straight
+  line too (`BotStats::direct`). Neighbour sensing and the policy's rays stay
+  on, so neither is blind seek-to-position.
+* **Replanning** is bounded: a goal switch replans at once; otherwise a street
+  line is replaced after ≥90 frames when the target moved ≥20 m, the line ran
+  out, or the car is ≥35 m off it (straight lines: ≥20 frames, 4 m, 5 m); a
+  failed plan waits 180 frames; one router query per fixed step across the
+  field. Approaching a *still* trigger (gold, own marker) the throttle is capped
+  at 0.5 inside 45 m — a 5 m pickup is missed at full speed; chases are not
+  capped.
+* **Recovery.** The policy's own back-up answers a stall. 540 frames inside 8 m
+  → `ResetVehicle` back onto the line (4–64 m behind, nearest first); stuck
+  again at the same place → put down 12–50 m *ahead*, past the obstruction.
+  Every landing keeps 25 m (or twice the larger trigger radius) from the gold
+  and both delivery markers, clear of other cars and on static dry ground, so a
+  re-anchor can never be a pickup or a delivery; with no such landing it is
+  refused. All of it is counted (`CnrBotDriver::{reanchors, refused}`) and
+  logged.
+
+### Measured
+
+Synthetic (`tests/cnr_bot_drive.rs`, real physics and gold step, flat ground,
+no street graph so lines are the straight fallback): loose-gold pickup →
+delivery with a goal switch; a moving carrier chased and robbed by ramming
+(`Dropped{Knocked}` by the chaser, then the chaser's own pickup); a walled-off
+bot re-anchored without scoring; no driving outside a CNR session, race
+opponents untouched; pause/results hold.
+
+Retail (`tests/cnr_bot_drive_retail.rs`, `MM2_RETAIL`, original-content level,
+2026-10-18): two bots per run, A ~60 m from the gold and B ~150 m, free-for-all,
+the first three seeds whose opening gold *and* hideout lie on a lane (as the site
+audit above says, most authored sites are off the road or on another level, and a
+street-following bot cannot finish a round whose site it cannot reach).
+
+| city | seed | A took the gold | A delivered | B closest to the carrier | notes |
+|---|---|---|---|---|---|
+| sf | 4 | no (B took it first) | no | — | stopped: no pickup by 120 s |
+| sf | 10 | no (B took it first) | no | — | stopped: stationary 60 s |
+| sf | 35 | yes (tick 6793) | **yes** (tick 11312) | 2.0 m | B also took the gold at some point (order not recorded) |
+| london | 12 | no | no | — | 8 refused re-anchors, 3 street lines: stuck near its start |
+| london | 15 | yes (tick 676) | **yes** (tick 8655) | 13.0 m | 1 re-anchor |
+| london | 89 | yes (tick 362) | **yes** (tick 4974) | 87.1 m | no re-anchor |
+
+Automated and observed: pickup → delivery in both cities (sf 35, london 15 and
+89), and a pursuer driving to within 13 m (london 15) and 2 m (sf 35) of a
+carrier. Not achieved and so not claimed: a pickup on every seed (sf 4/10 and
+london 12 fail for reasons not yet diagnosed — a bot sat near its start or lost
+the race for the gold), a steal *by ramming* on a retail street (only the
+synthetic test proves one), and any judgement of how the bots *look* or whether they are fun to
+play against (human-pending, CNRBOT-E). 

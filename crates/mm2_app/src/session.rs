@@ -311,6 +311,7 @@ pub fn drive_session(
             // gold load reconciles away with it (F27-AC04 — no handling
             // leak into a later race).
             commands.remove_resource::<crate::cnr::CnrHost>();
+            commands.remove_resource::<crate::cnr_bot_drive::CnrBotBrain>();
             commands.remove_resource::<crate::cnrnet::CnrReplica>();
             commands.remove_resource::<crate::cnrvoice::CnrCommentary>();
             commands.remove_resource::<crate::progression::EventRewards>();
@@ -772,6 +773,8 @@ pub fn load_session_world(
     // Cops & Robbers bots: the city's safe lane poses, gathered while
     // the deadly-water record is still in hand (CNRBOT-A).
     let mut bot_candidates: Option<Result<Vec<(crate::cnr_bots::BotSlot, bool)>, String>> = None;
+    // ... and the street graph the bots are driven over (CNRBOT-C).
+    let mut bot_graph: Option<std::sync::Arc<mm2_game::NavGraph>> = None;
     match &config.world {
         WorldMode::DevWorld => {
             dev_world::spawn_dev_world(
@@ -848,7 +851,12 @@ pub fn load_session_world(
                             .unwrap_or(psdl.as_str());
                         bot_candidates = Some(
                             crate::cnr_bots::load_graph(&vfs.0, stem)
-                                .map(|g| crate::cnr_bots::lane_slots(&g, loaded.water.as_ref()))
+                                .map(|g| {
+                                    let slots =
+                                        crate::cnr_bots::lane_slots(&g, loaded.water.as_ref());
+                                    bot_graph = Some(std::sync::Arc::new(g));
+                                    slots
+                                })
                                 .map_err(|e| e.to_string()),
                         );
                     }
@@ -1692,6 +1700,7 @@ pub fn load_session_world(
                     owner,
                     &mut session,
                 );
+                commands.insert_resource(crate::cnr_bot_drive::CnrBotBrain::new(bot_graph.take()));
             }
             Err(reason) => {
                 error!(%reason, "cops & robbers bots cannot be fielded");

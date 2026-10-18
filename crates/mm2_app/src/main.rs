@@ -2100,6 +2100,12 @@ fn main() {
         FixedUpdate,
         opponents::opponent_drive.run_if(evidence_capture_input_allowed),
     )
+    // CNRBOT-C: the local Cops & Robbers bots — idle without a bot
+    // brain, planned from the previous step's gold state.
+    .add_systems(
+        FixedUpdate,
+        mm2_app::cnr_bot_drive::cnr_bot_drive.run_if(evidence_capture_input_allowed),
+    )
     // F20-A.3: the fielded cops' detect → pursue machine. Frozen with
     // the other AI in ordinary static captures; no-ops without a fleet.
     .add_systems(

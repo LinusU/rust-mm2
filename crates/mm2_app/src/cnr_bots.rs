@@ -14,9 +14,9 @@
 //! never carry it — and the gold host step then treats a bot like the
 //! human: the same pickup, ram, delivery and score pipeline.
 //!
-//! This module does not drive the cars. A bot stands where it was put
-//! until the navigation and planner tasks (CNRBOT-B/C) give it inputs;
-//! it deliberately has no [`crate::opponents::OpponentDriver`] and no
+//! This module does not drive the cars: [`crate::cnr_bot_drive`] does
+//! (CNRBOT-C), through the [`CnrBotDriver`](crate::cnr_bot_drive::CnrBotDriver)
+//! spawned here. A bot deliberately has no [`crate::opponents::OpponentDriver`] and no
 //! `RaceProgress`, so no race system can mistake it for a finisher.
 //!
 //! Placement is a pure function of the city, the seed and the roster
@@ -336,6 +336,7 @@ pub fn spawn_bots(
             .spawn((
                 owner,
                 CnrBot { index: index as u8 },
+                crate::cnr_bot_drive::CnrBotDriver::default(),
                 ObjectIdentity(object),
                 Player {
                     id: player_id,
