@@ -657,6 +657,11 @@ fn spawn_lane(
             lane.stats.bytes_out += payload.len() as u64;
             let _ = write_frame(&mut dst, &payload);
         }
+        // Pass the end of stream on. The proxy keeps clones of every
+        // socket (to unblock lanes on drop), so dropping `dst` here
+        // would not close it: without the shutdown a peer that hung up
+        // leaves the far side believing the connection is live.
+        let _ = dst.shutdown(std::net::Shutdown::Write);
         shared_w.publish(slot, lane.stats);
     });
     // Writers first: joining on drop frees the channel receivers a
