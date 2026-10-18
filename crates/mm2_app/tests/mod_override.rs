@@ -2166,3 +2166,268 @@ fn a_mod_replaces_pedestrian_animation_through_the_archetype_loader_and_it_is_ga
     let bad = broken_mod(root, "badshaders", "anim/pedmodel_man.shaders", b"xx");
     assert!(ped_shape(&mounted(&f.base, &bad)).is_err());
 }
+
+/// A `camTrackCS` chase-lens record authoring `offset_y` and `fov`.
+fn track_cam(offset_y: f32, fov: f32) -> String {
+    format!(
+        "type: a\ncamTrackCS {{\n  Offset 0.000000 {offset_y:.6} -6.000000\n  MinDist 4.000000\n  MaxDist 8.000000\n  CameraFOV {fov:.6}\n  CameraNear 0.100000\n  CameraFar 600.000000\n}}\n"
+    )
+}
+
+/// A `camPovCS` cockpit-eye record authoring `eye_y`.
+fn pov_cam(eye_y: f32) -> String {
+    format!(
+        "type: a\ncamPovCS {{\n  Offset 0.000000 {eye_y:.6} -0.500000\n  ReverseOffset 0.000000 1.700000 0.750000\n  Pitch 0.020000\n  CameraFOV 70.000000\n  CameraNear 0.100000\n  CameraFar 600.000000\n}}\n"
+    )
+}
+
+fn camera_base(d: &Path) {
+    for car in ["vpt", "vpu"] {
+        write(
+            d,
+            &format!("tune/camera/{car}_near.camtrackcs"),
+            track_cam(2.0, 60.0),
+        );
+        write(
+            d,
+            &format!("tune/camera/{car}_far.camtrackcs"),
+            track_cam(4.0, 50.0),
+        );
+        write(d, &format!("tune/camera/{car}_dash.campovcs"), pov_cam(1.2));
+    }
+}
+
+/// `(near offset y, near fov, far offset y, pov eye y)` of `car`, read
+/// through the two production loaders; `None` for a record that did not
+/// load.
+type CameraShape = (Option<(f32, f32)>, Option<(f32, f32)>, Option<f32>);
+
+fn camera_shape(vfs: &Vfs, car: &str) -> CameraShape {
+    let cams = mm2_app::camera::load_track_cams(vfs, car);
+    let lens = |c: Option<mm2_formats::camtrack::TrackCamSpec>| {
+        c.map(|s| (s.offset.unwrap()[1], s.camera_fov.unwrap()))
+    };
+    (
+        lens(cams.near),
+        lens(cams.far),
+        mm2_app::dash::load_pov_cam(vfs, car).map(|p| p.offset.unwrap()[1]),
+    )
+}
+
+#[test]
+fn a_mod_replaces_camera_tuning_through_the_camera_and_dash_loaders() {
+    let f = fixture();
+    let root = f._tmp.path();
+    camera_base(&f.base);
+    let m = root.join("lens");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "lens");
+    write(&m, "tune/camera/vpt_near.camtrackcs", track_cam(3.0, 75.0));
+    write(&m, "tune/camera/vpt_dash.campovcs", pov_cam(1.5));
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(
+        camera_shape(&base, "vpt"),
+        (Some((2.0, 60.0)), Some((4.0, 50.0)), Some(1.2))
+    );
+    assert_eq!(
+        camera_shape(&modded, "vpt"),
+        (Some((3.0, 75.0)), Some((4.0, 50.0)), Some(1.5)),
+        "near lens and cockpit eye are the mod's; the far lens (bystander) is the base's"
+    );
+    assert_eq!(
+        camera_shape(&modded, "vpu"),
+        camera_shape(&base, "vpu"),
+        "another car is a bystander"
+    );
+    assert_eq!(
+        camera_shape(&vfs_of(&f.base, None), "vpt"),
+        camera_shape(&base, "vpt"),
+        "unmounting reverts"
+    );
+    // `tune/` is a gameplay prefix wholesale, so camera records move the
+    // fingerprint although they only steer the local view (filed as a
+    // classification question, not changed here).
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash
+    );
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (2, 0),
+        "{reports:?}"
+    );
+}
+
+/// A malformed camera override does not let the base's record stand in:
+/// the record reads as absent and the consumer takes its designed
+/// fallback. The loaders only `warn!` for *validation* issues; an
+/// unparseable record is dropped without a diagnostic (filed).
+#[test]
+fn a_malformed_camera_override_does_not_let_the_base_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    camera_base(&f.base);
+    let bad = broken_mod(
+        root,
+        "badnear",
+        "tune/camera/vpt_near.camtrackcs",
+        b"camPovCS {\n}\n",
+    );
+    assert_eq!(
+        camera_shape(&mounted(&f.base, &bad), "vpt"),
+        (None, Some((4.0, 50.0)), Some(1.2))
+    );
+    let bad = broken_mod(
+        root,
+        "badpov",
+        "tune/camera/vpt_dash.campovcs",
+        b"camTrackCS {\n}\n",
+    );
+    assert_eq!(
+        camera_shape(&mounted(&f.base, &bad), "vpt"),
+        (Some((2.0, 60.0)), Some((4.0, 50.0)), None)
+    );
+}
+
+/// One self-authored standalone `asBirthRule`.
+fn birth_rule(radius: f32, frame0: i64, spew: f32) -> String {
+    format!(
+        "type: a\nasBirthRule {{\n  PositionVar 0.200000 0.000000 0.200000\n  Velocity 0.000000 1.000000 0.000000\n  VelocityVar 0.500000 0.500000 0.500000\n  Life 0.500000\n  LifeVar 0.000000\n  Mass 0.300000\n  MassVar 0.000000\n  Radius {radius:.6}\n  RadiusVar 0.000000\n  Drag 0.000000\n  DragVar 0.000000\n  Damp 0.000000\n  DampVar 0.000000\n  DRadius 0.100000\n  DRadiusVar 0.000000\n  DAlpha -64.000000\n  DAlphaVar 0.000000\n  DRotation 0.000000\n  DRotationVar 0.000000\n  InitialBlast 4\n  SpewRate {spew:.6}\n  SpewTimeLimit 0.000000\n  Gravity -1.000000\n  TexFrameStart {frame0}\n  TexFrameEnd {}\n  BirthFlags 0\n  Height 0.000000\n  Intensity 1.000000\n  Color -1\n}}\n",
+        frame0 + 7
+    )
+}
+
+fn effects_base(d: &Path) {
+    for (i, name) in mm2_game::PTX_RULE_NAMES.iter().enumerate() {
+        write(
+            d,
+            &format!("tune/effects/{name}.asbirthrule"),
+            birth_rule(0.3, i as i64 * 8, 10.0),
+        );
+    }
+    write(d, "tune/rain.asbirthrule", birth_rule(0.1, 0, 200.0));
+}
+
+/// `(radius, tile start)` of each wheel effect that bound, and the report's
+/// `(loaded, failed)`.
+type WheelEffects = (Vec<Option<(f32, i64)>>, (usize, usize));
+
+fn wheel_effects(vfs: &Vfs) -> WheelEffects {
+    let (report, fx) = mm2_app::wheel_fx::wheel_fx_session(
+        vfs,
+        &mut Assets::<Mesh>::default(),
+        &mut Assets::<Image>::default(),
+        &mut Assets::<StandardMaterial>::default(),
+    );
+    let specs = fx
+        .specs
+        .iter()
+        .map(|s| s.as_ref().map(|s| (s.radius, s.tex_frame_start)))
+        .collect();
+    (specs, (report.loaded, report.failed))
+}
+
+/// `(radius, spew rate)` of the bound rain rule, and the report's
+/// `absent` reason.
+fn rain(vfs: &Vfs) -> (Option<(f32, f32)>, Option<&'static str>) {
+    let (report, _fx, rig) = mm2_app::precip::precip_session(
+        vfs,
+        mm2_game::Weather::new(3).unwrap(),
+        7,
+        &mut Assets::<Mesh>::default(),
+        &mut Assets::<Image>::default(),
+        &mut Assets::<StandardMaterial>::default(),
+    );
+    (
+        rig.map(|r| (r.spec.radius, r.spec.spew_rate)),
+        report.absent,
+    )
+}
+
+#[test]
+fn a_mod_replaces_wheel_effect_and_rain_rules_through_their_session_binders() {
+    let f = fixture();
+    let root = f._tmp.path();
+    effects_base(&f.base);
+    let m = root.join("fx");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "fx");
+    write(
+        &m,
+        "tune/effects/dust.asbirthrule",
+        birth_rule(0.9, 8, 10.0),
+    );
+    write(&m, "tune/rain.asbirthrule", birth_rule(0.4, 0, 90.0));
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    let (base_fx, base_counts) = wheel_effects(&base);
+    let n = mm2_game::PTX_RULE_NAMES.len();
+    assert_eq!((base_counts, base_fx.len()), ((n, 0), n));
+    let dust = mm2_game::PTX_RULE_NAMES
+        .iter()
+        .position(|&r| r == "dust")
+        .unwrap();
+    assert_eq!(base_fx[dust], Some((0.3, 8)));
+
+    let (mod_fx, mod_counts) = wheel_effects(&modded);
+    assert_eq!(mod_counts, (n, 0));
+    assert_eq!(mod_fx[dust], Some((0.9, 8)), "the dust rule is the mod's");
+    for (i, (a, b)) in base_fx.iter().zip(&mod_fx).enumerate() {
+        if i != dust {
+            assert_eq!(a, b, "effect {i} (bystander) is the base's");
+        }
+    }
+    assert_eq!(rain(&base), (Some((0.1, 200.0)), None));
+    assert_eq!(rain(&modded), (Some((0.4, 90.0)), None));
+    assert_eq!(wheel_effects(&vfs_of(&f.base, None)).0, base_fx);
+    assert_eq!(rain(&vfs_of(&f.base, None)), rain(&base), "revert");
+
+    // `tune/` is a gameplay prefix wholesale (see the camera test).
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash
+    );
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (2, 0),
+        "{reports:?}"
+    );
+}
+
+#[test]
+fn a_malformed_effect_override_is_counted_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    effects_base(&f.base);
+    let n = mm2_game::PTX_RULE_NAMES.len();
+
+    let bad = broken_mod(
+        root,
+        "baddirt",
+        "tune/effects/dirt.asbirthrule",
+        b"garbage\n",
+    );
+    let (fx, (loaded, failed)) = wheel_effects(&mounted(&f.base, &bad));
+    let dirt = mm2_game::PTX_RULE_NAMES
+        .iter()
+        .position(|&r| r == "dirt")
+        .unwrap();
+    assert_eq!((loaded, failed), (n - 1, 1));
+    assert_eq!(
+        fx[dirt], None,
+        "the slot stays dark, the base's rule is not used"
+    );
+
+    let bad = broken_mod(root, "badrain", "tune/rain.asbirthrule", b"garbage\n");
+    assert_eq!(
+        rain(&mounted(&f.base, &bad)),
+        (None, Some("rule unparseable"))
+    );
+}
