@@ -2892,7 +2892,19 @@ fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
 /// bound but inside the 0.75 m reseat's reach had it had time; a loaded
 /// local run measured 0.54 m), so the stop sits several seconds past rest
 /// to leave the bound room to act.
-const SHOVE_SETTLE_SECS: u64 = 50;
+///
+/// #1631: main CI then saw the jitter cell end 1.32 m apart with alice's
+/// car perched (`wheels=1/4`, `y=1.1`, three local impacts against the
+/// usual one) and `fix0` — the bound had not fired by the stop. The link
+/// dropped and duplicated nothing, and `Snap.impacts` rows (repeated
+/// since #1613) only feed `RemoteImpact` presentation, never a pose, so
+/// the repeats are ruled out; what remains is the local sim resolving a
+/// late contact differently and settling after the stop. The stop moves
+/// to 58 s so the 1 s at-rest window has the same room it had when
+/// #1508 was fixed. Not reproduced locally in 4 loaded runs of the shove
+/// tests (28 cells, worst 0.51 m), so this is a margin, not a proven
+/// root cause.
+const SHOVE_SETTLE_SECS: u64 = 58;
 
 /// One lobby of three processes on the dev world where the *host*
 /// drives (`--ram`, or `--parked` for the control) at the neighbouring
