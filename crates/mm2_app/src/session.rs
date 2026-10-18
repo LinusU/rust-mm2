@@ -748,6 +748,9 @@ pub fn load_session_world(
         None => None,
     };
     let mut world_ok = true;
+    // Cops & Robbers bots: the city's safe lane poses, gathered while
+    // the deadly-water record is still in hand (CNRBOT-A).
+    let mut bot_candidates: Option<Result<Vec<(crate::cnr_bots::BotSlot, bool)>, String>> = None;
     match &config.world {
         WorldMode::DevWorld => {
             dev_world::spawn_dev_world(
@@ -817,6 +820,17 @@ pub fn load_session_world(
                     // cities without a usable `.water` get no
                     // resource, so `track_recovery` falls back to the
                     // wheel-`drag` classification alone.
+                    if config.cnr_bots > 0 {
+                        let stem = std::path::Path::new(psdl)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(psdl.as_str());
+                        bot_candidates = Some(
+                            crate::cnr_bots::load_graph(&vfs.0, stem)
+                                .map(|g| crate::cnr_bots::lane_slots(&g, loaded.water.as_ref()))
+                                .map_err(|e| e.to_string()),
+                        );
+                    }
                     if let Some(water) = loaded.water {
                         commands.insert_resource(water);
                     }
@@ -1612,6 +1626,61 @@ pub fn load_session_world(
             spawn.position,
             spawn.yaw,
         ));
+
+    // CNRBOT-A: the local Cops & Robbers roster, set down beside the
+    // human. A roster that cannot be fielded fails the session — it is
+    // never silently shortened.
+    if config.cnr_bots > 0 {
+        let planned = match bot_candidates.take() {
+            Some(Ok(candidates)) => {
+                let city = match &config.world {
+                    WorldMode::City { psdl } => crate::net::city_stem(psdl),
+                    WorldMode::DevWorld => None,
+                };
+                let sites: Vec<Vec3> = city
+                    .map(|c| {
+                        mm2_content::CnrContent::load(&vfs.0, c)
+                            .sites
+                            .into_iter()
+                            .map(city::v3)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                crate::cnr_bots::plan_bots(
+                    &vfs.0,
+                    &candidates,
+                    config.cnr_bots,
+                    config.seed,
+                    spawn.position,
+                    &sites,
+                )
+                .map_err(|e| e.to_string())
+            }
+            Some(Err(reason)) => Err(reason),
+            None => Err("no city to place bots in".to_string()),
+        };
+        match planned {
+            Ok(plan) => {
+                crate::cnr_bots::spawn_bots(
+                    &mut commands,
+                    &vfs.0,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    plan,
+                    owner,
+                    &mut session,
+                );
+            }
+            Err(reason) => {
+                error!(%reason, "cops & robbers bots cannot be fielded");
+                session
+                    .fail(format!("Cops & Robbers bots: {reason}"))
+                    .expect("Loading → Failed is a legal transition");
+                return;
+            }
+        }
+    }
 
     // F22-B.2: every player vehicle carries the rear-view mirror strip
     // camera (HUD-3/CTL-1 `BACKSPACE`) — presentation, not authored

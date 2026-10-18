@@ -64,6 +64,13 @@ pub struct SessionConfig {
     /// caller that forgets to classify fails safe. Meaningless unless
     /// `mods_active`.
     pub mods_cosmetic_only: bool,
+    /// How many local AI participants a Cops & Robbers session fields
+    /// beside the one human (`0..=`[`MAX_CNR_BOTS`]). A designed
+    /// single-player enhancement, not an original rule: the retail mode
+    /// seats humans only. Local-only — it never rides the wire and a
+    /// hosted or joined session must leave it `0` ([`Self::validate`]).
+    /// Part of the config, so a restart reuses the same roster size.
+    pub cnr_bots: u8,
     /// Local-only developer overrides — never progression- or
     /// network-legal.
     pub dev: DevOverrides,
@@ -85,6 +92,7 @@ impl Default for SessionConfig {
             authority: SessionAuthority::Local,
             mods_active: false,
             mods_cosmetic_only: false,
+            cnr_bots: 0,
             dev: DevOverrides::default(),
         }
     }
@@ -128,9 +136,24 @@ impl SessionConfig {
                 return Err(ConfigError::CopsAndRobbersLimit(settings.limit));
             }
         }
+        if self.cnr_bots > 0 {
+            if self.cnr_bots > MAX_CNR_BOTS {
+                return Err(ConfigError::CnrBotCount(self.cnr_bots));
+            }
+            if !matches!(self.mode, SessionMode::CopsAndRobbers(_)) {
+                return Err(ConfigError::CnrBotsNeedCnr);
+            }
+            if self.authority != SessionAuthority::Local {
+                return Err(ConfigError::CnrBotsNeedLocal);
+            }
+        }
         Ok(())
     }
 }
+
+/// The most local AI participants a Cops & Robbers session may field
+/// beside its human (designed bound: a 16-car match).
+pub const MAX_CNR_BOTS: u8 = 15;
 
 /// A rejected `SessionConfig` field.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +180,13 @@ pub enum ConfigError {
     /// ([`MAX_LIMIT_MINUTES`]/[`MAX_LIMIT_POINTS`]); a wire blob can
     /// carry any `u32`, the host menu only the stock choices.
     CopsAndRobbersLimit(MatchLimit),
+    /// A bot count above [`MAX_CNR_BOTS`].
+    CnrBotCount(u8),
+    /// Bots requested outside a Cops & Robbers session.
+    CnrBotsNeedCnr,
+    /// Bots requested on a hosted or joined session: they are local
+    /// participants, never network seats.
+    CnrBotsNeedLocal,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -175,6 +205,19 @@ impl std::fmt::Display for ConfigError {
                 write!(
                     f,
                     "Cops & Robbers limit {limit:?} is outside the allowed range"
+                )
+            }
+            Self::CnrBotCount(n) => {
+                write!(
+                    f,
+                    "{n} Cops & Robbers bots is above the {MAX_CNR_BOTS} allowed"
+                )
+            }
+            Self::CnrBotsNeedCnr => write!(f, "bots are only available in Cops & Robbers"),
+            Self::CnrBotsNeedLocal => {
+                write!(
+                    f,
+                    "Cops & Robbers bots are local-only, not for hosted or joined sessions"
                 )
             }
         }
@@ -849,6 +892,42 @@ pub struct NavOverlay {
 
 #[cfg(test)]
 mod tests {
+    fn cnr_config(bots: u8, authority: SessionAuthority) -> SessionConfig {
+        SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/sf.psdl".to_string(),
+            },
+            mode: SessionMode::CopsAndRobbers(Default::default()),
+            authority,
+            cnr_bots: bots,
+            ..SessionConfig::default()
+        }
+    }
+
+    #[test]
+    fn cnr_bots_are_bounded_local_and_cnr_only() {
+        for n in [0, 1, MAX_CNR_BOTS] {
+            assert_eq!(cnr_config(n, SessionAuthority::Local).validate(), Ok(()));
+        }
+        assert_eq!(
+            cnr_config(MAX_CNR_BOTS + 1, SessionAuthority::Local).validate(),
+            Err(ConfigError::CnrBotCount(MAX_CNR_BOTS + 1))
+        );
+        for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+            assert_eq!(
+                cnr_config(1, authority).validate(),
+                Err(ConfigError::CnrBotsNeedLocal)
+            );
+            assert_eq!(cnr_config(0, authority).validate(), Ok(()));
+        }
+        let race = SessionConfig {
+            cnr_bots: 1,
+            ..SessionConfig::default()
+        };
+        assert_eq!(race.validate(), Err(ConfigError::CnrBotsNeedCnr));
+        assert_eq!(SessionConfig::default().cnr_bots, 0, "bots are opt-in");
+    }
+
     use super::*;
 
     #[test]

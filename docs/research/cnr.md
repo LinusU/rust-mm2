@@ -267,3 +267,20 @@ the host seat against a `--bot --bot-speed 6` client carrier. Measured on retail
 sf, seed 1291: a *client-seat* `--bot` still does not reliably deliver (its
 predicted car leaves the elevated road on the route's hill and the guide, which
 never re-anchors, cannot recover), which is why the thief is the host seat.
+
+## Local solo bots (CNRBOT-A) — designed, not original
+
+The retail mode seats humans only; local bots are a new single-player
+enhancement, not a claim about original Cops & Robbers AI.
+`SessionConfig::cnr_bots` (`0..=15`, default `0`) fields that many extra
+AI cars beside the one human. It is local-only: `SessionConfig::validate`
+refuses it outside a Cops & Robbers session and on a hosted or joined one,
+and it never rides the wire. `mm2_app::cnr_bots` places each bot at a
+seeded-random vehicle-lane midpoint of the city's navigation graph (not in
+deadly water, ≥25 m from the player's start, ≥15 m from a gold site, ≥20 m
+from another bot) and gives it a stock catalog car; a roster that cannot be
+placed fails the session with per-reason counts. Bots carry `CnrBot` and
+`PlayerControl::Ai`; only that tag lets `enroll_cnr_participants` seat an AI
+car, so traffic, police and race opponents stay out. Bots do not drive yet
+(navigation is CNRBOT-C). Evidence: `tests/cnr_bots.rs` (retail SF and
+London, original-content level).

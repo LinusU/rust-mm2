@@ -2734,6 +2734,7 @@ impl SessionParams {
             authority: SessionAuthority::Remote,
             mods_active: false,
             mods_cosmetic_only: false,
+            cnr_bots: 0,
             dev: DevOverrides::default(),
         })
     }

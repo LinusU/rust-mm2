@@ -61,6 +61,7 @@ use mm2_game::{
 use tracing::info;
 
 use crate::city::{MovableModels, WorldFloor, v3};
+use crate::cnr_bots::CnrBot;
 use crate::cnrnet::CnrReplica;
 use crate::netdrive::NetPlayer;
 
@@ -207,7 +208,7 @@ pub fn start_match(
 /// Fixed-step authority leg: seat every participant car that is not yet
 /// in the match, on the side [`GoldMatch::balanced_side`] picks, in
 /// ascending participant order so the split does not depend on query
-/// order. AI cars never take part — a bot is not a player here. In a
+/// order. AI cars take part only when tagged [`CnrBot`]. In a
 /// networked session only a car stamped with its wire id counts, which
 /// keeps the local car out until its identity is settled.
 ///
@@ -220,7 +221,7 @@ pub fn start_match(
 pub fn enroll_cnr_participants(
     session: Res<Session>,
     host: Option<ResMut<CnrHost>>,
-    cars: Query<(&Player, Option<&NetPlayer>)>,
+    cars: Query<(&Player, Option<&NetPlayer>, Has<CnrBot>)>,
 ) {
     let Some(mut host) = host else {
         return;
@@ -240,8 +241,11 @@ pub fn enroll_cnr_participants(
         .filter(|s| !s.connected)
         .map(|s| s.player)
         .collect();
-    for (player, net) in &cars {
-        if player.control == PlayerControl::Ai || (networked && net.is_none()) {
+    for (player, net, bot) in &cars {
+        // An AI car is a participant only when it is one of the
+        // session's tagged bots; traffic, police and race opponents
+        // never are.
+        if (player.control == PlayerControl::Ai && !bot) || (networked && net.is_none()) {
             continue;
         }
         let id = participant_id(player, net);
@@ -2204,5 +2208,137 @@ mod tests {
             .insert_resource(CnrReplica(game.view()));
         app.update();
         assert_eq!(mass_of(&app, cars[0]), MASS);
+    }
+
+    /// A local session with `bots` tagged AI cars beside one human,
+    /// enrollment and the host step chained as in the app.
+    fn bot_app(variant: CnrVariant, bots: u8) -> App {
+        let mut config = cnr_config(variant, SessionAuthority::Local);
+        config.cnr_bots = bots;
+        let mut session = playing(config);
+        let gold = session.mint_object_id();
+        let human = session.mint_player_id();
+        let game = GoldMatch::new(
+            session.generation(),
+            gold,
+            CnrSettings {
+                variant,
+                gold_mass: GoldMass::QuarterTon,
+                ..CnrSettings::default()
+            }
+            .rules(RACE_TICK_HZ),
+            pool(),
+            41,
+            &[],
+        )
+        .unwrap();
+        let mut ids = vec![(human, PlayerControl::Local, false)];
+        for _ in 0..bots {
+            ids.push((session.mint_player_id(), PlayerControl::Ai, true));
+        }
+        let mut app = App::new();
+        for (i, (id, control, bot)) in ids.into_iter().enumerate() {
+            let object = session.mint_object_id();
+            let mut e = app.world_mut().spawn((
+                ObjectIdentity(object),
+                Player { id, control },
+                Position(Vec3::new(5000.0 + i as f32 * 100.0, 0.0, 5000.0)),
+                Mass(MASS),
+                AngularInertia {
+                    principal: INERTIA,
+                    local_frame: Quat::IDENTITY,
+                },
+            ));
+            if bot {
+                e.insert(CnrBot { index: i as u8 - 1 });
+            }
+        }
+        // Ordinary AI traffic is never a participant.
+        app.world_mut().spawn((
+            ObjectIdentity(session.mint_object_id()),
+            Player {
+                id: session.mint_player_id(),
+                control: PlayerControl::Ai,
+            },
+            Position(Vec3::new(9000.0, 0.0, 9000.0)),
+        ));
+        app.insert_resource(session)
+            .insert_resource(CnrHost::new(game))
+            .add_message::<ImpactEvent>()
+            .add_message::<CnrEvent>()
+            .add_systems(
+                Update,
+                (enroll_cnr_participants, cnr_host_step, reconcile_gold_load).chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn a_roster_of_any_size_is_seated_exactly_with_deterministic_sides() {
+        for variant in [
+            CnrVariant::FreeForAll,
+            CnrVariant::CopsVsRobbers,
+            CnrVariant::RobbersVsRobbers,
+        ] {
+            for bots in [0u8, 1, 10, 15] {
+                let mut app = bot_app(variant, bots);
+                app.update();
+                let seated = sides(&app);
+                assert_eq!(seated.len(), bots as usize + 1, "{variant:?} x{bots}");
+                let again = {
+                    let mut b = bot_app(variant, bots);
+                    b.update();
+                    sides(&b)
+                };
+                assert_eq!(seated, again, "same seed, same split");
+                // Seating is idempotent: more updates add no one.
+                app.update();
+                assert_eq!(sides(&app), seated);
+                if variant != CnrVariant::FreeForAll {
+                    let first = seated[0].1;
+                    let same = seated.iter().filter(|(_, s)| *s == first).count();
+                    let others = seated.len() - same;
+                    assert!(same.abs_diff(others) <= 1, "balanced: {seated:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bot_carries_and_delivers_gold_through_the_same_host_step() {
+        let mut app = bot_app(CnrVariant::FreeForAll, 1);
+        app.update();
+        let bot = app
+            .world_mut()
+            .query_filtered::<(Entity, &Player), With<CnrBot>>()
+            .iter(app.world())
+            .map(|(e, p)| (e, p.id))
+            .next()
+            .unwrap();
+        let gold = app
+            .world()
+            .resource::<CnrHost>()
+            .game
+            .gold_position()
+            .unwrap();
+        app.world_mut().get_mut::<Position>(bot.0).unwrap().0 = gold;
+        app.update();
+        let game = &app.world().resource::<CnrHost>().game;
+        assert_eq!(game.carrier(), Some(bot.1));
+        assert_eq!(app.world().get::<Mass>(bot.0).unwrap().0, MASS + 250.0);
+        let hideout = game.sites().hideout;
+        app.world_mut().get_mut::<Position>(bot.0).unwrap().0 = hideout;
+        app.update();
+        let game = &app.world().resource::<CnrHost>().game;
+        assert_eq!(game.round(), 1, "one delivery");
+        assert_eq!(game.score(bot.1), Some(125), "the bot's own score");
+        let human = app
+            .world_mut()
+            .query_filtered::<&Player, Without<CnrBot>>()
+            .iter(app.world())
+            .find(|p| p.control == PlayerControl::Local)
+            .unwrap()
+            .id;
+        assert_eq!(app.world().resource::<CnrHost>().game.score(human), Some(0));
     }
 }
