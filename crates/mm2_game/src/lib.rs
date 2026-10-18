@@ -14,6 +14,7 @@ pub mod banger;
 pub mod breakaway;
 pub mod cablecar;
 pub mod cnr_options;
+pub mod cnr_tactics;
 pub mod config;
 pub mod damage;
 pub mod drawbridge;
