@@ -851,10 +851,10 @@ for a bounded window; **(c)** sent once. Line numbers are in
 
 | Variant | Direction | Class | What makes it so (code) | Loss matters? |
 |---|---|---|---|---|
-| `Hello` | C→H | (c) | `conn.rs` handshake, one frame | Dial dies at `HANDSHAKE_TIMEOUT`; no stuck state. #1614 |
-| `Accept` | H→C | (c) | `lobby.rs` accept path (~1198) | Client times out while the host has the slot; reaped `Lost`, roster resend heals. #1614 |
-| `Reject` | H→C | (c) | `lobby.rs` (~1172, ~1183) | Refusal reason degrades to a timeout. #1614 |
-| `Welcome` | H→C | (c) | `lobby.rs` (~1199) | As `Accept`. #1614 |
+| `Hello` | C→H | (c) | `conn.rs` handshake, one frame | Dial dies at `HANDSHAKE_TIMEOUT` with an I/O error; no stuck state, re-dial succeeds. Test: `a_lost_hello_times_out_and_a_redial_succeeds` (#1614) |
+| `Accept` | H→C | (c) | `lobby.rs` accept path (~1198) | Client errors (timeout, or the next frame where `Welcome` was expected) while the host has the slot; the failed dialler's close reaches the host and the seat is freed, re-dial succeeds. Test: `a_lost_accept_times_out_and_leaves_no_ghost_seat` (#1614) |
+| `Reject` | H→C | (c) | `lobby.rs` (~1172, ~1183) | Refusal reason degrades to a timeout; the next dial, frame flowing, gets the named reason. Test: `a_lost_reject_degrades_to_a_timeout_then_names_its_reason` (#1614) |
+| `Welcome` | H→C | (c) | `lobby.rs` (~1199) | As `Accept`. Test: `a_lost_welcome_times_out_and_leaves_no_ghost_seat` (#1614) |
 | `Session` | H→C | (b) | Re-broadcast every keepalive tick while in the lobby (`Phase::Lobby` branch of the timeout arm, ~1075); unicast to a newcomer (~1208) | No: newest-wins, self-heals within a tick |
 | `Roster` | H→C | (a) | `broadcast_roster` on every keepalive tick (~1098) and every membership change | No |
 | `SetReady` | C→H | (b) | `LobbyLink::resend_intents` (`mm2_app/src/net.rs`) repeats until the roster echoes it (#1488) | No |
@@ -876,7 +876,7 @@ for a bounded window; **(c)** sent once. Line numbers are in
 | `Leaves` | H→C | (a) | State frame, newest-wins | No |
 | `Signals` | H→C | (a) | State frame, newest-wins | No |
 
-Follow-ups: #1612 (`Cancel`), #1613 (`Snap.impacts`, fixed by a bounded repeat), #1614 (handshake).
+Follow-ups: #1612 (`Cancel`), #1613 (`Snap.impacts`, fixed by a bounded repeat), #1614 (handshake: tested, no retry added; the dialler reports an error and the caller re-dials). The ghost seat the test first found was a proxy artefact: `ImpairProxy` did not pass a hung-up peer's end of stream on, so the host never saw the close; lanes now `shutdown(Write)` on stream end.
 `Reject`/`Welcome`/`Accept` are grouped with `Hello` because they are one
 exchange with the same outcome. Everything else is (a) or (b) and already
 has a test or a recorded reason. Evidence level: code reading and the

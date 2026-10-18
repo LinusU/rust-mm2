@@ -674,7 +674,8 @@ mod tests {
     use super::*;
     use crate::conn::listen_loopback;
     use crate::proto::DriveInput;
-    use crate::{Client, Host, HostConfig, hello};
+    use crate::proto::{Message, RejectCode};
+    use crate::{Client, Host, HostConfig, NetError, hello};
     use std::sync::mpsc::{Receiver, SyncSender};
 
     const WAIT: Duration = Duration::from_secs(10);
@@ -1208,5 +1209,116 @@ mod tests {
         assert_eq!(read_frame(&mut c).unwrap(), frame(5));
         let stats = stats_at_least(&proxy, LinkDir::Down, 1);
         assert_eq!(stats.duplicated, 1);
+    }
+
+    /// The handshake frames are each sent once (#1611 audit, #1614). Lose
+    /// one at the application level — the relay swallows every frame of
+    /// its tag while the first dial runs — and the outcome is: the dial
+    /// fails with an error rather than hanging, the host holds no ghost
+    /// seat once the failed dialler is gone, and an immediate re-dial
+    /// through the same proxy succeeds. The transport (TCP) is not
+    /// claimed reliable here; this is the impaired relay's frame loss.
+    fn lose_handshake_frame(dir: LinkDir, lost: Message, dial_fingerprint: u64) -> NetError {
+        const FP: u64 = 0xfeed;
+        let host = Host::listen_loopback(&HostConfig::new(FP)).unwrap();
+        let proxy = ImpairProxy::loopback_seeded(host.addr(), 11).unwrap();
+        let tag = lost.encode().unwrap()[0];
+        proxy.set_drop_tag(dir, Some(tag));
+        let started = Instant::now();
+        let err = Client::join(
+            proxy.addr(),
+            &hello("build".to_string(), "lost".to_string(), dial_fingerprint),
+        )
+        .map(|_| ())
+        .expect_err("a handshake with a lost frame must not succeed");
+        assert!(
+            started.elapsed() < crate::conn::HANDSHAKE_TIMEOUT * 3,
+            "the dial must be bounded, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            proxy.stats(dir).dropped >= 1,
+            "the recipe never dropped the frame"
+        );
+        proxy.set_drop_tag(dir, None);
+
+        // Immediate re-dial with the right fingerprint.
+        let mut again = Client::join(
+            proxy.addr(),
+            &hello("build".to_string(), "again".to_string(), FP),
+        )
+        .expect("the re-dial after a lost handshake frame failed");
+
+        // Ghost check: a seat taken by the lost dial is reaped once the
+        // dialler gives up, so membership settles at the one live client.
+        let mut seated: i32 = 0;
+        let settle = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match host.recv_timeout(Duration::from_millis(50)) {
+                Ok(crate::HostEvent::Joined { .. }) => seated += 1,
+                Ok(crate::HostEvent::Left { .. }) => seated -= 1,
+                _ => {}
+            }
+            if seated == 1 && Instant::now() > settle {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ghost seat: {seated} seats held after the failed dial left"
+            );
+        }
+        let _ = again.set_ready(true);
+        err
+    }
+
+    #[test]
+    fn a_lost_hello_times_out_and_a_redial_succeeds() {
+        let hello_msg = Message::Hello(hello(String::new(), String::new(), 0));
+        let err = lose_handshake_frame(LinkDir::Up, hello_msg, 0xfeed);
+        assert!(matches!(err, NetError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_lost_accept_times_out_and_leaves_no_ghost_seat() {
+        let err = lose_handshake_frame(LinkDir::Down, Message::Accept, 0xfeed);
+        // The next frame in line (`Welcome`, `Session`) arrives where the
+        // lost one was expected, or the wait times out: both are errors.
+        assert!(
+            matches!(err, NetError::Io(_) | NetError::Unexpected(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_lost_welcome_times_out_and_leaves_no_ghost_seat() {
+        let err = lose_handshake_frame(LinkDir::Down, Message::Welcome { player_id: 0 }, 0xfeed);
+        // The next frame in line (`Welcome`, `Session`) arrives where the
+        // lost one was expected, or the wait times out: both are errors.
+        assert!(
+            matches!(err, NetError::Io(_) | NetError::Unexpected(_)),
+            "{err:?}"
+        );
+    }
+
+    /// A lost `Reject` degrades the refusal reason to a timeout; once
+    /// the frame flows again the same dial gets the precise reason.
+    #[test]
+    fn a_lost_reject_degrades_to_a_timeout_then_names_its_reason() {
+        let reject = Message::Reject {
+            code: RejectCode::ContentMismatch,
+            message: String::new(),
+        };
+        let err = lose_handshake_frame(LinkDir::Down, reject, 0xdead);
+        assert!(matches!(err, NetError::Io(_)), "{err:?}");
+        let host = Host::listen_loopback(&HostConfig::new(0xfeed)).unwrap();
+        let proxy = ImpairProxy::loopback_seeded(host.addr(), 12).unwrap();
+        match Client::join(
+            proxy.addr(),
+            &hello("build".to_string(), "bad".to_string(), 0xdead),
+        ) {
+            Err(NetError::Rejected { code, .. }) => assert_eq!(code, RejectCode::ContentMismatch),
+            other => panic!("expected a named refusal, got {:?}", other.map(|_| ())),
+        }
     }
 }
