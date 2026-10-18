@@ -39,8 +39,8 @@ use mm2_game::{
 };
 use mm2_net::{
     Client, Conn, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, KEEPALIVE_INTERVAL,
-    LateJoin, LeaveCause, LinkDir, Message, SNAP_NO_SURFACE, SnapEntry, SnapImpact, VehiclePick,
-    accept_hello, hello, listen_loopback,
+    LIFECYCLE_RESEND_WINDOW, LateJoin, LeaveCause, LinkDir, Message, SNAP_NO_SURFACE, SnapEntry,
+    SnapImpact, VehiclePick, accept_hello, hello, listen_loopback,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput, VehicleState};
 use support::{Proc, WAIT, listening, mount};
@@ -743,6 +743,66 @@ fn a_dropped_start_and_cancel_are_recovered_by_the_hosts_repeat() {
     // Recovery: the host's bounded `Cancel` repeat reaches the client,
     // which leaves the ended session for the lobby.
     proxy.set(LinkDir::Down, Impair::default());
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Menu);
+    assert!(
+        app.world().resource::<LobbyState>().generation.is_none(),
+        "the cancel must clear the client's session generation"
+    );
+    host.shutdown();
+}
+
+/// #1612: the host's `Cancel` repeat is time-bounded and never
+/// acknowledged, so a client that misses every copy used to stay in the
+/// ended session for good. The lane here drops every `Cancel` frame for
+/// longer than the whole resend window while the rest of the lane flows
+/// (the keepalives carrying the host's lifecycle state included), and the
+/// client must still return to the lobby.
+#[test]
+fn a_client_that_misses_every_cancel_copy_still_returns_to_the_lobby() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1612).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link);
+    until_ready(&mut app);
+
+    host.start(LateJoin::Open).unwrap();
+    let generation = until_started(&host);
+    spin(&mut app, |a| session_phase(a) != SessionPhase::Menu);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // No `Cancel` frame crosses for the whole resend window plus a tick.
+    let cancel_tag = Message::Cancel { generation }.encode().unwrap()[0];
+    proxy.set_drop_tag(LinkDir::Down, Some(cancel_tag));
+    let before = proxy.stats(LinkDir::Down).dropped;
+    host.cancel().unwrap();
+    let window_over = Instant::now() + LIFECYCLE_RESEND_WINDOW + KEEPALIVE_INTERVAL;
+    while Instant::now() < window_over {
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        proxy.stats(LinkDir::Down).dropped > before,
+        "no Cancel copy was ever dropped"
+    );
+    // The window is over; the lane never recovers a Cancel. The host's
+    // standing lifecycle state (keepalives) must end the session.
     spin(&mut app, |a| session_phase(a) == SessionPhase::Menu);
     assert!(
         app.world().resource::<LobbyState>().generation.is_none(),

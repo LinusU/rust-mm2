@@ -385,6 +385,20 @@ established, since the control channel may then idle between requests;
 need a different one. The F24-B accept loop therefore never waits on a
 single peer indefinitely.
 
+Since v28 (#1612, designed) the keepalive also carries the host's
+lifecycle state — the newest minted session `generation` and whether it
+is still `running` — repeated every tick for as long as the lobby lives.
+The host's `Cancel` repeat is time-bounded (`LIFECYCLE_RESEND_WINDOW`)
+and unacknowledged, so a client that missed every copy would otherwise
+sit in the ended session forever. `Client::recv` therefore turns a
+`running: false` keepalive for a generation the client entered (`>=` the
+newest `Start` it saw, `>` the newest `Cancel` it saw or synthesized)
+into the `Cancel` it stands for; an older generation is a stale reorder
+and ignored. `ImpairProxy::set_drop_tag` loses one message kind
+outright and the test
+`a_client_that_misses_every_cancel_copy_still_returns_to_the_lobby`
+proves the recovery.
+
 After the handshake the idle channel is bounded the other way (v23,
 F24-AC04, designed — nothing original is involved): the host loop sends
 every rostered peer a `Message::Keepalive` each `KEEPALIVE_INTERVAL`

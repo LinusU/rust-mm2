@@ -84,8 +84,10 @@
 /// `Message::Signals` — the authority's traffic-signal phase (the member
 /// road currently green at each light-controlled junction) as its own
 /// host→client frame, so a client renders the host's lights rather than
-/// none (F26-A.4b).
-pub const PROTOCOL_VERSION: u16 = 27;
+/// none (F26-A.4b). v28: `Message::Keepalive` carries the host's newest
+/// session generation and whether it is still running, so a client that
+/// missed every bounded `Cancel` copy still returns to the lobby (#1612).
+pub const PROTOCOL_VERSION: u16 = 28;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -896,11 +898,21 @@ pub enum Message {
         frame: SnapCnr,
     },
     /// Host → every client: nothing happened, the host is alive (v23,
-    /// F24-AC04). Carries no state; a client treats the silence of
-    /// everything else — keepalives included — for longer than the
-    /// liveness timeout as a lost host. A client that sends one is
-    /// dropped, like any other host-only message.
-    Keepalive,
+    /// F24-AC04). A client treats the silence of everything else —
+    /// keepalives included — for longer than the liveness timeout as a
+    /// lost host. Since v28 it also carries the host's lifecycle state,
+    /// repeated every tick: a client that missed every bounded `Cancel`
+    /// copy still learns its session is over (#1612). A client that
+    /// sends one is dropped, like any other host-only message.
+    Keepalive {
+        /// The newest session generation the host has minted (0 before
+        /// the first `Start`) — monotone, so a reordered stale
+        /// keepalive names an older generation than the client holds.
+        generation: u64,
+        /// Whether the session `generation` names is still running; a
+        /// keepalive saying `false` is the standing form of `Cancel`.
+        running: bool,
+    },
     /// Host → every client: the authority's proximity drawbridge leaves
     /// (v26, F26-A.4) — a proximity leaf opens for whoever came near it
     /// on the host, so its state is the host's to carry. `tick` is the
@@ -1379,7 +1391,14 @@ impl Message {
                     }
                 }
             }
-            Self::Keepalive => out.push(TAG_KEEPALIVE),
+            Self::Keepalive {
+                generation,
+                running,
+            } => {
+                out.push(TAG_KEEPALIVE);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.push(u8::from(*running));
+            }
             Self::Leaves {
                 generation,
                 tick,
@@ -1682,7 +1701,10 @@ impl Message {
                     rows,
                 }
             }
-            TAG_KEEPALIVE => Self::Keepalive,
+            TAG_KEEPALIVE => Self::Keepalive {
+                generation: cur.u64()?,
+                running: cur.bool()?,
+            },
             TAG_LEAVES => {
                 let generation = cur.u64()?;
                 let tick = cur.u64()?;
@@ -2412,10 +2434,14 @@ mod tests {
     }
 
     #[test]
-    fn a_keepalive_is_a_bare_tag_and_refuses_padding() {
-        let bytes = Message::Keepalive.encode().unwrap();
-        assert_eq!(bytes, [TAG_KEEPALIVE]);
-        assert_eq!(Message::decode(&bytes).unwrap(), Message::Keepalive);
+    fn a_keepalive_carries_the_lifecycle_state_and_refuses_padding() {
+        let keepalive = Message::Keepalive {
+            generation: 3,
+            running: true,
+        };
+        let bytes = keepalive.encode().unwrap();
+        assert_eq!(bytes, [TAG_KEEPALIVE, 3, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(Message::decode(&bytes).unwrap(), keepalive);
         let mut padded = bytes;
         padded.push(0);
         assert!(Message::decode(&padded).is_err());

@@ -733,6 +733,11 @@ impl HostCtl {
 pub struct Client {
     conn: Conn,
     player_id: u16,
+    /// Newest `Start` generation seen (0: none) and newest `Cancel`
+    /// generation seen or synthesized — what lets a host-state
+    /// keepalive stand in for a `Cancel` every copy of which was lost.
+    started: u64,
+    cancelled: u64,
 }
 
 impl Client {
@@ -751,7 +756,12 @@ impl Client {
             Message::Welcome { player_id } => player_id,
             _ => return Err(NetError::Unexpected("expected Welcome")),
         };
-        Ok(Self { conn, player_id })
+        Ok(Self {
+            conn,
+            player_id,
+            started: 0,
+            cancelled: 0,
+        })
     }
 
     /// The roster slot the host assigned.
@@ -809,14 +819,39 @@ impl Client {
     /// The next host→client message — a `Roster` broadcast today, more
     /// lobby traffic as later F24-B legs land. `Err` means the
     /// connection to the host is gone.
-    /// Keepalives are consumed here: they only restart the
+    /// Keepalives are consumed here: they restart the
     /// [`LIVENESS_TIMEOUT`] clock, which a silent host lets expire
-    /// (`Io` with `WouldBlock`/`TimedOut`).
+    /// (`Io` with `WouldBlock`/`TimedOut`). One that reports the
+    /// session this client entered as no longer running is returned as
+    /// the `Cancel` it stands for (#1612): the host's `Cancel` repeat is
+    /// time-bounded, the keepalive is not. A keepalive naming an older
+    /// generation than the client entered is a stale reorder and ignored.
     pub fn recv(&mut self) -> Result<Message, NetError> {
         loop {
             match self.conn.recv()? {
-                Message::Keepalive => {}
-                msg => return Ok(msg),
+                Message::Keepalive {
+                    generation,
+                    running: false,
+                } if self.started > 0
+                    && generation >= self.started
+                    && generation > self.cancelled =>
+                {
+                    self.cancelled = generation;
+                    return Ok(Message::Cancel { generation });
+                }
+                Message::Keepalive { .. } => {}
+                msg => {
+                    match &msg {
+                        Message::Start { generation, .. } => {
+                            self.started = self.started.max(*generation);
+                        }
+                        Message::Cancel { generation } => {
+                            self.cancelled = self.cancelled.max(*generation);
+                        }
+                        _ => {}
+                    }
+                    return Ok(msg);
+                }
             }
         }
     }
@@ -1065,7 +1100,16 @@ fn run(
                 // newest-wins) snapshot bounds that to one tick. A failed
                 // keepalive write needs no extra pass: `broadcast_roster`
                 // below reports the corrected roster either way.
-                broadcast(&mut players, &Message::Keepalive, &events, &inputs);
+                let running = matches!(phase, Phase::InSession { .. });
+                broadcast(
+                    &mut players,
+                    &Message::Keepalive {
+                        generation,
+                        running,
+                    },
+                    &events,
+                    &inputs,
+                );
                 // The lobby's advertised next session is as one-shot as
                 // a removal: a client that missed the host's edit would
                 // keep (and be started on) the stale ad. Newest-wins and
@@ -3244,7 +3288,13 @@ mod tests {
                 },
             ),
             ("Cancel", Message::Cancel { generation: 1 }),
-            ("Keepalive", Message::Keepalive),
+            (
+                "Keepalive",
+                Message::Keepalive {
+                    generation: 1,
+                    running: false,
+                },
+            ),
         ];
         for (name, spoof) in spoofs {
             let host = sessioned_host();
