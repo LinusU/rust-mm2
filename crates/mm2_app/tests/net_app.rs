@@ -13344,3 +13344,71 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
     }
     assert!(host.should_exit().is_none());
 }
+
+/// #1511: a `keep_ready` client that is a lobby member but never adopted
+/// the round (every `Start` copy lost) still gets that round's `Cancel`.
+/// The host reset its readiness on that `Cancel`, so the client must
+/// re-ready exactly once even though the link never held the generation.
+#[test]
+fn a_keep_ready_client_that_missed_the_start_readies_after_that_rounds_cancel() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1511).unwrap();
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    let id = link.player_id();
+    link.ctl().set_vehicle("", 0).unwrap();
+    link.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link.keep_ready(true));
+    until_ready(&mut app);
+
+    // Both the `Start` and the `Cancel` go into a dead Down lane, so the
+    // client never adopts the generation and sees only the later repeats.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    host.cancel().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut cancelled = false;
+    while !cancelled {
+        assert!(Instant::now() < deadline, "the host never cancelled");
+        while let Ok(event) = host.try_recv() {
+            cancelled |= matches!(event, HostEvent::Cancelled { .. });
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    proxy.set(LinkDir::Down, Impair::default());
+
+    let mut readied = 0;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        app.update();
+        while let Ok(event) = host.try_recv() {
+            if matches!(
+                event,
+                HostEvent::ReadyChanged { id: who, ready: true } if who == id
+            ) {
+                readied += 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(readied, 1, "the client did not re-ready exactly once");
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    host.shutdown();
+}

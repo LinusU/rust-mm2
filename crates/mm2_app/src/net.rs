@@ -430,6 +430,11 @@ pub struct LobbyLink {
     /// field lives on the link, not [`LobbyState`], because a fresh
     /// authority replaces the link and restarts its numbering at 1.
     entered_generation: Option<u64>,
+    /// The newest `Cancel` generation this link answered. A `Cancel` newer
+    /// than this is a new round's close even when the link never adopted
+    /// that round (every `Start` repeat was lost), so it still owes the
+    /// `keep_ready` re-ready; one at or below it is a re-send.
+    cancelled_generation: Option<u64>,
 }
 
 impl LobbyLink {
@@ -466,6 +471,7 @@ impl LobbyLink {
             ended,
             reliable_leave: false,
             keep_ready: false,
+            cancelled_generation: None,
             want_ready: None,
             want_pick: None,
             seen_ready: None,
@@ -864,7 +870,9 @@ pub fn drive_lobby(
                 // A repeated `Cancel` names a generation we no longer
                 // hold — a no-op: re-readying (or clearing the intent we
                 // re-armed) would answer the same frame twice.
-                if acted {
+                let newer = link.cancelled_generation.is_none_or(|g| generation > g);
+                if acted || newer {
+                    link.cancelled_generation = Some(generation);
                     // A readiness we still owed the host died with that
                     // reset unless we keep it.
                     link.want_ready = None;
