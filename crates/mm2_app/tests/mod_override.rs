@@ -1879,3 +1879,290 @@ fn a_mod_replaces_the_cnr_commentary_table_and_a_malformed_one_is_refused() {
     let r = draw(&mounted(&f.base, &bad), "test", rob).expect("the table binds");
     assert!(r.is_err(), "{r:?}");
 }
+
+/// The `(sample_rate, volume)` of the scream each gender's walker voices
+/// over `vfs`, `None` when that gender stays silent, and the report's
+/// `failed` count. The production chain:
+/// `PedVoiceAudio::load` binds the tables, `pedestrian_voices` draws a
+/// sample and the `WaveBank` resolves it. Every table authors one sample,
+/// so the draw is deterministic and the rate names the wave that played.
+fn walker_screams(vfs: Vfs) -> ([Option<(u32, f32)>; 2], u64) {
+    use bevy::asset::AssetPlugin;
+    use bevy::audio::{AudioPlayer, PlaybackSettings};
+    use bevy::math::Vec3;
+    use mm2_app::audio::{
+        AudioReport, AudioVoice, PedScream, PedVoiceAudio, VoiceKind, pedestrian_voices,
+    };
+    use mm2_game::{Mm2Vfs, Session, SessionConfig, SessionPhase};
+
+    let bank = WaveBank::index(&vfs);
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    for phase in [
+        SessionPhase::Ready,
+        SessionPhase::Countdown,
+        SessionPhase::Playing,
+    ] {
+        session.transition(phase).unwrap();
+    }
+    let table = PedVoiceAudio::load(&vfs, session.generation());
+    let mut app = bevy::app::App::new();
+    app.add_plugins(bevy::MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_message::<PedScream>()
+        .add_systems(bevy::app::Update, pedestrian_voices);
+    if let Some(table) = table {
+        app.insert_resource(table);
+    }
+    app.finish();
+    app.cleanup();
+
+    let mut out = [None, None];
+    for (slot, female) in [(0, true), (1, false)] {
+        let walker = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(PedScream {
+            walker,
+            position: Vec3::ZERO,
+            female,
+        });
+        app.update();
+        let world = app.world_mut();
+        let mut q = world.query::<(&AudioVoice, &AudioPlayer<PcmAudio>, &PlaybackSettings)>();
+        let heard: Vec<(u32, f32)> = q
+            .iter(world)
+            .filter(|(v, _, _)| v.kind == VoiceKind::PedVoice)
+            .map(|(_, p, s)| {
+                let rate = world
+                    .resource::<Assets<PcmAudio>>()
+                    .get(&p.0)
+                    .unwrap()
+                    .sample_rate
+                    .get();
+                (rate, s.volume.to_linear())
+            })
+            .collect();
+        out[slot] = heard.first().copied();
+        // Despawn so the second gender's pass sees only its own voice.
+        let ids: Vec<_> = world
+            .query_filtered::<bevy::ecs::entity::Entity, bevy::ecs::query::With<AudioVoice>>()
+            .iter(world)
+            .collect();
+        for id in ids {
+            world.despawn(id);
+        }
+    }
+    (out, app.world().resource::<AudioReport>().failed)
+}
+
+fn ped_voice_table(first: &str, volume: &str) -> String {
+    format!(
+        "Min speed,Max speed,min time in range,max time out of range\r\n0,500,0,0\r\nsample name,volume,,\r\n{first},{volume},,\r\n"
+    )
+}
+
+fn ped_voice_base(d: &Path) {
+    write(d, "aud/aud22/creature3d/fsc1.22k.wav", pcm_wav(22050, 220));
+    write(d, "aud/aud22/creature3d/msc1.22k.wav", pcm_wav(44100, 220));
+    write(d, "aud/aud22/creature3d/modsc.22k.wav", pcm_wav(11025, 220));
+    write(
+        d,
+        "aud/creaturedata/default_fpedvoice1.csv",
+        ped_voice_table("FSC1", "0.8"),
+    );
+    write(
+        d,
+        "aud/creaturedata/default_mpedvoice1.csv",
+        ped_voice_table("MSC1", "0.5"),
+    );
+}
+
+#[test]
+fn a_mod_replaces_a_pedestrian_voice_table_through_the_walker_scream_consumer() {
+    let f = fixture();
+    let root = f._tmp.path();
+    ped_voice_base(&f.base);
+    let m = root.join("screams");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "screams");
+    write(
+        &m,
+        "aud/creaturedata/default_fpedvoice1.csv",
+        ped_voice_table("MODSC", "0.6"),
+    );
+
+    let base = walker_screams(vfs_of(&f.base, None));
+    assert_eq!(base, ([Some((22050, 0.8)), Some((44100, 0.5))], 0));
+    let modded = walker_screams(vfs_of(&f.base, Some(&m)));
+    let ([female, male], failed) = modded;
+    assert_eq!(failed, 0);
+    let (rate, volume) = female.expect("the mod's female scream sounds");
+    assert_eq!(rate, 11025, "the female table is the mod's");
+    assert!((volume - 0.6).abs() < 0.05, "the mod's authored volume");
+    assert_eq!(male, base.0[1], "the male table (bystander) is the base's");
+    assert_eq!(
+        walker_screams(vfs_of(&f.base, None)),
+        base,
+        "unmounting reverts"
+    );
+    assert_eq!(
+        fingerprint::gameplay(&vfs_of(&f.base, Some(&m)))
+            .unwrap()
+            .hash,
+        fingerprint::gameplay(&vfs_of(&f.base, None)).unwrap().hash,
+        "a pedestrian voice table is cosmetic"
+    );
+    let reports = fingerprint::mod_reports(&vfs_of(&f.base, Some(&m)));
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (0, 1),
+        "{reports:?}"
+    );
+}
+
+#[test]
+fn a_malformed_pedestrian_voice_override_is_silent_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    ped_voice_base(&f.base);
+
+    // A female table with no usable row: that gender authors no sample, so
+    // it is silent (the table warns); the base's FSC1 does not stand in
+    // and the male table is a bystander.
+    let bad = broken_mod(
+        root,
+        "badfemale",
+        "aud/creaturedata/default_fpedvoice1.csv",
+        b"garbage\n1,2\n",
+    );
+    let ([female, male], failed) = walker_screams(mounted(&f.base, &bad));
+    assert_eq!(female, None, "the base table must not stand in");
+    assert_eq!(male, Some((44100, 0.5)));
+    assert_eq!(
+        failed, 0,
+        "an authored-empty table is silence, not a failure"
+    );
+
+    // A table naming a wave nothing carries is counted `failed` and silent
+    // for that gender, not answered with another gender's or the base's
+    // sample.
+    let bad = broken_mod(
+        root,
+        "nowave",
+        "aud/creaturedata/default_mpedvoice1.csv",
+        ped_voice_table("NOSUCHWAVE", "0.5").as_bytes(),
+    );
+    let ([female, male], failed) = walker_screams(mounted(&f.base, &bad));
+    assert_eq!(female, Some((22050, 0.8)));
+    assert_eq!(male, None);
+    assert_eq!(failed, 1);
+}
+
+/// A clip of `frames` frames for the three-bone synthetic rig (12 floats a
+/// frame).
+fn ped_clip(frames: u32) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&frames.to_le_bytes());
+    b.extend_from_slice(&12u32.to_le_bytes());
+    b.extend_from_slice(&0f32.to_le_bytes());
+    b.push(1);
+    for _ in 0..frames * 12 {
+        b.extend_from_slice(&0f32.to_le_bytes());
+    }
+    b
+}
+
+/// A shader table of `paints` paint jobs over the mesh's two material groups.
+fn ped_shaders(paints: u32) -> Vec<u8> {
+    let mut s = Vec::new();
+    s.extend_from_slice(&paints.to_le_bytes());
+    s.extend_from_slice(&2u32.to_le_bytes());
+    for _ in 0..paints * 2 {
+        s.push(0);
+        for c in [0.5f32; 16] {
+            s.extend_from_slice(&c.to_le_bytes());
+        }
+        s.extend_from_slice(&4f32.to_le_bytes());
+    }
+    s
+}
+
+/// `(walk frames, stand frames, paint jobs)` of the loaded archetype.
+fn ped_shape(vfs: &Vfs) -> Result<(u32, u32, usize), mm2_content::ped::PedLoadError> {
+    let a = mm2_content::ped::PedArchetype::load(vfs, "pedmodel_man")?;
+    Ok((
+        a.clip("xwalk").unwrap().frames,
+        a.clip("xstand").unwrap().frames,
+        a.paint_jobs(),
+    ))
+}
+
+#[test]
+fn a_mod_replaces_pedestrian_animation_through_the_archetype_loader_and_it_is_gameplay() {
+    use mm2_content::ped::PedLoadError;
+
+    let f = fixture();
+    let root = f._tmp.path();
+    let src = crate::pedestrian::install();
+    for name in ["skel", "csv", "mod", "shaders"] {
+        let rel = format!("anim/pedmodel_man.{name}");
+        write(&f.base, &rel, std::fs::read(src.path().join(&rel)).unwrap());
+    }
+    for clip in ["xstand", "xwalk"] {
+        let rel = format!("anim/{clip}.anim");
+        write(&f.base, &rel, std::fs::read(src.path().join(&rel)).unwrap());
+    }
+    let m = root.join("strut");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "strut");
+    write(&m, "anim/xwalk.anim", ped_clip(9));
+    write(&m, "anim/pedmodel_man.shaders", ped_shaders(3));
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(ped_shape(&base).unwrap(), (4, 4, 1));
+    assert_eq!(
+        ped_shape(&modded).unwrap(),
+        (9, 4, 3),
+        "walk clip and paint jobs are the mod's, the stand clip (bystander) is the base's"
+    );
+    assert_eq!(
+        ped_shape(&vfs_of(&f.base, None)).unwrap(),
+        (4, 4, 1),
+        "unmounting reverts"
+    );
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash,
+        "`anim/` is hashed as gameplay"
+    );
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (2, 0),
+        "{reports:?}"
+    );
+
+    // Malformed: each broken member is an error naming it, never the base's
+    // member standing in.
+    let bad = broken_mod(root, "badclip", "anim/xwalk.anim", b"not a clip");
+    assert!(matches!(
+        ped_shape(&mounted(&f.base, &bad)),
+        Err(PedLoadError::MissingClip { .. })
+    ));
+    let bad = broken_mod(root, "badmesh", "anim/pedmodel_man.mod", b"garbage\n");
+    assert!(ped_shape(&mounted(&f.base, &bad)).is_err());
+    let bad = broken_mod(root, "badskel", "anim/pedmodel_man.skel", b"garbage\n");
+    assert!(ped_shape(&mounted(&f.base, &bad)).is_err());
+    let bad = broken_mod(root, "badcsv", "anim/pedmodel_man.csv", b"");
+    assert!(ped_shape(&mounted(&f.base, &bad)).is_err());
+    let bad = broken_mod(root, "badshaders", "anim/pedmodel_man.shaders", b"xx");
+    assert!(ped_shape(&mounted(&f.base, &bad)).is_err());
+}
