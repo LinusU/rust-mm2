@@ -260,7 +260,7 @@ pub fn spawn_dash(
     let mut report = DashReport::default();
 
     let spec = try_load_dash_spec(vfs, car).unwrap_or_else(|e| {
-        warn!(error = %e, "unparseable asnode record ignored");
+        warn!(path = %format!("tune/{car}_dash.asnode"), error = %e, "unparseable asnode record ignored");
         report.spec_error = Some(e);
         None
     });
