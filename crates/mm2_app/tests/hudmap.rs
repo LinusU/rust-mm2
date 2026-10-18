@@ -40,7 +40,7 @@ fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
 /// a float-shader chunk with `paints` paint jobs of one untextured
 /// shader each. Enough for `pkg_paint_parts` + `shader_material` to
 /// produce real parts.
-fn synthetic_pkg(verts: &[[f32; 3]], indices: &[u16], paints: u32) -> Vec<u8> {
+pub fn synthetic_pkg(verts: &[[f32; 3]], indices: &[u16], paints: u32) -> Vec<u8> {
     let fvf: u32 = 0x002; // FVF_XYZ
     let mut geo = Vec::new();
     geo.extend_from_slice(&1u32.to_le_bytes()); // n_sections
@@ -135,7 +135,7 @@ fn minimal_psdl() -> Vec<u8> {
 /// The `mmHudMap` block in the authored shape — distinct values
 /// (`ZoomOutDist 700`) so the record proves it read this file, not a
 /// default.
-const TUNE: &str = "type: a\nmmHudMap {\n  Size 0.21 0.25\n  Pos 0.78 0.75\n  ZoomIn 0\n  Approach Rate 1.2\n  ZoomInDist 350\n  ZoomOutDist 700\n  IconScaleMin 10\n  IconScaleMax 20\n  ZoomInDistFS 400\n  ZoomOutDistFS 900\n  IconScaleMinFS 8\n  IconScaleMaxFS 14\n  Ocean Color 0.1 0.5 0.8\n}\n";
+pub const TUNE: &str = "type: a\nmmHudMap {\n  Size 0.21 0.25\n  Pos 0.78 0.75\n  ZoomIn 0\n  Approach Rate 1.2\n  ZoomInDist 350\n  ZoomOutDist 700\n  IconScaleMin 10\n  IconScaleMax 20\n  ZoomInDistFS 400\n  ZoomOutDistFS 900\n  IconScaleMinFS 8\n  IconScaleMaxFS 14\n  Ocean Color 0.1 0.5 0.8\n}\n";
 
 /// A synthetic install with a city, its map spec, and all three map
 /// packages: a world-space tile quad plus the tri/square markers.

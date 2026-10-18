@@ -2695,3 +2695,300 @@ fn a_mod_replaces_the_parked_car_pathset_and_it_is_gameplay() {
         (None, vec![FILE.to_string()], 0)
     );
 }
+
+// Dash cluster and HUD map (`dash::spawn_dash`, `hudmap::spawn_hud_map`).
+
+use crate::dash::{dash_pkg, dash_pkg_parts, part_mtx};
+use crate::hudmap::{TUNE as HUDMAP_TUNE, synthetic_pkg as hudmap_pkg};
+use mm2_app::dash::{DashNode, DashRole, DashRoot};
+use mm2_app::hudmap::HudMapReport;
+
+fn dash_asnode(dash_pos_y: f32, speed_max: f32) -> String {
+    format!(
+        "type: a\nasNode {{\n  DashPos 0.0 {dash_pos_y:.6} -0.78\n  SpeedOffset 0.1 0.2 0.3\n  WheelPos 0.0 0.0 0.0\n  SpeedRotMin 0.0\n  SpeedRotMax {speed_max:.6}\n}}\n"
+    )
+}
+
+fn dash_base(d: &Path) {
+    for car in ["vpt", "vpu"] {
+        write(
+            d,
+            &format!("tune/{car}_dash.asnode"),
+            dash_asnode(-0.6, 3.0),
+        );
+        write(d, &format!("geometry/{car}_dash.pkg"), dash_pkg());
+        write(
+            d,
+            &format!("geometry/{car}_dash_speed_needle.mtx"),
+            part_mtx([0.0, 0.0, 0.0]),
+        );
+    }
+}
+
+/// What `spawn_dash` built for `car` from `vfs`: the bound part count, the
+/// cluster anchor's Y, the speedo needle's sweep max and its node's X.
+type DashShape = (usize, Option<f32>, Option<f32>, Option<f32>);
+
+fn dash_shape(vfs: &Vfs, car: &str) -> DashShape {
+    let mut world = World::new();
+    world.init_resource::<Assets<Mesh>>();
+    world.init_resource::<Assets<Image>>();
+    world.init_resource::<Assets<StandardMaterial>>();
+    let vehicle = world.spawn_empty().id();
+    let report =
+        world.resource_scope(|world, mut meshes: bevy::ecs::prelude::Mut<Assets<Mesh>>| {
+            world.resource_scope(
+                |world, mut images: bevy::ecs::prelude::Mut<Assets<Image>>| {
+                    world.resource_scope(
+                |world, mut materials: bevy::ecs::prelude::Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        mm2_app::dash::spawn_dash(
+                            &mut commands,
+                            vfs,
+                            car,
+                            0,
+                            None,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            mm2_app::camera::CameraMode::Chase,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                },
+            )
+                },
+            )
+        });
+    let cluster = world
+        .query_filtered::<&bevy::transform::components::Transform, bevy::ecs::prelude::With<DashRoot>>()
+        .iter(&world)
+        .next()
+        .map(|t| t.translation.y);
+    let mut speed = (None, None);
+    let mut nodes = world.query::<(&DashNode, &bevy::transform::components::Transform)>();
+    for (n, t) in nodes.iter(&world) {
+        if let DashRole::Speed { max, .. } = n.role {
+            speed = (Some(max), Some(t.translation.x));
+        }
+    }
+    (report.parts, cluster, speed.0, speed.1)
+}
+
+#[test]
+fn a_mod_replaces_the_dash_cluster_records_through_spawn_dash() {
+    let f = fixture();
+    let root = f._tmp.path();
+    dash_base(&f.base);
+    let m = root.join("cluster");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "cluster");
+    write(&m, "tune/vpt_dash.asnode", dash_asnode(-0.4, 2.0));
+    write(
+        &m,
+        "geometry/vpt_dash.pkg",
+        dash_pkg_parts(&[
+            ("speed_needle_h", 0.0),
+            ("wheel_h", 0.2),
+            ("tach_needle_h", 0.4),
+        ]),
+    );
+    write(
+        &m,
+        "geometry/vpt_dash_speed_needle.mtx",
+        part_mtx([0.5, 0.0, 0.0]),
+    );
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    // The needle node sits at `pivot + SpeedOffset`.
+    assert_eq!(
+        dash_shape(&base, "vpt"),
+        (2, Some(-0.6), Some(3.0), Some(0.1))
+    );
+    assert_eq!(
+        dash_shape(&modded, "vpt"),
+        (3, Some(-0.4), Some(2.0), Some(0.6)),
+        "placement record, package and part pivot are the mod's"
+    );
+    assert_eq!(
+        dash_shape(&modded, "vpu"),
+        dash_shape(&base, "vpu"),
+        "another car is a bystander"
+    );
+    assert_eq!(
+        dash_shape(&vfs_of(&f.base, None), "vpt"),
+        dash_shape(&base, "vpt"),
+        "unmounting reverts"
+    );
+    // The placement record is on the presentation allow-list; the two
+    // `geometry/` files are gameplay.
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash
+    );
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (2, 1),
+        "{reports:?}"
+    );
+}
+
+/// A malformed dash override does not let the base stand in: the cluster
+/// binds nothing and `DashReport` is the only trace — `spawn_dash` drops an
+/// unparseable `asnode`/`pkg` without a `warn!` (filed).
+#[test]
+fn a_malformed_dash_override_does_not_let_the_base_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    dash_base(&f.base);
+    let bad = broken_mod(root, "badasnode", "tune/vpt_dash.asnode", b"asNode {\n");
+    assert_eq!(dash_shape(&mounted(&f.base, &bad), "vpt").0, 0);
+    let bad = broken_mod(root, "badpkg", "geometry/vpt_dash.pkg", b"not a pkg");
+    assert_eq!(dash_shape(&mounted(&f.base, &bad), "vpt").0, 0);
+    assert_eq!(dash_shape(&vfs_of(&f.base, None), "vpt").0, 2);
+}
+
+fn hudmap_base(d: &Path) {
+    write(d, "city/test.psdl", synthetic_psdl());
+    for city in ["test", "other"] {
+        write(d, &format!("tune/{city}.mmhudmap"), HUDMAP_TUNE);
+        write(
+            d,
+            &format!("geometry/hudmap_{city}.pkg"),
+            hudmap_pkg(
+                &[[-100., 0., -100.], [100., 0., -100.], [100., 2., 100.]],
+                &[0, 2, 1],
+                1,
+            ),
+        );
+    }
+}
+
+/// `(absent, tiles, marker_y, ZoomOutDist)` of the map `spawn_hud_map`
+/// bound for `city` from `vfs`.
+type MapShape = (Option<&'static str>, usize, f32, Option<f32>);
+
+fn hudmap_shape(vfs: &Vfs, city: &str) -> MapShape {
+    let mut world = World::new();
+    world.init_resource::<Assets<Mesh>>();
+    world.init_resource::<Assets<Image>>();
+    world.init_resource::<Assets<StandardMaterial>>();
+    let psdl = format!("city/{city}.psdl");
+    let (report, map): (HudMapReport, _) =
+        world.resource_scope(|world, mut meshes: bevy::ecs::prelude::Mut<Assets<Mesh>>| {
+            world.resource_scope(
+                |world, mut images: bevy::ecs::prelude::Mut<Assets<Image>>| {
+                    world.resource_scope(
+                    |world,
+                     mut materials: bevy::ecs::prelude::Mut<Assets<StandardMaterial>>| {
+                        let mut queue = CommandQueue::default();
+                        let out = {
+                            let mut commands = Commands::new(&mut queue, world);
+                            mm2_app::hudmap::spawn_hud_map(
+                                &mut commands,
+                                vfs,
+                                &psdl,
+                                None,
+                                false,
+                                0,
+                                &mut meshes,
+                                &mut images,
+                                &mut materials,
+                                SessionEntity(1),
+                                0,
+                            )
+                        };
+                        queue.apply(world);
+                        out
+                    },
+                )
+                },
+            )
+        });
+    (
+        report.absent,
+        report.tiles,
+        report.marker_y,
+        map.map(|m| m.spec.zoom_out_dist),
+    )
+}
+
+#[test]
+fn a_mod_replaces_the_hud_map_tune_and_tiles_through_spawn_hud_map() {
+    let f = fixture();
+    let root = f._tmp.path();
+    hudmap_base(&f.base);
+    let m = root.join("map");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "map");
+    write(
+        &m,
+        "tune/test.mmhudmap",
+        HUDMAP_TUNE.replace("ZoomOutDist 700", "ZoomOutDist 800"),
+    );
+    write(
+        &m,
+        "geometry/hudmap_test.pkg",
+        hudmap_pkg(
+            &[[-100., 0., -100.], [100., 0., -100.], [100., 9., 100.]],
+            &[0, 2, 1],
+            1,
+        ),
+    );
+
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    let (absent, tiles, base_y, zoom) = hudmap_shape(&base, "test");
+    assert_eq!((absent, tiles, zoom), (None, 1, Some(700.0)));
+    let (absent, tiles, mod_y, zoom) = hudmap_shape(&modded, "test");
+    assert_eq!((absent, tiles, zoom), (None, 1, Some(800.0)));
+    assert!(
+        mod_y > base_y + 5.0,
+        "tile package is the mod's: {base_y} vs {mod_y}"
+    );
+    assert_eq!(
+        hudmap_shape(&modded, "other"),
+        hudmap_shape(&base, "other"),
+        "another city is a bystander"
+    );
+    assert_eq!(
+        hudmap_shape(&vfs_of(&f.base, None), "test"),
+        hudmap_shape(&base, "test"),
+        "unmounting reverts"
+    );
+    assert_ne!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash
+    );
+    let reports = fingerprint::mod_reports(&modded);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (1, 1),
+        "{reports:?}"
+    );
+}
+
+/// A malformed map override is reported by `HudMapReport::absent` (and a
+/// `warn!`), and the base's map does not stand in.
+#[test]
+fn a_malformed_hud_map_override_is_reported_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    hudmap_base(&f.base);
+    let bad = broken_mod(root, "badtune", "tune/test.mmhudmap", b"mmHudMap {\n");
+    let (absent, tiles, _, zoom) = hudmap_shape(&mounted(&f.base, &bad), "test");
+    assert_eq!((absent, tiles, zoom), (Some("unparseable-tune"), 0, None));
+    let bad = broken_mod(root, "badtiles", "geometry/hudmap_test.pkg", b"not a pkg");
+    let (absent, tiles, _, zoom) = hudmap_shape(&mounted(&f.base, &bad), "test");
+    assert_eq!((absent, tiles, zoom), (Some("unparseable-pkg"), 0, None));
+}

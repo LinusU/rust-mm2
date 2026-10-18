@@ -990,7 +990,12 @@ fn push_lp(out: &mut Vec<u8>, s: &str) {
 /// named part (`speed_needle_h`, `wheel_h`) plus a one-paint untextured
 /// shader table — enough for `build_model` + `spawn_dash` to bind the
 /// two `DashRole` nodes.
-fn dash_pkg() -> Vec<u8> {
+pub fn dash_pkg() -> Vec<u8> {
+    dash_pkg_parts(&[("speed_needle_h", 0.0), ("wheel_h", 0.2)])
+}
+
+/// [`dash_pkg`] with the named single-triangle parts (`(chunk, z)`).
+pub fn dash_pkg_parts(parts: &[(&str, f32)]) -> Vec<u8> {
     let geo = |offset_z: f32| {
         let mut g = Vec::new();
         g.extend_from_slice(&1u32.to_le_bytes()); // n_sections
@@ -1033,11 +1038,11 @@ fn dash_pkg() -> Vec<u8> {
         shaders.extend_from_slice(&f.to_le_bytes());
     }
     let mut pkg = b"PKG3".to_vec();
-    for (name, payload) in [
-        ("speed_needle_h", geo(0.0)),
-        ("wheel_h", geo(0.2)),
-        ("shaders", shaders),
-    ] {
+    let chunks = parts
+        .iter()
+        .map(|(name, z)| (*name, geo(*z)))
+        .chain([("shaders", shaders)]);
+    for (name, payload) in chunks {
         pkg.extend_from_slice(b"FILE");
         push_lp(&mut pkg, name);
         pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -1322,7 +1327,7 @@ fn overflowing_asnode_reads_unauthored() {
 /// A 48-byte `.mtx` part transform: bounds min/max, the part `pivot`
 /// (the quad centre for a stock dash), origin 0 — the layout every stock
 /// dash uses (`origin` is 0, the centre lives in `pivot`).
-fn part_mtx(pivot: [f32; 3]) -> Vec<u8> {
+pub fn part_mtx(pivot: [f32; 3]) -> Vec<u8> {
     let mut d = Vec::new();
     for f in [
         -0.15f32, -0.3, -0.15, 0.15, 0.3, 0.15, // bounds min/max
