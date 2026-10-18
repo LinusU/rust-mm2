@@ -635,25 +635,34 @@ pub struct TrackCams {
     pub near: Option<TrackCamSpec>,
     /// `tune/camera/<car>_far.camtrackcs`.
     pub far: Option<TrackCamSpec>,
+    /// One `path: parse error` per record that exists but did not parse
+    /// (also warned). Such a record reads as absent, so the designed
+    /// fallback takes over — this makes that visible.
+    pub errors: Vec<String>,
 }
 
 /// Read both authored chase-lens records for `car`.
 pub fn load_track_cams(vfs: &Vfs, car: &str) -> TrackCams {
-    let read = |suffix: &str| {
+    let mut errors = Vec::new();
+    let mut read = |suffix: &str| {
         let path = format!("tune/camera/{car}_{suffix}.camtrackcs");
-        let spec = vfs
-            .read_path(&path)
-            .ok()
-            .and_then(|(bytes, _)| TrackCamSpec::parse(&String::from_utf8_lossy(&bytes)).ok())?;
+        let (bytes, _) = vfs.read_path(&path).ok()?;
+        let spec = match TrackCamSpec::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(spec) => spec,
+            Err(e) => {
+                warn!(path = %path, error = %e, "unparseable camtrackcs record ignored");
+                errors.push(format!("{path}: {e}"));
+                return None;
+            }
+        };
         for issue in spec.validate() {
             warn!(path = %path, issue = %issue, "camtrackcs spec issue");
         }
         Some(spec)
     };
-    TrackCams {
-        near: read("near"),
-        far: read("far"),
-    }
+    let near = read("near");
+    let far = read("far");
+    TrackCams { near, far, errors }
 }
 
 /// Smoke-record report of which chase lenses bound authored records

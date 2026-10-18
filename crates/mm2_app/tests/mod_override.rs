@@ -2281,6 +2281,14 @@ fn a_malformed_camera_override_does_not_let_the_base_stand_in() {
         camera_shape(&mounted(&f.base, &bad), "vpt"),
         (None, Some((4.0, 50.0)), Some(1.2))
     );
+    let errors = mm2_app::camera::load_track_cams(&mounted(&f.base, &bad), "vpt").errors;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("tune/camera/vpt_near.camtrackcs: "));
+    assert!(
+        mm2_app::camera::load_track_cams(&vfs_of(&f.base, None), "vpt")
+            .errors
+            .is_empty()
+    );
     let bad = broken_mod(
         root,
         "badpov",
@@ -2291,6 +2299,15 @@ fn a_malformed_camera_override_does_not_let_the_base_stand_in() {
         camera_shape(&mounted(&f.base, &bad), "vpt"),
         (Some((2.0, 60.0)), Some((4.0, 50.0)), None)
     );
+    let e = mm2_app::dash::try_load_pov_cam(&mounted(&f.base, &bad), "vpt").unwrap_err();
+    assert!(e.starts_with("tune/camera/vpt_dash.campovcs: "), "{e}");
+    let bad = broken_mod(root, "badnode", "tune/vpt_dash.asnode", b"not a record {\n");
+    let e = mm2_app::dash::try_load_dash_spec(&mounted(&f.base, &bad), "vpt").unwrap_err();
+    assert!(e.starts_with("tune/vpt_dash.asnode: "), "{e}");
+    assert!(matches!(
+        mm2_app::dash::try_load_dash_spec(&vfs_of(&f.base, None), "vpt"),
+        Ok(None)
+    ));
 }
 
 /// One self-authored standalone `asBirthRule`.

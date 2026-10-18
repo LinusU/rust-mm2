@@ -145,6 +145,9 @@ pub struct DashReport {
     pub cockpit: bool,
     /// Why nothing spawned (empty when a dash exists).
     pub absent: Option<String>,
+    /// `path: error` when `_dash.asnode` exists but did not parse (the
+    /// cluster then reads as unauthored).
+    pub spec_error: Option<String>,
 }
 
 impl fmt::Display for DashReport {
@@ -183,12 +186,41 @@ fn read_text(vfs: &Vfs, logical: &str) -> Option<String> {
 /// before any camera spawns inactive (a dashless car, the dev car or a
 /// `Cockpit` mode persisted across a reload has no camera otherwise).
 pub fn load_pov_cam(vfs: &Vfs, car: &str) -> Option<PovCamSpec> {
+    match try_load_pov_cam(vfs, car) {
+        Ok(spec) => spec,
+        Err(e) => {
+            warn!(error = %e, "unparseable campovcs record ignored");
+            None
+        }
+    }
+}
+
+/// [`load_pov_cam`] with the parse failure of an existing record
+/// returned as `path: error` instead of reading as absent.
+pub fn try_load_pov_cam(vfs: &Vfs, car: &str) -> Result<Option<PovCamSpec>, String> {
     let path = format!("tune/camera/{car}_dash.campovcs");
-    let spec = read_text(vfs, &path).and_then(|t| PovCamSpec::parse(&t).ok())?;
+    let Some(text) = read_text(vfs, &path) else {
+        return Ok(None);
+    };
+    let spec = PovCamSpec::parse(&text).map_err(|e| format!("{path}: {e}"))?;
     for issue in spec.validate() {
         warn!(path = %path, issue = %issue, "campovcs spec issue");
     }
-    Some(spec)
+    Ok(Some(spec))
+}
+
+/// Read and parse `tune/<car>_dash.asnode`; an existing record that does
+/// not parse is an `Err("path: error")`, an absent one `Ok(None)`.
+pub fn try_load_dash_spec(vfs: &Vfs, car: &str) -> Result<Option<DashSpec>, String> {
+    let path = format!("tune/{car}_dash.asnode");
+    let Some(text) = read_text(vfs, &path) else {
+        return Ok(None);
+    };
+    let spec = DashSpec::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    for issue in spec.validate() {
+        warn!(path = %path, issue = %issue, "asnode spec issue");
+    }
+    Ok(Some(spec))
 }
 
 /// Authored `[f32; 3]` → `Vec3`; an unusable value (non-finite or
@@ -227,13 +259,11 @@ pub fn spawn_dash(
 ) -> DashReport {
     let mut report = DashReport::default();
 
-    let dash_path = format!("tune/{car}_dash.asnode");
-    let spec = read_text(vfs, &dash_path).and_then(|t| DashSpec::parse(&t).ok());
-    if let Some(spec) = &spec {
-        for issue in spec.validate() {
-            warn!(path = %dash_path, issue = %issue, "asnode spec issue");
-        }
-    }
+    let spec = try_load_dash_spec(vfs, car).unwrap_or_else(|e| {
+        warn!(error = %e, "unparseable asnode record ignored");
+        report.spec_error = Some(e);
+        None
+    });
     let model = vfs
         .read_path(&format!("geometry/{car}_dash.pkg"))
         .ok()
