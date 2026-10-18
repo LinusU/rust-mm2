@@ -4569,6 +4569,7 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
             "Game: Free for all",
             "Gold weight: Weightless",
             "Limit: No limit",
+            "Bots: 10 (local only)",
             "Start match",
             "Host lobby"
         ]
@@ -4593,6 +4594,14 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
     assert_eq!(texts(&app)[0], "Game: Free for all");
     activate_row(&mut app, "Game:");
 
+    // The bot count wraps through 0..=15 in both directions; this
+    // synthetic city has no lane graph to field bots on, so the match
+    // under test is the bot-free one.
+    for _ in 0..6 {
+        activate_row(&mut app, "Bots:");
+    }
+    assert_eq!(texts(&app)[3], "Bots: 0 (local only)");
+
     activate_row(&mut app, "Start match");
     assert!(
         run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing),
@@ -4600,6 +4609,7 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
         phase(&app)
     );
     let config = app.world().resource::<Session>().config().cloned().unwrap();
+    assert_eq!(config.cnr_bots, 0);
     assert_eq!(
         config.mode,
         SessionMode::CopsAndRobbers(CnrSettings {
@@ -4614,6 +4624,73 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
             .is_some(),
         "the launched mode builds the match"
     );
+}
+
+/// CNRBOT-D: the picked bot count rides `Start match` for every value
+/// 0..=15 and in both cycle directions, and `Host lobby` never carries
+/// it. The launch config is read from the menu's effect before any
+/// world loads, so the synthetic install is enough.
+#[test]
+fn the_cnr_bot_count_rides_start_match_but_never_the_hosted_lobby() {
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::HostLink;
+    use mm2_game::SessionAuthority;
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    for (steps_forward, expected) in [(5, 15), (6, 0), (0, 10)] {
+        let mut app = menu_app(tmp.path(), None);
+        app.update();
+        activate_row(&mut app, "Cops & Robbers");
+        activate_row(&mut app, "testcity");
+        for _ in 0..steps_forward {
+            activate_row(&mut app, "Bots:");
+        }
+        let shown = format!("Bots: {expected} (local only)");
+        assert_eq!(shell(&app).rows[3].text, shown);
+        activate_row(&mut app, "Start match");
+        assert!(run_until(&mut app, 12, |a| {
+            a.world().resource::<Session>().config().is_some()
+        }));
+        let config = app.world().resource::<Session>().config().cloned().unwrap();
+        assert_eq!(config.cnr_bots, expected);
+        assert_eq!(config.authority, SessionAuthority::Local);
+    }
+    // Left from the default steps down, and wraps below zero to 15.
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    for _ in 0..3 {
+        press(&mut app, KeyCode::ArrowDown);
+    }
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[3].text, "Bots: 9 (local only)");
+    for _ in 0..10 {
+        press(&mut app, KeyCode::ArrowLeft);
+    }
+    assert_eq!(shell(&app).rows[3].text, "Bots: 15 (local only)");
+
+    // A hosted lobby with 15 picked carries none.
+    let mut app = menu_app(tmp.path(), None);
+    add_host_systems(&mut app, never_capturing);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    for _ in 0..5 {
+        activate_row(&mut app, "Bots:");
+    }
+    activate_row(&mut app, "Host lobby");
+    let link = app.world().resource::<HostLink>();
+    assert_eq!(link.config().authority, SessionAuthority::Host);
+    assert_eq!(link.config().cnr_bots, 0);
 }
 
 /// F27-C: the menu opens a Cops & Robbers lobby. *Host lobby* keeps the
@@ -5511,6 +5588,10 @@ fn a_decided_cops_and_robbers_match_offers_play_again() {
     activate_row(&mut app, "Cops & Robbers");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Limit:"); // 5 minutes
+    // No lane graph in the synthetic city: play the bot-free match.
+    for _ in 0..6 {
+        activate_row(&mut app, "Bots:");
+    }
     activate_row(&mut app, "Start match");
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
     let first = app.world().resource::<Session>().generation();
@@ -7865,6 +7946,10 @@ fn a_cops_and_robbers_round_is_played_from_the_menu_and_left() {
     activate_row(&mut app, "Cops & Robbers");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Limit:"); // 5 minutes
+    // No lane graph in the synthetic city: play the bot-free match.
+    for _ in 0..6 {
+        activate_row(&mut app, "Bots:");
+    }
     activate_row(&mut app, "Start match");
     assert!(
         run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing),

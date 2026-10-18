@@ -284,3 +284,11 @@ placed fails the session with per-reason counts. Bots carry `CnrBot` and
 car, so traffic, police and race opponents stay out. Bots do not drive yet
 (navigation is CNRBOT-C). Evidence: `tests/cnr_bots.rs` (retail SF and
 London, original-content level).
+
+CNRBOT-D (front end): the Cops & Robbers options screen has a `Bots: N`
+row (0..=15, wrapping, Left/Right/Enter) that rides `Start match` only; it
+opens at 10 for a lively local match. `Host lobby` never carries it, and the
+CLI `--cnr-bots N` (0..=15, needs `--cnr`, conflicts with `--host`/`--join`)
+and `SessionConfig::default()` stay at 0. *Play again* reuses the retained
+config, so a rematch fields the same roster size on a fresh session; the
+standings list bots as ordinary participants.

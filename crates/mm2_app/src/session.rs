@@ -493,8 +493,29 @@ pub(crate) fn restart_config(
     if let Some(next) = next_event {
         config.mode = SessionMode::Event(next);
         config.customization = None;
+        // Local bots belong to Cops & Robbers alone.
+        config.cnr_bots = 0;
     }
     config
+}
+
+#[cfg(test)]
+mod restart_config_tests {
+    use super::*;
+
+    #[test]
+    fn a_rematch_keeps_the_roster_size_and_an_event_switch_drops_it() {
+        let config = mm2_game::SessionConfig {
+            mode: SessionMode::CopsAndRobbers(Default::default()),
+            cnr_bots: 15,
+            ..Default::default()
+        };
+        assert_eq!(restart_config(config.clone(), None).cnr_bots, 15);
+        let next = mm2_game::EventRef::parse("circuit:0", "london").unwrap();
+        let switched = restart_config(config, Some(next));
+        assert_eq!(switched.cnr_bots, 0);
+        assert_eq!(switched.validate(), Ok(()));
+    }
 }
 
 /// `--restart` (quarantined `DevOverrides`, evidence runs only): queue

@@ -92,6 +92,17 @@ struct Cli {
     #[arg(long, value_name = "none|<n>m|<n>pts", requires = "cnr")]
     cnr_limit: Option<String>,
 
+    /// Local AI bots beside you in a standalone `--cnr` match, `0..=15`
+    /// (default 0). A single-player enhancement: not for `--host`/`--join`.
+    #[arg(
+        long,
+        value_name = "0-15",
+        requires = "cnr",
+        conflicts_with_all = ["host", "join"],
+        value_parser = clap::value_parser!(u8).range(0..=15)
+    )]
+    cnr_bots: Option<u8>,
+
     /// Drive the Professional parameter block instead of Amateur.
     #[arg(long)]
     pro: bool,
@@ -1238,6 +1249,7 @@ fn main() {
             id: selected.as_ref().map(|d| d.id.clone()),
             paint,
         },
+        cnr_bots: cli.cnr_bots.unwrap_or(0),
         dev: DevOverrides {
             vehicle_config: cli.vehicle_config.clone(),
             camera: cam_start,
@@ -2947,6 +2959,55 @@ mod bot_route_cli_tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("cannot read bot route"));
+    }
+}
+
+#[cfg(test)]
+mod cnr_bots_cli_tests {
+    use super::*;
+
+    #[test]
+    fn cnr_bots_accepts_zero_through_fifteen_and_defaults_to_none() {
+        for n in 0..=15u8 {
+            let cli =
+                Cli::try_parse_from(["mm2", "--cnr", "ffa", "--cnr-bots", &n.to_string()]).unwrap();
+            assert_eq!(cli.cnr_bots, Some(n));
+        }
+        let cli = Cli::try_parse_from(["mm2", "--cnr", "cops"]).unwrap();
+        assert_eq!(cli.cnr_bots, None);
+    }
+
+    #[test]
+    fn cnr_bots_rejects_bad_counts_and_non_local_use() {
+        use clap::error::ErrorKind;
+        for (args, kind) in [
+            (
+                vec!["--cnr", "ffa", "--cnr-bots", "16"],
+                ErrorKind::ValueValidation,
+            ),
+            (
+                vec!["--cnr", "ffa", "--cnr-bots", "-1"],
+                ErrorKind::UnknownArgument,
+            ),
+            (
+                vec!["--cnr", "ffa", "--cnr-bots", "x"],
+                ErrorKind::ValueValidation,
+            ),
+            (vec!["--cnr-bots", "3"], ErrorKind::MissingRequiredArgument),
+            (
+                vec!["--cnr", "ffa", "--cnr-bots", "3", "--host"],
+                ErrorKind::ArgumentConflict,
+            ),
+            (
+                vec!["--cnr", "ffa", "--cnr-bots", "3", "--join", "127.0.0.1:1"],
+                ErrorKind::ArgumentConflict,
+            ),
+        ] {
+            let mut full = vec!["mm2"];
+            full.extend(&args);
+            let error = Cli::try_parse_from(full).unwrap_err();
+            assert_eq!(error.kind(), kind, "{args:?}: {error}");
+        }
     }
 }
 
