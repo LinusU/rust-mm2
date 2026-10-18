@@ -708,6 +708,7 @@ fn a_dropped_start_and_cancel_are_recovered_by_the_hosts_repeat() {
             ..Impair::default()
         },
     );
+    let before = proxy.stats(LinkDir::Down).dropped;
     host.cancel().unwrap();
     let cancelled = Instant::now() + WAIT;
     loop {
@@ -720,15 +721,19 @@ fn a_dropped_start_and_cancel_are_recovered_by_the_hosts_repeat() {
             Err(_) => assert!(Instant::now() < cancelled, "the host never cancelled"),
         }
     }
-    let before = proxy.stats(LinkDir::Down).dropped;
+    // Wait on a deadline for a Cancel copy to be dropped; `before` was
+    // sampled ahead of `host.cancel()`, so a copy that crossed the proxy
+    // while the host's verdict was being awaited still counts.
+    let dropped = Instant::now() + WAIT;
+    while proxy.stats(LinkDir::Down).dropped <= before {
+        assert!(Instant::now() < dropped, "the Cancel was never dropped");
+        app.update();
+        thread::sleep(Duration::from_millis(5));
+    }
     for _ in 0..20 {
         app.update();
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        proxy.stats(LinkDir::Down).dropped > before,
-        "the Cancel was never dropped"
-    );
     assert_ne!(
         session_phase(&app),
         SessionPhase::Menu,
