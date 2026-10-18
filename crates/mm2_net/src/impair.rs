@@ -248,6 +248,13 @@ impl Lane {
         });
     }
 
+    /// Count one inbound frame and drop it outright (a tag drop).
+    fn drop_frame(&mut self, payload: &[u8]) {
+        self.stats.frames_in += 1;
+        self.stats.bytes_in += payload.len() as u64;
+        self.stats.dropped += 1;
+    }
+
     /// Classify one inbound frame at `now` under `params` — queue it,
     /// hold it for a swap, duplicate it or drop it.
     fn offer(&mut self, params: &Impair, now: Instant, payload: Vec<u8>) {
@@ -336,6 +343,8 @@ impl Lane {
 /// and the stop flag every thread polls.
 struct Shared {
     params: Mutex<[Impair; 2]>,
+    /// Per-direction message tag whose frames are dropped outright.
+    drop_tags: Mutex<[Option<u8>; 2]>,
     stats: Mutex<Vec<LinkStats>>,
     stop: AtomicBool,
 }
@@ -343,6 +352,10 @@ struct Shared {
 impl Shared {
     fn recipe(&self, dir: LinkDir) -> Impair {
         self.params.lock().unwrap_or_else(|e| e.into_inner())[dir as usize]
+    }
+
+    fn drop_tag(&self, dir: LinkDir) -> Option<u8> {
+        self.drop_tags.lock().unwrap_or_else(|e| e.into_inner())[dir as usize]
     }
 
     /// A fresh zeroed slot; its index is the lane's identity.
@@ -399,6 +412,7 @@ impl ImpairProxy {
         let addr = listener.local_addr()?;
         let shared = Arc::new(Shared {
             params: Mutex::new([Impair::default(), Impair::default()]),
+            drop_tags: Mutex::new([None; 2]),
             stats: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
         });
@@ -452,6 +466,17 @@ impl ImpairProxy {
     /// session phase.
     pub fn set(&self, dir: LinkDir, impair: Impair) {
         self.shared.params.lock().unwrap_or_else(|e| e.into_inner())[dir as usize] = impair;
+    }
+
+    /// Drop, deterministically and without a loss draw, every frame in
+    /// `dir` whose first payload byte (the message tag) is `tag`, until
+    /// cleared with `None` — how a test loses one message kind for as
+    /// long as it likes while the rest of the lane flows.
+    pub fn set_drop_tag(&self, dir: LinkDir, tag: Option<u8>) {
+        self.shared
+            .drop_tags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())[dir as usize] = tag;
     }
 
     /// The recipe `dir` currently runs.
@@ -610,7 +635,16 @@ fn spawn_lane(
                 .unwrap_or(PUMP_QUANTUM)
                 .min(PUMP_QUANTUM);
             match rx.recv_timeout(wait.max(Duration::from_micros(50))) {
-                Ok(payload) => lane.offer(&shared_w.recipe(dir), Instant::now(), payload),
+                Ok(payload) => {
+                    if shared_w
+                        .drop_tag(dir)
+                        .is_some_and(|t| payload.first() == Some(&t))
+                    {
+                        lane.drop_frame(&payload);
+                    } else {
+                        lane.offer(&shared_w.recipe(dir), Instant::now(), payload);
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => open = false,
             }
