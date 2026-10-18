@@ -6,7 +6,8 @@
 //! built from and every event record — so two peers fingerprint
 //! identically only when their effective gameplay content is byte-equal.
 //! Cosmetic families (`texture/`, `aud/`, menu art under `jpg/`, the
-//! display-name records `tune/*.cinfo`, plus the visual-only city
+//! display-name records `tune/*.cinfo`, the presentation-only tune records
+//! of [`is_presentation_tune`] (cameras, dash, HUD map, particle rules), plus the visual-only city
 //! records: skies, lighting and visibility sets) are
 //! deliberately excluded: a paint or soundtrack mod must not block
 //! joining (F24-AC02).
@@ -65,7 +66,7 @@ pub fn is_gameplay_path(logical: &str) -> bool {
         let ext = rest.rsplit('.').next().unwrap_or(rest);
         return !city_ext_is_visual(ext);
     }
-    if is_city_info(logical) {
+    if is_city_info(logical) || is_presentation_tune(logical) {
         return false;
     }
     GAMEPLAY_PREFIXES
@@ -80,6 +81,38 @@ pub fn is_gameplay_path(logical: &str) -> bool {
 /// one is consumed, that key's family moves into the gameplay set.
 fn is_city_info(logical: &str) -> bool {
     logical.starts_with("tune/") && logical.ends_with(".cinfo")
+}
+
+/// The `tune/` records that only steer local presentation, as an explicit
+/// allow-list so any other (or new) `tune/` file stays gameplay:
+///
+/// - `tune/camera/<name>.camtrackcs` / `.campovcs`: chase and cockpit
+///   camera specs (`camera::load_track_cams`, `dash::load_pov_cam`);
+/// - `tune/<car>_dash.asnode`: gauge calibration (`dash::spawn_dash`;
+///   the needle full-scales bind to the carsim, not to this record);
+/// - `tune/<city>.mmhudmap`: the minimap placement (`hudmap`);
+/// - `tune/rain.asbirthrule`, `tune/effects/<name>.asbirthrule`: rain and
+///   wheel-surface particle rules. Their emitters draw from their own
+///   seeded `NavRng` streams (the wheel rigs in a separate domain) and
+///   spawn billboards without collision, so they never touch sim state.
+///
+/// `mm2_game` (the simulation crate) reads none of them as rules; the
+/// consumers are presentation code in `mm2_app`.
+fn is_presentation_tune(logical: &str) -> bool {
+    let Some(rest) = logical.strip_prefix("tune/") else {
+        return false;
+    };
+    if let Some(name) = rest.strip_prefix("camera/") {
+        return !name.contains('/')
+            && (name.ends_with(".camtrackcs") || name.ends_with(".campovcs"));
+    }
+    if let Some(name) = rest.strip_prefix("effects/") {
+        return !name.contains('/') && name.ends_with(".asbirthrule");
+    }
+    !rest.contains('/')
+        && (rest.ends_with("_dash.asnode")
+            || rest.ends_with(".mmhudmap")
+            || rest == "rain.asbirthrule")
 }
 
 /// The computed fingerprint plus the denominator it covered, so a
@@ -289,6 +322,13 @@ mod tests {
             "city/sf.water",
             // A backup copy is not the display-name record.
             "tune/sf.cinfo.bak",
+            // Unknown new tune files default to gameplay.
+            "tune/foo.bar",
+            "tune/camera/vpbug_near.txt",
+            "tune/camera/sub/vpbug_near.camtrackcs",
+            "tune/effects/dust.txt",
+            "tune/snow.asbirthrule",
+            "tune/vpbug.asnode",
         ] {
             assert!(is_gameplay_path(p), "{p} should be gameplay");
         }
@@ -303,6 +343,12 @@ mod tests {
             "city/day.sky",
             "city/sf.lt07",
             "tune/sf.cinfo",
+            "tune/camera/vpbug_near.camtrackcs",
+            "tune/camera/vpbug_dash.campovcs",
+            "tune/vpbug_dash.asnode",
+            "tune/sf.mmhudmap",
+            "tune/rain.asbirthrule",
+            "tune/effects/dust.asbirthrule",
             "midtown2.exe",
             "readme.rtf",
         ] {

@@ -430,7 +430,12 @@ Two fingerprints, different jobs:
   `city/` except visual-only records (`.sky`, `.ldef`, `.lmap`,
   `.cpvs`, `.pvs`, `.pvshist`, `.ltNN`). Textures, audio and menu art
   never move it, so cosmetic mods cannot block a join; any edit the
-  simulation could observe does.
+  simulation could observe does. Also cosmetic under `tune/`: the
+  `.cinfo` name records and an explicit allow-list of presentation
+  records (camera specs, `_dash.asnode`, `.mmhudmap`, `rain.asbirthrule`,
+  `effects/*.asbirthrule`; #1625). Hosts and clients on builds before and
+  after that change can disagree on the fingerprint for mods touching
+  those files; the wire format is unchanged, so no protocol bump.
 
   The classification is an implementation choice pinned to this
   protocol version — when a new consumer domain lands (e.g. pedestrian

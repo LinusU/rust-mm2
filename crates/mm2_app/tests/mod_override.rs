@@ -2246,10 +2246,9 @@ fn a_mod_replaces_camera_tuning_through_the_camera_and_dash_loaders() {
         camera_shape(&base, "vpt"),
         "unmounting reverts"
     );
-    // `tune/` is a gameplay prefix wholesale, so camera records move the
-    // fingerprint although they only steer the local view (filed as a
-    // classification question, not changed here).
-    assert_ne!(
+    // Camera records only steer the local view: cosmetic, so they leave
+    // the gameplay fingerprint alone (#1625).
+    assert_eq!(
         fingerprint::gameplay(&modded).unwrap().hash,
         fingerprint::gameplay(&base).unwrap().hash
     );
@@ -2257,7 +2256,7 @@ fn a_mod_replaces_camera_tuning_through_the_camera_and_dash_loaders() {
     assert_eq!(reports.len(), 1);
     assert_eq!(
         (reports[0].gameplay, reports[0].cosmetic),
-        (2, 0),
+        (0, 2),
         "{reports:?}"
     );
 }
@@ -2404,8 +2403,8 @@ fn a_mod_replaces_wheel_effect_and_rain_rules_through_their_session_binders() {
     assert_eq!(wheel_effects(&vfs_of(&f.base, None)).0, base_fx);
     assert_eq!(rain(&vfs_of(&f.base, None)), rain(&base), "revert");
 
-    // `tune/` is a gameplay prefix wholesale (see the camera test).
-    assert_ne!(
+    // Particle rules are presentation-only: cosmetic (see the camera test).
+    assert_eq!(
         fingerprint::gameplay(&modded).unwrap().hash,
         fingerprint::gameplay(&base).unwrap().hash
     );
@@ -2413,7 +2412,7 @@ fn a_mod_replaces_wheel_effect_and_rain_rules_through_their_session_binders() {
     assert_eq!(reports.len(), 1);
     assert_eq!(
         (reports[0].gameplay, reports[0].cosmetic),
-        (2, 0),
+        (0, 2),
         "{reports:?}"
     );
 }

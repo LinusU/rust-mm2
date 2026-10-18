@@ -156,9 +156,12 @@ What a mod changes decides what it costs (F29 req 5). `mm2_content::
 fingerprint::is_gameplay_path` is the one classifier: `tune/`, `bound/`,
 `geometry/`, `race/`, `anim/`, `players/` and every `city/` file except
 skies, lighting and visibility sets feed the simulation or its rules (the
-one exception under `tune/` is `tune/<city>.cinfo`, the localized city and
-race names, which only the menu reads);
-`texture/`, `aud/`, `jpg/`, `tune/*.cinfo`,
+exceptions under `tune/` are an explicit allow-list: `tune/<city>.cinfo`,
+the localized city and race names, which only the menu reads, and the
+presentation-only records `tune/camera/*.{camtrackcs,campovcs}`,
+`tune/<car>_dash.asnode`, `tune/<city>.mmhudmap`, `tune/rain.asbirthrule`
+and `tune/effects/*.asbirthrule`; any other `tune/` file stays gameplay);
+`texture/`, `aud/`, `jpg/`, `tune/*.cinfo`, those presentation records,
 `city/*.sky|ldef|lmap|ltNN|cpvs|pvs|pvshist` and
 unprefixed loose files are cosmetic. A mod is judged by the files it
 **wins** — a gameplay file a later mod replaces is credited to that later
