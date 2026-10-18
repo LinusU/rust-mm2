@@ -256,14 +256,14 @@ impl Planner {
         let roles = &self.held.as_ref().map(|h| &h.roles);
         let mut out = Vec::with_capacity(active.len());
         for &id in bots {
-            if let Some(&(_, side, pos)) = active.iter().find(|a| a.0 == id) {
+            if let Some(&(_, side, _)) = active.iter().find(|a| a.0 == id) {
                 if out.iter().any(|(p, _)| *p == id) {
                     continue;
                 }
                 let role = roles
                     .and_then(|r| r.get(&id).copied())
                     .unwrap_or(Role::Primary);
-                out.push((id, objective(snap, id, side, pos, role)));
+                out.push((id, objective(snap, id, side, role)));
             }
         }
         out
@@ -373,7 +373,7 @@ fn nearest_enemy(
         .map(|c| (c.player, c.position))
 }
 
-fn objective(snap: &Snapshot, id: PlayerId, side: Side, pos: Vec3, role: Role) -> Objective {
+fn objective(snap: &Snapshot, id: PlayerId, side: Side, role: Role) -> Objective {
     let guard = Objective::Guard {
         at: clamp(snap, site(snap, side)),
     };
@@ -413,7 +413,6 @@ fn objective(snap: &Snapshot, id: PlayerId, side: Side, pos: Vec3, role: Role) -
         },
         _ => return guard,
     };
-    let _ = pos;
     with_position(obj, clamp(snap, obj.position()))
 }
 
