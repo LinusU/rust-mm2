@@ -1630,3 +1630,252 @@ fn a_mod_replaces_a_siren_program_through_siren_audio() {
     assert!(player.is_empty(), "base program must not stand in");
     assert_eq!(opponent, ["yelp"]);
 }
+
+/// The stems the session's environmental commentary plays over `vfs`, and
+/// the report's `(commentary, failed)` counters. The production chain:
+/// `CommentaryAudio` resolves registry → speaker → cue table → wave on the
+/// first live frame and `commentary_voices` queues what it drew.
+fn spoken_stems(vfs: Vfs) -> (Vec<String>, (u64, u64)) {
+    use bevy::asset::AssetPlugin;
+    use bevy::ecs::schedule::IntoScheduleConfigs;
+    use bevy::time::TimeUpdateStrategy;
+    use mm2_app::audio::{self, AudioReport, CommentaryAudio, CommentaryVoice};
+    use mm2_game::{
+        Mm2Vfs, Session, SessionConditions, SessionConfig, SessionPhase, TimeOfDay, Weather,
+    };
+
+    let bank = WaveBank::index(&vfs);
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    for phase in [
+        SessionPhase::Ready,
+        SessionPhase::Countdown,
+        SessionPhase::Playing,
+    ] {
+        session.transition(phase).unwrap();
+    }
+    let conditions = SessionConditions {
+        time_of_day: TimeOfDay::new(1).unwrap(),
+        weather: Weather::new(3).unwrap(),
+    };
+    let mut app = bevy::app::App::new();
+    app.add_plugins(bevy::MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .init_resource::<mm2_app::speech::SpeechArbiter>()
+        .add_systems(
+            bevy::app::Update,
+            (
+                audio::commentary_voices,
+                mm2_app::speech::speech_arbiter.after(audio::commentary_voices),
+            ),
+        )
+        .insert_resource(CommentaryAudio::bind(Some("test"), conditions, 7).unwrap());
+    app.finish();
+    app.cleanup();
+    // One-second clips plus the sequencing gap: ~80 updates play the queue.
+    for _ in 0..90 {
+        app.update();
+    }
+    let mut stems: Vec<String> = app
+        .world_mut()
+        .query::<&CommentaryVoice>()
+        .iter(app.world())
+        .map(|v| v.stem.clone())
+        .collect();
+    stems.sort();
+    let r = app.world().resource::<AudioReport>();
+    (stems, (r.commentary, r.failed))
+}
+
+/// Speech base: the `test` registry authors one `AS` announcer, whose
+/// weather and time-of-day tables each name one wave. The base ships every
+/// wave a mod table can name, so only the tables decide what is spoken.
+fn speech_base(d: &Path) {
+    write(
+        d,
+        "aud/spchdata/test.csv",
+        "\nNum announcers\n1\nprefix\nAS\n",
+    );
+    let table = |section: &str, prefix: &str| {
+        format!(
+            "Name prefix/type header,end sufix value,sufix add value\n{section} header,,\n{prefix},1,0\n"
+        )
+    };
+    write(
+        d,
+        "aud/spchdata/as1/wearain_prerace.csv",
+        table("WEATHER", "WEARAIN"),
+    );
+    write(
+        d,
+        "aud/spchdata/as1/timenoon_prerace.csv",
+        table("TIMEOFDAY", "TIMENOON"),
+    );
+    for stem in ["as1wearain01", "as1modrain01", "as1timenoon01"] {
+        write(
+            d,
+            &format!("aud/aud22/as1/{stem}.22k.wav"),
+            pcm_wav(22050, 22050),
+        );
+    }
+}
+
+#[test]
+fn a_mod_replaces_the_speech_tables_through_the_commentary_consumer_and_it_is_cosmetic() {
+    let f = fixture();
+    let root = f._tmp.path();
+    speech_base(&f.base);
+    let m = root.join("voices");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "voices");
+    write(
+        &m,
+        "aud/spchdata/as1/wearain_prerace.csv",
+        "Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nMODRAIN,1,0\n",
+    );
+
+    let base = spoken_stems(vfs_of(&f.base, None));
+    assert_eq!(
+        base,
+        (vec!["as1timenoon01".into(), "as1wearain01".into()], (2, 0))
+    );
+    let modded = spoken_stems(vfs_of(&f.base, Some(&m)));
+    assert_eq!(
+        modded,
+        (vec!["as1modrain01".into(), "as1timenoon01".into()], (2, 0)),
+        "the weather table is replaced, the time-of-day table (bystander) is the base's"
+    );
+    assert_eq!(
+        spoken_stems(vfs_of(&f.base, None)),
+        base,
+        "unmounting reverts"
+    );
+    assert_eq!(
+        fingerprint::gameplay(&vfs_of(&f.base, Some(&m)))
+            .unwrap()
+            .hash,
+        fingerprint::gameplay(&vfs_of(&f.base, None)).unwrap().hash,
+        "a speech table is cosmetic"
+    );
+    let reports = fingerprint::mod_reports(&vfs_of(&f.base, Some(&m)));
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        (reports[0].gameplay, reports[0].cosmetic),
+        (0, 1),
+        "{reports:?}"
+    );
+}
+
+#[test]
+fn a_malformed_speech_override_is_counted_and_the_base_does_not_stand_in() {
+    let f = fixture();
+    let root = f._tmp.path();
+    speech_base(&f.base);
+
+    // A weather table with no usable row: that cue is counted failed and the
+    // base's WEARAIN line is not spoken in its place; the other cue plays.
+    let bad = broken_mod(
+        root,
+        "badrain",
+        "aud/spchdata/as1/wearain_prerace.csv",
+        b"garbage\n1,2\n",
+    );
+    let (stems, (commentary, failed)) = spoken_stems(mounted(&f.base, &bad));
+    assert_eq!(stems, ["as1timenoon01"]);
+    assert_eq!((commentary, failed), (1, 1));
+
+    // A registry that authors no announcer: no speaker is drawn, so nothing
+    // is spoken and the failure is counted, not hidden by the base registry.
+    let bad = broken_mod(
+        root,
+        "badregistry",
+        "aud/spchdata/test.csv",
+        b"\nNum announcers\n0\nprefix\nAS\n",
+    );
+    let (stems, (commentary, failed)) = spoken_stems(mounted(&f.base, &bad));
+    assert!(stems.is_empty(), "{stems:?}");
+    assert_eq!((commentary, failed), (0, 1));
+}
+
+#[test]
+fn a_mod_replaces_the_cnr_commentary_table_and_a_malformed_one_is_refused() {
+    use mm2_app::cnrvoice::CnrCommentary;
+    use mm2_game::gold::{Call, CallKind, Side};
+
+    let f = fixture();
+    let root = f._tmp.path();
+    let table = |robget: &str| {
+        format!(
+            "Name prefix/type header,end sufix value,sufix add value\nROBGETLOOT header,,\n{robget},1,0\nCOPGETLOOT header,,\nAS1\\AS1COPGET,1,0\n"
+        )
+    };
+    write(&f.base, "aud/spchdata/cnrtest.csv", table("AL1\\AL1ROBGET"));
+    write(
+        &f.base,
+        "aud/spchdata/cnrother.csv",
+        table("AL1\\AL1ROBGET"),
+    );
+    let m = root.join("cnrvoices");
+    std::fs::create_dir_all(&m).unwrap();
+    manifest(&m, "cnrvoices");
+    write(&m, "aud/spchdata/cnrtest.csv", table("AL1\\AL1MODGET"));
+
+    let rob = Call {
+        kind: CallKind::Get,
+        side: Side::Robbers,
+    };
+    let cop = Call {
+        kind: CallKind::Get,
+        side: Side::Cops,
+    };
+    let draw = |vfs: &Vfs, city: &str, call: Call| {
+        CnrCommentary::load(vfs, city, 7).map(|mut c| c.draw(call))
+    };
+    let base = vfs_of(&f.base, None);
+    let modded = vfs_of(&f.base, Some(&m));
+    assert_eq!(draw(&base, "test", rob), Some(Ok("al1robget01".into())));
+    assert_eq!(draw(&modded, "test", rob), Some(Ok("al1modget01".into())));
+    assert_eq!(
+        draw(&modded, "test", cop),
+        draw(&base, "test", cop),
+        "an unchanged family of the replaced table is carried by the mod's copy"
+    );
+    assert_eq!(
+        draw(&modded, "other", rob),
+        draw(&base, "other", rob),
+        "another city's table is a bystander"
+    );
+    assert_eq!(
+        draw(&vfs_of(&f.base, None), "test", rob),
+        draw(&base, "test", rob),
+        "unmounting reverts"
+    );
+    assert_eq!(
+        fingerprint::gameplay(&modded).unwrap().hash,
+        fingerprint::gameplay(&base).unwrap().hash,
+        "a commentary table is cosmetic"
+    );
+
+    // Malformed: an empty table does not parse, so the city binds no
+    // announcer (warned); the base's table does not stand in.
+    let bad = broken_mod(root, "badcnr", "aud/spchdata/cnrtest.csv", b"");
+    assert!(CnrCommentary::load(&mounted(&f.base, &bad), "test", 7).is_none());
+    // A table that parses but authors no ROBGETLOOT cue draws an error,
+    // not the base's line.
+    let bad = broken_mod(
+        root,
+        "norob",
+        "aud/spchdata/cnrtest.csv",
+        b"Name prefix/type header,end sufix value,sufix add value\nCOPGETLOOT header,,\nAS1\\AS1COPGET,1,0\n",
+    );
+    let r = draw(&mounted(&f.base, &bad), "test", rob).expect("the table binds");
+    assert!(r.is_err(), "{r:?}");
+}
