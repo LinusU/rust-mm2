@@ -2701,6 +2701,15 @@ type SnapTrailerSourceRow<'a> = (
 /// so even a 30% loss lane misses every copy with probability ~1e-16.
 pub const RESULTS_FRAME_REPEATS: u32 = 30;
 
+/// How many further snapshots re-carry an impact row after the one that
+/// first published it (#1613). Rows are presentation *events* and the
+/// client acknowledges nothing, so a lost frame would drop the hit's
+/// sparks, sound and texel deformation for good. The client dedupes on
+/// `(generation, seat, id)`, so repeating is safe. A designed bound, not
+/// an original rule — 10 updates is a sixth of a second at 60 Hz, which
+/// rides out a burst of drops without keeping stale hits on the wire.
+pub const IMPACT_ROW_REPEATS: u32 = 10;
+
 /// Host-side: every participant's authoritative pose, broadcast once per
 /// update while the session is live. `tick` is the host's session tick —
 /// physics only moves inside fixed steps, so a same-tick snapshot is a
@@ -2746,6 +2755,9 @@ pub fn publish_snapshots(
     bangers: Query<(&ObjectIdentity, &Banger)>,
     mut impacts: MessageReader<ImpactEvent>,
     mut report: ResMut<NetDriveReport>,
+    // Rows published within the last [`IMPACT_ROW_REPEATS`] snapshots,
+    // as `(wire generation, repeats still owed, row)` (#1613).
+    mut owed_rows: Local<Vec<(u64, u32, SnapImpact)>>,
     // The v14 progress tail's source: a seat's `ObjectId` → its
     // participant `RaceProgress`, when the race tracks it.
     progresses: Query<(&ObjectIdentity, &RaceProgress), With<Player>>,
@@ -2938,6 +2950,27 @@ pub fn publish_snapshots(
         impact_rows.truncate(MAX_SNAP_IMPACTS as usize);
     }
     let sent_rows = impact_rows.len() as u64;
+    // Recent rows ride again so a dropped frame cannot lose a hit
+    // (#1613). New rows keep priority under the cap; the owed ones fill
+    // what is left, strongest first, and a generation change retires
+    // them. `impacts_sent` counts first publications only.
+    owed_rows.retain(|&(g, left, _)| g == wire_generation && left > 0);
+    owed_rows.sort_by(|a, b| {
+        b.2.severity
+            .total_cmp(&a.2.severity)
+            .then_with(|| (a.2.seat, a.2.id).cmp(&(b.2.seat, b.2.id)))
+    });
+    let room = (MAX_SNAP_IMPACTS as usize).saturating_sub(impact_rows.len());
+    let repeats: Vec<SnapImpact> = owed_rows.iter().take(room).map(|r| r.2).collect();
+    for (_, left, _) in owed_rows.iter_mut().take(room) {
+        *left -= 1;
+    }
+    owed_rows.extend(
+        impact_rows
+            .iter()
+            .map(|&row| (wire_generation, IMPACT_ROW_REPEATS, row)),
+    );
+    impact_rows.extend(repeats);
     // The v16 tails that left `SNAP_NO_SURFACE` — a seat `surface_voices`
     // resolved a live contact for this frame.
     let sent_surfaces = entries

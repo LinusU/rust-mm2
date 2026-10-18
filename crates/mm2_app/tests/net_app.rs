@@ -13472,3 +13472,145 @@ fn a_keep_ready_client_that_missed_the_start_readies_after_that_rounds_cancel() 
     assert_eq!(session_phase(&app), SessionPhase::Menu);
     host.shutdown();
 }
+
+/// #1613: a `Snap.impacts` row is an *event* the authority drains from
+/// its `ImpactEvent` stream into the frame being published, and the
+/// client never acknowledges a snapshot. A seeded [`ImpairProxy`] lane
+/// drops exactly the one frame that carries a scripted host hit, then
+/// runs clean: the remote copy must still present the hit (the same
+/// `RemoteImpact` stream spark, audio and `texel_fx::apply_remote_texels`
+/// consume, so the sparks, the sound and the texel deformation follow),
+/// and present it exactly once however many repeats follow.
+///
+/// Outcome decided here: a **bounded repeat** of recent rows
+/// ([`netdrive::IMPACT_ROW_REPEATS`] further snapshots, no ack — the
+/// `RESULTS_FRAME_REPEATS` style), not an accepted presentation loss:
+/// the damage *fraction* heals through the pose tail, but the texels
+/// never would, so the remote copy would stay visibly different from
+/// the host's for the rest of the session. The client's
+/// `(generation, seat, id)` dedupe makes the repeat safe.
+///
+/// Evidence level: synthetic integration over real loopback sockets.
+#[test]
+fn a_dropped_snapshot_does_not_lose_its_impact_rows() {
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+    let (proxy, mut host, mut client) = impaired_pair("impact-loss", 0x1613);
+    let host_oid = ObjectId {
+        generation: 1,
+        slot: 100,
+    };
+    host.world_mut().spawn((
+        NetPlayer(0),
+        Player {
+            id: mm2_game::PlayerId(0),
+            control: PlayerControl::Local,
+        },
+        netdrive::ResetEpoch(0),
+        ObjectIdentity(host_oid),
+        Position(Vec3::new(0.0, 1.0, 0.0)),
+        Rotation::default(),
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+    ));
+    client.world_mut().spawn((
+        PlayerVehicle,
+        Player {
+            id: mm2_game::PlayerId(1),
+            control: PlayerControl::Local,
+        },
+        mm2_game::AuthorityRole::Predicted,
+        Position::default(),
+        Rotation::default(),
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+    ));
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let copy = {
+        let mut q = client
+            .world_mut()
+            .query_filtered::<Entity, With<RemotePick>>();
+        q.single(client.world()).expect("the host's remote copy")
+    };
+
+    // The scripted hit rides the next published frame — which the lane
+    // drops whole (loss 1.0 is deterministic). The drop counter is the
+    // signal the frame was lost: the lane forwards on wall-clock time.
+    let dropped_before = proxy.stats(LinkDir::Down).dropped;
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    let generation = host.world().resource::<Session>().generation();
+    let tick = host.world().resource::<Session>().tick();
+    host.world_mut().write_message(ImpactEvent {
+        id: ImpactId(1613),
+        generation,
+        tick,
+        participants: (host_oid, ObjectId::WORLD),
+        point: Vec3::new(4.0, 0.5, -2.0),
+        normal: Vec3::Z,
+        severity: 11.0,
+        surface: SurfaceState::default(),
+    });
+    host.update();
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_sent,
+        1,
+        "the host published the hit once"
+    );
+    let deadline = Instant::now() + WAIT;
+    while proxy.stats(LinkDir::Down).dropped == dropped_before {
+        assert!(Instant::now() < deadline, "the lane never dropped a frame");
+        thread::sleep(Duration::from_millis(2));
+    }
+    proxy.set(LinkDir::Down, Impair::default());
+
+    // From here the lane is clean; the host keeps publishing.
+    let mut seen: Vec<netdrive::RemoteImpact> = Vec::new();
+    let step = |host: &mut App, client: &mut App, seen: &mut Vec<netdrive::RemoteImpact>| {
+        host.update();
+        client.update();
+        seen.extend(
+            client
+                .world_mut()
+                .resource_mut::<Messages<netdrive::RemoteImpact>>()
+                .drain()
+                .filter(|i| i.entity == copy),
+        );
+        thread::sleep(Duration::from_millis(4));
+    };
+    let deadline = Instant::now() + WAIT;
+    while seen.is_empty() && Instant::now() < deadline {
+        step(&mut host, &mut client, &mut seen);
+    }
+    assert_eq!(
+        seen.len(),
+        1,
+        "the remote copy presented the hit whose frame the lane dropped"
+    );
+    assert_eq!(seen[0].point, Vec3::new(4.0, 0.5, -2.0));
+    // The rest of the repeat window lands as counted duplicates, never
+    // as a second presentation.
+    for _ in 0..netdrive::IMPACT_ROW_REPEATS + 10 {
+        step(&mut host, &mut client, &mut seen);
+    }
+    assert_eq!(seen.len(), 1, "repeats dedupe on (generation, seat, id)");
+    assert_eq!(
+        client
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_applied,
+        1
+    );
+}

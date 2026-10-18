@@ -867,7 +867,7 @@ for a bounded window; **(c)** sent once. Line numbers are in
 | `ResetRequest` | C→H | (b) | `netdrive::send_reset_request` repeats every `RESET_RETRY_TICKS`, up to `MAX_RESET_ASKS` (20), until the epoch-declared `Snap` comes back; the host keeps the highest generation | No (budget tested at 60 % loss) |
 | `Snap` pose, trailers, `race`, seat race-progress and damage | H→C | (a) | `publish_snapshots` every update; stale ticks drop on `(generation, tick)` | No |
 | `Snap` terminal (`Results`) frame | H→C | (b) | `RESULTS_FRAME_REPEATS` = 30 extra copies (`netdrive.rs` ~2697) | No |
-| `Snap.impacts` rows | H→C | (c) | Drained from the `ImpactEvent` stream into the one frame being published; the client dedupes but nothing repeats them | Yes, presentation: lost sparks/audio, remote texel deformation stays different. #1613 |
+| `Snap.impacts` rows | H→C | (b), bounded only | `publish_snapshots` re-carries each row for `IMPACT_ROW_REPEATS` (10) further snapshots, no ack (#1613); the client dedupes on `(generation, seat, id)`, so a repeat never presents twice. Test: `a_dropped_snapshot_does_not_lose_its_impact_rows` (seeded `ImpairProxy` drops exactly the frame carrying a scripted hit) | No, unless 10 consecutive snapshots are lost |
 | `Props` | H→C | (a)/(b) | State frame; active + changed rows plus a rolling `RESEND_WINDOW` of settled/broken rows; late-join snapshot is paced until delivered (F26-A.3) | No |
 | `Traffic` | H→C | (a) | State frame; the client retires a copy only after several frames without it | No |
 | `World` | H→C | (a) | World-clock tick, newest-wins | No |
@@ -876,7 +876,7 @@ for a bounded window; **(c)** sent once. Line numbers are in
 | `Leaves` | H→C | (a) | State frame, newest-wins | No |
 | `Signals` | H→C | (a) | State frame, newest-wins | No |
 
-Follow-ups: #1612 (`Cancel`), #1613 (`Snap.impacts`), #1614 (handshake).
+Follow-ups: #1612 (`Cancel`), #1613 (`Snap.impacts`, fixed by a bounded repeat), #1614 (handshake).
 `Reject`/`Welcome`/`Accept` are grouped with `Hello` because they are one
 exchange with the same outcome. Everything else is (a) or (b) and already
 has a test or a recorded reason. Evidence level: code reading and the
