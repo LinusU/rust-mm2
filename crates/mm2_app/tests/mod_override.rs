@@ -2431,3 +2431,251 @@ fn a_malformed_effect_override_is_counted_and_the_base_does_not_stand_in() {
         (None, Some("rule unparseable"))
     );
 }
+
+// ─── Traffic, police and parked-car routes (F29-AC01, #1608) ────────────
+//
+// Four consumers: `mm2_content::ambient_setup` (`city/<city>.aimap`, the
+// city's roster and density), `police::cruise_roster` (`race/<city>/roam
+// .aimap`), `load_city`'s `city/<city>/props.pathset` stamping and
+// `city::spawn_parked_cars` (`race/<city>/<city>_parkedcar.pathset`).
+
+use crate::banger::{pth1, pth1_path};
+use crate::support::{ambient_assets, city_aimap};
+
+const ROAM_STOCK: &str = "[Police]\n1\nvpcop 0 0 130 0 0 15 0.5 50\n";
+const ROAM_MOD: &str = "[Police]\n2\nvpcop 0 0 130 0 0 15 0.5 50\nvpcop 4 0 90 0 0 15 0.5 50\n";
+
+fn route_base(d: &Path) {
+    base_install(d);
+    write(d, "city/test.aimap", city_aimap());
+    write(d, "city/other.aimap", city_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    write(d, "race/test/roam.aimap", ROAM_STOCK);
+    write(d, "race/other/roam.aimap", ROAM_STOCK);
+    write(
+        d,
+        "city/test/props.pathset",
+        pth1(&[pth1_path("testprop", &[[0.0, 0.0, 15.0]], 0, 0)]),
+    );
+    write(
+        d,
+        "race/test/test_parkedcar.pathset",
+        pth1(&[pth1_path("park", &[[0.0, 0.0, 0.0]], 0, 0)]),
+    );
+}
+
+/// A base install plus a mod directory carrying `files`.
+fn route_mod(
+    files: &[(&str, Vec<u8>)],
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let m = tmp.path().join("routes");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    route_base(&base);
+    manifest(&m, "routes");
+    for (logical, bytes) in files {
+        write(&m, logical, bytes);
+    }
+    (tmp, base, m)
+}
+
+fn gameplay_hash(vfs: &Vfs) -> u64 {
+    fingerprint::gameplay(vfs).unwrap().hash
+}
+
+/// (roster class ids, city density) the ambient consumer builds.
+fn ambient_of(vfs: &Vfs, city: &str) -> (usize, Option<f32>) {
+    let setup = mm2_content::ambient_setup(vfs, city, None)
+        .expect("the city aimap loads")
+        .expect("the city authors a roster");
+    (setup.roster.entries.len(), setup.city_density)
+}
+
+#[test]
+fn a_mod_replaces_the_city_ambient_aimap_and_it_is_gameplay() {
+    let (tmp, base, m) = route_mod(&[(
+        "city/test.aimap",
+        b"[Ambient Types/Density]\n1\nva_test_a 1.0 0\n[Density]\n0.75\n".to_vec(),
+    )]);
+    let stock = vfs_of(&base, None);
+    let modded = vfs_of(&base, Some(&m));
+    assert_eq!(ambient_of(&stock, "test"), (2, Some(0.25)));
+    assert_eq!(ambient_of(&modded, "test"), (1, Some(0.75)), "mod won");
+    assert_eq!(
+        ambient_of(&modded, "other"),
+        ambient_of(&stock, "other"),
+        "bystander city unmoved"
+    );
+    assert_eq!(ambient_of(&vfs_of(&base, None), "test"), (2, Some(0.25)));
+    assert_ne!(gameplay_hash(&modded), gameplay_hash(&stock), "gameplay");
+
+    // An aimap that declares more rows than it authors is an error from
+    // the consumer; the stock aimap does not stand in.
+    let bad = broken_mod(
+        tmp.path(),
+        "badcityaimap",
+        "city/test.aimap",
+        b"[Ambient Types/Density]\n2\nva_test_a 1.0 0\n",
+    );
+    let vfs = mounted(&base, &bad);
+    let err = mm2_content::ambient_setup(&vfs, "test", None)
+        .expect_err("a malformed city aimap is refused");
+    assert!(
+        matches!(err, mm2_content::TrafficLoadError::Aimap(ref e) if e.contains("city/test.aimap")),
+        "{err:?}"
+    );
+    assert!(mm2_content::ambient_setup(&vfs, "other", None).is_ok());
+}
+
+#[test]
+fn a_mod_replaces_the_cruise_police_lineup_and_it_is_gameplay() {
+    use mm2_app::police::cruise_roster;
+    use mm2_game::Difficulty;
+    let (tmp, base, m) = route_mod(&[("race/test/roam.aimap", ROAM_MOD.as_bytes().to_vec())]);
+    let stock = vfs_of(&base, None);
+    let modded = vfs_of(&base, Some(&m));
+    let lineup = |v: &Vfs, city: &str| cruise_roster(v, city, Difficulty::Amateur);
+    assert_eq!(lineup(&stock, "test").entries.len(), 1);
+    let won = lineup(&modded, "test");
+    assert_eq!(won.entries.len(), 2, "the mod's lineup won");
+    assert_eq!(won.entries[1].position.x, 4.0);
+    assert_eq!(
+        lineup(&modded, "other").entries,
+        lineup(&stock, "other").entries
+    );
+    assert_eq!(
+        lineup(&vfs_of(&base, None), "test").entries.len(),
+        1,
+        "revert"
+    );
+    assert_ne!(gameplay_hash(&modded), gameplay_hash(&stock), "gameplay");
+
+    // The consumer's own error: the malformed record is refused by the
+    // content loader. `cruise_roster` logs it and fields no cops rather
+    // than the stock lineup, so the base's cop does not stand in.
+    let bad = broken_mod(
+        tmp.path(),
+        "badroam",
+        "race/test/roam.aimap",
+        b"[Police]\n2\nvpcop 0 0 130 0 0 15 0.5 50\n",
+    );
+    let vfs = mounted(&base, &bad);
+    assert!(matches!(
+        mm2_content::cruise_police_roster(&vfs, "test", Difficulty::Amateur),
+        Err(mm2_content::RosterBuildError::AimapParse { .. })
+    ));
+    assert!(lineup(&vfs, "test").entries.is_empty());
+    assert_eq!(lineup(&vfs, "other").entries.len(), 1);
+}
+
+/// `props.pathset` stamping totals `load_city` reports on `vfs`.
+fn props_pathset_report(vfs: &Vfs) -> (usize, usize) {
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    let mut session = mm2_game::Session::new();
+    let loaded = load_city(
+        &mut commands,
+        vfs,
+        "city/test.psdl",
+        &mut meshes,
+        &mut images,
+        &mut materials,
+        SessionEntity(1),
+        &mut session,
+    )
+    .expect("city loads");
+    queue.apply(&mut world);
+    (
+        loaded.report.pathset_props_spawned,
+        loaded.report.pathset_props_failed,
+    )
+}
+
+#[test]
+fn a_mod_replaces_the_street_dressing_pathset_and_it_is_gameplay() {
+    let two = pth1(&[pth1_path(
+        "testprop",
+        &[[0.0, 0.0, 15.0], [0.0, 0.0, 25.0]],
+        0,
+        0,
+    )]);
+    let (tmp, base, m) = route_mod(&[("city/test/props.pathset", two)]);
+    let stock = vfs_of(&base, None);
+    let modded = vfs_of(&base, Some(&m));
+    assert_eq!(props_pathset_report(&stock), (1, 0));
+    assert_eq!(props_pathset_report(&modded), (2, 0), "the mod's path won");
+    assert_eq!(props_pathset_report(&vfs_of(&base, None)), (1, 0), "revert");
+    assert_ne!(gameplay_hash(&modded), gameplay_hash(&stock), "gameplay");
+
+    // An unparseable file stamps nothing (a `warn!`, no pathset counters);
+    // the base's stamp does not stand in.
+    let bad = broken_mod(tmp.path(), "badprops", "city/test/props.pathset", b"junk");
+    assert_eq!(props_pathset_report(&mounted(&base, &bad)), (0, 0));
+}
+
+/// What `spawn_parked_cars` made of `vfs`: (file, failed files, stamps).
+fn parked_of(vfs: &Vfs) -> (Option<String>, Vec<String>, usize) {
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    let mut session = mm2_game::Session::new();
+    let r = mm2_app::city::spawn_parked_cars(
+        &mut commands,
+        vfs,
+        "test",
+        None,
+        7,
+        &mut meshes,
+        &mut images,
+        &mut materials,
+        SessionEntity(1),
+        &mut session,
+    );
+    queue.apply(&mut world);
+    (
+        r.file,
+        r.failed_files,
+        r.cars + r.empty_bays + r.missing_models,
+    )
+}
+
+#[test]
+fn a_mod_replaces_the_parked_car_pathset_and_it_is_gameplay() {
+    const FILE: &str = "race/test/test_parkedcar.pathset";
+    let three = pth1(&[pth1_path(
+        "park",
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, 40.0], [0.0, 0.0, 80.0]],
+        0,
+        0,
+    )]);
+    let (tmp, base, m) = route_mod(&[(FILE, three)]);
+    let stock = vfs_of(&base, None);
+    let modded = vfs_of(&base, Some(&m));
+    assert_eq!(parked_of(&stock), (Some(FILE.into()), vec![], 1));
+    assert_eq!(
+        parked_of(&modded),
+        (Some(FILE.into()), vec![], 3),
+        "mod won"
+    );
+    assert_eq!(parked_of(&vfs_of(&base, None)).2, 1, "revert");
+    assert_ne!(gameplay_hash(&modded), gameplay_hash(&stock), "gameplay");
+
+    // An unparseable override is reported in `failed_files`; the loader
+    // then falls through to the next candidate, and here there is none, so
+    // the base's file does not stand in.
+    let bad = broken_mod(tmp.path(), "badparked", FILE, b"junk");
+    assert_eq!(
+        parked_of(&mounted(&base, &bad)),
+        (None, vec![FILE.to_string()], 0)
+    );
+}
