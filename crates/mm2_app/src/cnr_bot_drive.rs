@@ -158,6 +158,8 @@ pub struct BotStats {
     pub failures: u64,
     /// Goal switches that replaced a line.
     pub switches: u64,
+    /// Policy evaluations (one per driven bot per fixed step).
+    pub policy_calls: u64,
 }
 
 /// How a line was made.
@@ -698,6 +700,7 @@ pub fn cnr_bot_drive(
             .map(|(_, n)| *n)
             .collect();
         let water = water.as_deref();
+        brain.stats.policy_calls += 1;
         *input = neural.drive(
             policy,
             &mut scratch,

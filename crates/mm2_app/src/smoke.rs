@@ -1917,6 +1917,25 @@ fn run_headless(
             }
         }
     };
+    // The local Cops & Robbers bot field's cost counters (CNRBOT-E):
+    // `bots=<n>/streets<…>/straight<…>/direct<…>/fail<…>/switch<…>/
+    // policy<…>` — lines planned (the replan bound), router failures and
+    // policy evaluations. Absent without a bot field, so every other
+    // record stays bit-identical.
+    let bots_detail = world_ecs
+        .get_resource::<crate::cnr_bot_drive::CnrBotBrain>()
+        .map_or_else(String::new, |b| {
+            let n = world_ecs
+                .iter_entities()
+                .filter(|e| e.contains::<crate::cnr_bots::CnrBot>())
+                .count();
+            let entities = world_ecs.iter_entities().count();
+            let s = b.stats;
+            format!(
+                " bots={n}/ents{entities}/streets{}/straight{}/direct{}/fail{}/switch{}/policy{}",
+                s.streets, s.straight, s.direct, s.failures, s.switches, s.policy_calls
+            )
+        });
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
     // own verdict, not the generic "no player" one: a refused session
     // or a lost host carries its reason in the notice, a clean
@@ -2895,7 +2914,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{xwhl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{xwhl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{bots_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),
