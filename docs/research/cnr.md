@@ -456,7 +456,6 @@ command scores in both cities (10 bots, 180 s simulated: london 4 scoring bots,
 sf 3). Test: `ten_london_bots_score_on_the_default_seed`
 (`tests/cnr_bot_drive_retail.rs`).
 
-<<<<<<< HEAD
 ## Local solo bots, the full menu journey (CNRBOT-E, #1689) — designed, not original
 
 `tests/menu.rs::a_retail_cops_and_robbers_bot_match_runs_from_the_menu_through_play_again_and_exit`
@@ -477,7 +476,7 @@ contests and bot removal mid-match (#1688).
 ```sh
 MM2_RETAIL=<install> cargo test -p mm2_app --test app a_retail_cops_and_robbers_bot_match -- --nocapture
 ```
-=======
+
 ### Removing a bot seat mid-match (#1691) — designed, not original
 
 `--cnr-drop-bot-at <ticks>` (with `--cnr-bots`, optional `--cnr-drop-bot <index>`;
@@ -495,4 +494,3 @@ frames in sf and london; the record passes, 11 seats remain, 9 bot cars remain
 and the field keeps scoring (sf 25 points in total, london 200 — sf is the
 weak seed noted above). The retail run does not assert who carried at the
 removal moment.
->>>>>>> 9ad736c (Add a retail bot-seat removal scenario and document it (CNRBOT-E))
