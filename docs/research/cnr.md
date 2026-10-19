@@ -440,3 +440,18 @@ behaviour in the team variants under contact, disconnect-style removal,
 and a steal by ramming on a retail street remain open (follow-up tasks);
 points were observed above the 50-point limit (125) before the match was
 decided in sf — not investigated.
+
+### Street-reachable site pool (#1686) — designed, not original
+
+`mm2 --city london --cnr ffa --cnr-bots 10` on the default seed (0) scored 0
+points in 240 s. Diagnosis: the opening gold (400.7, 5.2, -331.1) lies inside a
+room (`city-room81-collider`); the nearest lane is 54 m away and the straight
+leg from the end of the street route runs into the building, so every bot
+parked at the kerb (14 refused re-anchors, 0 pickups). The same holds for any
+off-lane draw. A session with `cnr_bots > 0` therefore draws every round from
+the pool restricted to sites on a lane (`cnr_bots::reachable_pool`; the "on a
+lane" measure above), at least three of which each city has (sf 12, london 14).
+Sessions without bots keep the full authored pool. After the change the same
+command scores in both cities (10 bots, 180 s simulated: london 4 scoring bots,
+sf 3). Test: `ten_london_bots_score_on_the_default_seed`
+(`tests/cnr_bot_drive_retail.rs`).

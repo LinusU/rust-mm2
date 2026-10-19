@@ -360,6 +360,39 @@ pub fn spawn_bots(
     spawned
 }
 
+/// Horizontal reach (m) from a gold site to a routable vehicle lane for
+/// a car to be able to take or deliver there.
+pub const SITE_LANE_REACH: f32 = 15.0;
+/// ... and the vertical one (m): a lane under or over a site is no lane.
+pub const SITE_LANE_HEIGHT: f32 = 3.0;
+
+/// Whether a car on the street graph can meet `p`: a routable vehicle
+/// lane passes within [`SITE_LANE_REACH`] horizontally and
+/// [`SITE_LANE_HEIGHT`] vertically — the measure `docs/research/cnr.md`
+/// uses for "on a lane".
+pub fn site_on_lane(graph: &NavGraph, p: [f32; 3]) -> bool {
+    graph
+        .nearest_lane(p, &mm2_game::LaneQuery::vehicles(30.0))
+        .is_some_and(|h| {
+            (h.point[0] - p[0]).hypot(h.point[2] - p[2]) <= SITE_LANE_REACH
+                && (h.point[1] - p[1]).abs() <= SITE_LANE_HEIGHT
+        })
+}
+
+/// The authored site pool restricted to the sites a street-following
+/// bot can reach. **Designed, not original**: most authored gold,
+/// hideout and bank sites are plazas, lawns, rooms or other levels off
+/// the street graph (sf 12 of 44, london 14 of 46 are on a lane), and a
+/// round drawn there leaves every bot parked at the nearest kerb
+/// scoring nothing. A session with bots draws its rounds from this
+/// subset; a session without keeps the full pool.
+pub fn reachable_pool(graph: &NavGraph, pool: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    pool.iter()
+        .copied()
+        .filter(|p| site_on_lane(graph, *p))
+        .collect()
+}
+
 /// Load the city's navigation graph for placement, strictly: a city
 /// without one cannot field bots.
 pub fn load_graph(vfs: &Vfs, city: &str) -> Result<NavGraph, BotError> {

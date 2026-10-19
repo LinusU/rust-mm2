@@ -26,7 +26,8 @@ use mm2_app::cnr::{
 };
 use mm2_app::cnr_bot_drive::{CnrBotBrain, CnrBotDriver, cnr_bot_drive};
 use mm2_app::cnr_bots::{
-    BotSlot, CnrBot, PlannedBot, lane_slots, load_graph, spawn_bots, stock_vehicle_ids,
+    BotSlot, CnrBot, PlannedBot, lane_slots, load_graph, reachable_pool, spawn_bots,
+    stock_vehicle_ids,
 };
 use mm2_app::contracts;
 use mm2_assets::Vfs;
@@ -99,7 +100,12 @@ pub(crate) fn lane_seeds(vfs: &Vfs, city: &str, graph: &mm2_game::NavGraph, n: u
 
 /// The retail city under a local Cops & Robbers session that is
 /// `Playing`, with the bot driver and the gold step wired as in the app.
-fn city_app(retail: &std::path::Path, city: &str, seed: u64) -> (App, Vec<BotSlot>) {
+fn city_app(
+    retail: &std::path::Path,
+    city: &str,
+    seed: u64,
+    reachable_only: bool,
+) -> (App, Vec<BotSlot>) {
     let vfs = mount(retail);
     let surfaces = mm2_content::load_surface_tables(&vfs).unwrap();
     let (psdl_bytes, _) = vfs.read_path(&format!("city/{city}.psdl")).unwrap();
@@ -132,8 +138,12 @@ fn city_app(retail: &std::path::Path, city: &str, seed: u64) -> (App, Vec<BotSlo
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let gold = session.mint_object_id();
+    let mut content = CnrContent::load(&vfs, city);
+    if reachable_only {
+        content.sites = reachable_pool(&graph, &content.sites);
+    }
     let host = CnrHost::from_content(
-        &CnrContent::load(&vfs, city),
+        &content,
         &CnrSettings {
             variant: CnrVariant::FreeForAll,
             gold_mass: GoldMass::QuarterTon,
@@ -297,7 +307,7 @@ struct Outcome {
 /// 15 m circle, has not taken the gold by [`PICKUP_BY`], or [`BUDGET`]
 /// seconds pass.
 fn run(retail: &std::path::Path, city: &str, seed: u64) -> Outcome {
-    let (mut app, slots) = city_app(retail, city, seed);
+    let (mut app, slots) = city_app(retail, city, seed, false);
     let gold = app.world().resource::<CnrHost>().game.sites().gold;
     let a_slot = start_near(&slots, gold, 60.0, &[]);
     let b_slot = start_near(&slots, gold, 150.0, &[a_slot]);
@@ -411,4 +421,56 @@ fn retail_bots_pick_up_deliver_and_pursue_in_each_city() {
             "{city}: street lines"
         );
     }
+}
+
+/// CNRBOT-E finding (#1686): ten bots in London on the default seed
+/// scored nothing in four minutes, because the drawn gold lies in a
+/// room 54 m from the nearest lane. A session with bots draws from the
+/// street-reachable sites ([`reachable_pool`], designed not original),
+/// and the field then scores on its own: no bot is placed at the gold
+/// and nothing writes the match.
+#[test]
+fn ten_london_bots_score_on_the_default_seed() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; the London bot field was NOT checked");
+        return;
+    };
+    let (mut app, slots) = city_app(&retail, "london", 0, true);
+    let sites = app.world().resource::<CnrHost>().game.sites();
+    let vfs = mount(&retail);
+    let graph = load_graph(&vfs, "london").unwrap();
+    assert!(
+        [sites.gold, sites.hideout, sites.bank]
+            .iter()
+            .all(|p| on_lane(&graph, *p)),
+        "the opening draw is all on lanes: {sites:?}"
+    );
+    let candidates: Vec<_> = slots.into_iter().map(|s| (s, false)).collect();
+    let chosen = mm2_app::cnr_bots::choose_slots(
+        &candidates,
+        10,
+        0,
+        Vec3::ZERO,
+        &[sites.gold, sites.hideout, sites.bank],
+    )
+    .unwrap();
+    spawn(&mut app, chosen);
+    let mut points = 0;
+    for _ in 0..HZ * 180 {
+        app.update();
+        points = app
+            .world()
+            .resource::<Events>()
+            .0
+            .iter()
+            .map(|e| match e {
+                GoldEvent::Delivered { points, .. } => *points,
+                _ => 0,
+            })
+            .sum::<u32>();
+        if points > 0 {
+            break;
+        }
+    }
+    assert!(points > 0, "no bot scored in 180 s of London on seed 0");
 }

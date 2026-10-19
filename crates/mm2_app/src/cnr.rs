@@ -169,7 +169,17 @@ pub fn start_match(
 ) -> Result<CnrMarkerReport, String> {
     let city = crate::net::city_stem(psdl)
         .ok_or_else(|| format!("{psdl:?} is not a city/<stem>.psdl path"))?;
-    let content = CnrContent::load(vfs, city);
+    let mut content = CnrContent::load(vfs, city);
+    if session.config().is_some_and(|c| c.cnr_bots > 0) {
+        // Local bots follow streets: play the sites a car can reach.
+        let graph = crate::cnr_bots::load_graph(vfs, city)
+            .map_err(|e| format!("Cops & Robbers bots in {city:?}: {e}"))?;
+        content.sites = crate::cnr_bots::reachable_pool(&graph, &content.sites);
+        info!(
+            reachable = content.sites.len(),
+            "cops and robbers bots: site pool restricted to street-reachable sites"
+        );
+    }
     let seed = session.config().map_or(0, |c| c.seed);
     let gold = session.mint_object_id();
     let host = CnrHost::from_content(
