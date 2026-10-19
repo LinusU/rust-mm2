@@ -8226,3 +8226,150 @@ fn a_retail_stock_event_drives_from_the_menu_to_a_finished_result() {
     app.update();
     assert!(shell(&app).active, "the menu is back");
 }
+
+/// CNRBOT-E / F31-AC03, original-content validation (opt-in:
+/// `MM2_RETAIL=<dir>`): the whole local-bot journey through the real
+/// menu and results systems over retail SF. The production Cops &
+/// Robbers screen picks *Bots: 3* (nine presses from the default 10),
+/// *Start match* loads `city/sf.psdl`, the production roster fields
+/// three tagged bots beside the human, the street-graph driver runs
+/// them for real frames, the match clock runs out and the results
+/// screen offers *Play again* — whose restart must field three bots
+/// again (new entities, same count, same variant) — and quitting
+/// returns to the menu with no bot, brain or match left.
+///
+/// Nothing here places a bot or hands out gold; the one shortcut is the
+/// same as the synthetic journey's: the match clock is advanced with
+/// `GoldMatch::tick` instead of simulating five minutes. Evidence
+/// level: original-content validation (no rendering, audio or
+/// play-test).
+#[test]
+fn a_retail_cops_and_robbers_bot_match_runs_from_the_menu_through_play_again_and_exit() {
+    use mm2_app::cnr::{CnrHost, cnr_host_step, end_decided_match, enroll_cnr_participants};
+    use mm2_app::cnr_bot_drive::{CnrBotBrain, cnr_bot_drive};
+    use mm2_app::cnr_bots::CnrBot;
+    use mm2_assets::{InstallMount, mount_install};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; the retail C&R bot menu journey was NOT run");
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+    let mut app = menu_app_vfs_car(vfs, MenuData::new(None, false, None), "vpbug");
+    app.insert_resource(Time::<Fixed>::from_hz(60.0));
+    app.add_message::<mm2_game::RecoveryEvent>()
+        .add_message::<mm2_app::cnr::CnrEvent>()
+        .add_systems(FixedUpdate, cnr_bot_drive)
+        .add_systems(
+            FixedLast,
+            (
+                enroll_cnr_participants,
+                cnr_host_step,
+                end_decided_match,
+                mm2_app::cnr::reconcile_gold_load,
+            )
+                .chain(),
+        );
+    app.update();
+
+    let bots = |app: &mut App| {
+        app.world_mut()
+            .query_filtered::<Entity, With<CnrBot>>()
+            .iter(app.world())
+            .count()
+    };
+
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "sf");
+    activate_row(&mut app, "Limit:"); // 5 minutes
+    for _ in 0..9 {
+        activate_row(&mut app, "Bots:");
+    }
+    assert_eq!(shell(&app).rows[3].text, "Bots: 3 (local only)");
+    activate_row(&mut app, "Start match");
+    assert!(
+        run_until(&mut app, 400, |a| phase(a) == SessionPhase::Playing),
+        "the retail match never reached Playing: {:?} {:?}",
+        phase(&app),
+        shell(&app).status
+    );
+    let first = app.world().resource::<Session>().generation();
+    let config = app.world().resource::<Session>().config().cloned().unwrap();
+    assert_eq!(config.cnr_bots, 3);
+    assert_eq!(bots(&mut app), 3, "the roster is fielded beside the human");
+    assert!(app.world().get_resource::<CnrBotBrain>().is_some());
+
+    // Real frames: the bots are enrolled and driven, not parked.
+    for _ in 0..300 {
+        app.update();
+    }
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    let seats = app
+        .world()
+        .resource::<CnrHost>()
+        .game
+        .view()
+        .standings
+        .len();
+    assert_eq!(seats, 4, "three bots plus the human hold a seat each");
+    let moved = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&LinearVelocity, With<CnrBot>>();
+        q.iter(app.world()).any(|v| v.0.length() > 0.5)
+    };
+    assert!(moved, "no bot moved in 5 s of real frames");
+
+    // The clock runs out; the production end step opens the results.
+    {
+        let mut host = app.world_mut().resource_mut::<CnrHost>();
+        for _ in 0..(5 * 60 * mm2_game::RACE_TICK_HZ) {
+            host.game.tick();
+        }
+        assert!(host.game.outcome().is_some());
+    }
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Results));
+    let shown = results_texts(&mut app);
+    assert!(shown.iter().any(|t| t.contains("Play again")), "{shown:?}");
+
+    // Play again keeps the bot count: a new generation, three fresh
+    // bots, a fresh undecided match with all four seated.
+    results_row(&mut app, 1);
+    assert!(
+        run_until(&mut app, 400, |a| {
+            phase(a) == SessionPhase::Playing
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the rematch never started: {:?} {:?}",
+        phase(&app),
+        shell(&app).status
+    );
+    let again = app.world().resource::<Session>().config().cloned().unwrap();
+    assert_eq!(again.cnr_bots, 3, "the restart keeps the picked bot count");
+    assert_eq!(again.mode, config.mode);
+    assert_eq!(
+        bots(&mut app),
+        3,
+        "the rematch fields three bots, not 0 or 6"
+    );
+    for _ in 0..60 {
+        app.update();
+    }
+    let host = app.world().resource::<CnrHost>();
+    assert!(host.game.outcome().is_none());
+    assert_eq!(host.game.view().standings.len(), 4);
+
+    // Exit to the menu: nothing of the match survives.
+    quit_session(&mut app);
+    assert!(
+        run_until(&mut app, 60, |a| phase(a) == SessionPhase::Menu),
+        "quit never reached Menu: {:?}",
+        phase(&app)
+    );
+    app.update();
+    assert!(shell(&app).active, "the menu is back");
+    assert_eq!(bots(&mut app), 0, "no bot outlives the session");
+    assert!(app.world().get_resource::<CnrBotBrain>().is_none());
+    assert!(app.world().get_resource::<CnrHost>().is_none());
+}

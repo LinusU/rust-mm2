@@ -455,3 +455,24 @@ Sessions without bots keep the full authored pool. After the change the same
 command scores in both cities (10 bots, 180 s simulated: london 4 scoring bots,
 sf 3). Test: `ten_london_bots_score_on_the_default_seed`
 (`tests/cnr_bot_drive_retail.rs`).
+
+## Local solo bots, the full menu journey (CNRBOT-E, #1689) — designed, not original
+
+`tests/menu.rs::a_retail_cops_and_robbers_bot_match_runs_from_the_menu_through_play_again_and_exit`
+(opt-in: `MM2_RETAIL`) drives the production menu, session, results and
+pause systems over retail SF: Cops & Robbers → `sf` → `Limit:` → `Bots:`
+nine presses (10 → 3) → `Start match` → city load → three `CnrBot`
+entities plus a `CnrBotBrain` → 300 real frames (four seats enrolled, at
+least one bot moving) → match clock run out → `Results` with *Play
+again* → the restart is a new generation with `cnr_bots == 3`, the same
+mode and exactly three fresh bots (four seats, undecided match) → Esc /
+quit → `Menu` with no bot, brain or `CnrHost` left. Nothing places a bot
+or grants gold. The one shortcut is shared with the synthetic journey:
+the match clock is advanced with `GoldMatch::tick` rather than simulated
+for five minutes. Evidence level: original-content validation; no
+rendering, audio or play-test (CNRBOT-F). Not covered: human-carrier
+contests and bot removal mid-match (#1688).
+
+```sh
+MM2_RETAIL=<install> cargo test -p mm2_app --test app a_retail_cops_and_robbers_bot_match -- --nocapture
+```
