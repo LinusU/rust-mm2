@@ -493,6 +493,7 @@ frames in sf and london; the record passes, 11 seats remain, 9 bot cars remain
 and the field keeps scoring (sf 25 points in total, london 200 — sf is the
 weak seed noted above). The retail run does not assert who carried at the
 removal moment.
+
 ### A steal by ramming on a retail street (#1692)
 
 Test `a_bot_steals_the_gold_by_ramming_on_a_retail_street`
