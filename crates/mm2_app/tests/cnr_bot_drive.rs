@@ -19,7 +19,7 @@ use mm2_app::cnr_bot_drive::{CnrBotBrain, CnrBotDriver, REPLAN_FRAMES, cnr_bot_d
 use mm2_app::cnr_bots::CnrBot;
 use mm2_app::contracts;
 use mm2_content::cnr::{CnrSettings, GoldMass};
-use mm2_game::gold::{CnrVariant, EndRule, GoldEvent, GoldMatch};
+use mm2_game::gold::{CnrVariant, DropCause, EndRule, GoldEvent, GoldMatch, Side};
 use mm2_game::{
     ImpactEvent, ObjectIdentity, Player, PlayerControl, PlayerId, Session, SessionAuthority,
     SessionConfig, SessionMode, SessionPhase, WorldMode,
@@ -135,6 +135,14 @@ impl Rig {
         }
     }
 
+    /// A bot on `side` (as enrolment would seat it, were the split not
+    /// chosen), on the ground at `at`, facing `toward`.
+    fn bot_on(&mut self, index: u8, at: Vec3, toward: Vec3, side: Side) -> (Entity, PlayerId) {
+        let (entity, id) = self.bot(index, at, toward);
+        self.seat(id, side);
+        (entity, id)
+    }
+
     /// A bot on the ground at `at`, facing `toward`.
     fn bot(&mut self, index: u8, at: Vec3, toward: Vec3) -> (Entity, PlayerId) {
         let config = VehicleConfig::default();
@@ -166,6 +174,104 @@ impl Rig {
             ))
             .id();
         (entity, id)
+    }
+
+    /// A human-driven car on the ground at `at`, facing `toward`, seated
+    /// on `side`. Its pedals are whatever the test writes to its
+    /// `VehicleInput`; nothing else moves it.
+    fn human(&mut self, at: Vec3, toward: Vec3, side: Side) -> (Entity, PlayerId) {
+        let config = VehicleConfig::default();
+        let flat = toward - at;
+        let yaw = (-flat.x).atan2(-flat.z);
+        let (object, id, role) = {
+            let mut session = self.app.world_mut().resource_mut::<Session>();
+            (
+                session.mint_object_id(),
+                session.mint_player_id(),
+                session.authority_role(),
+            )
+        };
+        self.seat(id, side);
+        let entity = self
+            .app
+            .world_mut()
+            .spawn((
+                ObjectIdentity(object),
+                Player {
+                    id,
+                    control: PlayerControl::Local,
+                },
+                role,
+                vehicle_bundle(&config),
+                Transform::from_translation(Vec3::new(at.x, 1.2, at.z))
+                    .with_rotation(Quat::from_rotation_y(yaw)),
+            ))
+            .id();
+        (entity, id)
+    }
+
+    /// Seat a participant on `side` through the match's own join, as
+    /// the lobby would, so the split is the test's and not the
+    /// enrolment order's.
+    fn seat(&mut self, id: PlayerId, side: Side) {
+        self.app
+            .world_mut()
+            .resource_mut::<CnrHost>()
+            .game
+            .join(id, side)
+            .unwrap();
+    }
+
+    /// Drive `e` as a person would: full throttle, steering toward
+    /// `target` by the angle between its heading and the bearing.
+    fn steer_toward(&mut self, e: Entity, target: Vec3) {
+        let world = self.app.world();
+        let (p, q) = (
+            world.get::<Position>(e).unwrap().0,
+            world.get::<Rotation>(e).unwrap().0,
+        );
+        let fwd = q * Vec3::NEG_Z;
+        let want = target - p;
+        let cross = fwd.x * want.z - fwd.z * want.x;
+        let dot = fwd.x * want.x + fwd.z * want.z;
+        // Positive cross: the target is to the car's clockwise side
+        // seen from above (screen right, `-Z` forward).
+        let angle = cross.atan2(dot);
+        let mut input = self.app.world_mut().get_mut::<VehicleInput>(e).unwrap();
+        *input = VehicleInput {
+            throttle: 1.0,
+            steering: (angle * 2.0).clamp(-1.0, 1.0),
+            ..default()
+        };
+    }
+
+    /// Step with `drive` called before each step (a human's hands),
+    /// like [`Rig::run_until`] watching for teleports.
+    fn run_driving(
+        &mut self,
+        ticks: u32,
+        watch: &[Entity],
+        mut drive: impl FnMut(&mut Rig),
+        mut done: impl FnMut(&Rig) -> bool,
+    ) -> u32 {
+        let mut last: Vec<Vec3> = watch.iter().map(|e| self.pos(*e)).collect();
+        for t in 0..ticks {
+            drive(self);
+            self.app.update();
+            for (i, e) in watch.iter().enumerate() {
+                let p = self.pos(*e);
+                assert!(
+                    p.is_finite() && p.distance(last[i]) < self.jump_limit,
+                    "car {i} jumped {:?} -> {p:?} at tick {t}",
+                    last[i]
+                );
+                last[i] = p;
+            }
+            if done(self) {
+                return t;
+            }
+        }
+        ticks
     }
 
     fn pos(&self, e: Entity) -> Vec3 {
@@ -469,5 +575,194 @@ fn a_field_of_fifteen_bots_scores_with_bounded_replanning_in_every_variant() {
             stats.policy_calls
         );
         assert!(stats.policy_calls > 0, "{variant:?}: the policy drove");
+    }
+}
+
+/// The two teams of a team variant, as (human's side, other side).
+fn teams(variant: CnrVariant) -> (Side, Side) {
+    match variant {
+        CnrVariant::CopsVsRobbers => (Side::Robbers, Side::Cops),
+        CnrVariant::RobbersVsRobbers => (Side::Red, Side::Blue),
+        CnrVariant::FreeForAll => unreachable!("free-for-all has no teams"),
+    }
+}
+
+/// Where `side` delivers in this rig's world.
+fn home(rig: &Rig, side: Side) -> Vec3 {
+    let sites = rig.game().sites();
+    sites.target(side.delivery_target())
+}
+
+const TEAM_VARIANTS: [CnrVariant; 2] = [CnrVariant::CopsVsRobbers, CnrVariant::RobbersVsRobbers];
+
+/// Whether `events` hold a drop of the gold by `loser` knocked by `by`.
+fn knocked(events: &[GoldEvent], loser: PlayerId, by: PlayerId) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            GoldEvent::Dropped { player, cause: DropCause::Knocked { by: Some(b) }, .. }
+                if *player == loser && *b == by
+        )
+    })
+}
+
+/// CNRBOT-E human-carrier leg (a): a driven human carries the gold to
+/// the hideout while a bot of each side waits off the way. The enemy
+/// bot robs the human by ramming; the ally is never the one who takes
+/// it. Nothing is placed after the start: the human's pedals are the
+/// only hands, the bots drive themselves and the host step rules.
+#[test]
+fn a_driven_human_carrier_is_robbed_by_an_enemy_bot_and_never_by_an_ally() {
+    for variant in TEAM_VARIANTS {
+        let (mine, theirs) = teams(variant);
+        let mut rig = Rig::new(variant, true);
+        let (gold, hideout) = (rig.gold, rig.hideout);
+        let (human, h_id) = rig.human(gold, hideout, mine);
+        let (enemy, e_id) = rig.bot_on(0, along(gold, hideout, 0.2, 6.0), gold, theirs);
+        let (ally, a_id) = rig.bot_on(1, along(gold, hideout, 0.3, -60.0), gold, mine);
+        rig.run_driving(
+            30,
+            &[human, enemy, ally],
+            |r| r.steer_toward(human, hideout),
+            |r| r.game().carrier() == Some(h_id),
+        );
+        assert_eq!(
+            rig.game().carrier(),
+            Some(h_id),
+            "{variant:?}: human picked up"
+        );
+        let before = rig.events().len();
+        let t = rig.run_driving(
+            60 * 60,
+            &[human, enemy, ally],
+            |r| r.steer_toward(human, hideout),
+            |r| r.game().carrier() != Some(h_id),
+        );
+        let events = &rig.events()[before..];
+        assert!(
+            knocked(events, h_id, e_id),
+            "{variant:?}: the enemy bot robs the human ({t} ticks): {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GoldEvent::Dropped { cause: DropCause::Knocked { by: Some(b) }, .. } if *b == a_id
+            )) && !events
+                .iter()
+                .any(|e| matches!(e, GoldEvent::Picked { player, .. } if *player == a_id)),
+            "{variant:?}: the ally took part in the robbery: {events:?}"
+        );
+        assert_eq!(rig.game().carrier(), Some(e_id), "{variant:?}: {events:?}");
+        assert_eq!(
+            driver(&rig, enemy).reanchors + driver(&rig, ally).reanchors,
+            0
+        );
+    }
+}
+
+/// The control for (a): with only an ally near, the human carrier is
+/// left alone all the way to the hideout and scores.
+#[test]
+fn an_ally_bot_never_robs_the_human_carrier() {
+    for variant in TEAM_VARIANTS {
+        let (mine, _) = teams(variant);
+        let mut rig = Rig::new(variant, true);
+        let (gold, hideout) = (rig.gold, rig.hideout);
+        let (human, h_id) = rig.human(gold, hideout, mine);
+        let (ally, a_id) = rig.bot_on(0, along(gold, hideout, 0.4, 25.0), gold, mine);
+        rig.run_driving(
+            60 * 90,
+            &[human, ally],
+            |r| r.steer_toward(human, hideout),
+            |r| r.game().score(h_id).unwrap_or(0) > 0,
+        );
+        assert!(
+            rig.game().score(h_id).unwrap_or(0) > 0,
+            "{variant:?}: delivered"
+        );
+        assert!(
+            !rig.events()
+                .iter()
+                .any(|e| matches!(e, GoldEvent::Dropped { .. })
+                    || matches!(e, GoldEvent::Picked { player, .. } if *player == a_id)),
+            "{variant:?}: {:?}",
+            rig.events()
+        );
+    }
+}
+
+/// CNRBOT-E human-carrier leg (b): a bot carries the gold toward the
+/// hideout. A human on the other side robs it by driving into it.
+#[test]
+fn a_human_robs_an_enemy_bot_carrier_by_driving_into_it() {
+    for variant in TEAM_VARIANTS {
+        let (mine, theirs) = teams(variant);
+        let mut rig = Rig::new(variant, true);
+        let gold = rig.gold;
+        let hideout = home(&rig, theirs);
+        let (bot, b_id) = rig.bot_on(0, gold, hideout, theirs);
+        let (human, h_id) = rig.human(along(gold, hideout, 0.8, 60.0), gold, mine);
+        rig.run_driving(
+            30,
+            &[bot, human],
+            |_| {},
+            |r| r.game().carrier() == Some(b_id),
+        );
+        assert_eq!(
+            rig.game().carrier(),
+            Some(b_id),
+            "{variant:?}: bot picked up"
+        );
+        let before = rig.events().len();
+        let t = rig.run_driving(
+            60 * 60,
+            &[bot, human],
+            |r| {
+                let at = r.pos(bot);
+                r.steer_toward(human, at)
+            },
+            |r| r.game().carrier() == Some(h_id),
+        );
+        let events = &rig.events()[before..];
+        assert_eq!(
+            rig.game().carrier(),
+            Some(h_id),
+            "{variant:?}: robbed after {t} ticks: {events:?}"
+        );
+        assert!(knocked(events, b_id, h_id), "{variant:?}: {events:?}");
+        assert_eq!(driver(&rig, bot).reanchors, 0);
+    }
+}
+
+/// A human on the carrier's own side is no robber to the bot: the
+/// bot carries on to the hideout with the human driving alongside it
+/// at the same hideout, and no steal is recorded.
+#[test]
+fn an_ally_human_does_not_rob_a_bot_carrier_driving_to_the_same_hideout() {
+    for variant in TEAM_VARIANTS {
+        let (mine, _) = teams(variant);
+        let mut rig = Rig::new(variant, true);
+        let gold = rig.gold;
+        let hideout = home(&rig, mine);
+        let (bot, b_id) = rig.bot_on(0, gold, hideout, mine);
+        let (human, h_id) = rig.human(along(gold, hideout, 0.1, 30.0), hideout, mine);
+        rig.run_driving(
+            60 * 90,
+            &[bot, human],
+            |r| r.steer_toward(human, hideout),
+            |r| r.game().score(b_id).unwrap_or(0) > 0,
+        );
+        assert!(
+            rig.game().score(b_id).unwrap_or(0) > 0,
+            "{variant:?}: delivered"
+        );
+        assert!(
+            !rig.events().iter().any(|e| matches!(
+                e,
+                GoldEvent::Picked { player, .. } if *player == h_id
+            )),
+            "{variant:?}: {:?}",
+            rig.events()
+        );
     }
 }
