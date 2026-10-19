@@ -406,10 +406,100 @@ fn pause_menu_restart_reloads_clean() {
     assert_eq!(count::<With<Hud>>(&mut app), 1);
 }
 
-/// MP-6: a session under non-local authority cannot pause — `Esc`
-/// keeps its quit meaning rather than going dead.
+/// MP-6 + #1711: a session under non-local authority cannot pause, but
+/// `Esc` must not tear it down or go dead either — it opens the local
+/// menu over the running game: the phase stays `Playing`, the
+/// simulation clock keeps counting, and `Esc` (or Resume) closes it.
+fn esc_opens_a_local_menu_without_stopping_the_game(authority: SessionAuthority) {
+    let mut app = test_app(
+        SessionConfig {
+            authority,
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    for _ in 0..5 {
+        app.update();
+    }
+
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing), "no pause");
+    assert!(!physics_paused(&mut app), "the simulation keeps running");
+    assert_eq!(pause_rows(&mut app), 1, "the local menu draws");
+    let tick = app.world().resource::<Session>().tick();
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<Session>().tick() > tick,
+        "the session clock keeps counting under the menu"
+    );
+
+    // Esc closes it again.
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert_eq!(pause_rows(&mut app), 0);
+    assert!(!app.world().resource::<SessionControl>().menu);
+
+    // Reopen; Resume (the focused first row) closes it too.
+    press_key(&mut app, KeyCode::Escape);
+    assert_eq!(pause_rows(&mut app), 1);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert_eq!(pause_rows(&mut app), 0);
+}
+
 #[test]
-fn esc_quits_when_the_authority_cannot_pause() {
+fn esc_opens_a_local_menu_for_a_host() {
+    esc_opens_a_local_menu_without_stopping_the_game(SessionAuthority::Host);
+}
+
+#[test]
+fn esc_opens_a_local_menu_for_a_remote_client() {
+    esc_opens_a_local_menu_without_stopping_the_game(SessionAuthority::Remote);
+}
+
+/// The menu's Leave row (last row) tears the session down cleanly and
+/// takes the overlay with it; Restart is inert (the host owns restarts).
+#[test]
+fn the_local_menu_leave_row_tears_a_networked_session_down() {
+    for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+        let mut app = test_app(
+            SessionConfig {
+                authority,
+                ..SessionConfig::default()
+            },
+            1.0 / 60.0,
+        );
+        app.update();
+        press_key(&mut app, KeyCode::Escape);
+        assert_eq!(pause_rows(&mut app), 1);
+
+        // Restart (row 1) does nothing.
+        press_key(&mut app, KeyCode::ArrowDown);
+        press_key(&mut app, KeyCode::Enter);
+        assert!(!app.world().resource::<SessionControl>().restart);
+        assert!(phase_is(&mut app, SessionPhase::Playing));
+
+        // Down to Leave (row 3) and activate.
+        press_key(&mut app, KeyCode::ArrowDown);
+        press_key(&mut app, KeyCode::ArrowDown);
+        press_key(&mut app, KeyCode::Enter);
+        assert!(
+            run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+            "Leave should tear down, got {:?}",
+            app.world().resource::<Session>().phase()
+        );
+        assert_eq!(pause_rows(&mut app), 0);
+        assert!(!app.world().resource::<SessionControl>().menu);
+    }
+}
+
+/// While the local menu is up the keyboard drives the menu, not the car.
+#[test]
+fn the_local_menu_captures_driving_input() {
     let mut app = test_app(
         SessionConfig {
             authority: SessionAuthority::Host,
@@ -418,15 +508,18 @@ fn esc_quits_when_the_authority_cannot_pause() {
         1.0 / 60.0,
     );
     app.update();
-    assert!(phase_is(&mut app, SessionPhase::Playing));
-
     press_key(&mut app, KeyCode::Escape);
-    assert!(
-        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
-        "Esc on a non-pausable session should quit, got {:?}",
-        app.world().resource::<Session>().phase()
-    );
-    assert_eq!(pause_rows(&mut app), 0, "no pause overlay for a host");
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+    app.update();
+    let throttle = app
+        .world_mut()
+        .query_filtered::<&VehicleInput, With<PlayerVehicle>>()
+        .single(app.world())
+        .unwrap()
+        .throttle;
+    assert_eq!(throttle, 0.0, "W navigates the menu, it does not drive");
 }
 
 /// The `F4` binding is not the only `control.restart` producer — the

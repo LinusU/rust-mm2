@@ -127,6 +127,15 @@ pub struct SessionControl {
     /// whose authority allows pause — `session_control_input` falls
     /// back to `quit` when `allows_pause` is false (MP-6).
     pub pause: bool,
+    /// A networked session's Esc (MP-6: it never pauses): ask for the
+    /// local menu. `drive_session` turns it into [`Self::menu`] after
+    /// `pause_input` ran, so the opening press is not re-read as a close.
+    pub open_menu: bool,
+    /// The local menu is up over a live networked session. Only input is
+    /// captured — the phase stays `Playing`/`Countdown`, the simulation
+    /// and the network pump keep running, and `pause_input` owns the
+    /// keyboard until Resume/Esc closes it or Leave tears the session down.
+    pub menu: bool,
 }
 
 /// How the last session ended, carried across teardown so the menu can
@@ -194,10 +203,15 @@ pub fn session_control_input(
             .next()
             .is_some_and(|pad| pad.just_pressed(GamepadButton::Start));
     if pause_key {
-        if *session.phase() == SessionPhase::Playing
-            && session.config().is_none_or(|c| c.authority.allows_pause())
-        {
+        let pausable = session.config().is_none_or(|c| c.authority.allows_pause());
+        if *session.phase() == SessionPhase::Playing && pausable {
             control.pause = true;
+        } else if !pausable && !matches!(session.phase(), SessionPhase::Failed(_)) {
+            // A networked session cannot pause, but Esc must not tear it
+            // down either: it opens the local menu over the running game.
+            // With the menu already up the same press is `pause_input`'s
+            // close, so it is neither a re-open nor a quit here.
+            control.open_menu = !control.menu;
         } else {
             control.quit = true;
         }
@@ -281,6 +295,18 @@ pub fn drive_session(
     mut note: Option<ResMut<SessionNote>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // The local menu only lives over a running networked session: any
+    // other phase (results, teardown, a host-driven restart) closes it.
+    if !matches!(
+        session.phase(),
+        SessionPhase::Countdown | SessionPhase::Playing
+    ) {
+        control.menu = false;
+        control.open_menu = false;
+    } else if control.open_menu {
+        control.open_menu = false;
+        control.menu = true;
+    }
     match *session.phase() {
         SessionPhase::Unloading => {
             if !roots.is_empty() {
@@ -471,6 +497,7 @@ pub fn drive_session(
             // A queued pause must not outlive the session it was meant
             // for — the next `Playing` phase belongs to a new run.
             control.pause = false;
+            control.menu = false;
             session
                 .transition(SessionPhase::Unloading)
                 .expect("live/failed session → Unloading is a legal transition");

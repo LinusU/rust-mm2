@@ -18,7 +18,7 @@ use crate::controls::{
 };
 use crate::manual_gear::ManualGear;
 use crate::pad_map::PadAction;
-use crate::session::{self, SpawnPoint};
+use crate::session::{self, SessionControl, SpawnPoint};
 
 /// The *shipped* designed in-session pad map (F22-AC06's bindings leg; the
 /// gamepad-only leg F23 req 4 asks for). The original's pad button
@@ -642,6 +642,7 @@ pub fn vehicle_input(
     controls: Option<Res<ControlSettings>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     mut commands: Commands,
+    control: Option<Res<SessionControl>>,
 ) {
     // Driving controls are active in every drive view — the chase
     // lenses and the cockpit (HUD-3's three views are all drive views);
@@ -652,9 +653,13 @@ pub fn vehicle_input(
     // already `Countdown` in the normal flow, but `input_locked` also
     // covers a race resource that outlives its gate.
     let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
+    let menu_open = control.is_some_and(|c| c.menu);
     let focused = windows_focused(&windows);
-    let driving =
-        !matches!(*cam_mode, CameraMode::Free) && session.is_playing() && focused && !race_locked;
+    let driving = !matches!(*cam_mode, CameraMode::Free)
+        && session.is_playing()
+        && focused
+        && !race_locked
+        && !menu_open;
     if !driving {
         // A pause or countdown ends the held gear: the next frame seeds
         // from whatever the car is in, so a shift key pressed meanwhile
@@ -797,8 +802,10 @@ pub fn reset_input(
     controls: Option<Res<ControlSettings>>,
     player: Query<Entity, With<PlayerVehicle>>,
     mut writer: MessageWriter<ResetVehicle>,
+    control: Option<Res<SessionControl>>,
 ) {
     if !session.is_playing()
+        || control.is_some_and(|c| c.menu)
         || !session.authority_role().is_authority()
         || !control_just_pressed(
             &keys,

@@ -145,6 +145,7 @@ struct PauseRow {
 /// in-game keys page edits (see [`PauseMenu::alt`]).
 fn pause_rows(
     has_menu: bool,
+    live: bool,
     page: PausePage,
     settings: Option<GraphicsSettings>,
     controls: Option<&ControlSettings>,
@@ -258,7 +259,17 @@ fn pause_rows(
     }
     vec![
         row("Resume".into(), Ok(PauseAction::Resume)),
-        row("Restart".into(), Ok(PauseAction::Restart)),
+        row(
+            "Restart".into(),
+            if live {
+                // The wire owns a networked session's restarts (the
+                // host's `Cancel`/`Start`), so the row names why it is
+                // inert rather than queueing an intent nobody honours.
+                Err("the host restarts a multiplayer match".into())
+            } else {
+                Ok(PauseAction::Restart)
+            },
+        ),
         row(
             "Options".into(),
             if settings.is_some() {
@@ -268,7 +279,12 @@ fn pause_rows(
             },
         ),
         row(
-            if has_menu { "Quit to menu" } else { "Quit" }.into(),
+            match (live, has_menu) {
+                (true, _) => "Leave session",
+                (false, true) => "Quit to menu",
+                (false, false) => "Quit",
+            }
+            .into(),
             Ok(PauseAction::Quit),
         ),
     ]
@@ -395,7 +411,8 @@ pub fn pause_input(
     mut pause: ResMut<PauseMenu>,
     mut graphics: PauseGraphics,
 ) {
-    if !matches!(session.phase(), SessionPhase::Paused) {
+    let live = control.menu;
+    if !matches!(session.phase(), SessionPhase::Paused) && !live {
         return;
     }
     // F22-A.1/HUD-4: while the full-screen pause map is up it replaces
@@ -505,6 +522,7 @@ pub fn pause_input(
         // whole set.
         let rows = pause_rows(
             has_menu,
+            live,
             pause.page,
             graphics.settings.as_deref().copied(),
             graphics.controls.as_deref(),
@@ -515,9 +533,7 @@ pub fn pause_input(
             MenuCommand::Down => pause.focus = (pause.focus + 1).min(rows.len().saturating_sub(1)),
             MenuCommand::Activate => match rows.get(pause.focus).map(|r| &r.enabled) {
                 Some(Ok(action)) => match action {
-                    PauseAction::Resume => session
-                        .transition(SessionPhase::Playing)
-                        .expect("Paused → Playing is a legal transition"),
+                    PauseAction::Resume => resume(live, &mut session, &mut control),
                     PauseAction::Restart => control.restart = true,
                     PauseAction::Quit => control.quit = true,
                     PauseAction::OpenOptions => open_page(&mut pause, PausePage::Options, 0),
@@ -613,9 +629,7 @@ pub fn pause_input(
                 }
                 PausePage::Controls => open_page(&mut pause, PausePage::Options, CONTROLS_ROW),
                 PausePage::Options => open_page(&mut pause, PausePage::Pause, OPTIONS_ROW),
-                PausePage::Pause => session
-                    .transition(SessionPhase::Playing)
-                    .expect("Paused → Playing is a legal transition"),
+                PausePage::Pause => resume(live, &mut session, &mut control),
             },
             // No text fields or mouse-produced focus commands under
             // pause, and a capture is handled above.
@@ -627,6 +641,18 @@ pub fn pause_input(
             | MenuCommand::CapturePad(_) => {}
         }
         pause.dirty = true;
+    }
+}
+
+/// Leave the overlay: a `Paused` session returns to `Playing`; a live
+/// (networked) one just closes the local menu — its phase never moved.
+fn resume(live: bool, session: &mut Session, control: &mut SessionControl) {
+    if live {
+        control.menu = false;
+    } else {
+        session
+            .transition(SessionPhase::Playing)
+            .expect("Paused → Playing is a legal transition");
     }
 }
 
@@ -829,6 +855,7 @@ pub fn pause_present(
     mut commands: Commands,
     session: Res<Session>,
     mut pause: ResMut<PauseMenu>,
+    control: Res<SessionControl>,
     view: PauseView,
     roots: Query<Entity, (With<PauseUi>, Without<ChildOf>)>,
     cameras: Query<(Entity, &Camera), crate::hudmap::WorldCamera3d>,
@@ -847,7 +874,8 @@ pub fn pause_present(
         pause.dirty = true;
         return;
     }
-    if !matches!(session.phase(), SessionPhase::Paused) {
+    let live = control.menu;
+    if !matches!(session.phase(), SessionPhase::Paused) && !live {
         for root in &roots {
             commands.entity(root).despawn();
         }
@@ -869,6 +897,7 @@ pub fn pause_present(
 
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
     let title = match pause.page {
+        PausePage::Pause if live => "Menu",
         PausePage::Pause => "Paused",
         PausePage::Options => "Graphics and audio options",
         PausePage::Controls => "Driving controls",
@@ -879,6 +908,7 @@ pub fn pause_present(
     lines.push((String::new(), 8.0, Color::NONE));
     for (i, row) in pause_rows(
         view.menu_shell.is_some(),
+        live,
         pause.page,
         view.settings.as_deref().copied(),
         view.controls.as_deref(),

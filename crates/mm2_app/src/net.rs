@@ -997,6 +997,8 @@ fn begin_wired(
     control.restart = false;
     control.next_event = None;
     control.pause = false;
+    control.open_menu = false;
+    control.menu = false;
     Ok(())
 }
 
@@ -2951,6 +2953,7 @@ mod tests {
             restart: true,
             next_event: None,
             pause: true,
+            ..Default::default()
         };
         begin_wired(&mut session, &mut control, SessionConfig::default(), 4).unwrap();
         assert_eq!(*session.phase(), SessionPhase::Loading);
