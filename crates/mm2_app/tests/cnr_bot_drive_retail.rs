@@ -424,6 +424,115 @@ fn retail_bots_pick_up_deliver_and_pursue_in_each_city() {
     }
 }
 
+/// What one steal hunt saw.
+#[derive(Debug, Default)]
+struct Steal {
+    /// Frame (from the first step) A took the loose gold.
+    picked: Option<u32>,
+    /// Frame B's hit knocked the gold out of A's car.
+    knocked: Option<u32>,
+    /// Frame B held the gold it had knocked loose.
+    stolen: Option<u32>,
+    /// Closest B came to A while A carried, m.
+    closest: f32,
+}
+
+/// Two bots, A ~60 m and B ~150 m from the gold (as [`run`]), both on
+/// the production driver, vehicle and collision; nothing is placed or
+/// written after the start. Ends when B holds the gold A carried
+/// (a `Dropped { Knocked { by: B } }` of A's gold, then `Picked` by B),
+/// when A delivers, or after [`BUDGET`] seconds.
+fn hunt(retail: &std::path::Path, city: &str, seed: u64) -> Steal {
+    let (mut app, slots) = city_app(retail, city, seed, false, CnrVariant::FreeForAll);
+    let gold = app.world().resource::<CnrHost>().game.sites().gold;
+    let a_slot = start_near(&slots, gold, 60.0, &[]);
+    let b_slot = start_near(&slots, gold, 150.0, &[a_slot]);
+    let bots = spawn(&mut app, vec![a_slot, b_slot]);
+    let ((a, a_id), (b, b_id)) = (bots[0], bots[1]);
+    let mut out = Steal {
+        closest: f32::MAX,
+        ..Steal::default()
+    };
+    let mut seen = 0usize;
+    for tick in 0..HZ * BUDGET {
+        app.update();
+        let events = app.world().resource::<Events>().0.clone();
+        for e in &events[seen..] {
+            match e {
+                GoldEvent::Picked {
+                    player,
+                    recovered: false,
+                    ..
+                } if *player == a_id => {
+                    out.picked.get_or_insert(tick);
+                }
+                GoldEvent::Dropped {
+                    player,
+                    cause: DropCause::Knocked { by: Some(by) },
+                    ..
+                } if *player == a_id && *by == b_id => {
+                    out.knocked.get_or_insert(tick);
+                }
+                GoldEvent::Picked { player, .. } if *player == b_id && out.knocked.is_some() => {
+                    out.stolen.get_or_insert(tick);
+                }
+                GoldEvent::Delivered { .. } => return out,
+                _ => {}
+            }
+        }
+        seen = events.len();
+        if out.stolen.is_some() {
+            return out;
+        }
+        if out.picked.is_some() {
+            out.closest = out.closest.min(pos(&app, a).distance(pos(&app, b)));
+        }
+        if out.picked.is_none() && tick > HZ * PICKUP_BY {
+            break;
+        }
+    }
+    out
+}
+
+/// CNRBOT-E: a steal by ramming on a retail street. Bot B takes the gold
+/// off bot A's car by driving into it, with production physics, the nav
+/// graph and the neural driver; nothing is placed or scripted. The seeds
+/// were found by hunting the first [`STEAL_SEARCH`] all-on-lane seeds of
+/// each city (`docs/research/cnr.md`): only London 122 and 164 steal, so
+/// both are pinned and each must reproduce. A change to physics, the
+/// graph or the driver that moves them fails here; re-run the hunt with
+/// `MM2_STEAL_SEARCH=1` to find new seeds.
+#[test]
+fn a_bot_steals_the_gold_by_ramming_on_a_retail_street() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; the ramming steal was NOT checked");
+        return;
+    };
+    if std::env::var_os("MM2_STEAL_SEARCH").is_some() {
+        for city in ["sf", "london"] {
+            let vfs = mount(&retail);
+            let graph = load_graph(&vfs, city).unwrap();
+            for seed in lane_seeds(&vfs, city, &graph, STEAL_SEARCH) {
+                eprintln!("{city} seed {seed}: {:?}", hunt(&retail, city, seed));
+            }
+        }
+        return;
+    }
+    for seed in [122, 164] {
+        let s = hunt(&retail, "london", seed);
+        eprintln!("london seed {seed}: {s:?}");
+        let (picked, knocked, stolen) = (
+            s.picked.expect("A never took the gold"),
+            s.knocked.expect("B never knocked the gold out of A"),
+            s.stolen.expect("B never held the gold it knocked loose"),
+        );
+        assert!(picked < knocked && knocked <= stolen, "{s:?}");
+    }
+}
+
+/// Seeds per city the hunt searches (`MM2_STEAL_SEARCH`).
+const STEAL_SEARCH: usize = 12;
+
 /// CNRBOT-E finding (#1686): ten bots in London on the default seed
 /// scored nothing in four minutes, because the drawn gold lies in a
 /// room 54 m from the nearest lane. A session with bots draws from the

@@ -436,8 +436,7 @@ the baseline growth is not bot-specific and is filed separately.
 
 Menu → city load → *Play again* → exit to menu through the real UI,
 human-carrier and human-bot contests with a driven human, ally/enemy
-behaviour in the team variants under contact,
-and a steal by ramming on a retail street remain open (follow-up tasks);
+behaviour in the team variants under contact remain open (follow-up tasks);
 points were observed above the 50-point limit (125) before the match was
 decided in sf — not investigated.
 
@@ -494,3 +493,27 @@ frames in sf and london; the record passes, 11 seats remain, 9 bot cars remain
 and the field keeps scoring (sf 25 points in total, london 200 — sf is the
 weak seed noted above). The retail run does not assert who carried at the
 removal moment.
+### A steal by ramming on a retail street (#1692)
+
+Test `a_bot_steals_the_gold_by_ramming_on_a_retail_street`
+(`tests/cnr_bot_drive_retail.rs`, opt-in via `MM2_RETAIL`). Setup: free-for-all,
+two bots on the production driver, vehicle (stock car 0), retail collision and
+nav graph; bot A starts the lane start nearest 60 m from the gold, bot B
+nearest 150 m. Nothing is placed or written after the start. A steal is a
+`Dropped { Knocked { by: B } }` of A's gold followed by `Picked` by B.
+
+Hunt over the first 12 all-on-lane seeds per city (`MM2_STEAL_SEARCH=1`, 300 s
+budget): sf 0 of 12, london 2 of 12. Frames are fixed steps at 60 Hz.
+
+| city, seed | A picks up | B's hit drops it | B holds it | closest approach |
+|---|---|---|---|---|
+| london 122 | 218 | 459 | 464 | 5.5 m |
+| london 164 | 1400 | 4334 | 4380 | 4.5 m |
+
+Most other seeds end with A delivering before B arrives, or no pickup (the
+gold or hideout is off the bot's reachable streets). The earlier
+`Outcome::stolen` flag in `retail_bots_pick_up_deliver_and_pursue_in_each_city`
+is set when B takes *loose* gold, not a steal; it is not evidence here. The two
+seeds are pinned and must reproduce; a change to physics, the graph or the
+driver that moves them means re-running the hunt. Evidence level:
+original-content validation; no rendering, no play-test.
