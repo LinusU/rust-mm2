@@ -74,9 +74,22 @@ fn run_case(
     seed: u64,
     frames: u32,
 ) -> Case {
+    run_case_with(retail, city, settings, bots, seed, frames, |_| {})
+}
+
+#[allow(clippy::too_many_arguments)] // run_case's six plus the dev-override hook
+fn run_case_with(
+    retail: &std::path::Path,
+    city: &str,
+    settings: CnrSettings,
+    bots: u8,
+    seed: u64,
+    frames: u32,
+    dev: impl FnOnce(&mut mm2_game::DevOverrides),
+) -> Case {
     let mut vfs = Vfs::new();
     mm2_assets::mount_install(&mut vfs, retail, &mm2_assets::InstallMount::default()).unwrap();
-    let config = SessionConfig {
+    let mut config = SessionConfig {
         world: WorldMode::City {
             psdl: format!("city/{city}.psdl"),
         },
@@ -85,6 +98,7 @@ fn run_case(
         seed,
         ..SessionConfig::default()
     };
+    dev(&mut config.dev);
     let start = Instant::now();
     let rec = smoke::headless_smoke(
         &config,
@@ -282,5 +296,39 @@ fn retail_bots_decide_matches_by_points_and_time_and_carry_heavy_gold() {
             "{city}: bots could not deliver half-ton gold: {}",
             c.line
         );
+    }
+}
+
+/// Removal leg: one of ten bots' cars vanishes a quarter of the way in
+/// (the carrier if one is carrying, else the lowest index) through the
+/// production `--cnr-drop-bot-at` path, which the host step handles as
+/// a disconnect. The run still passes, the seat list keeps every seat,
+/// exactly one bot entity is gone, and the nine others keep scoring.
+#[test]
+fn retail_removing_a_bot_seat_mid_match_leaves_the_match_running() {
+    let Some(retail) = retail() else { return };
+    for city in ["sf", "london"] {
+        let seed = scoring_seed(&retail, city);
+        let c = run_case_with(&retail, city, ffa(), 10, seed, budget(), |dev| {
+            dev.cnr_drop_bot_at = Some(u64::from(budget() / 4));
+        });
+        let total: i64 = c.points.iter().map(|p| p.1).sum();
+        println!(
+            "cnr-e2e city={city} seed={seed} drop-bot seats={} points={total} pts={:?} {}",
+            c.seats, c.points, c.line
+        );
+        assert_eq!(
+            c.seats, 11,
+            "{city}: every seat stays on the board: {}",
+            c.line
+        );
+        let alive = c
+            .line
+            .split(' ')
+            .find_map(|t| t.strip_prefix("bots="))
+            .and_then(|b| b.split('/').next())
+            .and_then(|n| n.parse::<u8>().ok());
+        assert_eq!(alive, Some(9), "{city}: one bot car removed: {}", c.line);
+        assert!(total > 0, "{city}: the field kept scoring: {}", c.line);
     }
 }

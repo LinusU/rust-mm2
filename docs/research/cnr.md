@@ -436,7 +436,7 @@ the baseline growth is not bot-specific and is filed separately.
 
 Menu → city load → *Play again* → exit to menu through the real UI,
 human-carrier and human-bot contests with a driven human, ally/enemy
-behaviour in the team variants under contact, disconnect-style removal,
+behaviour in the team variants under contact,
 and a steal by ramming on a retail street remain open (follow-up tasks);
 points were observed above the 50-point limit (125) before the match was
 decided in sf — not investigated.
@@ -456,6 +456,7 @@ command scores in both cities (10 bots, 180 s simulated: london 4 scoring bots,
 sf 3). Test: `ten_london_bots_score_on_the_default_seed`
 (`tests/cnr_bot_drive_retail.rs`).
 
+<<<<<<< HEAD
 ## Local solo bots, the full menu journey (CNRBOT-E, #1689) — designed, not original
 
 `tests/menu.rs::a_retail_cops_and_robbers_bot_match_runs_from_the_menu_through_play_again_and_exit`
@@ -476,3 +477,22 @@ contests and bot removal mid-match (#1688).
 ```sh
 MM2_RETAIL=<install> cargo test -p mm2_app --test app a_retail_cops_and_robbers_bot_match -- --nocapture
 ```
+=======
+### Removing a bot seat mid-match (#1691) — designed, not original
+
+`--cnr-drop-bot-at <ticks>` (with `--cnr-bots`, optional `--cnr-drop-bot <index>`;
+record-ineligible, one-shot) despawns one bot's car — the carrier if a bot is
+carrying, else the lowest index — which is exactly what a disconnect leaves.
+Nothing touches the match: `cnr_host_step` sees the seat's car gone and runs
+`GoldMatch::leave` (carried gold drops where the car last was, cause
+`Disconnected`, no lockout; the seat stays on the board, disconnected, with its
+points). Synthetic test (`cnr_bot_drive`): six bots, the carrier is removed, the
+gold is on the ground at its last position, `Left` + `Dropped{Disconnected}`
+fire, seats are unchanged, another bot takes the gold and delivers, and the
+match ends with a winner other than the leaver. Retail test
+(`cnr_bots_e2e_retail`): ten bots, seed on a lane, removed at 900 of 3600
+frames in sf and london; the record passes, 11 seats remain, 9 bot cars remain
+and the field keeps scoring (sf 25 points in total, london 200 — sf is the
+weak seed noted above). The retail run does not assert who carried at the
+removal moment.
+>>>>>>> 9ad736c (Add a retail bot-seat removal scenario and document it (CNRBOT-E))
