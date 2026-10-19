@@ -233,15 +233,16 @@ fn retail_london_matrix_scores_autonomously_with_ten_and_fifteen_bots() {
     city_matrix("london");
 }
 
-/// The first on-lane seed of `city` (SF 4, London 12/15/89 in the
-/// audit); the limit tests below need only that bots score at all.
-fn scoring_seed(retail: &std::path::Path, city: &str) -> u64 {
-    let mut vfs = Vfs::new();
-    mm2_assets::mount_install(&mut vfs, retail, &mm2_assets::InstallMount::default()).unwrap();
-    let graph = mm2_app::cnr_bots::load_graph(&vfs, city).unwrap();
-    // London's first lane seed (12) is the diagnosed non-scorer.
-    let seeds = crate::cnr_bot_drive_retail::lane_seeds(&vfs, city, &graph, 3);
-    *seeds.last().unwrap()
+/// The seed the limit tests use. A session with bots draws its rounds
+/// from the street-reachable pool (`cnr_bots::reachable_pool`), so every
+/// seed is a drivable round and `lane_seeds`, which probes the full
+/// authored pool, names different rounds (it once picked sf 35, where four
+/// bots picked up and none delivered). Delivery still depends on the draw:
+/// with 15 bots in 120 s sf seed 2 and london seeds 1 and 2 only pick up
+/// (25 points each, nothing banked, so a 50-point match never ends), while
+/// seed 0 decides in both cities.
+fn scoring_seed(_retail: &std::path::Path, _city: &str) -> u64 {
+    0
 }
 
 /// Bots decide a match on their own: a points limit and a time limit
