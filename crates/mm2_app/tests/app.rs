@@ -17,6 +17,7 @@ mod chunked_city;
 mod cnr_bot_drive;
 mod cnr_bot_drive_retail;
 mod cnr_bots;
+mod cnr_bots_e2e_retail;
 mod cnr_variants;
 mod cnrvoice;
 mod contracts;

@@ -72,7 +72,7 @@ fn on_lane(graph: &mm2_game::NavGraph, p: Vec3) -> bool {
 }
 
 /// The first `n` seeds whose opening gold and hideout both lie on a lane.
-fn lane_seeds(vfs: &Vfs, city: &str, graph: &mm2_game::NavGraph, n: usize) -> Vec<u64> {
+pub(crate) fn lane_seeds(vfs: &Vfs, city: &str, graph: &mm2_game::NavGraph, n: usize) -> Vec<u64> {
     let content = CnrContent::load(vfs, city);
     let settings = CnrSettings::default();
     (0..4096u64)

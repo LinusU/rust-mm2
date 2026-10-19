@@ -407,3 +407,67 @@ fn a_paused_or_finished_session_holds_every_bot() {
         assert_eq!((input.throttle, input.handbrake), (0.0, 1.0), "{phase:?}");
     }
 }
+
+/// CNRBOT-E synthetic leg: a full field of 15 bots in each variant. The
+/// bots start in a ring around the loose gold and nothing is scripted
+/// afterwards: at least one scores by driving (the step watches for
+/// teleports), nobody is re-anchored into a marker, and the field's
+/// replanning and policy evaluations stay bounded.
+#[test]
+fn a_field_of_fifteen_bots_scores_with_bounded_replanning_in_every_variant() {
+    for variant in [
+        CnrVariant::FreeForAll,
+        CnrVariant::CopsVsRobbers,
+        CnrVariant::RobbersVsRobbers,
+    ] {
+        let mut rig = Rig::new(variant, true);
+        let centre = rig.gold;
+        let mut bots = Vec::new();
+        for i in 0..15u8 {
+            let a = f32::from(i) / 15.0 * std::f32::consts::TAU;
+            let ring = 60.0 + 12.0 * f32::from(i % 3);
+            let at = centre + Vec3::new(a.cos() * ring, 0.0, a.sin() * ring);
+            bots.push(rig.bot(i, at, centre));
+        }
+        let watch: Vec<Entity> = bots.iter().map(|b| b.0).collect();
+        let ticks = 60 * 60;
+        rig.run_until(ticks, &watch, |r| {
+            bots.iter()
+                .any(|(_, id)| r.game().score(*id).unwrap_or(0) > 0)
+        });
+        let scorer = bots
+            .iter()
+            .find(|(_, id)| rig.game().score(*id).unwrap_or(0) > 0);
+        assert!(
+            scorer.is_some(),
+            "{variant:?}: nobody scored in {ticks} ticks"
+        );
+        // The score came from the host step's own pickup event, never a
+        // direct ownership write.
+        assert!(
+            rig.events()
+                .iter()
+                .any(|e| matches!(e, GoldEvent::Picked { .. } | GoldEvent::Delivered { .. })),
+            "{variant:?}: {:?}",
+            rig.events()
+        );
+        for (e, _) in &bots {
+            assert_eq!(
+                driver(&rig, *e).reanchors,
+                0,
+                "{variant:?}: no teleport helped"
+            );
+        }
+        let stats = rig.app.world().resource::<CnrBotBrain>().stats;
+        let plans = stats.straight + stats.direct + stats.streets;
+        // One line per bot, a switch or two each, and the rate limit.
+        let bound = 15 * (1 + 2 * 2) + 15 * u64::from(ticks / REPLAN_FRAMES);
+        assert!(plans <= bound, "{variant:?}: {plans} plans > {bound}");
+        assert!(
+            stats.policy_calls <= 15 * u64::from(ticks),
+            "{variant:?}: {} policy calls",
+            stats.policy_calls
+        );
+        assert!(stats.policy_calls > 0, "{variant:?}: the policy drove");
+    }
+}

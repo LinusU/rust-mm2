@@ -360,3 +360,83 @@ london 12 fail for reasons not yet diagnosed — a bot sat near its start or los
 the race for the gold), a steal *by ramming* on a retail street (only the
 synthetic test proves one), and any judgement of how the bots *look* or whether they are fun to
 play against (human-pending, CNRBOT-E). 
+
+## Local solo bots end to end (CNRBOT-E) — designed, not original
+
+Evidence level: **original-content validation** (retail SF and London
+data, production headless session path, no rendering, no audio, no
+play-test — the human visual/feel check is CNRBOT-F). The bots' score is
+earned by driving: the tests below never place a bot or write gold
+ownership; points arrive from `GoldMatch` pickup/delivery events.
+
+Reproduce (retail install in `MM2_RETAIL`; each prints `cnr-e2e …` lines
+with `--nocapture`):
+
+```sh
+cargo test -p mm2_app --test app cnr_bots_e2e -- --nocapture --test-threads=2
+cargo test -p mm2_app --test app a_field_of_fifteen        # synthetic, CI
+mm2 --mm2-path "$MM2_RETAIL" --city sf --cnr ffa --cnr-bots 15 --headless --frames 3600
+```
+
+`tests/cnr_bots_e2e_retail.rs` runs `smoke::headless_smoke` (the same
+`load_session_world` / bot roster / driver / physics / gold step the app
+runs) for **3 variants × 2 cities × 0, 1, 10, 15 bots** with a parked
+human, and asserts one seat per bot plus the human, no points with 0
+bots, and at least one autonomous score with 10 and 15. A second test
+decides a 15-bot match by a 50-point limit and by a 1-minute limit (the
+winner is a bot), and checks that bots still deliver half-ton gold.
+Seeds: the first on-lane seed of the site audit above that scores with
+ten bots (sf 4, london 15 — london 12 scores nothing, as before).
+`a_field_of_fifteen_bots_…` (`tests/cnr_bot_drive.rs`, runs in CI) is the
+synthetic leg: 15 bots, three variants, a score by driving, no re-anchor,
+bounded replans and policy calls.
+
+### Measured (60 s of simulated time, 3600 frames)
+
+| city/seed | variant | bots | points (all bots) |
+|---|---|---|---|
+| sf 4 | ffa / cops / rvr | 10 | 25 / 25 / 25 |
+| sf 4 | ffa / cops / rvr | 15 | 150 / 150 / 150 |
+| london 15 | ffa / cops / rvr | 10 | 50 / 50 / 50 |
+| london 15 | ffa / cops / rvr | 15 | 75 / 75 / 75 |
+
+0 and 1 bots (900 frames) score nothing: one bot did not reach the gold in
+15 s. The default seed (0): sf 10 bots scores 50, **london 10 bots scores
+0 in 60 s and in 240 s** — its opening gold is off the street graph (see
+"Where the authored sites lie"); filed as a task.
+
+### Cost (`mm2 --headless`, SF seed 0, FFA)
+
+Machine: Apple M1, 8 cores, 16 GiB, macOS, `cargo` dev profile with
+dependencies at `opt-level = 3` and workspace crates at `opt-level = 1`
+(the CI/test profile, not release), no renderer, other agents building on
+the same machine (load average ≈ 4). Wall time includes ≈ 3 s of city
+load.
+
+| bots | wall for 3600 frames | wall for 14400 | max RSS (3600 / 14400) |
+|---|---|---|---|
+| 0 | 11.0 s | 44.9 s | 667 / 775 MB |
+| 5 | 20.0 s | | 716 MB |
+| 10 | 23.7 s | | 750 MB |
+| 15 | 29.6–29.9 s | 130 s | 784 / 930 MB |
+
+Per fixed step that is ≈ 2.9 ms with no bots and ≈ 8.8 ms with 15 (≈ 0.4 ms
+per bot) against the 16.7 ms budget — headless, simulation only, so about
+1.9× real time on this machine. **No frame rate of the windowed game is
+claimed**; rendering was not measured. The smoke record now carries
+`bots=<n>/ents<entities>/streets/straight/direct/fail/switch/policy`
+counters. At 15 bots: 49.4k → 49.7k entities between 3600 and 14400
+frames (stable), 108 → 1067 street plans (≈ 4.5 plans per simulated second
+for the whole field, rate-limited), `policy` = 15 evaluations per step.
+RSS grows with simulated time even with no bots (+108 MB over 4 min; +146
+MB with 15), so the bots add ≈ 38 MB of growth over 3 minutes at most;
+the baseline growth is not bot-specific and is filed separately.
+
+### Not shown here
+
+Menu → city load → *Play again* → exit to menu through the real UI,
+human-carrier and human-bot contests with a driven human, ally/enemy
+behaviour in the team variants under contact, disconnect-style removal,
+and a steal by ramming on a retail street remain open (follow-up tasks);
+points were observed above the 50-point limit (125) before the match was
+decided in sf — not investigated.
