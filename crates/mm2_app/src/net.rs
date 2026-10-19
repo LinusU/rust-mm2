@@ -2429,6 +2429,38 @@ pub fn host_input(keys: Res<ButtonInput<KeyCode>>, session: Res<Session>, link: 
 #[derive(Component)]
 pub struct HostText;
 
+/// The camera a lobby's status line renders through. At `Menu` no world
+/// camera exists, and a menu that opened or joined a lobby has closed
+/// and taken its own camera with it — without this one the window
+/// keeps its last frame and the lobby looks frozen.
+#[derive(Component)]
+pub struct LobbyCamera;
+
+/// Either lobby's status line.
+type LobbyLine = Or<(With<HostText>, With<LobbyText>)>;
+
+/// Keep exactly one [`LobbyCamera`] while a lobby line ([`HostText`] or
+/// [`LobbyText`]) is up at `Menu` and the menu has no camera of its own;
+/// despawn it otherwise, so the menu's and the world's cameras never
+/// share the screen with it.
+pub fn lobby_camera(
+    mut commands: Commands,
+    session: Res<Session>,
+    lines: Query<(), LobbyLine>,
+    menu: Query<(), With<crate::menu::MenuCamera>>,
+    cameras: Query<Entity, With<LobbyCamera>>,
+) {
+    let wanted = *session.phase() == SessionPhase::Menu && !lines.is_empty() && menu.is_empty();
+    let mut existing = cameras.iter();
+    if wanted && existing.next().is_none() {
+        commands.spawn((LobbyCamera, Camera2d));
+    }
+    // Past the one kept when wanted, every camera goes.
+    for camera in existing {
+        commands.entity(camera).despawn();
+    }
+}
+
 /// The hosted lobby's status line — where peers dial, what the lobby
 /// runs, the remote roster's readiness, and the latest gate notice.
 /// The line empties while a session runs — the HUD owns the screen.
@@ -2939,6 +2971,41 @@ mod tests {
         assert!(begin_wired(&mut session, &mut control, SessionConfig::default(), 0).is_err());
         assert!(control.quit);
         assert_eq!(*session.phase(), SessionPhase::Menu);
+    }
+
+    fn lobby_cameras(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<(), With<LobbyCamera>>()
+            .iter(app.world())
+            .count()
+    }
+
+    /// A lobby line at `Menu` with the menu closed gets one camera to
+    /// render through — the window froze without it — and gives it up
+    /// once the menu has its own camera again or the line is gone.
+    #[test]
+    fn a_lobby_line_at_menu_keeps_one_camera() {
+        let mut app = App::new();
+        app.init_resource::<Session>();
+        app.add_systems(Update, lobby_camera);
+        let line = app.world_mut().spawn(HostText).id();
+        app.update();
+        app.update();
+        assert_eq!(lobby_cameras(&mut app), 1);
+
+        let menu = app.world_mut().spawn(crate::menu::MenuCamera).id();
+        app.update();
+        assert_eq!(lobby_cameras(&mut app), 0);
+
+        app.world_mut().despawn(menu);
+        app.world_mut().despawn(line);
+        let line = app.world_mut().spawn(LobbyText).id();
+        app.update();
+        assert_eq!(lobby_cameras(&mut app), 1);
+
+        app.world_mut().despawn(line);
+        app.update();
+        assert_eq!(lobby_cameras(&mut app), 0);
     }
 
     fn city_event_config() -> SessionConfig {

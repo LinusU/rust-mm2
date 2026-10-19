@@ -2454,6 +2454,11 @@ fn main() {
     if hosting_from_cli || menu_mode {
         mm2_app::lobby_systems::add_host_systems(&mut app, capturing);
     }
+    if joining_from_cli || hosting_from_cli || menu_mode {
+        // After `menu_present`, so a menu that just closed onto a lobby
+        // has already given up its camera.
+        app.add_systems(Update, net::lobby_camera.after(menu::menu_present));
+    }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
     }
