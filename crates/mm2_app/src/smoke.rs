@@ -816,10 +816,13 @@ fn run_headless(
         .init_resource::<ButtonInput<KeyCode>>()
         // `load_session_world` writes marker/HUD meshes into the shared
         // asset stores — nothing renders, but the system contract needs
-        // them present.
+        // them present. `init_asset` rather than `init_resource`: only it
+        // schedules the system that drains each store's queued
+        // `AssetEvent`s, and without that every `get_mut` (a smoke puff
+        // fading, once per tick) grows the queue for the whole run.
         .init_resource::<Assets<Mesh>>()
-        .init_resource::<Assets<Image>>()
-        .init_resource::<Assets<StandardMaterial>>()
+        .init_asset::<Image>()
+        .init_asset::<StandardMaterial>()
         // `--cockpit`/`--far`/`--cam` view selection reaches the
         // headless app through the config like `dev.mirror` — the
         // record's `cam` pose then proves the authored interior eye /

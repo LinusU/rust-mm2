@@ -428,9 +428,13 @@ claimed**; rendering was not measured. The smoke record now carries
 counters. At 15 bots: 49.4k → 49.7k entities between 3600 and 14400
 frames (stable), 108 → 1067 street plans (≈ 4.5 plans per simulated second
 for the whole field, rate-limited), `policy` = 15 evaluations per step.
-RSS grows with simulated time even with no bots (+108 MB over 4 min; +146
-MB with 15), so the bots add ≈ 38 MB of growth over 3 minutes at most;
-the baseline growth is not bot-specific and is filed separately.
+RSS grew with simulated time even with no bots (+108 MB over 4 min; +146
+MB with 15) until #1687 found the cause: the headless app registered
+`Assets<Image>` / `Assets<StandardMaterial>` with `init_resource`, which
+does not schedule the system that drains each store's queued `AssetEvent`s,
+so every `materials.get_mut` (a smoke puff fading, each tick) appended to a
+queue nobody emptied. They are now `init_asset`. Max RSS at 3600 / 14400
+frames with 0 bots is 654 / 660 MB (was 667 / 775).
 
 ### Not shown here
 
