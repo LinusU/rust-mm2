@@ -836,11 +836,9 @@ fn run_human(
             }
         }
         seen = events.len();
-        // The ally holding the gold after the person had it (or off the
-        // enemy carrier) is a theft from a teammate.
-        if (human_robs || out.human_picked) && carrier(&app) == Some(ally_id) {
-            out.ally_took = true;
-        }
+        // A teammate knocking its own carrier loose is the theft; an ally
+        // that merely reaches loose gold first is ordinary play.
+        out.ally_took = out.ally_knocked;
         if (human_robs && out.robbed_bot) || (!human_robs && (out.robbed || out.ally_took)) {
             break;
         }
@@ -887,15 +885,10 @@ fn retail_human_carriers_are_robbed_by_enemy_bots_and_robbing_them() {
             for variant in [CnrVariant::CopsVsRobbers, CnrVariant::RobbersVsRobbers] {
                 let a = run_human(&retail, city, seed, variant, false);
                 let b = run_human(&retail, city, seed, variant, true);
-                // Reported, not asserted: on sf seed 10 (Cops vs. Robbers)
-                // an ally bot knocks its own carrier loose and takes the
-                // gold, because the host's impact rule has no teammate
-                // exemption. That is an open finding, not a pass; see the
-                // follow-up task, and the synthetic ally tests in
-                // `cnr_bot_drive` which hold.
-                if a.ally_took || b.ally_took {
-                    eprintln!("FINDING {city} seed {seed} {variant:?}: an ally took the gold");
-                }
+                assert!(
+                    !(a.ally_took || b.ally_took),
+                    "{city} seed {seed} {variant:?}: an ally took the gold"
+                );
                 ally_thefts += usize::from(a.ally_took || b.ally_took);
                 robbed += usize::from(a.robbed);
                 robbed_bot += usize::from(b.robbed_bot);

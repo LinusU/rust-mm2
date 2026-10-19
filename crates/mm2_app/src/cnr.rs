@@ -215,6 +215,15 @@ pub fn start_match(
     Ok(report)
 }
 
+/// Two distinct participants on the same team. `Side::Solo` is the
+/// free-for-all side of one, so it never makes teammates.
+fn is_teammate(game: &GoldMatch, a: PlayerId, b: PlayerId) -> bool {
+    match (game.side_of(a), game.side_of(b)) {
+        (Some(x), Some(y)) => x == y && x != Side::Solo,
+        _ => false,
+    }
+}
+
 /// Fixed-step authority leg: seat every participant car that is not yet
 /// in the match, on the side [`GoldMatch::balanced_side`] picks, in
 /// ascending participant order so the split does not depend on query
@@ -416,6 +425,9 @@ pub fn cnr_host_step(
                             _ => None,
                         }
                     })
+                    // Teammates never rob each other (designed, CNR-12);
+                    // free-for-all's `Solo` is everyone's own side.
+                    .filter(|&by| !is_teammate(game, carrier, by))
                     .map(|by| DropCause::Knocked { by: Some(by) })
             };
             if let Some(cause) = cause {
@@ -783,6 +795,16 @@ mod tests {
     }
 
     fn rig(end: EndRule, players: &[PlayerId]) -> Rig {
+        let sided: Vec<(PlayerId, Side)> = players.iter().map(|&p| (p, Side::Solo)).collect();
+        rig_sides(end, &sided)
+    }
+
+    fn rig_sides(end: EndRule, participants: &[(PlayerId, Side)]) -> Rig {
+        let variant = match participants[0].1 {
+            Side::Robbers | Side::Cops => CnrVariant::CopsVsRobbers,
+            Side::Red | Side::Blue => CnrVariant::RobbersVsRobbers,
+            Side::Solo => CnrVariant::FreeForAll,
+        };
         let mut session = Session::new();
         session.begin(SessionConfig::default()).unwrap();
         session.transition(SessionPhase::Ready).unwrap();
@@ -790,15 +812,16 @@ mod tests {
         let gold = session.mint_object_id();
         let a_obj = session.mint_object_id();
         let b_obj = session.mint_object_id();
-        let participants: Vec<(PlayerId, Side)> =
-            players.iter().map(|&p| (p, Side::Solo)).collect();
         let game = GoldMatch::new(
             session.generation(),
             gold,
-            rules(end),
+            GoldRules {
+                variant,
+                ..rules(end)
+            },
             pool(),
             5,
-            &participants,
+            participants,
         )
         .unwrap();
         let mut app = App::new();
@@ -954,6 +977,37 @@ mod tests {
         r.impact(ao, ao, 100.0);
         r.step();
         assert_eq!(r.game().carrier(), Some(A));
+    }
+
+    #[test]
+    fn a_teammate_ram_leaves_the_carrier_but_an_enemy_ram_robs() {
+        for (a_side, b_side) in [(Side::Robbers, Side::Robbers), (Side::Red, Side::Red)] {
+            let mut r = rig_sides(EndRule::None, &[(A, a_side), (B, b_side)]);
+            let g = r.gold_at();
+            r.put(r.a, g);
+            r.step();
+            assert_eq!(r.game().carrier(), Some(A));
+            r.put(r.b, g + Vec3::X * 2.0);
+            let (ao, bo) = (r.a_obj, r.b_obj);
+            r.impact(bo, ao, 20.0);
+            r.step();
+            assert_eq!(
+                r.game().carrier(),
+                Some(A),
+                "{a_side:?}: ally ram is harmless"
+            );
+        }
+        for (a_side, b_side) in [(Side::Robbers, Side::Cops), (Side::Red, Side::Blue)] {
+            let mut r = rig_sides(EndRule::None, &[(A, a_side), (B, b_side)]);
+            let g = r.gold_at();
+            r.put(r.a, g);
+            r.step();
+            r.put(r.b, g + Vec3::X * 2.0);
+            let (ao, bo) = (r.a_obj, r.b_obj);
+            r.impact(bo, ao, 20.0);
+            r.step();
+            assert_ne!(r.game().carrier(), Some(A), "{a_side:?}: enemy ram robs");
+        }
     }
 
     #[test]
