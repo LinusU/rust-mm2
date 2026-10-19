@@ -853,6 +853,7 @@ fn run_headless(
         // decision cadence and the stuck windows count physics ticks.
         .add_systems(FixedUpdate, opponents::opponent_drive)
         .add_systems(FixedUpdate, crate::cnr_bot_drive::cnr_bot_drive)
+        .add_systems(FixedUpdate, crate::cnr_bots::dev_drop_bot_at)
         .init_resource::<crate::worldclock::WorldClock>()
         .init_resource::<crate::worldclock::SceneryProbe>()
         .init_resource::<crate::cablecar::CableCircuits>()

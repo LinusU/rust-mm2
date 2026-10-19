@@ -800,6 +800,17 @@ pub struct DevOverrides {
     /// `--wreck-seat`: the wire seat (`NetPlayer` id, the host is 0)
     /// `wreck_at` destroys. `None` wrecks the local car.
     pub wreck_seat: Option<u16>,
+    /// `--cnr-drop-bot-at`: remove one local Cops & Robbers bot's car
+    /// once the session clock reaches the given fixed-step count — the
+    /// same vanishing car a disconnect leaves, so the roster removal
+    /// path (`cnr_host_step`'s leave) is what runs. Names the bot by
+    /// `cnr_drop_bot` or, without it, takes the gold carrier if it is a
+    /// bot, else the lowest-index bot. One-shot, authority-only
+    /// (evidence/diagnostic runs — never a session-legal parameter); it
+    /// changes the run's course, so it IS in `record_eligibility`.
+    pub cnr_drop_bot_at: Option<u64>,
+    /// `--cnr-drop-bot`: the `CnrBot` index `cnr_drop_bot_at` removes.
+    pub cnr_drop_bot: Option<u8>,
     /// Optional evidence-driver speed ceiling in m/s; never changes vehicle handling.
     pub bot_speed: Option<f32>,
     /// `--bot-thief`: the scripted driver plays the Cops & Robbers thief

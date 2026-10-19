@@ -355,6 +355,18 @@ struct Cli {
     #[arg(long, value_name = "id", requires = "wreck_at")]
     wreck_seat: Option<u16>,
 
+    /// With `--cnr-bots`: remove one bot's car once the session clock
+    /// reaches `ticks` fixed steps, as a disconnect would (the gold it
+    /// carries drops where it was). The bot is `--cnr-drop-bot`, else
+    /// the gold carrier if a bot, else the lowest-index bot. One-shot;
+    /// the run is record-ineligible.
+    #[arg(long, value_name = "ticks", requires = "cnr_bots")]
+    cnr_drop_bot_at: Option<u64>,
+
+    /// With `--cnr-drop-bot-at`: the bot index (0-based) to remove.
+    #[arg(long, value_name = "index", requires = "cnr_drop_bot_at")]
+    cnr_drop_bot: Option<u8>,
+
     /// Advance the documented `C` view chain once when the session
     /// clock reaches `ticks` fixed steps — how a
     /// `--frames`/`--screenshot` capture inspects a mid-drive camera
@@ -1266,6 +1278,8 @@ fn main() {
             reset_at: cli.reset_at,
             wreck_at: cli.wreck_at,
             wreck_seat: cli.wreck_seat,
+            cnr_drop_bot_at: cli.cnr_drop_bot_at,
+            cnr_drop_bot: cli.cnr_drop_bot,
             bot_speed: cli.bot_speed,
             bot_thief: cli.bot_thief,
             bot_route: cli.bot_route.clone(),
@@ -2106,6 +2120,7 @@ fn main() {
         FixedUpdate,
         mm2_app::cnr_bot_drive::cnr_bot_drive.run_if(evidence_capture_input_allowed),
     )
+    .add_systems(FixedUpdate, mm2_app::cnr_bots::dev_drop_bot_at)
     // F20-A.3: the fielded cops' detect → pursue machine. Frozen with
     // the other AI in ordinary static captures; no-ops without a fleet.
     .add_systems(

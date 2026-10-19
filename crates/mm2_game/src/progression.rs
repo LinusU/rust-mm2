@@ -619,6 +619,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("reset-at"))
     } else if dev.wreck_at.is_some() {
         Err(Ineligible::DevOverride("wreck-at"))
+    } else if dev.cnr_drop_bot_at.is_some() {
+        Err(Ineligible::DevOverride("cnr-drop-bot-at"))
     } else {
         Ok(())
     }

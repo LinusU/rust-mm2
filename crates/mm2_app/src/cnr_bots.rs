@@ -401,6 +401,53 @@ pub fn load_graph(vfs: &Vfs, city: &str) -> Result<NavGraph, BotError> {
         .map_err(|e| BotError::NoGraph(e.to_string()))
 }
 
+/// `--cnr-drop-bot-at`: remove one bot's car the way a disconnect
+/// does — the entity simply vanishes, and [`crate::cnr::cnr_host_step`]
+/// sees the seat's car gone and runs the production leave (drop the
+/// carried gold where the car last was, keep the points). Nothing here
+/// touches the match. The bot is `--cnr-drop-bot`, else the gold
+/// carrier if it is a bot, else the lowest-index bot. One-shot, and
+/// waits for its target to exist. Evidence knob: authority only.
+pub fn dev_drop_bot_at(
+    session: Res<Session>,
+    host: Option<Res<crate::cnr::CnrHost>>,
+    bots: Query<(Entity, &CnrBot, &Player)>,
+    mut commands: Commands,
+    mut fired: Local<bool>,
+) {
+    if *fired || !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let Some((at, wanted)) = session
+        .config()
+        .and_then(|c| c.dev.cnr_drop_bot_at.map(|at| (at, c.dev.cnr_drop_bot)))
+    else {
+        return;
+    };
+    if session.tick() < at {
+        return;
+    }
+    let carrier = host.as_ref().and_then(|h| h.game.carrier());
+    let target = match wanted {
+        Some(index) => bots.iter().find(|(_, b, _)| b.index == index),
+        None => bots
+            .iter()
+            .find(|(_, _, p)| Some(p.id) == carrier)
+            .or_else(|| bots.iter().min_by_key(|(_, b, _)| b.index)),
+    };
+    let Some((entity, bot, player)) = target else {
+        return;
+    };
+    *fired = true;
+    info!(
+        "cnr bot {} (player {}) removed at tick {}",
+        bot.index,
+        player.id.0,
+        session.tick()
+    );
+    commands.entity(entity).despawn();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

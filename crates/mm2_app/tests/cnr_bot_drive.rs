@@ -16,7 +16,7 @@ use mm2_app::cnr::{
     CnrEvent, CnrHost, cnr_host_step, enroll_cnr_participants, reconcile_gold_load,
 };
 use mm2_app::cnr_bot_drive::{CnrBotBrain, CnrBotDriver, REPLAN_FRAMES, cnr_bot_drive};
-use mm2_app::cnr_bots::CnrBot;
+use mm2_app::cnr_bots::{CnrBot, dev_drop_bot_at};
 use mm2_app::contracts;
 use mm2_content::cnr::{CnrSettings, GoldMass};
 use mm2_game::gold::{CnrVariant, DropCause, EndRule, GoldEvent, GoldMatch, Side};
@@ -58,21 +58,32 @@ fn pool() -> Vec<Vec3> {
 
 impl Rig {
     fn new(variant: CnrVariant, with_brain: bool) -> Self {
+        Self::build(variant, with_brain, EndRule::None, |_| {})
+    }
+
+    /// [`Rig::new`] with the match's end rule and the session's dev
+    /// overrides chosen.
+    fn build(
+        variant: CnrVariant,
+        with_brain: bool,
+        end: EndRule,
+        dev: impl FnOnce(&mut mm2_game::DevOverrides),
+    ) -> Self {
+        let mut config = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/testcity.psdl".to_string(),
+            },
+            mode: SessionMode::CopsAndRobbers(CnrSettings {
+                variant,
+                ..CnrSettings::default()
+            }),
+            authority: SessionAuthority::Local,
+            seed: 5,
+            ..SessionConfig::default()
+        };
+        dev(&mut config.dev);
         let mut session = Session::new();
-        session
-            .begin(SessionConfig {
-                world: WorldMode::City {
-                    psdl: "city/testcity.psdl".to_string(),
-                },
-                mode: SessionMode::CopsAndRobbers(CnrSettings {
-                    variant,
-                    ..CnrSettings::default()
-                }),
-                authority: SessionAuthority::Local,
-                seed: 5,
-                ..SessionConfig::default()
-            })
-            .unwrap();
+        session.begin(config).unwrap();
         session.transition(SessionPhase::Ready).unwrap();
         session.transition(SessionPhase::Playing).unwrap();
         let gold_id = session.mint_object_id();
@@ -82,7 +93,7 @@ impl Rig {
             ..CnrSettings::default()
         }
         .rules(HZ);
-        rules.end = EndRule::None;
+        rules.end = end;
         let game = GoldMatch::new(session.generation(), gold_id, rules, pool(), 9, &[]).unwrap();
         let sites = game.sites();
         let mut app = App::new();
@@ -105,7 +116,14 @@ impl Rig {
             .add_message::<mm2_game::RecoveryEvent>()
             .init_resource::<Events>()
             .init_resource::<contracts::ImpactFilter>()
-            .add_systems(FixedUpdate, cnr_bot_drive)
+            .add_systems(
+                FixedUpdate,
+                (
+                    mm2_game::advance_session_tick,
+                    cnr_bot_drive,
+                    dev_drop_bot_at,
+                ),
+            )
             .add_systems(
                 FixedLast,
                 (
@@ -764,5 +782,140 @@ fn an_ally_human_does_not_rob_a_bot_carrier_driving_to_the_same_hideout() {
             "{variant:?}: {:?}",
             rig.events()
         );
+    }
+}
+
+/// Six bots ringed round the loose gold, seated and driving.
+fn ring(rig: &mut Rig, n: u8) -> Vec<(Entity, PlayerId)> {
+    let centre = rig.gold;
+    (0..n)
+        .map(|i| {
+            let a = f32::from(i) / f32::from(n) * std::f32::consts::TAU;
+            let ring = 60.0 + 12.0 * f32::from(i % 3);
+            let at = centre + Vec3::new(a.cos() * ring, 0.0, a.sin() * ring);
+            rig.bot(i, at, centre)
+        })
+        .collect()
+}
+
+/// CNRBOT-E removal leg: the carrier's seat vanishes mid-match, as a
+/// disconnect does. The host step runs its production leave: the gold
+/// drops where the car was (no lockout), the seat stays on the board
+/// disconnected with its points, the other bots keep driving, one of
+/// them takes the dropped gold and delivers, and the match ends with a
+/// connected winner — no panic, no stale entity reference.
+#[test]
+fn removing_the_carrying_bot_drops_its_gold_and_the_match_goes_on() {
+    let mut rig = Rig::build(CnrVariant::FreeForAll, true, EndRule::Points(100), |_| {});
+    let bots = ring(&mut rig, 6);
+    let watch: Vec<Entity> = bots.iter().map(|b| b.0).collect();
+    rig.run_until(60 * 60, &watch, |r| r.game().carrier().is_some());
+    let carrier = rig.game().carrier().expect("somebody picked the gold up");
+    let (victim, _) = *bots.iter().find(|b| b.1 == carrier).unwrap();
+    let seats = rig.game().standings().len();
+    let last = rig.pos(victim);
+    let before = rig.events().len();
+
+    // The same removal a disconnect makes: the car is simply gone.
+    rig.app.world_mut().entity_mut(victim).despawn();
+    let survivors: Vec<Entity> = watch.iter().copied().filter(|e| *e != victim).collect();
+    rig.run_until(2, &survivors, |_| false);
+
+    assert_eq!(rig.game().carrier(), None, "the gold is no longer carried");
+    let dropped = rig
+        .game()
+        .gold_position()
+        .expect("the gold is on the ground");
+    assert!(
+        dropped.distance(last) < rig.jump_limit,
+        "dropped at {dropped:?}, the car was at {last:?}"
+    );
+    let events = &rig.events()[before..];
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GoldEvent::Left { player } if *player == carrier)),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GoldEvent::Dropped { player, cause: mm2_game::gold::DropCause::Disconnected, .. }
+                if *player == carrier
+        )),
+        "{events:?}"
+    );
+    let standings = rig.game().standings();
+    assert_eq!(standings.len(), seats, "the seat list is unchanged");
+    let gone = standings.iter().find(|s| s.player == carrier).unwrap();
+    assert!(!gone.connected, "the leaver is marked gone");
+    assert!(
+        standings
+            .iter()
+            .filter(|s| s.player != carrier)
+            .all(|s| s.connected),
+        "nobody else left: {standings:?}"
+    );
+    assert!(rig.game().outcome().is_none(), "the match is not over yet");
+
+    // The rest of the field carries on: somebody else takes the gold,
+    // delivers it, and wins.
+    rig.run_until(60 * 120, &survivors, |r| r.game().outcome().is_some());
+    let outcome = rig.game().outcome().expect("the match ended");
+    let winner = format!("{outcome:?}");
+    assert!(
+        !winner.contains(&format!("{carrier:?}")),
+        "the leaver cannot win: {winner}"
+    );
+    assert!(
+        rig.events().iter().any(|e| matches!(
+            e,
+            GoldEvent::Picked { player, .. } if *player != carrier
+        )),
+        "{:?}",
+        rig.events()
+    );
+    for (e, id) in &bots {
+        if *id != carrier {
+            assert!(rig.app.world().get::<CnrBotDriver>(*e).is_some());
+        }
+    }
+}
+
+/// The evidence knob names no bot: with nobody carrying, the lowest
+/// index goes. Its points stay, the others keep their seats and drive,
+/// and a second knob firing is not a thing (one-shot).
+#[test]
+fn the_drop_knob_removes_the_lowest_bot_once_and_the_rest_keep_driving() {
+    let mut rig = Rig::build(CnrVariant::FreeForAll, true, EndRule::None, |dev| {
+        dev.cnr_drop_bot_at = Some(3);
+    });
+    let bots = ring(&mut rig, 4);
+    let watch: Vec<Entity> = bots.iter().map(|b| b.0).collect();
+    rig.run_until(2, &watch, |_| false);
+    assert!(rig.game().standings().iter().all(|s| s.connected));
+    let survivors: Vec<Entity> = watch[1..].to_vec();
+    let start: Vec<Vec3> = survivors.iter().map(|e| rig.pos(*e)).collect();
+    rig.run_until(240, &survivors, |_| false);
+    assert!(
+        rig.app.world().get_entity(bots[0].0).is_err(),
+        "bot 0 was removed"
+    );
+    let standings = rig.game().standings();
+    assert_eq!(standings.len(), 4);
+    assert_eq!(
+        standings.iter().filter(|s| !s.connected).count(),
+        1,
+        "{standings:?}"
+    );
+    assert!(
+        !standings
+            .iter()
+            .find(|s| s.player == bots[0].1)
+            .unwrap()
+            .connected
+    );
+    for (e, from) in survivors.iter().zip(&start) {
+        assert!(rig.pos(*e).distance(*from) > 5.0, "a survivor kept driving");
     }
 }
