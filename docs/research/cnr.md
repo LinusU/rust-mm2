@@ -436,9 +436,19 @@ the baseline growth is not bot-specific and is filed separately.
 
 Menu → city load → *Play again* → exit to menu through the real UI,
 human-carrier and human-bot contests with a driven human, ally/enemy
-behaviour in the team variants under contact remain open (follow-up tasks);
-points were observed above the 50-point limit (125) before the match was
-decided in sf — not investigated.
+behaviour in the team variants under contact remain open (follow-up tasks).
+
+### A 50-point match decided at 125 (#1693) — not a bug
+
+`GoldMatch::check_point_limit` runs after every award (pickup and
+delivery), so the limit does not lag. A pickup is 25 points and a delivery
+100 (`cnr_options`), so a carrier at 25 who delivers goes to 125 in one
+award and the match ends in that same step; the award is not clipped to the
+limit. 125 is therefore the first reachable total above 50 for a single
+player (team variants sum the side). Whether the retail game clips the final
+award is unrecovered; we keep the full award (implementation choice).
+Test: `a_delivery_that_crosses_the_limit_ends_the_match_at_once_with_the_whole_award`
+(`mm2_game::gold`).
 
 ### Street-reachable site pool (#1686) — designed, not original
 

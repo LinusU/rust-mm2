@@ -1804,6 +1804,27 @@ mod tests {
     }
 
     #[test]
+    fn a_delivery_that_crosses_the_limit_ends_the_match_at_once_with_the_whole_award() {
+        // #1693: a 50-point match was seen decided at 125. The check runs
+        // after every award, so nothing lags; the 100-point delivery is
+        // one award on top of the 25-point pickup (25 < 50 < 125).
+        let mut m = ffa(EndRule::Points(50));
+        take(&mut m, A);
+        assert!(m.outcome().is_none(), "25 is below the limit");
+        assert_eq!(m.score(A), Some(25));
+        let h = m.sites().hideout;
+        m.deliver(A, 0, h);
+        let out = m.outcome().expect("decided in the delivering step");
+        assert_eq!(out.reason, EndReason::PointLimit);
+        assert_eq!(out.winner, Winner::Player(A));
+        assert_eq!(
+            m.score(A),
+            Some(125),
+            "the award is not clipped to the limit"
+        );
+    }
+
+    #[test]
     fn team_variants_end_on_the_team_total_not_an_individual() {
         let mut m = GoldMatch::new(
             1,
