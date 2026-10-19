@@ -2145,11 +2145,15 @@ fn two_retail_processes_decide_a_cops_and_robbers_match() {
 
     // The host's own log names the delivery and the verdict it decided.
     let bound = Duration::from_secs(300);
+    // The gold marker rides the host seat's car while it carries, on the
+    // host and on the joined client alike.
+    host.until_within("event=gold_marker over=p0", bound);
     let delivered = host.until_within("Delivered {", bound);
     let ended = host.until_within("Ended(", bound);
     eprintln!("host   {delivered}\nhost   {ended}");
     assert!(ended.contains("reason: PointLimit"), "{ended}");
     assert!(delivered.contains("player: PlayerId(0)"), "{delivered}");
+    client.until_within("event=gold_marker over=p0", bound);
     let rec = client.until_within("smoke=headless-physics", bound);
     assert!(client.wait().success(), "the client did not exit cleanly");
     host.cmd("quit");
@@ -4287,6 +4291,14 @@ fn a_client_thief_runs_down_the_carrier_and_delivers_the_gold() {
     assert!(ended.contains("reason: PointLimit"), "{ended}");
     assert!(ended.contains("winner: Player(PlayerId(1))"), "{ended}");
 
+    // The gold marker rode each carrier on every client: bob (p2) first,
+    // then alice (p1) — on her own screen and on bob's.
+    for (who, client) in [("alice", &alice), ("bob", &bob)] {
+        for carrier in ["p2", "p1"] {
+            client.until_within(&format!("event=gold_marker over={carrier}"), bound);
+            eprintln!("{who} saw the gold marker over {carrier}");
+        }
+    }
     let alice_rec = alice.until_within("smoke=headless-physics", bound);
     let bob_rec = bob.until_within("smoke=headless-physics", bound);
     alice.wait_success("alice", &alice_rec);

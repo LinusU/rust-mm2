@@ -711,30 +711,66 @@ pub fn spawn_cnr_markers(
     report
 }
 
+/// How far above a carrier's pose the gold marker rides, metres.
+/// *Implementation choice*: what the original draws on a carrier is
+/// unrecovered (ledger), so this only clears a car roof; it is not a
+/// retail number.
+pub const CARRIER_MARKER_LIFT: f32 = 2.5;
+
 /// Keep the markers where the match says they are: hideout and bank at
 /// the round's drawn sites (they move when a delivery draws new ones),
 /// the gold where it rests or was dropped. The authority reads its
 /// [`CnrHost`]; a client reads the host's replicated match
 /// ([`CnrReplica`]), so both draw the same round. While a car carries
-/// the gold its marker is hidden — *implementation choice*: what the
-/// original draws on a carrier is unrecovered, and the carrier/score
-/// presentation is the HUD's (F27-B.4), not a marker pinned to a body.
-/// With neither (a client before the first frame, or no match at all)
-/// the markers keep their last pose, which on a client is the round's
-/// opening draw.
+/// the gold its marker rides [`CARRIER_MARKER_LIFT`] above that car's
+/// current pose, so every process sees who has it; if the carrier's car
+/// is not in this world the marker is hidden rather than left at a
+/// stale spot. With neither a host nor a replica (a client before the
+/// first frame, or no match at all) the markers keep their last pose,
+/// which on a client is the round's opening draw.
 pub fn sync_cnr_markers(
     host: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
+    cars: Query<(&Player, Option<&NetPlayer>, &Transform), Without<CnrMarker>>,
     mut markers: Query<(&CnrMarker, &mut Transform, &mut Visibility)>,
+    mut announced: Local<Option<String>>,
 ) {
-    let (sites, gold) = match (&host, &replica) {
-        (Some(host), _) => (host.game.sites(), host.game.gold_position()),
-        (None, Some(replica)) => (replica.0.sites, replica.0.gold_position()),
+    let (sites, gold, carrier) = match (&host, &replica) {
+        (Some(host), _) => (
+            host.game.sites(),
+            host.game.gold_position(),
+            host.game.carrier(),
+        ),
+        (None, Some(replica)) => (
+            replica.0.sites,
+            replica.0.gold_position(),
+            replica.0.carrier(),
+        ),
         (None, None) => return,
     };
+    let carried_at = carrier.and_then(|who| {
+        cars.iter()
+            .find(|(player, net, _)| participant_id(player, *net) == who)
+            .map(|(_, _, t)| t.translation + Vec3::Y * CARRIER_MARKER_LIFT)
+    });
+    // One record per change of what the gold marker shows, so a process
+    // test can read the overhead marker off each process's own output.
+    let state = match (gold, carried_at, carrier) {
+        (Some(_), ..) => "ground".to_string(),
+        (None, Some(_), Some(who)) => format!("over=p{}", who.0),
+        _ => "hidden".to_string(),
+    };
+    if announced.as_ref() != Some(&state) {
+        println!("event=gold_marker {state}");
+        *announced = Some(state);
+    }
     for (marker, mut transform, mut visibility) in &mut markers {
         let (at, shown) = match marker.role {
-            MarkerRole::Gold => (gold.unwrap_or(sites.gold), gold.is_some()),
+            MarkerRole::Gold => match (gold, carried_at) {
+                (Some(on_ground), _) => (on_ground, true),
+                (None, Some(over_car)) => (over_car, true),
+                (None, None) => (sites.gold, false),
+            },
             MarkerRole::Hideout => (sites.hideout, true),
             MarkerRole::Bank => (sites.bank, true),
         };
@@ -840,6 +876,7 @@ mod tests {
                         control: PlayerControl::Local,
                     },
                     Position(at),
+                    Transform::from_translation(at),
                     Mass(MASS),
                     AngularInertia {
                         principal: INERTIA,
@@ -873,6 +910,11 @@ mod tests {
         }
         fn put(&mut self, e: Entity, p: Vec3) {
             self.app.world_mut().get_mut::<Position>(e).unwrap().0 = p;
+            self.app
+                .world_mut()
+                .get_mut::<Transform>(e)
+                .unwrap()
+                .translation = p;
         }
         fn mass(&self, e: Entity) -> f32 {
             self.app.world().get::<Mass>(e).unwrap().0
@@ -1561,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gold_marker_follows_the_gold_and_hides_while_it_is_carried() {
+    fn the_gold_marker_follows_the_gold_and_rides_the_carrier() {
         let mut r = rig(EndRule::None, &[A, B]);
         r.app
             .add_systems(Update, sync_cnr_markers.after(reconcile_gold_load));
@@ -1574,8 +1616,18 @@ mod tests {
         r.put(r.a, g);
         r.step();
         assert_eq!(r.game().carrier(), Some(A));
-        let (_, vis) = marker_pose(&mut r, MarkerRole::Gold);
-        assert_eq!(vis, Visibility::Hidden, "nothing lies on the ground");
+        let (at, vis) = marker_pose(&mut r, MarkerRole::Gold);
+        assert_eq!(vis, Visibility::Inherited, "the marker rides the carrier");
+        assert_eq!(at, g + Vec3::Y * CARRIER_MARKER_LIFT);
+
+        // It follows the car as it drives.
+        let moved = g + Vec3::new(3.0, 0.0, 1.0);
+        r.put(r.a, moved);
+        r.app.update();
+        let (at, _) = marker_pose(&mut r, MarkerRole::Gold);
+        assert_eq!(at, moved + Vec3::Y * CARRIER_MARKER_LIFT);
+        r.put(r.a, g);
+        r.app.update();
 
         // Rammed loose by a car outside pickup reach, the gold lies
         // where the carrier was struck and its marker comes back there.
@@ -1627,12 +1679,33 @@ mod tests {
         assert_eq!(pose(&mut app, MarkerRole::Hideout).0, sites.hideout);
         assert_eq!(pose(&mut app, MarkerRole::Bank).0, sites.bank);
 
-        // Carried: the gold marker hides; a delivery moves every site.
+        // Carried: the gold marker rides the carrier's car on the client
+        // too; with that car absent it hides rather than going stale.
         let g = r.gold_at();
+        let client_car_at = Vec3::new(10.0, 1.0, -4.0);
+        let client_car = app
+            .world_mut()
+            .spawn((
+                Player {
+                    id: A,
+                    control: PlayerControl::Local,
+                },
+                Transform::from_translation(client_car_at),
+            ))
+            .id();
         r.put(r.a, g);
         r.step();
         assert_eq!(r.game().carrier(), Some(A));
         app.insert_resource(CnrReplica(r.game().view()));
+        app.update();
+        assert_eq!(
+            pose(&mut app, MarkerRole::Gold),
+            (
+                client_car_at + Vec3::Y * CARRIER_MARKER_LIFT,
+                Visibility::Inherited
+            )
+        );
+        app.world_mut().despawn(client_car);
         app.update();
         assert_eq!(pose(&mut app, MarkerRole::Gold).1, Visibility::Hidden);
 

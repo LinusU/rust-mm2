@@ -887,6 +887,9 @@ fn run_headless(
                 .chain()
                 .after(crate::recovery::resolve_recovery),
         )
+        // F27-B.2b: the gold marker over its carrier, host and client
+        // alike — same wiring as the app; the process tests read its record.
+        .add_systems(Update, crate::cnr::sync_cnr_markers)
         .add_systems(
             FixedLast,
             (
