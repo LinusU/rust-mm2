@@ -185,9 +185,34 @@ in), so the tests drive it on a synthetic clock.
   (NETPLAY-04), which owns reconciliation. The `CommandStream` capture is
   unchanged.
 
-## Not in this slice
+## Impairment matrix (02E, `mm2_app` `tests/net_matrix.rs`)
 
-The impairment matrix is 02E.
+Loopback only, through the seeded `ImpairProxy`; **no real-Internet claim**.
+Each cell runs the production path: a client app under the real fixed
+schedule (`capture_and_send` + worker handoff) -> proxy lane -> `HostLink`
+mailbox -> `consume_seat_commands` -> `Snap.input_ack`/`input_depth` back
+through the other lane into `CommandHistory::ack`. Cells: two independently
+impaired seats (20 / 150 ms RTT), 20/80 and 80/20 ms splits, RTT 50 -> 150 ->
+50 ms (the drop in delay makes later frames overtake earlier ones), 3-6
+consecutive dropped input packets spanning a brake/steering press and
+release, 90 dropped snapshots (return-path ack burst), a 15-tick renderer
+stall caught up in one frame, a silent peer, and a session restart.
+
+Every cell asserts, against what the host consumed: a Command tick finalizes
+exactly the next seq and applies exactly that seq's quantized controls; one
+slot per tick (`finalized + fallback`); the ack equals finalized + gap
+finalized and converges on the client; no control sticks and a substitute
+never outlives the hold; zero host overflow; host occupancy under a
+per-cell bound well below `BUFFER_CAP`; client history under `HISTORY_CAP`;
+stale (swapped) snapshot acks never move the history back. Counters printed
+per cell (`--nocapture`): generated / queued / transmitted / coalesced /
+handoff-dropped, host received / duplicate / old / overflow / finalized /
+fallback / underflow / gap, occupancy, ack and depth feedback.
+
+Open: the matrix runs without the lead controller or prediction replay
+(neither is wired into the schedule), so a starved burst leaves a constant
+host backlog (about two ticks per lost window) that only the controller
+would drain, and no slot is "replayed". Both belong to NETPLAY-04.
 With the selector on, the host's `apply_remote_inputs` stands down and
 `consume_seat_commands` owns remote controls; the stalled-seat watch counts a
 window as a sign of life.

@@ -61,7 +61,7 @@ const DAMAGE_SPEC: mm2_game::DamageSpec = mm2_game::DamageSpec {
 
 /// The wire session every leg advertises: a dev-world cruise — the
 /// world the synthetic mounts can actually load.
-fn dev_cruise() -> SessionConfig {
+pub(crate) fn dev_cruise() -> SessionConfig {
     SessionConfig {
         world: WorldMode::DevWorld,
         mode: SessionMode::Cruise,
@@ -229,7 +229,7 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
 /// contract the binary schedules (writer → `vehicle_reset` → epoch
 /// tracker → `publish_snapshots`), so a test leg observes the real
 /// same-frame epoch/pose coherence rather than a test-only stream.
-fn host_app(vfs: Vfs, link: HostLink) -> App {
+pub(crate) fn host_app(vfs: Vfs, link: HostLink) -> App {
     let mut app = lobby_app(vfs);
     app.insert_resource(link)
         .init_resource::<netdrive::NetDriveReport>()
@@ -1364,7 +1364,7 @@ fn a_client_that_cannot_run_the_changed_session_leaves_cleanly() {
 /// A loopback `HostLink` advertising `config` — the in-app half of
 /// `mm2 --host`. The fingerprint is the mount's own, so a peer built
 /// from it satisfies the handshake gate.
-fn host_link(dir: &std::path::Path, config: &SessionConfig) -> (HostLink, Vfs, u64) {
+pub(crate) fn host_link(dir: &std::path::Path, config: &SessionConfig) -> (HostLink, Vfs, u64) {
     let vfs = mount(dir);
     let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
     let link = HostLink::open(
@@ -1394,7 +1394,7 @@ fn remote_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
 /// timeout while the stream is quiet and by `WAIT` while it keeps
 /// sending other messages, so a missing message fails rather than
 /// hanging.
-fn until_wire(peer: &mut Client, pred: impl Fn(&Message) -> bool) -> Message {
+pub(crate) fn until_wire(peer: &mut Client, pred: impl Fn(&Message) -> bool) -> Message {
     let deadline = Instant::now() + WAIT;
     loop {
         let msg = peer.recv().expect("the peer stream ended");
@@ -1411,7 +1411,7 @@ fn until_wire(peer: &mut Client, pred: impl Fn(&Message) -> bool) -> Message {
 /// A remote peer already past the host's start gate — pick + ready
 /// sent and the roster broadcast showing both — so a following
 /// `start` cannot race the loop's intake.
-fn ready_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
+pub(crate) fn ready_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
     let mut peer = remote_peer(addr, driver, fp);
     let ctl = peer.ctl().unwrap();
     ctl.set_vehicle("", 0).unwrap();
@@ -1425,7 +1425,7 @@ fn ready_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
 
 /// `app.update()` until `pred` holds — bounded so a broken settle
 /// fails rather than hanging.
-fn spin(app: &mut App, pred: impl Fn(&App) -> bool) {
+pub(crate) fn spin(app: &mut App, pred: impl Fn(&App) -> bool) {
     for _ in 0..200 {
         app.update();
         if pred(app) {
@@ -3068,7 +3068,7 @@ fn mm2_host_cnr_advertises_the_mode() {
 /// generation (the peer is already ready), the begin lands `Loading`,
 /// and the manual transitions stand it live — the load legs are the
 /// headless/process runs.
-fn hosted_playing(app: &mut App) -> u64 {
+pub(crate) fn hosted_playing(app: &mut App) -> u64 {
     app.world()
         .resource::<HostLink>()
         .command_sender()
@@ -3087,7 +3087,7 @@ fn hosted_playing(app: &mut App) -> u64 {
 
 /// `spin` for predicates that need `world_mut` (a query state is a
 /// mutable borrow) — same bounded contract.
-fn spin_mut(app: &mut App, mut pred: impl FnMut(&mut App) -> bool) {
+pub(crate) fn spin_mut(app: &mut App, mut pred: impl FnMut(&mut App) -> bool) {
     for _ in 0..200 {
         app.update();
         if pred(app) {
