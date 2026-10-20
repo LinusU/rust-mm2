@@ -2,6 +2,7 @@
 //!
 //! Layout:
 //! - [`analysis`]: closed-form handling diagnostics (rollover, ride, clearance)
+//! - [`capture`]: typed capture/restore of a vehicle's complete step state
 //! - [`config`]: the fully serializable handling definition
 //! - [`vehicle`]: ECS components (`Vehicle`, `VehicleInput`, `VehicleState`)
 //! - [`original`]: recovered retail tyres, suspension, engine and drivetrain
@@ -16,6 +17,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 pub mod analysis;
+pub mod capture;
 pub mod config;
 pub mod debug;
 pub mod original;

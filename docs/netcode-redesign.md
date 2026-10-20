@@ -180,3 +180,77 @@ To be set by NETPLAY-09 from this harness; until then the placeholder is
 `Limits::STRICT` above. The existing 40 m moving sanity ceiling and the
 50-58 s settling waits in `net_drive.rs` are **not** driving-quality
 evidence and are not accepted as such.
+
+## Vehicle state capture/restore (NETPLAY-03A, #1778)
+
+`mm2_vehicle::capture` holds the typed DTO (`VehicleCapture`, serde, no
+`Entity` ids, no ECS reflection) plus `capture_vehicle` / `restore_vehicle`
+over a `World`. Take captures between fixed steps, never inside one.
+`restore_vehicle` validates (wheel count, model, finite values) before it
+writes anything. `VehicleCapture::deviation` compares two captures:
+discrete state exactly, floats by largest absolute difference.
+Tests: `crates/mm2_vehicle/tests/capture.rs`, production `VehiclePlugin`
+schedules at `FIXED_HZ` 60, generic and original model both.
+
+Classes: **T** transmitted (the authority must send it, or the receiver
+cannot step the car identically), **H** locally historical (the owner of
+the simulation keeps it; a rewind restores it from its own history),
+**R** safely reconstructed (recomputed before anything reads it), **I**
+immutable (config; never captured). The wire choice of T versus H is
+NETPLAY-03D's; this table is the closure of what a step reads.
+
+| Field | Class | Why |
+|---|---|---|
+| `Position`, `Rotation`, linear/angular velocity | T | the body |
+| `Mass`, `AngularInertia` (principal, frame) | T | Cops & Robbers gold changes them mid-match |
+| `EngineImpairment` factor | T | damage is tick-associated state |
+| `VehicleInput` (throttle, brake, steering, handbrake, forced gear) | T | the command in effect; replayed commands come from the input log |
+| `PreStepVelocity` | H | rewritten by `vehicle_simulation` before any read; captured for an exact restore |
+| `VehicleState`: `steer_angle`, `direction`, `gear`, `engine_load`, `shifting`, `upended_for`, `gyro_spin` | T | steering/drivetrain/shift/assist latches read by the next step |
+| `VehicleState`: `rpm`, `grounded`, `forward_speed` | H | outputs of the last step; the generic model reads them back (rpm response, traction) |
+| `VehicleState`: `gyro_spins`, `gyro_completed` | H | run evidence, never read by the sim; kept so a restore does not rewrite history |
+| `WheelState` contact point/normal, `compression`, `suspension_force`, velocities, slip, forces, `cornering`, `traction_demand`, `spin` | H | suspension/contact history the next step differences against |
+| `WheelState` `surface_grip`, `surface_drag`, `slip_visual` | R | rewritten by the tyre path each step; captured for exactness |
+| `WheelState::contact_entity` | R | an `Entity`; re-derived by the next wheel ray cast, dropped from the DTO |
+| `OriginalState::powertrain` (gear, engine omega, clutch, torque, rpm, time in gear, gear-change latch, lag left, rpm at shift) | T | the private latch is captured too (`PowertrainHidden`) |
+| `OriginalState`: `drive_omega`, `drive_bias`, per-wheel `x`, bristles, `reaction`, `omega` | T | tyre stick-slip and wheel spin are state in the original model |
+| `OriginalState`: `pending_force`, `pending_torque`, `angular_momentum`, `integrated_angular_velocity` | H | force/torque accumulation carried across the step boundary |
+| `OriginalState`: `player_speed`, `steering_speed` | H | one and two samples old speeds the player rules read |
+| `OriginalState`: implicit Jacobians A/B/C | H | coupled suspension solve of the previous step |
+| `OriginalState`: `push`, `last_push`, `applied_push` | H | bump-stop corrections, read by wheel point velocities |
+| `OriginalState`: `collision_impulse`, `collision_angular_impulse` | H | static-world contact momentum consumed by the next solve |
+| `OriginalState`: `step_start_position`, `step_start_rotation` | R | rewritten at the start of every step |
+| Avian force accumulators | R | emptied by `original_step::integrate` every step; empty at a boundary |
+| `OriginalContactSnapshots` | R | only live between the solver's prepare and restore inside one step |
+| `Transform` | R | rewritten from the restored pose |
+| `EpochRef` (session generation, reset epoch) | T | opaque to the vehicle crate; the replay layer rejects stale epochs |
+| `VehicleConfig`, `OriginalHandling`, collider, `StrikeBound` | I | never captured |
+| Avian contact manifolds, solver warm start, broad phase, sleep timers | out of scope | physics world; NETPLAY-03B |
+| Trailer hitch, other bodies, `HumanDriver`, `RemoteReplica`, input filters in the app | out of scope | NETPLAY-03B/C/D |
+
+Findings:
+
+- **Reset mismatch (AC2).** `vehicle_reset` rebuilds `VehicleState::new`
+  and zeroes the body velocities; a pose-only snap lands the same pose
+  and velocities but keeps tyre bristles, wheel spin, engine/gear,
+  suspension and force history. Same pose, same commands: after 60
+  ticks the largest capture difference is ~157 (generic) and ~4968
+  (original, a wheel force in N). A reset equals a freshly spawned car
+  exactly (0 deviation) once one step has rewritten `PreStepVelocity`,
+  which `vehicle_reset` leaves stale (harmless; nothing reads it before
+  the step writes it).
+- **Replay (AC1).** Capture at T, run steer/brake/forced-gear/handbrake/
+  coast to T+N, restore T, replay the same commands: the generic and the
+  original path both come back with a maximum float deviation of **0**
+  (bit-identical) against an uninterrupted run, at every segment end and
+  on a second rewind. The test tolerance is `1e-3`, kept loose on
+  purpose so a legitimate libm/platform difference is not a false alarm.
+
+Determinism limits (what this does **not** prove): one machine, one
+build, a flat ground plane. Bit identity relies on the fixed step being
+exactly one tick per update and on Avian's solver being reproducible for
+the same inputs; it was observed with Avian's contact warm-start cache
+left as the replay found it, which is only safe on this fixture. Contacts
+with props, walls, other cars and sleeping bodies need the physics-world
+restore or invalidation of NETPLAY-03B, and cross-platform float
+determinism is not claimed.

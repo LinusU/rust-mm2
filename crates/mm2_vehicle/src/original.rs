@@ -769,7 +769,50 @@ pub struct Powertrain {
     rpm_at_shift: f32,
 }
 
+/// The gear-change latch private to [`Powertrain`], exposed to the
+/// capture/restore layer only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PowertrainHidden {
+    pub in_gear_change: bool,
+    pub lag_left: f32,
+    pub rpm_at_shift: f32,
+}
+
 impl Powertrain {
+    pub(crate) fn hidden(&self) -> PowertrainHidden {
+        PowertrainHidden {
+            in_gear_change: self.in_gear_change,
+            lag_left: self.lag_left,
+            rpm_at_shift: self.rpm_at_shift,
+        }
+    }
+
+    /// Rebuild from captured fields (see `capture`).
+    #[allow(clippy::too_many_arguments)] // mirrors the struct's public fields
+    pub(crate) fn from_capture(
+        gear: usize,
+        engine_omega: f32,
+        clutch: bool,
+        torque: f32,
+        rpm: f32,
+        time_in_gear: f32,
+        gear_changed: bool,
+        hidden: PowertrainHidden,
+    ) -> Self {
+        Self {
+            gear,
+            engine_omega,
+            clutch,
+            torque,
+            rpm,
+            time_in_gear,
+            gear_changed,
+            in_gear_change: hidden.in_gear_change,
+            lag_left: hidden.lag_left,
+            rpm_at_shift: hidden.rpm_at_shift,
+        }
+    }
+
     /// A fresh powertrain (`vehEngine::Reset`, 0x4d8cd0): the displayed
     /// RPM starts at idle, but the cold engine's actual spin starts at zero.
     pub fn new(engine: &EngineConstants) -> Self {
