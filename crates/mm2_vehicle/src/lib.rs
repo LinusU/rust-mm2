@@ -3,6 +3,8 @@
 //! Layout:
 //! - [`analysis`]: closed-form handling diagnostics (rollover, ride, clearance)
 //! - [`capture`]: typed capture/restore of a vehicle's complete step state
+//! - [`physics_world`]: restore of the Avian world around captured vehicles
+//! - [`replay`]: bounded fixed-step replay with side effects suppressed
 //! - [`config`]: the fully serializable handling definition
 //! - [`vehicle`]: ECS components (`Vehicle`, `VehicleInput`, `VehicleState`)
 //! - [`original`]: recovered retail tyres, suspension, engine and drivetrain
@@ -16,6 +18,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use replay::ReplayAppExt;
+
 pub mod analysis;
 pub mod capture;
 pub mod config;
@@ -25,6 +29,7 @@ mod original_contacts;
 mod original_step;
 pub mod physics_world;
 pub mod player_input;
+pub mod replay;
 pub mod sim;
 pub mod surface;
 pub mod systems;
@@ -73,6 +78,11 @@ impl Plugin for VehiclePlugin {
             .init_resource::<VehicleProbeLayers>()
             .init_resource::<original_contacts::OriginalContactSnapshots>()
             .init_resource::<physics_world::PendingSleeps>()
+            .init_resource::<replay::ReplayContext>()
+            // Collision edges feed impact, damage and pickup systems; a
+            // replay must not emit them a second time.
+            .quarantine_message_in_replay::<CollisionStart>()
+            .quarantine_message_in_replay::<CollisionEnd>()
             .configure_sets(
                 PhysicsSchedule,
                 VehicleBodyForces

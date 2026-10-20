@@ -346,3 +346,49 @@ Not covered, and not claimed: other platforms, `CollidingEntities` and
 collision events (above), bodies with joints other than the trailer
 hitch, more than one prop island, and the cost of `capture_world`
 (NETPLAY-03F).
+
+## Controlled fixed-step replay (NETPLAY-03C, #1780)
+
+`mm2_vehicle::replay`: `replay_from(&mut World, &HistoryRing, from_tick,
+&[ReplayStep]) -> Result<ReplayReport, ReplayError>`. It restores the
+`WorldCapture` recorded for `from_tick` (03B) and then runs the
+`FixedPostUpdate` schedule once per step, with the generic `Time` set to one
+fixed step as `FixedMain` does. That is Avian's outer preparation and
+write-back sets around the `PhysicsSchedule`, which in turn holds the
+vehicle step, world queries, cached-force integration, collision and
+substeps, original static-contact processing and the push-out, in the live
+order. Nothing else runs: no `Update`/`Last` (no render frame), no
+`FixedPreUpdate`/`FixedUpdate`/`FixedLast` (session clock, race, audio,
+network, bots, world systems).
+
+Running only the inner `PhysicsSchedule` was tried first and rejected: it
+matched the reference bit for bit through the replayed window, then the
+first *live* step afterwards was off by ~11000 N on a wheel force, because
+Avian's outer `Prepare` work had not run for the replayed ticks. With
+`FixedPostUpdate` the live run continues bit-identical to an uninterrupted
+one (`live_ticks_after_a_replay_match_an_uninterrupted_run`, rewinds of 1
+and 10 ticks across the wall contact onset).
+
+| Concern | What the replay does |
+|---|---|
+| `Time<Physics>`, `Time<Substeps>`, generic `Time` | saved before, written back after; `Time<Virtual>`/`Time<Fixed>` are never touched |
+| Messages written inside a tick (`CollisionStart`/`CollisionEnd`, plus any type an app registers with `quarantine_message_in_replay::<M>()`) | the live queue is swapped for a scratch queue for the replay and put back untouched; scratch contents are counted in `ReplayReport::suppressed_messages` and dropped, so live readers never see them |
+| Systems in `FixedPostUpdate`/`PhysicsSchedule` with a presentation or irreversible effect | gate with `.run_if(not_replaying)` (`ReplayContext` is active exactly while a replay runs); the native skid-timing capture in `mm2_app::audio` is the one such system today |
+| Bound | `MAX_REPLAY_STEPS` = 120 ticks (2 s); `HistoryRing` holds `MAX_HISTORY` = 121 captures, evicts the oldest and drops everything from a re-recorded tick on |
+| Preconditions | checked before any write: no steps, too many steps, re-entrancy, paused physics, zero timestep, missing history |
+
+**Missing history is a distinct operation.** `ReplayError::MissingHistory`
+writes nothing. The caller takes `recover_missing_history`, which adopts the
+authority's complete `VehicleCapture` (`Recovery::AdoptedAuthoritative`):
+tyres, engine, suspension and force history all come from it, no replay runs
+and a refused capture leaves the car as it was. `VehicleState::new` is built
+only by a spawn or by a genuine reset (`ResetVehicle` → `vehicle_reset`);
+nothing in the replay or recovery path constructs it.
+
+Scope notes: a vehicle with no entry in a `ReplayStep` keeps the command it
+has; the caller supplies commands for every car it wants driven.
+Quarantine covers message queues only: a system that mutates a resource or a
+component outside the captured set from inside `FixedPostUpdate` must gate
+itself. Wiring the ring and replay into the client's correction path is
+NETPLAY-04; deduplicating gameplay reactions to the replayed contacts
+(damage, pickups) beyond suppressing the events is NETPLAY-03E.

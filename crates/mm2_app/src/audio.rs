@@ -1491,7 +1491,11 @@ impl Plugin for NativeSkidTimingPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             avian3d::prelude::PhysicsSchedule,
-            capture_native_skid.before(avian3d::prelude::PhysicsStepSystems::First),
+            // A replay re-runs physics ticks that already fed the skid
+            // timing; capturing again would shift the audio window.
+            capture_native_skid
+                .before(avian3d::prelude::PhysicsStepSystems::First)
+                .run_if(mm2_vehicle::replay::not_replaying),
         );
     }
 }
