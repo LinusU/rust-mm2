@@ -63,6 +63,9 @@
 //! [`crate::pvs::CityPvs`]: inserted by `load_session_world` and
 //! removed by `drive_session`'s teardown.
 
+use avian3d::prelude::{
+    Forces, Gravity, PhysicsSchedule, Position, ReadRigidBodyForces, WriteRigidBodyForces,
+};
 use bevy::prelude::*;
 use mm2_content::SurfaceTables;
 use mm2_formats::{
@@ -87,6 +90,92 @@ const SURFACE_SLACK: f32 = 0.1;
 /// car is no longer in the water room: it reads as airborne and the
 /// out-of-bounds legs own it.
 const WATER_DEPTH: f32 = 5.0;
+
+/// Nominal hull height the buoyancy fraction is measured over, metres.
+/// Designed (#1715, DSN-23): the retail float behaviour is unrecovered.
+const BODY_HEIGHT: f32 = 1.5;
+/// Buoyant acceleration at full submersion, in multiples of gravity: 2
+/// puts equilibrium with the centre of mass on the surface (half the
+/// hull under). Designed.
+const BUOYANCY_RATIO: f32 = 2.0;
+/// Vertical velocity damping in water, 1/s. Under critical for the
+/// spring `BUOYANCY_RATIO·g/BODY_HEIGHT`, so a car dropped in bobs a
+/// few times and settles. Designed.
+const VERTICAL_DAMPING: f32 = 4.0;
+/// Horizontal velocity damping in water, 1/s. Designed.
+const HORIZONTAL_DAMPING: f32 = 0.8;
+/// Angular velocity damping in water, 1/s. Designed.
+const ANGULAR_DAMPING: f32 = 2.0;
+
+/// The buoyant (upward) acceleration and damping for a body at
+/// `centre` moving at `velocity`/`angular` in water whose surface is at
+/// `surface`; `gravity` is the vehicle's gravity magnitude. Returns
+/// `(linear, angular)` accelerations.
+pub fn water_accelerations(
+    centre_y: f32,
+    surface: f32,
+    gravity: f32,
+    velocity: Vec3,
+    angular: Vec3,
+) -> (Vec3, Vec3) {
+    let submerged = (0.5 + (surface - centre_y) / BODY_HEIGHT).clamp(0.0, 1.0);
+    let lift = Vec3::Y * BUOYANCY_RATIO * gravity * submerged;
+    let damp = Vec3::new(
+        -HORIZONTAL_DAMPING * velocity.x,
+        -VERTICAL_DAMPING * velocity.y,
+        -HORIZONTAL_DAMPING * velocity.z,
+    ) * submerged;
+    (lift + damp, -ANGULAR_DAMPING * submerged * angular)
+}
+
+/// Deep water is not ground (#1715): its collider is on the
+/// collision-free `Water` layer, so a car sinks through the plane and
+/// is carried here instead — buoyancy toward floating at the surface,
+/// with damping, applied to the retail step's acceleration accumulator.
+/// The submersion dwell in `track_recovery` still owns the rescue.
+pub fn float_vehicles(
+    water: Option<Res<CityWater>>,
+    gravity: Res<Gravity>,
+    mut vehicles: Query<
+        (&mm2_vehicle::Vehicle, &Position, Forces),
+        Without<mm2_vehicle::RemoteReplica>,
+    >,
+) {
+    let Some(water) = water else {
+        return;
+    };
+    for (vehicle, pos, mut forces) in &mut vehicles {
+        let Some(surface) = water.surface_at(pos.0) else {
+            continue;
+        };
+        let g = vehicle
+            .config
+            .original
+            .as_ref()
+            .map_or(gravity.0.length(), |o| o.gravity);
+        let (lin, ang) = water_accelerations(
+            pos.0.y,
+            surface,
+            g,
+            forces.linear_velocity(),
+            forces.angular_velocity(),
+        );
+        forces.apply_linear_acceleration(lin);
+        forces.apply_angular_acceleration(ang);
+    }
+}
+
+/// Registers [`float_vehicles`]; add it next to `VehiclePlugin`.
+pub struct WaterPlugin;
+
+impl Plugin for WaterPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PhysicsSchedule,
+            float_vehicles.in_set(mm2_vehicle::VehicleBodyForces),
+        );
+    }
+}
 
 /// Which of the exe's two deadly-water sources marked a room — the
 /// authored `.water` refs or the SDL water-surface pass.
@@ -230,6 +319,22 @@ impl CityWater {
     /// the file's ref order, SDL marks appended in room order.
     pub fn room_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.rooms.iter().map(|r| r.id)
+    }
+
+    /// The surface height of the deadly water `p` is in: the bound of a
+    /// listed room whose perimeter contains `p` and whose column
+    /// reaches it (the same test as [`is_deadly`](Self::is_deadly)).
+    pub fn surface_at(&self, p: Vec3) -> Option<f32> {
+        let pt = (p.x, authored_z(p.z));
+        self.rooms
+            .iter()
+            .filter(|r| {
+                (r.bound - WATER_DEPTH..=r.bound + SURFACE_SLACK).contains(&p.y)
+                    && r.poly.len() >= 3
+                    && point_in_poly(pt, &r.poly)
+            })
+            .map(|r| r.bound)
+            .reduce(f32::max)
     }
 
     /// Whether `p` (world space) sits inside a listed room's XZ
@@ -496,5 +601,52 @@ mod tests {
         let water = CityWater::build(&def, &psdl, None);
         assert_eq!(water.sdl_rooms(), 0);
         assert!(!water.is_deadly(world(4.0, -4.0, 4.0)));
+    }
+
+    #[test]
+    fn surface_is_the_bound_of_the_room_the_point_is_in() {
+        let psdl = psdl_with_water(-4.0, -20.0);
+        let def = WaterDef::parse("-3.8\n1").unwrap();
+        let water = CityWater::build(&def, &psdl, None);
+        assert_eq!(water.surface_at(world(4.0, -4.5, 4.0)), Some(-3.8));
+        // Above the bound (a deck), outside the room, or sunk past the
+        // column: no surface.
+        assert_eq!(water.surface_at(world(4.0, 5.0, 4.0)), None);
+        assert_eq!(water.surface_at(world(12.0, -4.5, 4.0)), None);
+        assert_eq!(water.surface_at(world(4.0, -12.0, 4.0)), None);
+    }
+
+    #[test]
+    fn buoyancy_is_nil_clear_of_the_water_and_balances_at_half_hull() {
+        let g = 19.6;
+        let (lin, ang) = water_accelerations(2.0, 0.0, g, Vec3::new(3.0, -1.0, 0.0), Vec3::ONE);
+        assert_eq!((lin, ang), (Vec3::ZERO, Vec3::ZERO));
+        // Centre of mass on the surface, at rest: lift exactly cancels gravity.
+        let (lin, _) = water_accelerations(0.0, 0.0, g, Vec3::ZERO, Vec3::ZERO);
+        assert!((lin.y - g).abs() < 1e-4, "{lin:?}");
+        // Deeper pushes up harder, never more than the cap.
+        let (deep, _) = water_accelerations(-5.0, 0.0, g, Vec3::ZERO, Vec3::ZERO);
+        assert!((deep.y - BUOYANCY_RATIO * g).abs() < 1e-4);
+    }
+
+    /// A car dropped from 3 m above the surface at 12 m/s forward
+    /// enters, is slowed, bobs and settles floating at the surface — it
+    /// is not stopped dead by a plane and does not sink for ever.
+    #[test]
+    fn a_dropped_body_settles_floating_instead_of_sinking_or_bouncing() {
+        let g = 19.6;
+        let dt = 1.0 / 60.0;
+        let (mut y, mut vy, mut vx) = (3.0_f32, 0.0_f32, 12.0_f32);
+        let mut lowest = y;
+        for _ in 0..(10.0 / dt) as usize {
+            let (lin, _) = water_accelerations(y, 0.0, g, Vec3::new(vx, vy, 0.0), Vec3::ZERO);
+            vy += (lin.y - g) * dt;
+            vx += lin.x * dt;
+            y += vy * dt;
+            lowest = lowest.min(y);
+        }
+        assert!(lowest > -3.0, "sank {lowest} m");
+        assert!(y.abs() < 0.05 && vy.abs() < 0.05, "y {y} vy {vy}");
+        assert!(vx < 3.0, "horizontal speed is bled off: {vx}");
     }
 }

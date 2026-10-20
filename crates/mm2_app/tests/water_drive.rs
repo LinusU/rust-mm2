@@ -84,9 +84,13 @@ fn london_drive_app_with(vfs: Vfs, start: Vec3, yaw: f32, leaves: Leaves) -> (Ap
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         .insert_resource(session)
         .insert_resource(TireConditions::default())
+        .insert_resource(mm2_vehicle::VehicleProbeLayers(
+            mm2_app::layers::GameLayer::probe_mask(),
+        ))
         .insert_resource(SpawnPoint::new(start, yaw))
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
+        .add_plugins(mm2_app::water::WaterPlugin)
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
@@ -594,6 +598,68 @@ fn a_car_dropped_into_the_river_under_a_bridge_still_drowns() {
     assert!(
         report.submerged >= 1 && report.recovered >= 1,
         "dropped into the Thames at {spot:?} and never recovered: {report:?}, car at {pos:?}"
+    );
+}
+
+/// #1715: the Thames is a plane to sink through, not a road. Dropped
+/// onto the river a car's wheels never find ground (the `deepwater`
+/// collider is on the collision-free water layer), it is carried at the
+/// surface rather than sinking out of the column, and the submersion
+/// dwell still rescues it.
+#[test]
+fn a_car_dropped_into_the_river_passes_the_surface_and_floats() {
+    let Some((_, bridges, _)) = london_stretches() else {
+        return;
+    };
+    let bridge = bridges.first().expect("a London bridge");
+    let water_level = -3.8;
+    let (app0, _) = london_drive_app(
+        retail_vfs("the float control").unwrap(),
+        Vec3::new(0.0, 50.0, 0.0),
+        0.0,
+    );
+    let water = app0.world().resource::<mm2_app::water::CityWater>();
+    let spot = bridge
+        .path
+        .iter()
+        .copied()
+        .find(|p| water.is_deadly(Vec3::new(p.x, water_level - 1.0, p.z)))
+        .expect("a bridge vertex over the river");
+    drop(app0);
+    let (mut app, car) = london_drive_app(
+        retail_vfs("the float control").unwrap(),
+        Vec3::new(spot.x, water_level + 2.0, spot.z),
+        0.0,
+    );
+    let (mut lowest, mut grounded_frames, mut frames) = (f32::MAX, 0, 0);
+    // Under the 2 s dwell: observe the float, then the rescue.
+    while app.world().resource::<RecoveryReport>().recovered == 0 && frames < 480 {
+        app.update();
+        frames += 1;
+        let pos = app.world().get::<Position>(car).unwrap().0;
+        if app.world().resource::<RecoveryReport>().recovered == 0 {
+            lowest = lowest.min(pos.y);
+            let state = app.world().get::<mm2_vehicle::VehicleState>(car).unwrap();
+            let g = state.wheels.iter().any(|w| w.grounded);
+            grounded_frames += usize::from(g);
+        }
+    }
+    let report = app.world().resource::<RecoveryReport>();
+    assert!(
+        report.submerged >= 1 && report.recovered >= 1,
+        "never rescued: {report:?}"
+    );
+    assert_eq!(
+        grounded_frames, 0,
+        "a wheel found ground on the water: the surface is still solid"
+    );
+    assert!(
+        lowest < water_level + 0.3,
+        "the car never sank into the surface, lowest centre {lowest}"
+    );
+    assert!(
+        lowest > water_level - 2.5,
+        "the car sank out of its depth instead of floating: {lowest}"
     );
 }
 

@@ -3272,6 +3272,9 @@ fn spawn_prop(
         if let Some(contact) = col.contact {
             entity.insert(contact);
         }
+        if col.tire.drag >= mm2_game::RecoveryPolicy::default().water_min_drag {
+            entity.insert(GameLayer::water());
+        }
     }
 }
 
@@ -4239,6 +4242,13 @@ fn load_city_part(
             Name::new(name),
         ));
         if let Some(tire) = surfaces.as_ref().and_then(|t| t.tire_surface_for(surface)) {
+            // A drowning-class surface is a plane to sink through, not
+            // ground: its collider joins the `Water` layer that nothing
+            // collides with or probes, and `water::float_vehicles`
+            // carries the car in it (#1715).
+            if tire.drag >= mm2_game::RecoveryPolicy::default().water_min_drag {
+                entity.insert(GameLayer::water());
+            }
             entity.insert(tire);
         }
         if let Some(material) = surfaces.as_ref().and_then(|t| t.raw_contact_for(surface)) {

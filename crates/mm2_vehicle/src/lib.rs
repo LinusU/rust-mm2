@@ -27,6 +27,13 @@ pub mod surface;
 pub mod systems;
 pub mod vehicle;
 
+/// Where outside systems add body accelerations (`Forces::
+/// apply_linear_acceleration`) that the retail integration folds into
+/// the step: after the integration is prepared, before it consumes the
+/// accumulators. Water buoyancy lives here.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VehicleBodyForces;
+
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
@@ -55,6 +62,13 @@ impl Plugin for VehiclePlugin {
             .init_resource::<TireConditions>()
             .init_resource::<VehicleProbeLayers>()
             .init_resource::<original_contacts::OriginalContactSnapshots>()
+            .configure_sets(
+                PhysicsSchedule,
+                VehicleBodyForces
+                    .in_set(PhysicsStepSystems::First)
+                    .after(original_step::prepare_integration)
+                    .before(original_step::integrate),
+            )
             .add_systems(
                 PhysicsSchedule,
                 (

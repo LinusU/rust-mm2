@@ -45,6 +45,11 @@ pub enum GameLayer {
     /// A banger still waiting for its first strike (see
     /// [`GameLayer::dormant_prop`]).
     DormantProp,
+    /// Deep-water surfaces (`deepwater`-class drag): the visible plane a
+    /// car sinks through rather than drives on. It collides with
+    /// nothing and no probe sees it; `water::float_vehicles` carries the
+    /// car instead.
+    Water,
 }
 
 impl GameLayer {
@@ -52,6 +57,13 @@ impl GameLayer {
     /// collides with everything the layers allow.
     pub fn world() -> CollisionLayers {
         CollisionLayers::new(GameLayer::World, LayerMask::ALL)
+    }
+
+    /// Layers for a deep-water surface collider: a `Water` member that
+    /// collides with nothing, so neither a chassis nor a wheel ray is
+    /// held up by it (see [`GameLayer::Water`]).
+    pub fn water() -> CollisionLayers {
+        CollisionLayers::new(GameLayer::Water, LayerMask::NONE)
     }
 
     /// Layers for a kinematic scenery mover: a `Scenery` member that
@@ -96,12 +108,12 @@ impl GameLayer {
     }
 
     /// Every layer a car's or camera's ray may hit: all but
-    /// `Pedestrian`. A walker meets a car through the collision pair
+    /// `Pedestrian` and `Water`. A walker meets a car through the collision pair
     /// only; a wheel ray, an anchor probe or the chase camera that ended
     /// on a capsule would change how the car drives or where the camera
     /// sits (#1390).
     pub fn probe_mask() -> LayerMask {
-        !LayerMask::from(GameLayer::Pedestrian)
+        !LayerMask::from([GameLayer::Pedestrian, GameLayer::Water])
     }
 
     /// A [`SpatialQueryFilter`] over [`GameLayer::probe_mask`] that skips
@@ -114,6 +126,15 @@ impl GameLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_water_is_neither_collided_with_nor_probed() {
+        let water = GameLayer::water();
+        assert!(!water.interacts_with(CollisionLayers::default()));
+        assert!(!water.interacts_with(GameLayer::world()));
+        assert!(!GameLayer::probe_mask().has_all(LayerMask::from(GameLayer::Water)));
+        assert!(GameLayer::probe_mask().has_all(LayerMask::from(GameLayer::World)));
+    }
 
     #[test]
     fn scenery_skips_the_world_and_itself_and_nothing_else() {

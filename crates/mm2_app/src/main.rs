@@ -1720,6 +1720,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .insert_resource(ScreenshotDir(screenshot_dir))
     .add_plugins(VehiclePlugin)
+    .add_plugins(mm2_app::water::WaterPlugin)
     // Wheel and contact rays never end on a walker (#1390).
     .insert_resource(VehicleProbeLayers(mm2_app::layers::GameLayer::probe_mask()))
     .add_plugins(audio::NativeSkidTimingPlugin)

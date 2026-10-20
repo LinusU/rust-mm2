@@ -772,6 +772,7 @@ fn run_headless(
         .insert_resource(session_res)
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
+        .add_plugins(crate::water::WaterPlugin)
         // Wheel and contact rays never end on a walker (#1390).
         .insert_resource(VehicleProbeLayers(crate::layers::GameLayer::probe_mask()))
         .add_message::<ImpactEvent>()
