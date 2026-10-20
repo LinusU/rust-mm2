@@ -3095,7 +3095,7 @@ fn run_headless(
     // it: the parked evidence is `moved=`/`peak=` staying at zero. A city
     // can legitimately wall the car in, so its bar is load + finite +
     // grounded only.
-    if driver != Driver::Parked
+    if driver_must_reach_speed(driver)
         && matches!(&rec_config.world, WorldMode::DevWorld)
         && !matches!(&rec_config.mode, mm2_game::SessionMode::Event(_))
         && peak_speed < 5.0
@@ -3103,6 +3103,18 @@ fn run_headless(
         return record(&end_world, SmokeStatus::Fail, detail(" car never drove"));
     }
     record(&end_world, SmokeStatus::Pass, detail(""))
+}
+
+/// Whether the dev-world "car never drove" bar applies to `driver`.
+/// `Parked` never requests motion. `Route` is the NETPLAY baseline
+/// harness's input program: its evidence is the per-update trace that
+/// `netprobe` measures, and a client under unequal frame pacing is
+/// legitimately re-seated onto the host's copy by the own-seat drift
+/// snap (docs/netcode-redesign.md), which can leave the predicted car
+/// wedged against a wall for the whole run — a measured baseline defect
+/// the harness reports, not a smoke failure (#1787).
+fn driver_must_reach_speed(driver: Driver) -> bool {
+    !matches!(driver, Driver::Parked | Driver::Route(_))
 }
 
 /// Whether a missing player entity at the frame cap is a legitimate
@@ -3820,6 +3832,17 @@ mod tests {
             drv.field(),
             " opp_drv=3000m/15.0mps/10.0ipk/2.0xpk/1.0apk/0.33hpk"
         );
+    }
+
+    #[test]
+    fn the_dev_world_speed_bar_skips_parked_and_route_drivers_only() {
+        assert!(driver_must_reach_speed(Driver::Hold));
+        assert!(driver_must_reach_speed(Driver::Ram));
+        assert!(driver_must_reach_speed(Driver::Scripted));
+        assert!(!driver_must_reach_speed(Driver::Parked));
+        assert!(!driver_must_reach_speed(Driver::Route(
+            crate::netprobe::Route::Accel
+        )));
     }
 
     #[test]
