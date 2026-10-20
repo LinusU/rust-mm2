@@ -217,7 +217,7 @@ fn start_grid_and_waypoints_project_to_expected_pixels_in_both_cities() {
         let spec = HudMapSpec::parse(&String::from_utf8_lossy(&bytes)).unwrap();
         let mut map = mm2_game::HudMap::new(spec, 0);
         map.fullscreen = true;
-        map.zoomed_in = false;
+        map.zoom_level = mm2_game::MapZoom::Standard;
         map.zoom = map.target_zoom();
         let half = map.view_half_extent();
         assert!(half > 0.0 && half.is_finite(), "{city}: half extent {half}");

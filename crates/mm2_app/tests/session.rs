@@ -731,7 +731,10 @@ fn pad_buttons_drive_the_map_controls() {
     assert_eq!(app.world().resource::<HudMap>().view, MapView::Inset);
 
     pad_press(&mut app, GamepadButton::DPadLeft);
-    assert!(app.world().resource::<HudMap>().zoomed_in);
+    assert_eq!(
+        app.world().resource::<HudMap>().zoom_level,
+        mm2_game::MapZoom::Wide
+    );
     pad_press(&mut app, GamepadButton::DPadRight);
     assert_eq!(
         app.world().resource::<HudMap>().orientation,

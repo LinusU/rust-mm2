@@ -76,7 +76,7 @@ pub use effects::{
     PrecipDrop, Precipitation, SmokeEmitter, SmokePolicy, SmokePuff, Spark, SparkPolicy,
     VehicleSmoke, VehicleSparks, WheelDraw, WheelEmission, WheelPtx, WheelPtxPolicy, WheelPuff,
 };
-pub use hudmap::{HudMap, MapOrientation, MapView};
+pub use hudmap::{HudMap, MapOrientation, MapView, MapZoom};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use lesson::{

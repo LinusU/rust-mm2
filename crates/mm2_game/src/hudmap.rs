@@ -4,7 +4,7 @@
 //! which corner view is up, whether the map rotates with the player, the
 //! eased zoom level and the full-screen pause map — because it is the
 //! session's contract (HUD-4): TAB cycles two smaller map views and off,
-//! E toggles the zoom level, F toggles rotation, Q opens the full-screen
+//! E cycles the zoom level, F toggles rotation, Q opens the full-screen
 //! map (single player only). Everything is driven by the authored
 //! [`HudMapSpec`] the session loaded (`tune/<city>.mmhudmap`), so the
 //! distances, icon scales and easing rate are authored values, not
@@ -24,7 +24,11 @@
 //!   out" (the field's semantics are unrecovered), and
 //!   [`INSET_VIEW_SCALE`] — read verbatim as half-extents, the authored
 //!   inset distances frame most of the city in a ~360 px corner, which
-//!   leaves the streets around the car unreadable.
+//!   leaves the streets around the car unreadable. [`MapZoom::Wide`],
+//!   the corner overview that frames the full-screen map's authored
+//!   `ZoomOutDistFS` span in the inset (the full-screen map is
+//!   single-player only, so a networked session had no wide view), and
+//!   E's Standard → Wide → Close → Standard order are designed too.
 
 use bevy::prelude::*;
 use mm2_formats::hudmap::HudMapSpec;
@@ -36,6 +40,41 @@ use mm2_formats::hudmap::HudMapSpec;
 /// the car legible. The full-screen map keeps its `*FS` pair verbatim,
 /// since its job is the whole-city overview.
 pub const INSET_VIEW_SCALE: f32 = 0.25;
+
+/// The map's zoom level — E cycles it (HUD-4 documents the toggle;
+/// the third level is designed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MapZoom {
+    /// Authored `ZoomInDist`: the streets around the car.
+    Close,
+    /// Authored `ZoomOutDist` (the retail start level).
+    #[default]
+    Standard,
+    /// A city overview: the full-screen map's authored `ZoomOutDistFS`
+    /// half-extent shown in the corner inset, with markers grown to
+    /// keep their on-screen size.
+    Wide,
+}
+
+impl MapZoom {
+    /// E order: `Standard → Wide → Close → Standard`.
+    pub fn next(self) -> Self {
+        match self {
+            MapZoom::Standard => MapZoom::Wide,
+            MapZoom::Wide => MapZoom::Close,
+            MapZoom::Close => MapZoom::Standard,
+        }
+    }
+
+    /// Short name for the `map=` record field.
+    pub fn name(self) -> &'static str {
+        match self {
+            MapZoom::Close => "close",
+            MapZoom::Standard => "std",
+            MapZoom::Wide => "wide",
+        }
+    }
+}
 
 /// Which corner-map presentation the HUD shows — TAB cycles it
 /// (HUD-4: "two smaller map views and off"). The cycle order is
@@ -108,10 +147,9 @@ pub struct HudMap {
     pub view: MapView,
     /// Fixed vs. rotating map (F).
     pub orientation: MapOrientation,
-    /// `true` at the zoomed-in level, `false` zoomed out — E toggles.
-    /// Seeded from the authored `ZoomIn` field (designed reading: `0` =
-    /// start zoomed out).
-    pub zoomed_in: bool,
+    /// Zoom level — E cycles it. Seeded from the authored `ZoomIn`
+    /// field (designed reading: `0` = start at the standard level).
+    pub zoom_level: MapZoom,
     /// Current view half-extent in metres, eased toward
     /// [`Self::target_zoom`] by [`Self::advance`]. Starts *at* the
     /// target — the easing animates transitions, not the first frame.
@@ -128,12 +166,16 @@ impl HudMap {
     /// A map state for `spec`/`generation`, starting on the authored
     /// `ZoomIn` level with the zoom already at its target.
     pub fn new(spec: HudMapSpec, generation: u64) -> Self {
-        let zoomed_in = spec.zoom_in != 0;
+        let zoom_level = if spec.zoom_in != 0 {
+            MapZoom::Close
+        } else {
+            MapZoom::Standard
+        };
         let mut map = Self {
             spec,
             view: MapView::Inset,
             orientation: MapOrientation::NorthUp,
-            zoomed_in,
+            zoom_level,
             zoom: 0.0,
             fullscreen: false,
             generation,
@@ -158,11 +200,14 @@ impl HudMap {
     /// authored in/out distance of the active presentation — the
     /// `*FS` pair while the full-screen map is up.
     pub fn target_zoom(&self) -> f32 {
-        match (self.fullscreen, self.zoomed_in) {
-            (false, false) => self.spec.zoom_out_dist,
-            (false, true) => self.spec.zoom_in_dist,
-            (true, false) => self.spec.zoom_out_dist_fs,
-            (true, true) => self.spec.zoom_in_dist_fs,
+        match (self.fullscreen, self.zoom_level) {
+            (false, MapZoom::Standard) => self.spec.zoom_out_dist,
+            (false, MapZoom::Close) => self.spec.zoom_in_dist,
+            // `view_half_extent` scales the inset by `INSET_VIEW_SCALE`;
+            // undo it so the overview frames the full-screen span.
+            (false, MapZoom::Wide) => self.spec.zoom_out_dist_fs / INSET_VIEW_SCALE,
+            (true, MapZoom::Close) => self.spec.zoom_in_dist_fs,
+            (true, _) => self.spec.zoom_out_dist_fs,
         }
     }
 
@@ -198,7 +243,11 @@ impl HudMap {
             )
         };
         let t = ((self.zoom - near) / (far - near)).clamp(0.0, 1.0);
-        lo + (hi - lo) * t
+        let scale = lo + (hi - lo) * t;
+        // Past the authored range (the inset's Wide overview) the
+        // extent keeps growing with the view so markers hold their
+        // on-screen size instead of shrinking to specks.
+        scale * (self.zoom / far).max(1.0)
     }
 
     /// Ease [`Self::zoom`] toward [`Self::target_zoom`] at the authored
@@ -214,9 +263,9 @@ impl HudMap {
         self.view = self.view.next();
     }
 
-    /// E — toggle the zoom level (HUD-4).
+    /// E — step the zoom level (HUD-4).
     pub fn toggle_zoom(&mut self) {
-        self.zoomed_in = !self.zoomed_in;
+        self.zoom_level = self.zoom_level.next();
     }
 
     /// F — toggle north-up vs. rotating (HUD-4).
@@ -260,7 +309,7 @@ mod tests {
         assert!(!m.fullscreen);
         // ZoomIn 0 → zoomed out, and already at the target (the easing
         // animates transitions, not spawn).
-        assert!(!m.zoomed_in);
+        assert_eq!(m.zoom_level, MapZoom::Standard);
         assert_eq!(m.zoom, 1195.0);
         assert!(m.visible());
         assert!(!m.is_stale(7) && m.is_stale(6));
@@ -282,6 +331,8 @@ mod tests {
     fn zoom_eases_to_the_toggled_level() {
         let mut m = HudMap::new(spec(), 0);
         m.toggle_zoom();
+        m.toggle_zoom();
+        assert_eq!(m.zoom_level, MapZoom::Close);
         assert_eq!(m.target_zoom(), 577.0);
         // A second of 1/60 frames lands within the authored rate's
         // reach of the target without ever overshooting.
@@ -294,6 +345,7 @@ mod tests {
         }
         assert!((m.zoom - 577.0).abs() < 0.5, "eased to target: {}", m.zoom);
         m.toggle_zoom();
+        assert_eq!(m.zoom_level, MapZoom::Standard);
         for _ in 0..600 {
             m.advance(1.0 / 60.0);
         }
@@ -301,10 +353,37 @@ mod tests {
     }
 
     #[test]
+    fn wide_overview_frames_the_fullscreen_span_in_the_inset() {
+        let mut m = HudMap::new(spec(), 0);
+        m.toggle_zoom();
+        assert_eq!(m.zoom_level, MapZoom::Wide);
+        for _ in 0..1200 {
+            m.advance(1.0 / 60.0);
+        }
+        // The corner view shows the full-screen map's authored span.
+        assert!((m.view_half_extent() - 1581.0).abs() < 1.0);
+        assert!(m.view_half_extent() > 4.0 * 1195.0 * INSET_VIEW_SCALE);
+        // Markers keep the standard level's on-screen proportion.
+        let ratio = |m: &HudMap| m.icon_scale() / m.view_half_extent();
+        let wide = ratio(&m);
+        let mut std = HudMap::new(spec(), 0);
+        std.zoom = std.target_zoom();
+        assert!(
+            (wide - ratio(&std)).abs() < 1e-3,
+            "{wide} vs {}",
+            ratio(&std)
+        );
+        // Full-screen ignores Wide: it is the standard FS level.
+        m.fullscreen = true;
+        assert_eq!(m.target_zoom(), 1581.0);
+    }
+
+    #[test]
     fn fullscreen_map_uses_the_fs_pair() {
         let mut m = HudMap::new(spec(), 0);
         m.fullscreen = true;
         assert_eq!(m.target_zoom(), 1581.0);
+        m.toggle_zoom();
         m.toggle_zoom();
         assert_eq!(m.target_zoom(), 786.0);
         // Fullscreen also overrides Off.
