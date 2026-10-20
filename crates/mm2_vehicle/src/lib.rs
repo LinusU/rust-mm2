@@ -23,6 +23,7 @@ pub mod debug;
 pub mod original;
 mod original_contacts;
 mod original_step;
+pub mod physics_world;
 pub mod player_input;
 pub mod sim;
 pub mod surface;
@@ -71,6 +72,7 @@ impl Plugin for VehiclePlugin {
             .init_resource::<TireConditions>()
             .init_resource::<VehicleProbeLayers>()
             .init_resource::<original_contacts::OriginalContactSnapshots>()
+            .init_resource::<physics_world::PendingSleeps>()
             .configure_sets(
                 PhysicsSchedule,
                 VehicleBodyForces
@@ -115,6 +117,16 @@ impl Plugin for VehiclePlugin {
                 )
                     .chain()
                     .in_set(PhysicsStepSystems::Last),
+            )
+            .add_systems(
+                PhysicsSchedule,
+                physics_world::finish_sleep_restore
+                    .in_set(PhysicsStepSystems::Last)
+                    // Idle unless a restore left a body to put to sleep;
+                    // it only has to run after the narrow phase and
+                    // before Avian advances `LastPhysicsTick`, both of
+                    // which the set position guarantees.
+                    .ambiguous_with_all(),
             )
             // `vehicle_self_right` emits `ResetVehicle`; the chained
             // `vehicle_reset` applies it the same frame — and every
