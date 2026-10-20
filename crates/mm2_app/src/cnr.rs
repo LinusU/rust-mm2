@@ -51,7 +51,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
-use mm2_game::cnr_options::HEAL_SECONDS_TO_FULL;
+use mm2_game::cnr_options::{DELIVERY_RADIUS_M, HEAL_SECONDS_TO_FULL, MARKER_HEIGHT_M};
 use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId,
@@ -636,6 +636,26 @@ impl MarkerRole {
     }
 }
 
+impl MarkerRole {
+    /// How the retail constructor sizes this role's model, as the local
+    /// transform of its render parts. The hideout and bank are authored
+    /// as a unit sign (2 x 1 m, 0.05 m thick); the original scales it by
+    /// `(radius, 7.5, radius)` and lifts it half its height, so the sign
+    /// is as wide as the delivery sphere is across and stands on the
+    /// site. The gold marker's draw is a different object class whose
+    /// scale is not read, so it keeps its authored size.
+    pub fn part_transform(self) -> Transform {
+        match self {
+            MarkerRole::Gold => Transform::IDENTITY,
+            MarkerRole::Hideout | MarkerRole::Bank => Transform {
+                translation: Vec3::Y * (MARKER_HEIGHT_M * 0.5),
+                scale: Vec3::new(DELIVERY_RADIUS_M, MARKER_HEIGHT_M, DELIVERY_RADIUS_M),
+                ..Transform::IDENTITY
+            },
+        }
+    }
+}
+
 /// A rendered marker for one of the match's three sites, positioned by
 /// [`sync_cnr_markers`] from the host's match. Pure presentation: it
 /// has no collider and no authority.
@@ -700,7 +720,7 @@ pub fn spawn_cnr_markers(
                 .spawn((
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(material.clone()),
-                    Transform::IDENTITY,
+                    role.part_transform(),
                 ))
                 .id();
             commands.entity(root).add_child(part);
@@ -1600,6 +1620,18 @@ mod tests {
             .world_mut()
             .query_filtered::<Entity, (With<CnrMarker>, With<Collider>)>();
         assert_eq!(colliders.iter(r.app.world()).count(), 0);
+    }
+
+    #[test]
+    fn the_hideout_and_bank_signs_span_the_delivery_sphere_and_stand_on_the_site() {
+        for role in [MarkerRole::Hideout, MarkerRole::Bank] {
+            let t = role.part_transform();
+            // The unit model spans x in [-1, 1], y in [-0.5, 0.5].
+            assert_eq!(t.scale.x * 1.0, DELIVERY_RADIUS_M);
+            assert_eq!(t.translation.y - 0.5 * t.scale.y, 0.0, "bottom on the site");
+            assert_eq!(t.translation.y + 0.5 * t.scale.y, MARKER_HEIGHT_M);
+        }
+        assert_eq!(MarkerRole::Gold.part_transform(), Transform::IDENTITY);
     }
 
     #[test]

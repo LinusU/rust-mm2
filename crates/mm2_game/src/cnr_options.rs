@@ -77,6 +77,16 @@ pub const DELIVERY_POINTS: u32 = 100;
 /// that comparison was read from x87 flag tests and is *inferred*.
 pub const DELIVERY_RADIUS_M: f32 = 12.0;
 
+/// Height the marker constructor passes beside the radius for every
+/// marker, metres (`7.5`, the argument pushed at `0x423d12`, `0x423ee0`
+/// and `0x423f46`). The constructor hands `(radius, 7.5, radius)` to the
+/// marker object's size setter (vtable `+0x68`, `0x43f810`), whose draw
+/// (`0x43f850`) multiplies the PKG by that scale, and lifts the marker by
+/// half of it (`0x43df7a`: `7.5 * 0.5`) so the unit model's `y = -0.5`
+/// edge rests on the site. *verified_original* as call-site constants;
+/// the marker object's draw matrix (orientation) is not read.
+pub const MARKER_HEIGHT_M: f32 = 7.5;
+
 /// The host's gold-mass option. *verified_original* for the three
 /// choices and their numbers; the strings are `Weightless`, `Quarter
 /// Ton`, `Half Ton` (`mmlang.dll` 0x14c–0x14e).
