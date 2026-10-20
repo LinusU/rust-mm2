@@ -746,13 +746,16 @@ impl AmbientTraffic {
     /// (F10-AC01). A car agrees when its nose lies within ~8 degrees of
     /// the lane (or crossing) tangent and it is not moving backwards
     /// along it. Knocked wrecks and cars whose cursor no longer
-    /// samples are not audited.
+    /// samples are not audited. The nose is read from the physics
+    /// [`Rotation`], which `drive_ambient` writes from the cursor; the
+    /// render `Transform` is eased between ticks (`TransformInterpolation`)
+    /// and lags the lane by up to one tick on a curve.
     pub fn heading_audit<'a>(
         &self,
-        cars: impl Iterator<Item = (&'a AmbientCar, &'a Transform, &'a LinearVelocity)>,
+        cars: impl Iterator<Item = (&'a AmbientCar, &'a Rotation, &'a LinearVelocity)>,
     ) -> (usize, usize) {
         let (mut ok, mut total) = (0, 0);
-        for (car, transform, velocity) in cars {
+        for (car, rotation, velocity) in cars {
             if car.drive != AmbientDrive::Lane {
                 continue;
             }
@@ -761,7 +764,7 @@ impl AmbientTraffic {
             };
             let tangent = Vec3::from(sample.tangent).normalize_or_zero();
             total += 1;
-            let aligned = transform.forward().dot(tangent) > 0.99;
+            let aligned = (rotation.0 * Vec3::NEG_Z).dot(tangent) > 0.99;
             let forward_speed = velocity.0.dot(tangent) >= 0.0;
             if aligned && forward_speed {
                 ok += 1;

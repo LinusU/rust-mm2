@@ -2545,7 +2545,7 @@ fn run_headless(
             }
             let mut query = world_ecs.try_query::<(
                 &crate::traffic::AmbientCar,
-                &Transform,
+                &avian3d::prelude::Rotation,
                 &avian3d::prelude::LinearVelocity,
             )>();
             if let Some(q) = query.as_mut() {
