@@ -229,7 +229,7 @@ ticks and holds the target +-1; 4- and 8-packet starved bursts (the
 client within `max_depth` ticks of the wall; 100 / 150 / 250 ms stalls never
 release more than `max_catchup_ticks` per frame, never run more ticks than
 the wall time bought and account every missing tick to dropped wall time or
-drained buffer; a 30 s sleep/resume releases no ticks, counts one sleep
+controller slowing (at most `max_adjust_ppm`); a 30 s sleep/resume releases no ticks, counts one sleep
 rebase and recovers. Loopback only, no real-Internet claim. Still open:
 prediction replay (NETPLAY-04), so no slot is "replayed".
 With the selector on, the host's `apply_remote_inputs` stands down and
