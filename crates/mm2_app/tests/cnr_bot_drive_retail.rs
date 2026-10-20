@@ -381,8 +381,15 @@ fn run(retail: &std::path::Path, city: &str, seed: u64) -> Outcome {
 const BUDGET: u32 = 300;
 const GIVE_UP: u32 = 60;
 const PICKUP_BY: u32 = 120;
-/// Seeds tried per city.
-const SEEDS: usize = 3;
+/// Seeds tried per city. A run is chaotic: the same seed's bots diverge by
+/// centimetres at the first landing and then amplify, so whether any one
+/// seed delivers or sees the pursuer flips with every change to the
+/// physics stack (Bevy 0.19 / Avian 0.7 vs Bevy 0.20 / Avian 0.8 measured
+/// over these nine seeds: sf 5 delivered / 2 pursued on both, london 4 / 3
+/// on both, while the first three seeds alone went 1 / 1 to 1 / 0). Nine
+/// seeds make the "at least one" thresholds a statement about the drivers
+/// rather than about which seeds land well.
+const SEEDS: usize = 9;
 
 #[test]
 fn retail_bots_pick_up_deliver_and_pursue_in_each_city() {

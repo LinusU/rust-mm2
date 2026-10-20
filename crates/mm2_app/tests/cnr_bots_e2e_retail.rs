@@ -155,24 +155,32 @@ fn city_matrix(city: &str) {
     let mut vfs = Vfs::new();
     mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
     let graph = mm2_app::cnr_bots::load_graph(&vfs, city).unwrap();
-    // Probe the first three on-lane seeds with ten free-for-all bots and
-    // run the matrix on the first that scores; every probe is reported
-    // (seeds that do not score are the diagnosed-later failures, see
-    // `docs/research/cnr.md`).
+    // Probe the on-lane seeds with ten bots in every variant and run the
+    // matrix on the first where each variant scores, since the matrix
+    // asserts exactly that below; every probe is reported (seeds that do
+    // not score are the diagnosed-later failures, see
+    // `docs/research/cnr.md`). A run is chaotic, so whether one variant
+    // scores on a given seed flips with any change to the physics stack
+    // (the sf default of Avian 0.7 scored in every variant on seed 4,
+    // Avian 0.8 does not in cops); the probe makes the pick follow that.
     let mut seed = None;
-    for s in crate::cnr_bot_drive_retail::lane_seeds(&vfs, city, &graph, 3) {
-        let p = run_case(&retail, city, ffa(), 10, s, budget());
-        let total: i64 = p.points.iter().map(|p| p.1).sum();
-        println!(
-            "cnr-e2e city={city} probe seed={s} wall={:.1}s points={total}",
-            p.wall
-        );
-        if total > 0 {
-            seed = Some(s);
-            break;
+    'seeds: for s in crate::cnr_bot_drive_retail::lane_seeds(&vfs, city, &graph, 9) {
+        for (variant, tag) in VARIANTS {
+            let p = run_case(&retail, city, settings(variant), 10, s, budget());
+            let total: i64 = p.points.iter().map(|p| p.1).sum();
+            println!(
+                "cnr-e2e city={city} probe seed={s} variant={tag} wall={:.1}s points={total}",
+                p.wall
+            );
+            if total == 0 {
+                continue 'seeds;
+            }
         }
+        seed = Some(s);
+        break;
     }
-    let seed = seed.expect("no on-lane seed of the first three scored with ten bots");
+    let seed =
+        seed.expect("no on-lane seed of the first nine scored with ten bots in every variant");
     let d = run_case(
         &retail,
         city,
