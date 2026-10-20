@@ -790,6 +790,7 @@ pub fn drive_lobby(
     mut tuned: ResMut<TunedVehicle>,
     menu: Option<Res<MenuShell>>,
     mut snaps: ResMut<crate::netdrive::RemoteSnaps>,
+    mut lead: Option<ResMut<crate::netpace::ClientLead>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for event in link.drain() {
@@ -831,7 +832,12 @@ pub fn drive_lobby(
                 trailers,
                 impacts,
                 race,
-            }) => snaps.push(generation, tick, entries, trailers, impacts, race),
+            }) => {
+                if let Some(lead) = lead.as_mut() {
+                    lead.note_snap(link.player_id(), generation, tick, &entries);
+                }
+                snaps.push(generation, tick, entries, trailers, impacts, race)
+            }
             LobbyEvent::Message(Message::Props {
                 generation,
                 tick,

@@ -328,6 +328,11 @@ impl CommandStream {
         self.handoff = Some(handoff);
     }
 
+    /// Whether a transport is attached (the stream is sending).
+    pub fn has_handoff(&self) -> bool {
+        self.handoff.is_some()
+    }
+
     /// The command history.
     pub fn history(&self) -> &CommandHistory {
         &self.history

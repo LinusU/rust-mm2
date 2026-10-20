@@ -53,6 +53,7 @@ pub mod net;
 pub mod netcmd;
 pub mod netdrive;
 pub mod netlead;
+pub mod netpace;
 pub mod netplay_timeline;
 pub mod netprobe;
 pub mod neural;

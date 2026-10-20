@@ -37,6 +37,8 @@ struct JoinedReconcile;
 pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + Clone) {
     // NETPLAY-02C: the fixed-tick command stream (behind the selector).
     crate::netcmd::add_systems(app);
+    // NETPLAY-02F: the lead controller drives the same stream's tick rate.
+    crate::netpace::add_systems(app);
     app.add_systems(
         Update,
         (

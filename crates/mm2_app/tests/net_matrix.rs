@@ -12,11 +12,12 @@
 //! what skews the two timelines.
 //!
 //! Evidence level: loopback only, seeded lossy proxy. It says nothing about a
-//! real Internet path. Not covered here: the lead controller driving the
-//! client's tick rate (`netlead` is a library piece, not yet wired into the
-//! schedule) and prediction replay/rebase (NETPLAY-04), so no slot is
-//! "replayed" in these runs and every cell's counters report that as absent
-//! rather than zero-by-construction.
+//! real Internet path. The 02E cells run one fixed tick per host step; the
+//! `lead_controller_*` cells (NETPLAY-02F, below) run the client under
+//! `netpace`, where the lead controller and pacer decide the ticks. Not
+//! covered: prediction replay/rebase (NETPLAY-04), so no slot is "replayed"
+//! in these runs and every cell's counters report that as absent rather than
+//! zero-by-construction.
 //!
 //! Every cell checks the same invariants against what the host consumed:
 //! - a tick that consumed a driver command finalized exactly the next seq and
@@ -40,6 +41,8 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::net::HostLink;
 use mm2_app::netcmd::{self, CommandStream, HISTORY_CAP};
 use mm2_app::netdrive::{self, NetPlayer, RemotePick};
+use mm2_app::netlead::LeadConfig;
+use mm2_app::netpace;
 use mm2_app::netplay_timeline::NetplayTimeline;
 use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionPhase};
 use mm2_net::{
@@ -116,6 +119,8 @@ fn feed(mut driver: ResMut<Driver>, mut car: Query<&mut VehicleInput, With<Playe
 /// What a snapshot told the client about its seat.
 #[derive(Debug, Clone, Copy)]
 struct AckSample {
+    generation: u64,
+    tick: u64,
     ack: u64,
     depth: u8,
 }
@@ -142,6 +147,15 @@ struct Seat {
     ack_regressions: u64,
     history_acked: u64,
     last_ack_seen: u64,
+    /// Lead-controller cells: this client's wall clock runs this many ppm
+    /// fast (negative = slow) against the host's.
+    ppm: i64,
+    /// Wall time that passed while the client was frozen, in ns; the next
+    /// frame it runs carries it (a stall, or a sleep/resume).
+    owed_ns: i64,
+    /// Most fixed ticks the pacer released in one frame.
+    max_frame_ticks: u64,
+    prev_ran: u64,
 }
 
 /// One host tick for one seat, observed after `consume_seat_commands`.
@@ -161,6 +175,9 @@ struct Rig {
     tick: u64,
     generation: u64,
     stop: Arc<AtomicBool>,
+    /// The clients run under `netpace` (the lead controller) instead of
+    /// one fixed step per host step.
+    lead: bool,
 }
 
 /// One seat of a cell; its lanes are tuned per phase with `Rig::both`.
@@ -178,6 +195,16 @@ fn delay(ms: u64) -> Impair {
 
 impl Rig {
     fn new(specs: &[SeatSpec], seed: u64) -> Self {
+        Self::build(specs, seed, false)
+    }
+
+    /// A rig whose clients' fixed schedule is driven by the lead
+    /// controller and pacer.
+    fn paced(specs: &[SeatSpec], seed: u64) -> Self {
+        Self::build(specs, seed, true)
+    }
+
+    fn build(specs: &[SeatSpec], seed: u64, lead: bool) -> Self {
         let install = tempfile::tempdir().unwrap();
         let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
         let host_addr = link.addr();
@@ -227,6 +254,7 @@ impl Rig {
                     // is never this session's ack.
                     if let Message::Snap {
                         generation,
+                        tick,
                         entries,
                         ..
                     } = msg
@@ -234,13 +262,15 @@ impl Rig {
                         && let Some(e) = entries.iter().find(|e| e.player == id)
                     {
                         sink.lock().unwrap().push(AckSample {
+                            generation,
+                            tick,
                             ack: e.input_ack,
                             depth: e.input_depth,
                         });
                     }
                 }
             });
-            let client = client_app(generation, spec.script, i, ctl);
+            let client = client_app(generation, spec.script, i, ctl, lead);
             let entity_on_host = host
                 .world_mut()
                 .query_filtered::<(Entity, &NetPlayer), With<RemotePick>>()
@@ -266,6 +296,10 @@ impl Rig {
                 ack_regressions: 0,
                 history_acked: 0,
                 last_ack_seen: 0,
+                ppm: 0,
+                owed_ns: 0,
+                max_frame_ticks: 0,
+                prev_ran: 0,
             });
         }
         // The first fixed step tells the mailbox which generation runs.
@@ -277,6 +311,7 @@ impl Rig {
             tick: 0,
             generation,
             stop,
+            lead,
         };
         rig.consume();
         // Keep the tempdir alive for the rig's lifetime (the host mounted it).
@@ -306,14 +341,43 @@ impl Rig {
     /// waits for the next tick instant.
     fn step(&mut self) {
         for seat in &mut self.seats {
-            if seat.frozen {
-                continue;
+            if self.lead {
+                // One host step is one TICK of wall time. A frozen client
+                // runs no frame (it still folds in the reports that
+                // arrived, with no time passing) and owes the time to its
+                // next frame; a running one scales its frame by its own
+                // clock error. The pacer, not the harness, decides how many
+                // fixed ticks that frame buys.
+                let tick_ns = TICK.as_nanos() as i64;
+                let dt_ns = if seat.frozen {
+                    seat.owed_ns += tick_ns;
+                    0
+                } else {
+                    let own = tick_ns + tick_ns * seat.ppm / 1_000_000;
+                    own + std::mem::take(&mut seat.owed_ns)
+                };
+                seat.client
+                    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(
+                        dt_ns as u64,
+                    )));
+                seat.client.update();
+                let ran = seat
+                    .client
+                    .world()
+                    .resource::<netpace::ClientLead>()
+                    .ticks_run();
+                seat.max_frame_ticks = seat.max_frame_ticks.max(ran - seat.prev_ran);
+                seat.prev_ran = ran;
+            } else {
+                if seat.frozen {
+                    continue;
+                }
+                let ticks = 1 + seat.catch_up;
+                seat.catch_up = 0;
+                seat.client
+                    .insert_resource(TimeUpdateStrategy::ManualDuration(TICK * ticks));
+                seat.client.update();
             }
-            let ticks = 1 + seat.catch_up;
-            seat.catch_up = 0;
-            seat.client
-                .insert_resource(TimeUpdateStrategy::ManualDuration(TICK * ticks));
-            seat.client.update();
             // Let the worker hand the window to the socket (it is the only
             // thing allowed to block); bounded so a stuck sink fails.
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -332,6 +396,15 @@ impl Rig {
         self.host.update();
         for seat in &mut self.seats {
             let samples: Vec<AckSample> = std::mem::take(&mut *seat.acks.lock().unwrap());
+            if self.lead {
+                let mut lead = seat
+                    .client
+                    .world_mut()
+                    .resource_mut::<netpace::ClientLead>();
+                for s in &samples {
+                    lead.note_report(s.generation, s.tick, s.ack, s.depth);
+                }
+            }
             let mut stream = seat.client.world_mut().resource_mut::<CommandStream>();
             for s in samples {
                 seat.acks_received += 1;
@@ -340,7 +413,11 @@ impl Rig {
                     seat.ack_regressions += 1;
                 }
                 seat.last_ack_seen = seat.last_ack_seen.max(s.ack);
-                stream.history_mut().ack(s.ack);
+                if !self.lead {
+                    // With the controller active the client's own
+                    // frame trims the history from the same report.
+                    stream.history_mut().ack(s.ack);
+                }
             }
             seat.max_history = seat.max_history.max(stream.history().len());
             let acked = stream.history().acked();
@@ -583,7 +660,13 @@ impl Drop for Rig {
     }
 }
 
-fn client_app(generation: u64, script: Script, seat: usize, ctl: mm2_net::ClientCtl) -> App {
+fn client_app(
+    generation: u64,
+    script: Script,
+    seat: usize,
+    ctl: mm2_net::ClientCtl,
+    lead: bool,
+) -> App {
     let mut session = Session::new();
     session
         .begin_generation(SessionConfig::default(), generation)
@@ -612,6 +695,9 @@ fn client_app(generation: u64, script: Script, seat: usize, ctl: mm2_net::Client
             tick: 0,
         })
         .add_systems(FixedUpdate, (feed, netcmd::capture_and_send).chain());
+    if lead {
+        netpace::add_systems(&mut app);
+    }
     app.world_mut().spawn((
         PlayerVehicle,
         VehicleInput::default(),
@@ -867,4 +953,305 @@ fn a_session_restart_drops_the_old_generations_windows() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// NETPLAY-02F: the same host path with the lead controller driving each
+// client's fixed schedule (`netpace`). Loopback only; the host consumes one
+// command per seat per tick and the controller steers the buffer depth the
+// host reports back to `LeadConfig::target_depth`.
+
+fn lead_cfg() -> LeadConfig {
+    LeadConfig::default()
+}
+
+fn occupancy(rig: &Rig, seat: usize) -> Vec<usize> {
+    rig.seats[seat]
+        .ticks
+        .iter()
+        .map(|t| t.stats.occupancy)
+        .collect()
+}
+
+fn mean(xs: &[usize]) -> f64 {
+    xs.iter().sum::<usize>() as f64 / xs.len().max(1) as f64
+}
+
+/// Index of the first host tick at or after `from` from which the buffer
+/// stays within `[lo, hi]` to the end of the run.
+fn settled_at(occ: &[usize], from: usize, lo: usize, hi: usize) -> Option<usize> {
+    let bad = occ
+        .iter()
+        .rposition(|&o| o < lo || o > hi)
+        .map_or(from, |i| i + 1);
+    let at = bad.max(from);
+    (at < occ.len()).then_some(at)
+}
+
+fn lead_of(rig: &Rig, seat: usize) -> &netpace::ClientLead {
+    rig.seats[seat]
+        .client
+        .world()
+        .resource::<netpace::ClientLead>()
+}
+
+fn report_lead(tag: &str, rig: &Rig, seat: usize) {
+    let lead = lead_of(rig, seat);
+    let occ = occupancy(rig, seat);
+    eprintln!(
+        "{tag}: lead ticks_run={} host_ticks={} pacer(stall={} sleep={} dropped={}) \
+         ctl={:?} rate={}ppm depth={:.2} max_frame_ticks={} occ_max={} occ_tail_mean={:.2}",
+        lead.ticks_run(),
+        occ.len(),
+        lead.pacer().stall_rebases(),
+        lead.pacer().sleep_rebases(),
+        lead.pacer().dropped_ticks(),
+        lead.controller().stats(),
+        lead.controller().rate_ppm(),
+        lead.controller().depth_ticks(),
+        rig.seats[seat].max_frame_ticks,
+        occ.iter().max().unwrap_or(&0),
+        mean(&occ[occ.len().saturating_sub(200)..]),
+    );
+}
+
+/// The controller engages on a client that is sending, and a steady 20 ms
+/// RTT settles the host buffer at the target and holds it there.
+#[test]
+fn lead_controller_settles_the_host_buffer_at_the_target() {
+    let cfg = lead_cfg();
+    let mut rig = Rig::paced(&[plain("lead", busy)], 0x02F1);
+    rig.both(0, 10, 10);
+    rig.run(900);
+    assert!(lead_of(&rig, 0).engaged(), "the pacer never took over");
+    rig.drain();
+    rig.check("lead-steady", 12);
+    report_lead("lead-steady", &rig, 0);
+    let occ = occupancy(&rig, 0);
+    let started = rig.seats[0]
+        .ticks
+        .iter()
+        .position(|t| t.stats.received > 0)
+        .unwrap();
+    let at = settled_at(&occ[..900], started, 0, cfg.max_depth as usize)
+        .expect("the buffer never settled");
+    assert!(
+        at - started <= 300,
+        "settled only after {} ticks",
+        at - started
+    );
+    let tail = &occ[600..900];
+    assert!(
+        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 1.0).contains(&mean(tail)),
+        "steady depth {} is not near the target",
+        mean(tail)
+    );
+    assert!(*tail.iter().max().unwrap() <= cfg.max_depth as usize);
+}
+
+/// Settle a paced rig, then check the buffer is back in band and near the
+/// target over the last `window` ticks.
+fn assert_in_band(tag: &str, rig: &Rig, window: usize) {
+    let cfg = lead_cfg();
+    let occ = occupancy(rig, 0);
+    let tail = &occ[occ.len() - window..];
+    assert!(
+        *tail.iter().max().unwrap() <= cfg.max_depth as usize,
+        "{tag}: depth {} over max over the last {window} ticks",
+        tail.iter().max().unwrap()
+    );
+    let m = mean(tail);
+    assert!(
+        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 1.0).contains(&m),
+        "{tag}: mean depth {m} is not near the target"
+    );
+}
+
+/// A starved burst (consecutive dropped input packets) leaves the host with
+/// a backlog when the redundant windows land; the controller drains it back
+/// to the target in bounded time, and the host never overflows.
+fn drain_after_a_burst(burst: u64) {
+    let cfg = lead_cfg();
+    {
+        let mut rig = Rig::paced(&[plain("burst", busy)], 0x02F2 + burst);
+        rig.both(0, 10, 10);
+        rig.run(400);
+        let before = rig.seats[0].ticks.len();
+        rig.drop_burst(0, LinkDir::Up, burst, delay(10));
+        rig.run(900);
+        rig.drain();
+        let tag = format!("lead-burst-{burst}");
+        rig.check(&tag, cfg.max_depth as usize + 2 * burst as usize);
+        report_lead(&tag, &rig, 0);
+        let occ = occupancy(&rig, 0);
+        let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+            .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
+        assert!(
+            settled - before <= 600,
+            "{tag}: took {} ticks to come back",
+            settled - before
+        );
+        assert_in_band(&tag, &rig, 200);
+        assert_eq!(rig.seats[0].ticks.last().unwrap().stats.overflow, 0);
+    }
+}
+
+/// A 4-packet burst.
+#[test]
+fn lead_controller_drains_the_backlog_a_4_packet_burst_leaves() {
+    drain_after_a_burst(4);
+}
+
+/// An 8-packet burst: the backlog peaks above `max_depth`.
+#[test]
+fn lead_controller_drains_the_backlog_an_8_packet_burst_leaves() {
+    drain_after_a_burst(8);
+}
+
+/// +-100 ppm of client clock error must neither expand the buffer nor make
+/// the controller hunt: the rate stays at zero inside the dead band.
+fn hold_under_clock_error(ppm: i64) {
+    {
+        let mut rig = Rig::paced(&[plain("ppm", busy)], 0x02F3);
+        rig.seats[0].ppm = ppm;
+        rig.both(0, 10, 10);
+        rig.run(1500);
+        rig.drain();
+        let tag = format!("lead-ppm{ppm}");
+        rig.check(&tag, lead_cfg().max_depth as usize);
+        report_lead(&tag, &rig, 0);
+        assert_in_band(&tag, &rig, 600);
+        let lead = lead_of(&rig, 0);
+        assert_eq!(
+            lead.pacer().stall_rebases() + lead.pacer().sleep_rebases(),
+            0
+        );
+        assert!(
+            lead.controller().rate_ppm().abs() <= 100,
+            "the rate hunted: {}",
+            lead.controller().rate_ppm()
+        );
+        // No uncontrolled fast-forward: the client ran as many ticks as the
+        // wall time bought, plus the lead the controller holds.
+        let host_ticks = rig.seats[0].ticks.len() as i64;
+        let ran = lead.ticks_run() as i64;
+        assert!(
+            (ran - host_ticks).abs() <= lead_cfg().max_depth as i64,
+            "client ran {ran} ticks against the host's {host_ticks}"
+        );
+    }
+}
+
+/// Client clock 100 ppm slow.
+#[test]
+fn lead_controller_holds_the_buffer_under_minus_100_ppm() {
+    hold_under_clock_error(-100);
+}
+
+/// Client clock 100 ppm fast.
+#[test]
+fn lead_controller_holds_the_buffer_under_plus_100_ppm() {
+    hold_under_clock_error(100);
+}
+
+/// 100, 150 and 250 ms client stalls (and the frame that follows them): catch-up
+/// is bounded per frame, wall time beyond the backlog is dropped and
+/// rebased, the buffer is not expanded for good, and nothing overflows.
+fn catch_up_after_a_stall(stall_ticks: usize) {
+    let cfg = lead_cfg();
+    {
+        let mut rig = Rig::paced(&[plain("stall", busy)], 0x02F4 + stall_ticks as u64);
+        rig.both(0, 10, 10);
+        rig.run(400);
+        let before = rig.seats[0].ticks.len();
+        rig.seats[0].frozen = true;
+        rig.run(stall_ticks);
+        rig.seats[0].frozen = false;
+        rig.run(900);
+        // Host steps before the drain are wall time the client lived through.
+        let wall = rig.seats[0].ticks.len() as i64;
+        rig.drain();
+        let tag = format!("lead-stall-{stall_ticks}");
+        rig.check(
+            &tag,
+            cfg.max_depth as usize + cfg.max_catchup_ticks as usize + 6,
+        );
+        report_lead(&tag, &rig, 0);
+        let seat = &rig.seats[0];
+        assert!(
+            seat.max_frame_ticks <= u64::from(cfg.max_catchup_ticks),
+            "{tag}: a frame ran {} ticks",
+            seat.max_frame_ticks
+        );
+        let occ = occupancy(&rig, 0);
+        let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+            .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
+        assert!(settled - before <= 600, "{tag}: slow to recover");
+        assert_in_band(&tag, &rig, 200);
+        // No uncontrolled fast-forward: the client never ran more ticks
+        // than its wall time bought, and every tick it did not run is wall
+        // time the pacer dropped or buffer the controller drained.
+        let lead = lead_of(&rig, 0);
+        let host_ticks = wall;
+        let ran = lead.ticks_run() as i64;
+        assert!(
+            ran <= host_ticks + 1,
+            "{tag}: ran {ran} ticks against {host_ticks}"
+        );
+        let peak = occ.iter().max().copied().unwrap_or(0) as i64;
+        assert!(
+            host_ticks - ran <= lead.pacer().dropped_ticks() as i64 + peak,
+            "{tag}: ran {ran} ticks against {host_ticks} (dropped {}, peak depth {peak})",
+            lead.pacer().dropped_ticks()
+        );
+    }
+}
+
+/// 100 ms stall.
+#[test]
+fn lead_controller_bounds_the_catch_up_after_a_100ms_stall() {
+    catch_up_after_a_stall(6);
+}
+
+/// 150 ms stall.
+#[test]
+fn lead_controller_bounds_the_catch_up_after_a_150ms_stall() {
+    catch_up_after_a_stall(9);
+}
+
+/// 250 ms stall: more wall time than the pacer keeps, so some is dropped.
+#[test]
+fn lead_controller_bounds_the_catch_up_after_a_250ms_stall() {
+    catch_up_after_a_stall(15);
+}
+
+/// Sleep/resume: a frame of seconds drops all wall time at once, releases no
+/// ticks, rebases the controller, and the stream resumes in order.
+#[test]
+fn lead_controller_rebases_on_sleep_and_resume() {
+    let cfg = lead_cfg();
+    let mut rig = Rig::paced(&[plain("sleep", busy)], 0x02F5);
+    rig.both(0, 10, 10);
+    rig.run(400);
+    let before = rig.seats[0].ticks.len();
+    rig.seats[0].frozen = true;
+    rig.seats[0].owed_ns = 30_000_000_000;
+    rig.run(20);
+    rig.seats[0].frozen = false;
+    rig.run(900);
+    rig.drain();
+    rig.check(
+        "lead-sleep",
+        cfg.max_depth as usize + cfg.max_catchup_ticks as usize + 6,
+    );
+    report_lead("lead-sleep", &rig, 0);
+    let lead = lead_of(&rig, 0);
+    assert_eq!(lead.pacer().sleep_rebases(), 1);
+    assert!(lead.controller().stats().rebases >= 1);
+    assert!(rig.seats[0].max_frame_ticks <= u64::from(cfg.max_catchup_ticks));
+    let occ = occupancy(&rig, 0);
+    let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+        .expect("never back inside the depth band");
+    assert!(settled - before <= 600, "slow to recover");
+    assert_in_band("lead-sleep", &rig, 200);
 }

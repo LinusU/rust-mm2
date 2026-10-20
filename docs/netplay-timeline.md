@@ -139,9 +139,8 @@ gap_finalized, occupancy/max_occupancy, last/max command age.
   `coalesced`, `send_errors`.
 - The legacy `Message::Input` stream still runs beside it; with the selector
   on the host ignores it for controls (02B). Acks (`CommandHistory::ack`) are
-  not yet fed from `SnapEntry::input_ack` on the client — that belongs to
-  the replay/rebase work (NETPLAY-04, 02D); until then the ring is bounded by
-  `HISTORY_CAP`.
+  fed from `SnapEntry::input_ack` on the client by `netpace` (02F, with the
+  selector on); the ring is also bounded by `HISTORY_CAP`.
 
 ## Lead controller (02D, `mm2_app::netlead`)
 
@@ -179,11 +178,21 @@ in), so the tests drive it on a synthetic clock.
   asymmetric 100/5 ms paths, +-100 ppm host and client drift, 100/150/250 ms
   stalls and a 30 s sleep, asserting depth bounds, settling time, zero host
   overflow and bounded underflow counts.
-- **Not yet wired.** The controller and pacer are library pieces; driving
-  the app's fixed-tick schedule from them, and feeding `observe` from
-  snapshots and `CommandHistory::ack`, belongs with the replay/rebase work
-  (NETPLAY-04), which owns reconciliation. The `CommandStream` capture is
-  unchanged.
+- **Wired (02F, `mm2_app::netpace`).** Behind the selector, a client with
+  a command stream attached to a transport in a playing session stops using
+  Bevy's fixed-time accumulator. Each frame `Pacer::advance` turns the
+  *real* frame time (not `Time<Virtual>`, whose 250 ms clamp would hide a
+  sleep/resume) plus `LeadController::update`'s rate into whole ticks, and
+  the `FixedMain` schedule runs that many times at the unchanged `Time<Fixed>`
+  step. Bevy's own `FixedMainLoop` set is skipped only while engaged, so
+  selector off, a host and a single-player session keep the legacy path.
+  `drive_lobby` records the local seat's `input_ack` / `input_depth` /
+  server tick from each `Snap`; the next frame feeds them to
+  `LeadController::observe` and trims `CommandHistory::ack`. A `Rebase`
+  from the pacer calls `LeadController::rebase`; a new wire generation
+  restarts controller and pacer. The `CommandStream` capture is unchanged.
+  `initial_lead_ticks` (the RTT seed) is still unused: the client has no RTT
+  measurement to give it; feedback alone steers.
 
 ## Impairment matrix (02E, `mm2_app` `tests/net_matrix.rs`)
 
@@ -209,10 +218,20 @@ per cell (`--nocapture`): generated / queued / transmitted / coalesced /
 handoff-dropped, host received / duplicate / old / overflow / finalized /
 fallback / underflow / gap, occupancy, ack and depth feedback.
 
-Open: the matrix runs without the lead controller or prediction replay
-(neither is wired into the schedule), so a starved burst leaves a constant
-host backlog (about two ticks per lost window) that only the controller
-would drain, and no slot is "replayed". Both belong to NETPLAY-04.
+The 02E cells above step each client one fixed tick per host step (no
+controller). 02F adds a paced rig (`Rig::paced`): the client's frame carries
+the wall time (own clock error in ppm; time owed from a freeze), and the
+pacer decides the ticks. Cells, all asserting zero host overflow, the
+shared invariants and the depth band: steady 20 ms RTT settles within 300
+ticks and holds the target +-1; 4- and 8-packet starved bursts (the
+8-packet backlog peaks above `max_depth`) drain back inside the band within
+600 ticks; +-100 ppm leaves the rate at (near) zero, no rebase and the
+client within `max_depth` ticks of the wall; 100 / 150 / 250 ms stalls never
+release more than `max_catchup_ticks` per frame, never run more ticks than
+the wall time bought and account every missing tick to dropped wall time or
+drained buffer; a 30 s sleep/resume releases no ticks, counts one sleep
+rebase and recovers. Loopback only, no real-Internet claim. Still open:
+prediction replay (NETPLAY-04), so no slot is "replayed".
 With the selector on, the host's `apply_remote_inputs` stands down and
 `consume_seat_commands` owns remote controls; the stalled-seat watch counts a
 window as a sign of life.
