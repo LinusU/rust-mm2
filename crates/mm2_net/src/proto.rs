@@ -90,8 +90,10 @@
 /// v29: the fixed-tick command stream (NETPLAY-02A, see
 /// `docs/netplay-timeline.md`) — `Message::InputWindow` carries a bounded
 /// redundant window of consecutive per-tick commands, and `SnapEntry`
-/// gained `input_ack`, the host's per-seat finalized-command ack.
-pub const PROTOCOL_VERSION: u16 = 29;
+/// gained `input_ack`, the host's per-seat finalized-command ack. v30:
+/// `SnapEntry` gained `input_depth`, the host's per-seat count of buffered
+/// unconsumed commands (NETPLAY-02D's prediction-lead feedback signal).
+pub const PROTOCOL_VERSION: u16 = 30;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -398,6 +400,11 @@ pub struct SnapEntry {
     /// received. `0` = nothing finalized yet (command seqs start at 1),
     /// and for seats that send no commands (the host's own seat, bots).
     pub input_ack: u64,
+    /// Command-buffer depth (v30, NETPLAY-02D): how many of this seat's
+    /// commands the host held unconsumed when the entry was captured,
+    /// saturated at 255. The client's lead controller steers this to a
+    /// small target. `0` for seats without a buffer (host seat, bots).
+    pub input_depth: u8,
 }
 
 impl Default for SnapEntry {
@@ -430,6 +437,7 @@ impl Default for SnapEntry {
             skid_speed: 0,
             surf_roll: SNAP_NO_SURFACE,
             input_ack: 0,
+            input_depth: 0,
         }
     }
 }
@@ -1413,6 +1421,7 @@ impl Message {
                     out.extend_from_slice(&e.skid_speed.to_le_bytes());
                     out.extend_from_slice(&e.surf_roll.to_le_bytes());
                     out.extend_from_slice(&e.input_ack.to_le_bytes());
+                    out.push(e.input_depth);
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -1736,6 +1745,7 @@ impl Message {
                         skid_speed: cur.i16()?,
                         surf_roll: cur.u16()?,
                         input_ack: cur.u64()?,
+                        input_depth: cur.u8()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -2154,6 +2164,7 @@ mod tests {
                         skid_speed: -124,
                         surf_roll: 1,
                         input_ack: 4242,
+                        input_depth: 7,
                     },
                     SnapEntry {
                         player: 3,
@@ -2181,6 +2192,7 @@ mod tests {
                         skid_speed: 0,
                         surf_roll: SNAP_NO_SURFACE,
                         input_ack: 0,
+                        input_depth: 0,
                     },
                 ],
                 trailers: vec![
@@ -2805,6 +2817,7 @@ mod tests {
                 skid_speed: 0,
                 surf_roll: SNAP_NO_SURFACE,
                 input_ack: 0,
+                input_depth: 0,
             };
             MAX_PLAYERS as usize + 1
         ];
@@ -3021,6 +3034,7 @@ mod tests {
             entries: vec![SnapEntry {
                 player: 2,
                 input_ack: u64::MAX,
+                input_depth: 255,
                 ..SnapEntry::default()
             }],
             trailers: Vec::new(),
@@ -3032,12 +3046,13 @@ mod tests {
         };
         assert_eq!(entries[0].input_ack, u64::MAX);
         assert_eq!(SnapEntry::default().input_ack, 0);
+        assert_eq!(SnapEntry::default().input_depth, 0);
     }
 
     #[test]
-    fn v29_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 29);
-        for protocol in [28, 30] {
+    fn v30_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 30);
+        for protocol in [29, 31] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {

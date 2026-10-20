@@ -584,6 +584,15 @@ impl RemoteInputs {
         mail.seats.get(&id).map_or(0, SeatBuffer::ack)
     }
 
+    /// `id`'s unconsumed buffered commands, saturated at 255 (`0` = none or
+    /// no buffer): the depth the client's lead controller steers.
+    pub fn command_depth(&self, id: u16) -> u8 {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.seats
+            .get(&id)
+            .map_or(0, |s| u8::try_from(s.stats().occupancy).unwrap_or(u8::MAX))
+    }
+
     /// `id`'s command-buffer counters, if it has a buffer.
     pub fn seat_stats(&self, id: u16) -> Option<SeatStats> {
         let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -3309,6 +3318,7 @@ mod tests {
                     skid_speed: 0,
                     surf_roll: SNAP_NO_SURFACE,
                     input_ack: 0,
+                    input_depth: 0,
                 }],
                 trailers: Vec::new(),
                 impacts: Vec::new(),
@@ -3623,6 +3633,18 @@ mod tests {
     }
 
     #[test]
+    fn command_depth_counts_unconsumed_commands() {
+        let inputs = RemoteInputs::default();
+        let t = Instant::now();
+        inputs.set_running_generation(Some(1));
+        assert_eq!(inputs.command_depth(1), 0);
+        inputs.store_window_at(1, 1, 0, 1, &[tick_cmd(1), tick_cmd(2), tick_cmd(3)], t);
+        assert_eq!(inputs.command_depth(1), 3);
+        inputs.consume_command_at(1, t);
+        assert_eq!(inputs.command_depth(1), 2);
+    }
+
+    #[test]
     fn generation_change_resets_every_seat_and_ack() {
         let inputs = RemoteInputs::default();
         let t = Instant::now();
@@ -3856,6 +3878,7 @@ mod tests {
                 skid_speed: 0,
                 surf_roll: SNAP_NO_SURFACE,
                 input_ack: 0,
+                input_depth: 0,
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),

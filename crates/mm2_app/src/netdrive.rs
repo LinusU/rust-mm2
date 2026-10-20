@@ -2925,6 +2925,7 @@ pub fn publish_snapshots(
                     skid_speed,
                     surf_roll,
                     input_ack: inputs.as_ref().map_or(0, |i| i.command_ack(wire.0)),
+                    input_depth: inputs.as_ref().map_or(0, |i| i.command_depth(wire.0)),
                     ..SnapEntry::default()
                 };
                 // The v14 progress tail (F25-B): the seat's replicated
