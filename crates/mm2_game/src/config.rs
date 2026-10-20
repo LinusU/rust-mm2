@@ -67,8 +67,11 @@ pub struct SessionConfig {
     /// How many local AI participants a Cops & Robbers session fields
     /// beside the one human (`0..=`[`MAX_CNR_BOTS`]). A designed
     /// single-player enhancement, not an original rule: the retail mode
-    /// seats humans only. Local-only — it never rides the wire and a
-    /// hosted or joined session must leave it `0` ([`Self::validate`]).
+    /// seats humans only. On a hosted or joined session it is the host's
+    /// lobby choice and rides the session advertisement, bounded by
+    /// [`MAX_CNR_LOBBY_BOTS`] ([`Self::validate`]); only
+    /// [`Self::local_cnr_bots`] of it is spawned by this process, since
+    /// the host-authoritative network roster is a later step.
     /// Part of the config, so a restart reuses the same roster size.
     pub cnr_bots: u8,
     /// Local-only developer overrides — never progression- or
@@ -143,17 +146,34 @@ impl SessionConfig {
             if !matches!(self.mode, SessionMode::CopsAndRobbers(_)) {
                 return Err(ConfigError::CnrBotsNeedCnr);
             }
-            if self.authority != SessionAuthority::Local {
-                return Err(ConfigError::CnrBotsNeedLocal);
+            if self.authority != SessionAuthority::Local && self.cnr_bots > MAX_CNR_LOBBY_BOTS {
+                return Err(ConfigError::CnrLobbyBotsFull(self.cnr_bots));
             }
         }
         Ok(())
+    }
+
+    /// The bots this process spawns itself: the picked count on a local
+    /// session, none on a hosted or joined one (the lobby's count is
+    /// carried, but its network spawn is not built yet).
+    pub fn local_cnr_bots(&self) -> u8 {
+        if self.authority == SessionAuthority::Local {
+            self.cnr_bots
+        } else {
+            0
+        }
     }
 }
 
 /// The most local AI participants a Cops & Robbers session may field
 /// beside its human (designed bound: a 16-car match).
 pub const MAX_CNR_BOTS: u8 = 15;
+
+/// The most bots a hosted lobby may field: the 16-car match
+/// ([`MAX_CNR_BOTS`] + the human) less the eight seats the lobby's
+/// roster can fill with humans, so a full roster never overfills the
+/// match. Designed bound, not an original rule.
+pub const MAX_CNR_LOBBY_BOTS: u8 = 8;
 
 /// A rejected `SessionConfig` field.
 #[derive(Debug, Clone, PartialEq)]
@@ -184,9 +204,9 @@ pub enum ConfigError {
     CnrBotCount(u8),
     /// Bots requested outside a Cops & Robbers session.
     CnrBotsNeedCnr,
-    /// Bots requested on a hosted or joined session: they are local
-    /// participants, never network seats.
-    CnrBotsNeedLocal,
+    /// More lobby bots than a full roster of humans leaves room for
+    /// ([`MAX_CNR_LOBBY_BOTS`]).
+    CnrLobbyBotsFull(u8),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -214,10 +234,10 @@ impl std::fmt::Display for ConfigError {
                 )
             }
             Self::CnrBotsNeedCnr => write!(f, "bots are only available in Cops & Robbers"),
-            Self::CnrBotsNeedLocal => {
+            Self::CnrLobbyBotsFull(n) => {
                 write!(
                     f,
-                    "Cops & Robbers bots are local-only, not for hosted or joined sessions"
+                    "{n} lobby bots would leave no room for a full roster of humans (at most {MAX_CNR_LOBBY_BOTS})"
                 )
             }
         }
@@ -925,12 +945,16 @@ mod tests {
             Err(ConfigError::CnrBotCount(MAX_CNR_BOTS + 1))
         );
         for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+            for n in [0, 1, MAX_CNR_LOBBY_BOTS] {
+                assert_eq!(cnr_config(n, authority).validate(), Ok(()));
+            }
             assert_eq!(
-                cnr_config(1, authority).validate(),
-                Err(ConfigError::CnrBotsNeedLocal)
+                cnr_config(MAX_CNR_LOBBY_BOTS + 1, authority).validate(),
+                Err(ConfigError::CnrLobbyBotsFull(MAX_CNR_LOBBY_BOTS + 1))
             );
-            assert_eq!(cnr_config(0, authority).validate(), Ok(()));
         }
+        assert_eq!(cnr_config(3, SessionAuthority::Local).local_cnr_bots(), 3);
+        assert_eq!(cnr_config(3, SessionAuthority::Host).local_cnr_bots(), 0);
         let race = SessionConfig {
             cnr_bots: 1,
             ..SessionConfig::default()

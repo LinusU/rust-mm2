@@ -4570,6 +4570,7 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
             "Gold weight: Weightless",
             "Limit: No limit",
             "Bots: 10 (local only)",
+            "Lobby bots: 0 (host lobby only, max 8)",
             "Start match",
             "Host lobby"
         ]
@@ -4678,7 +4679,7 @@ fn the_cnr_bot_count_rides_start_match_but_never_the_hosted_lobby() {
     }
     assert_eq!(shell(&app).rows[3].text, "Bots: 15 (local only)");
 
-    // A hosted lobby with 15 picked carries none.
+    // A hosted lobby with 15 local bots picked carries none.
     let mut app = menu_app(tmp.path(), None);
     add_host_systems(&mut app, never_capturing);
     app.update();
@@ -4691,6 +4692,77 @@ fn the_cnr_bot_count_rides_start_match_but_never_the_hosted_lobby() {
     let link = app.world().resource::<HostLink>();
     assert_eq!(link.config().authority, SessionAuthority::Host);
     assert_eq!(link.config().cnr_bots, 0);
+}
+
+/// CNR-MP-BOTS-A: the lobby's bot count is its own row. It starts at 0,
+/// wraps through `0..=MAX_CNR_LOBBY_BOTS` in both directions, rides
+/// `Host lobby` into the advertised session, and never reaches
+/// `Start match`.
+#[test]
+fn the_lobby_bot_count_is_its_own_row_and_rides_only_the_hosted_lobby() {
+    use mm2_app::lobby_systems::add_host_systems;
+    use mm2_app::net::HostLink;
+    use mm2_game::{MAX_CNR_LOBBY_BOTS, SessionAuthority};
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let lobby_row = |app: &App| shell(app).rows[4].text.clone();
+
+    // Wraps: one step back from 0 is the maximum, one past it is 0.
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    assert_eq!(lobby_row(&app), "Lobby bots: 0 (host lobby only, max 8)");
+    focus_row(&mut app, "Lobby bots:");
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(
+        lobby_row(&app),
+        format!("Lobby bots: {MAX_CNR_LOBBY_BOTS} (host lobby only, max 8)")
+    );
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(lobby_row(&app), "Lobby bots: 0 (host lobby only, max 8)");
+
+    // `Start match` never reads it: 3 lobby bots, 0 local ones.
+    for _ in 0..3 {
+        activate_row(&mut app, "Lobby bots:");
+    }
+    for _ in 0..6 {
+        activate_row(&mut app, "Bots:");
+    }
+    activate_row(&mut app, "Start match");
+    assert!(run_until(&mut app, 12, |a| {
+        a.world().resource::<Session>().config().is_some()
+    }));
+    let config = app.world().resource::<Session>().config().cloned().unwrap();
+    assert_eq!(config.cnr_bots, 0);
+    assert_eq!(config.authority, SessionAuthority::Local);
+
+    // `Host lobby` advertises the 3, and not the 10 local ones.
+    let mut app = menu_app(tmp.path(), None);
+    add_host_systems(&mut app, never_capturing);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    for _ in 0..3 {
+        activate_row(&mut app, "Lobby bots:");
+    }
+    activate_row(&mut app, "Host lobby");
+    let link = app.world().resource::<HostLink>();
+    assert_eq!(link.config().authority, SessionAuthority::Host);
+    assert_eq!(link.config().cnr_bots, 3);
+    assert!(
+        link.summary().contains("3 lobby bots"),
+        "{}",
+        link.summary()
+    );
 }
 
 /// F27-C: the menu opens a Cops & Robbers lobby. *Host lobby* keeps the

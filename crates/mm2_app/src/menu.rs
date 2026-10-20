@@ -77,7 +77,6 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
 use mm2_content::{CityInfo, EventCatalog, VehicleCatalog, VehicleDef};
-use mm2_game::MAX_CNR_BOTS;
 use mm2_game::cnr_options::CnrSettings;
 use mm2_game::{
     AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
@@ -86,6 +85,7 @@ use mm2_game::{
     SessionCustomization, SessionMode, SessionPhase, TimeOfDay, Unlock, VehicleSelection, Weather,
     WorldMode,
 };
+use mm2_game::{MAX_CNR_BOTS, MAX_CNR_LOBBY_BOTS};
 use tracing::{info, warn};
 
 use crate::controls::{ControlItem, ControlSettings, DriveAction, PadItem, SLOTS};
@@ -165,8 +165,13 @@ pub enum Screen {
         /// The working picks, starting from the executable's defaults.
         settings: CnrSettings,
         /// Local AI participants `Start match` fields beside the human
-        /// (`0..=MAX_CNR_BOTS`). A lobby never carries them (CNRBOT-D).
+        /// (`0..=MAX_CNR_BOTS`). A hosted lobby never reads this count;
+        /// it has its own, `lobby_bots`.
         bots: u8,
+        /// Bots the `Host lobby` row advertises to joiners
+        /// (`0..=MAX_CNR_LOBBY_BOTS`), default none. Kept apart from the
+        /// local count so one setting never leaks into the other.
+        lobby_bots: u8,
     },
     /// Pick a city whose event tables to browse.
     EventCity,
@@ -385,6 +390,7 @@ pub enum Action {
     CycleCnrLimit,
     /// Step the local Cops & Robbers bot count through `0..=15`.
     CycleCnrBots,
+    CycleCnrLobbyBots,
     /// Start the match the Cops & Robbers options screen configures.
     LaunchCnr,
     /// Open a lobby for the match the Cops & Robbers options screen
@@ -1237,12 +1243,14 @@ impl MenuShell {
             | Action::CycleCnrVariant
             | Action::CycleCnrGold
             | Action::CycleCnrLimit
-            | Action::CycleCnrBots) => self.adjust_with(data, &action, true, effects),
+            | Action::CycleCnrBots
+            | Action::CycleCnrLobbyBots) => self.adjust_with(data, &action, true, effects),
             Action::LaunchCnr => {
                 let Screen::CnrOptions {
                     city,
                     settings,
                     bots,
+                    ..
                 } = &self.screen
                 else {
                     return;
@@ -1271,11 +1279,18 @@ impl MenuShell {
                 }));
             }
             Action::HostCnr => {
-                // A lobby seats humans only: the bot count is not read.
-                let Screen::CnrOptions { city, settings, .. } = &self.screen else {
+                // The lobby carries its own bot count; the local `bots`
+                // pick is not read.
+                let Screen::CnrOptions {
+                    city,
+                    settings,
+                    lobby_bots,
+                    ..
+                } = &self.screen
+                else {
                     return;
                 };
-                let (city, settings) = (city.clone(), *settings);
+                let (city, settings, lobby_bots) = (city.clone(), *settings, *lobby_bots);
                 let mut launched = Vec::new();
                 self.launch(
                     data,
@@ -1286,7 +1301,12 @@ impl MenuShell {
                     &mut launched,
                 );
                 effects.extend(launched.into_iter().map(|effect| match effect {
-                    MenuEffect::Launch { config, car, paint } => {
+                    MenuEffect::Launch {
+                        mut config,
+                        car,
+                        paint,
+                    } => {
+                        config.cnr_bots = lobby_bots;
                         MenuEffect::Host { config, car, paint }
                     }
                     other => other,
@@ -1562,6 +1582,16 @@ impl MenuShell {
                         (*bots + 1) % count
                     } else {
                         (*bots + count - 1) % count
+                    };
+                }
+            }
+            Action::CycleCnrLobbyBots => {
+                if let Screen::CnrOptions { lobby_bots, .. } = &mut self.screen {
+                    let count = MAX_CNR_LOBBY_BOTS + 1;
+                    *lobby_bots = if forward {
+                        (*lobby_bots + 1) % count
+                    } else {
+                        (*lobby_bots + count - 1) % count
                     };
                 }
             }
@@ -1968,6 +1998,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         city: city.clone(),
                         settings: CnrSettings::default(),
                         bots: DEFAULT_MENU_CNR_BOTS,
+                        lobby_bots: 0,
                     }),
                     text: city,
                     won: None,
@@ -1975,7 +2006,12 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 })
                 .collect()
         }
-        Screen::CnrOptions { settings, bots, .. } => {
+        Screen::CnrOptions {
+            settings,
+            bots,
+            lobby_bots,
+            ..
+        } => {
             let row = |text: String, action: Action| Row {
                 text,
                 enabled: Ok(()),
@@ -1997,6 +2033,10 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     Action::CycleCnrLimit,
                 ),
                 row(format!("Bots: {bots} (local only)"), Action::CycleCnrBots),
+                row(
+                    format!("Lobby bots: {lobby_bots} (host lobby only, max {MAX_CNR_LOBBY_BOTS})"),
+                    Action::CycleCnrLobbyBots,
+                ),
                 row("Start match".to_string(), Action::LaunchCnr),
                 row("Host lobby".to_string(), Action::HostCnr),
             ]

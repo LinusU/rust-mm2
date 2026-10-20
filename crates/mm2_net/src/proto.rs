@@ -93,7 +93,10 @@
 /// gained `input_ack`, the host's per-seat finalized-command ack. v30:
 /// `SnapEntry` gained `input_depth`, the host's per-seat count of buffered
 /// unconsumed commands (NETPLAY-02D's prediction-lead feedback signal).
-pub const PROTOCOL_VERSION: u16 = 30;
+/// v31: the session advertisement's `params` carry the host's Cops &
+/// Robbers lobby bot count (`cnr_bots`); a v30 peer would drop it and
+/// show, validate and start a different roster than the host chose.
+pub const PROTOCOL_VERSION: u16 = 31;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -3050,9 +3053,9 @@ mod tests {
     }
 
     #[test]
-    fn v30_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 30);
-        for protocol in [29, 31] {
+    fn v31_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 31);
+        for protocol in [30, 32] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {

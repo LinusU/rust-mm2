@@ -871,7 +871,7 @@ pub fn load_session_world(
                     // cities without a usable `.water` get no
                     // resource, so `track_recovery` falls back to the
                     // wheel-`drag` classification alone.
-                    if config.cnr_bots > 0 {
+                    if config.local_cnr_bots() > 0 {
                         let stem = std::path::Path::new(psdl)
                             .file_stem()
                             .and_then(|s| s.to_str())
@@ -1245,7 +1245,7 @@ pub fn load_session_world(
                     .map(|(_, roster, ..)| roster.entries.len())
                     .unwrap_or(0),
                 config.authority,
-                config.cnr_bots,
+                config.local_cnr_bots(),
             ),
             &mut assets.meshes,
             &mut assets.images,
@@ -1690,7 +1690,7 @@ pub fn load_session_world(
     // CNRBOT-A: the local Cops & Robbers roster, set down beside the
     // human. A roster that cannot be fielded fails the session — it is
     // never silently shortened.
-    if config.cnr_bots > 0 {
+    if config.local_cnr_bots() > 0 {
         let planned = match bot_candidates.take() {
             Some(Ok(candidates)) => {
                 let city = match &config.world {

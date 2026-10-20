@@ -170,7 +170,7 @@ pub fn start_match(
     let city = crate::net::city_stem(psdl)
         .ok_or_else(|| format!("{psdl:?} is not a city/<stem>.psdl path"))?;
     let mut content = CnrContent::load(vfs, city);
-    if session.config().is_some_and(|c| c.cnr_bots > 0) {
+    if session.config().is_some_and(|c| c.local_cnr_bots() > 0) {
         // Local bots follow streets: play the sites a car can reach.
         let graph = crate::cnr_bots::load_graph(vfs, city)
             .map_err(|e| format!("Cops & Robbers bots in {city:?}: {e}"))?;

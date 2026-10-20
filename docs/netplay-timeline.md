@@ -1,7 +1,7 @@
 # Netplay fixed-tick timeline contract (NETPLAY-02)
 
 Status: contract defined by NETPLAY-02A (#1773), wire codec in
-`mm2_net::proto` at **protocol v30** (v29 added the command window and
+`mm2_net::proto` at **protocol v31** (v31 adds the Cops & Robbers lobby bot count to the session advertisement `params`; v29 added the command window and
 `input_ack`; v30 adds `SnapEntry.input_depth`). The host buffer (02B), client capture
 (02C), lead controller (02D) and impairment matrix (02E) implement against
 this page. Where a rule here is a *design choice* rather than a measurement

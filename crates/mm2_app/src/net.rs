@@ -1309,6 +1309,7 @@ pub struct SessionChange {
     weather: Option<Weather>,
     time_of_day: Option<TimeOfDay>,
     seed: Option<u64>,
+    cnr_bots: Option<u8>,
 }
 
 /// The mode a [`SessionChange`] names — the table/row stays unresolved
@@ -1383,6 +1384,13 @@ impl SessionChange {
                             .and_then(|v| TimeOfDay::new(v).map_err(|e| e.to_string()))?,
                     );
                 }
+                "bots" => {
+                    change.cnr_bots = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid bots {value:?}"))?,
+                    );
+                }
                 "seed" => {
                     change.seed = Some(
                         value
@@ -1395,7 +1403,7 @@ impl SessionChange {
         }
         if seen.is_empty() {
             return Err(
-                "nothing to change: city= event= cnr= gold= limit= difficulty= weather= tod= seed="
+                "nothing to change: city= event= cnr= gold= limit= bots= difficulty= weather= tod= seed="
                     .to_string(),
             );
         }
@@ -1468,6 +1476,18 @@ impl SessionChange {
         }
         if let Some(time_of_day) = self.time_of_day {
             config.conditions.time_of_day = time_of_day;
+        }
+        // Lobby bots belong to Cops & Robbers alone: leaving the mode
+        // drops the count rather than leaving it to fail the gate, and a
+        // `bots=` aimed at another mode is refused, never ignored.
+        if !matches!(config.mode, SessionMode::CopsAndRobbers(_)) {
+            if self.cnr_bots.is_some_and(|n| n > 0) {
+                return Err("bots= only applies to Cops & Robbers (give cnr=<variant>)".into());
+            }
+            config.cnr_bots = 0;
+        }
+        if let Some(bots) = self.cnr_bots {
+            config.cnr_bots = bots;
         }
         config.seed = self.seed.unwrap_or(fresh_seed);
         Ok(config)
@@ -2515,7 +2535,18 @@ fn summarize(config: &SessionConfig) -> String {
         SessionMode::Event(r) => format!("{}:{}", r.table.stem_prefix(), r.index),
         SessionMode::CopsAndRobbers(c) => format!("cops & robbers, {}", variant_label(c.variant)),
     };
-    format!("{}, {}, {}", world, mode, config.difficulty.as_str())
+    let bots = match config.cnr_bots {
+        0 => String::new(),
+        1 => ", 1 lobby bot".to_string(),
+        n => format!(", {n} lobby bots"),
+    };
+    format!(
+        "{}, {}{}, {}",
+        world,
+        mode,
+        bots,
+        config.difficulty.as_str()
+    )
 }
 
 /// Whether a session of this mode takes joins once started (MP-5): an
@@ -2556,6 +2587,10 @@ struct SessionParams {
     densities: DensitiesParams,
     customization: Option<CustomizationParams>,
     seed: u64,
+    /// The host's Cops & Robbers lobby bot count (protocol v31). Absent
+    /// is zero, and only a Cops & Robbers session may carry more.
+    #[serde(default)]
+    cnr_bots: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2695,6 +2730,7 @@ impl From<&SessionConfig> for SessionParams {
                 }),
             }),
             seed: config.seed,
+            cnr_bots: config.cnr_bots,
         }
     }
 }
@@ -2774,7 +2810,7 @@ impl SessionParams {
             authority: SessionAuthority::Remote,
             mods_active: false,
             mods_cosmetic_only: false,
-            cnr_bots: 0,
+            cnr_bots: self.cnr_bots,
             dev: DevOverrides::default(),
         })
     }
@@ -2807,6 +2843,49 @@ mod tests {
 
     fn change(line: &str) -> Result<SessionChange, String> {
         SessionChange::parse(line.split_whitespace())
+    }
+
+    /// `bots=` sets the lobby's Cops & Robbers bot count; leaving the
+    /// mode drops it, and naming it for another mode is refused.
+    #[test]
+    fn a_session_edit_carries_the_lobby_bot_count_for_cops_and_robbers_only() {
+        let cnr = SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/sf.psdl".into(),
+            },
+            mode: SessionMode::CopsAndRobbers(CnrSettings::default()),
+            ..SessionConfig::default()
+        };
+        let with = change("bots=4").unwrap().apply(&cnr, 1).unwrap();
+        assert_eq!(with.cnr_bots, 4);
+        assert_eq!(
+            change("limit=none cnr=ffa")
+                .unwrap()
+                .apply(&with, 1)
+                .unwrap()
+                .cnr_bots,
+            4,
+            "an edit that does not name bots keeps them"
+        );
+        let cruise = change("event=none").unwrap().apply(&with, 1).unwrap();
+        assert_eq!(cruise.cnr_bots, 0);
+        assert!(cruise.validate().is_ok());
+        assert!(
+            change("event=none bots=2")
+                .unwrap()
+                .apply(&with, 1)
+                .is_err()
+        );
+        assert!(change("bots=x").is_err());
+        let full = change("bots=9").unwrap().apply(&cnr, 1).unwrap();
+        let host = SessionConfig {
+            authority: SessionAuthority::Host,
+            ..full
+        };
+        assert!(matches!(
+            host.validate(),
+            Err(ConfigError::CnrLobbyBotsFull(9))
+        ));
     }
 
     /// The operator's words become exactly the fields they name; every
