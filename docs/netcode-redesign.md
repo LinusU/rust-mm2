@@ -477,3 +477,31 @@ snapshots: NETPLAY-02/04), bodies other than the trailer joint, and the cost
 of `capture_authoritative` (NETPLAY-03F). Applying a correction on a peer
 while it predicts ahead (rewind to T, replay local inputs) composes this
 with 03C's `replay_from`; that wiring is NETPLAY-04.
+
+## Historical lifetimes of collision dependencies (NETPLAY-03E, #1782)
+
+`mm2_vehicle::lifetime`. A `WorldCapture` names `Entity` ids that must
+mean the same actor when it is restored up to `MAX_REPLAY_STEPS` (120)
+ticks later. Rather than keeping despawned entities alive for the length
+of the history, the lifetime is made detectable: a capture records what an
+id meant, and a restore never writes through an id that now means something
+else. `check_lifetimes(world, &capture)` lists the `LifetimeIssue`s;
+`restore_world` reports them (`RestoreReport::issues`, `retired`) and
+`replay_from` fails with `ReplayError::StaleHistory` *before writing*, so
+the caller adopts the authority's capture (`recover_missing_history`).
+
+| Case | Mechanism | Result |
+|---|---|---|
+| Traffic recycle/despawn, slot reused | Bevy entity generation: the stale id never resolves to the new occupant | `missing`, nothing written to the new car; replay proceeds |
+| Entity repurposed in place (broken or changed banger, fragment reuse, recycled traffic car, a body swapped under a moving collider) | `ActorIncarnation` component, bumped by whoever repurposes (`banger::shatter_placement` does) and captured per body, vehicle and contact pair | `Retired`: not written; pairs with that body cold-start; replay refuses |
+| Trailer attach/detach | the `SphericalJoint` set `(joint, body1, body2)` is captured | `HitchChanged`; replay refuses |
+| New session generation | `SessionEpoch` resource vs `EpochRef::generation` | restore writes nothing; replay refuses; `restore_vehicle` returns `StaleEpoch` |
+| Vehicle reset | `ResetEpoch` component vs `EpochRef::reset_epoch` (a capture *older* than the live epoch is stale; a wire snapshot ahead of the peer is not) | `StaleEpoch` refusal; replay refuses; an authoritative capture stamped with the new epoch is adopted |
+
+Bounds: a `u32` incarnation needs 2^32 bumps of one entity inside the
+121-tick history to alias; only `SphericalJoint` hitches are tracked; the
+checks are skipped when `SessionEpoch` / `ResetEpoch` are absent. Wiring
+`SessionEpoch`/`ResetEpoch` and the remaining repurposing sites (fragment
+pool, traffic recycle-in-place, if any exist) into the app is NETPLAY-04's
+correction path. The city is loaded as one unit, so there is no runtime
+chunk streaming to account for. Tests: `crates/mm2_vehicle/tests/lifetime.rs`.

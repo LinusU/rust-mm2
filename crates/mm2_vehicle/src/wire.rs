@@ -307,7 +307,12 @@ pub fn apply_authoritative(
         .collect();
 
     let mut report = ApplyReport::default();
-    let mut capture = WorldCapture::default();
+    // Validated equal to the peer's generation above; no incarnations or
+    // joints are recorded, so none are compared.
+    let mut capture = WorldCapture {
+        generation: state.generation,
+        ..Default::default()
+    };
     let mut vehicle_of = HashMap::new();
     for (slot, v) in &state.vehicles {
         match by_slot.get(slot) {

@@ -185,6 +185,10 @@ pub enum RestoreError {
     ModelMismatch,
     #[error("capture holds a non-finite value in `{0}`")]
     NonFinite(&'static str),
+    /// The capture is from before a session change or a vehicle reset
+    /// (see `crate::lifetime`).
+    #[error("capture is from another session generation or reset epoch")]
+    StaleEpoch,
 }
 
 fn v3(v: Vec3) -> [f32; 3] {
@@ -636,10 +640,19 @@ pub fn restore_vehicle(
     entity: Entity,
     capture: &VehicleCapture,
 ) -> Result<(), RestoreError> {
+    let session_stale = world
+        .get_resource::<crate::lifetime::SessionEpoch>()
+        .is_some_and(|s| s.0 != capture.epoch.generation);
     let mut e = world
         .get_entity_mut(entity)
         .map_err(|_| RestoreError::NotAVehicle)?;
     let vehicle = e.get::<Vehicle>().ok_or(RestoreError::NotAVehicle)?;
+    if session_stale
+        || e.get::<crate::lifetime::ResetEpoch>()
+            .is_some_and(|r| capture.epoch.reset_epoch < r.0)
+    {
+        return Err(RestoreError::StaleEpoch);
+    }
     let model_original = vehicle.config.original.is_some();
     let wheels = vehicle.config.wheels.len();
     if capture.wheels.len() != wheels {

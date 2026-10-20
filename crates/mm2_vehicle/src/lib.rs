@@ -24,6 +24,7 @@ pub mod analysis;
 pub mod capture;
 pub mod config;
 pub mod debug;
+pub mod lifetime;
 pub mod original;
 mod original_contacts;
 mod original_step;

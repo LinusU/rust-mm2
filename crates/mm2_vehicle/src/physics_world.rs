@@ -28,6 +28,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::capture::{EpochRef, RestoreError, VehicleCapture, capture_vehicle, restore_vehicle};
+use crate::lifetime::{Hitch, LifetimeIssue, capture_hitches, check_lifetimes, incarnation};
 use crate::vehicle::Vehicle;
 
 /// A dynamic body that is not a vehicle (a prop).
@@ -44,6 +45,9 @@ pub struct BodyState {
 /// The contact data of one collider pair that held manifolds at capture.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PairState {
+    /// The two bodies of the pair and their [`crate::lifetime`]
+    /// incarnations: a pair whose body was repurposed is cold-started.
+    bodies: [(Option<Entity>, u32); 2],
     manifolds: Vec<ContactManifold>,
     recycling_cache: Option<avian3d::collision::contact_types::ContactRecyclingCache>,
 }
@@ -61,6 +65,14 @@ pub struct WorldCapture {
     pub vehicles: Vec<(Entity, VehicleCapture)>,
     pub bodies: Vec<(Entity, BodyState)>,
     pub pairs: Vec<((Entity, Entity), PairState)>,
+    /// Session generation the capture was stamped with.
+    pub generation: u32,
+    /// [`crate::lifetime::ActorIncarnation`] of every captured body and
+    /// vehicle, sorted by entity.
+    pub incarnations: Vec<(Entity, u32)>,
+    /// Joints (the trailer hitch) at capture time.
+    /// `None` when the capture did not record joints (a wire snapshot).
+    pub hitches: Option<Vec<Hitch>>,
 }
 
 /// What a [`restore_world`] did, for tests and the replay layer's log.
@@ -81,6 +93,12 @@ pub struct RestoreReport {
     pub sleep_deferred: Vec<Entity>,
     /// Captured vehicles whose restore was refused.
     pub refused: Vec<(Entity, RestoreError)>,
+    /// Captured actors whose entity was repurposed since (a different
+    /// incarnation): left untouched, never written through.
+    pub retired: Vec<Entity>,
+    /// Everything [`check_lifetimes`] found. A stale session generation
+    /// makes the restore write nothing at all.
+    pub issues: Vec<LifetimeIssue>,
 }
 
 /// Capture every vehicle, every non-vehicle dynamic body and the touching
@@ -97,7 +115,10 @@ pub(crate) fn capture_bodies(world: &mut World, epoch: EpochRef) -> WorldCapture
 }
 
 fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> WorldCapture {
-    let mut out = WorldCapture::default();
+    let mut out = WorldCapture {
+        generation: epoch.generation,
+        ..Default::default()
+    };
     let mut q = world.query::<(
         Entity,
         &RigidBody,
@@ -135,6 +156,15 @@ fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> Wor
     // Query order is not stable across worlds; entity order is.
     out.vehicles.sort_by_key(|(e, _)| *e);
     out.bodies.sort_by_key(|(e, _)| *e);
+    out.incarnations = out
+        .vehicles
+        .iter()
+        .map(|(e, _)| *e)
+        .chain(out.bodies.iter().map(|(e, _)| *e))
+        .map(|e| (e, incarnation(world, e)))
+        .collect();
+    out.incarnations.sort();
+    out.hitches = Some(capture_hitches(world));
     if !contacts {
         return out;
     }
@@ -143,9 +173,11 @@ fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> Wor
             if pair.manifolds.is_empty() {
                 continue;
             }
+            let inc = |b: Option<Entity>| (b, b.map_or(0, |b| incarnation(world, b)));
             out.pairs.push((
                 (pair.collider1, pair.collider2),
                 PairState {
+                    bodies: [inc(pair.body1), inc(pair.body2)],
                     manifolds: pair.manifolds.clone(),
                     recycling_cache: pair.recycling_cache.clone(),
                 },
@@ -264,9 +296,33 @@ fn cold_start(pair: &mut ContactPair) {
 /// run did; every other pair is cold-started, because carrying impulses
 /// from the abandoned future into the replay would be wrong.
 pub fn restore_world(world: &mut World, capture: &WorldCapture) -> RestoreReport {
-    let mut report = RestoreReport::default();
+    let mut report = RestoreReport {
+        issues: check_lifetimes(world, capture),
+        ..Default::default()
+    };
+    if report
+        .issues
+        .iter()
+        .any(|i| matches!(i, LifetimeIssue::StaleSession { .. }))
+    {
+        // Another session's history: every id in it is foreign.
+        return report;
+    }
+    let retired: std::collections::HashSet<Entity> = report
+        .issues
+        .iter()
+        .filter_map(|i| match i {
+            LifetimeIssue::Retired { entity, .. } => Some(*entity),
+            _ => None,
+        })
+        .collect();
+    report.retired = retired.iter().copied().collect();
+    report.retired.sort();
 
     for (e, c) in &capture.vehicles {
+        if retired.contains(e) {
+            continue;
+        }
         match restore_vehicle(world, *e, c) {
             Ok(()) => {}
             Err(RestoreError::NotAVehicle) if world.get_entity(*e).is_err() => {
@@ -279,6 +335,9 @@ pub fn restore_world(world: &mut World, capture: &WorldCapture) -> RestoreReport
     let mut wake = Vec::new();
     let mut sleep = Vec::new();
     for (e, s) in &capture.bodies {
+        if retired.contains(e) {
+            continue;
+        }
         let Ok(mut ent) = world.get_entity_mut(*e) else {
             report.missing.push(*e);
             continue;
@@ -327,11 +386,22 @@ pub fn restore_world(world: &mut World, capture: &WorldCapture) -> RestoreReport
 
     let by_key: HashMap<(Entity, Entity), &PairState> =
         capture.pairs.iter().map(|(k, v)| (*k, v)).collect();
+    let live_incarnation =
+        |world: &World, b: Option<Entity>| b.map_or(0, |b| incarnation(world, b));
+    let now: HashMap<Entity, u32> = by_key
+        .values()
+        .flat_map(|s| s.bodies.iter().filter_map(|(b, _)| *b))
+        .map(|b| (b, live_incarnation(world, Some(b))))
+        .collect();
     if let Some(mut graph) = world.get_resource_mut::<ContactGraph>() {
         let mut visit = |pair: &mut ContactPair| match by_key.get(&(pair.collider1, pair.collider2))
         {
+            // A body repurposed since the capture is another actor: its
+            // old manifolds say nothing about the new one.
             Some(state)
-                if state.manifolds.len() == pair.manifolds.len()
+                if state.bodies.iter().all(|(b, inc)| {
+                    b.is_none_or(|b| now.get(&b).copied().unwrap_or(0) == *inc)
+                }) && state.manifolds.len() == pair.manifolds.len()
                     && state
                         .manifolds
                         .iter()

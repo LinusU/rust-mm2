@@ -405,6 +405,14 @@ pub(crate) fn claim_slot(
 /// to. Shared by the authority's activation and a client applying the
 /// replicated `Broken` row (F26-A).
 pub(crate) fn shatter_placement(commands: &mut Commands, entity: Entity) {
+    // The entity is repurposed in place: a controlled replay's history
+    // must not rewind the intact banger into the shattered placement
+    // (`mm2_vehicle::lifetime`).
+    commands
+        .entity(entity)
+        .entry::<mm2_vehicle::lifetime::ActorIncarnation>()
+        .and_modify(|mut i| i.bump())
+        .or_insert(mm2_vehicle::lifetime::ActorIncarnation(1));
     commands
         .entity(entity)
         .remove::<(Collider, RigidBody, CollisionEventsEnabled, Sleeping)>()

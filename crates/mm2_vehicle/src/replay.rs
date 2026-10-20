@@ -55,6 +55,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::capture::{RestoreError, VehicleCapture, restore_vehicle};
+use crate::lifetime::{LifetimeIssue, check_lifetimes};
 use crate::physics_world::{RestoreReport, WorldCapture, restore_world};
 use crate::vehicle::VehicleInput;
 
@@ -210,6 +211,11 @@ pub enum ReplayError {
     PhysicsPaused,
     #[error("the physics step has no time (zero timestep)")]
     ZeroTimestep,
+    /// A captured id no longer refers to the actor it did, or the session,
+    /// a reset or the trailer rig changed (see [`crate::lifetime`]). Nothing
+    /// was written: adopt the authority's state instead.
+    #[error("history is stale: {} lifetime issue(s)", .0.len())]
+    StaleHistory(Vec<LifetimeIssue>),
     #[error("the restore refused {} vehicle(s)", .0.len())]
     Restore(Vec<(Entity, RestoreError)>),
 }
@@ -341,6 +347,10 @@ pub fn replay_from(
         return Err(ReplayError::ZeroTimestep);
     }
 
+    let issues = check_lifetimes(world, capture);
+    if !issues.is_empty() {
+        return Err(ReplayError::StaleHistory(issues));
+    }
     let restore = restore_world(world, capture);
     if !restore.refused.is_empty() {
         return Err(ReplayError::Restore(restore.refused));
