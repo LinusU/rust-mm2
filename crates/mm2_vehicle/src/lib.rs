@@ -34,6 +34,7 @@ pub mod sim;
 pub mod surface;
 pub mod systems;
 pub mod vehicle;
+pub mod wire;
 
 /// Where outside systems add body accelerations (`Forces::
 /// apply_linear_acceleration`) that the retail integration folds into

@@ -436,7 +436,7 @@ impl VehicleCapture {
     }
 
     /// The first non-finite float, if any.
-    fn first_non_finite(&self) -> Option<&'static str> {
+    pub(crate) fn first_non_finite(&self) -> Option<&'static str> {
         self.floats()
             .into_iter()
             .find(|(_, v)| !v.is_finite())

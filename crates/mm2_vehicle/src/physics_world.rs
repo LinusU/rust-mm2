@@ -86,6 +86,17 @@ pub struct RestoreReport {
 /// Capture every vehicle, every non-vehicle dynamic body and the touching
 /// contact pairs. Call between fixed steps.
 pub fn capture_world(world: &mut World, epoch: EpochRef) -> WorldCapture {
+    capture_world_with(world, epoch, true)
+}
+
+/// [`capture_world`] without the contact graph: bodies and vehicles only.
+/// What a wire snapshot is built from (`crate::wire`); the receiver
+/// cold-starts every contact pair.
+pub(crate) fn capture_bodies(world: &mut World, epoch: EpochRef) -> WorldCapture {
+    capture_world_with(world, epoch, false)
+}
+
+fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> WorldCapture {
     let mut out = WorldCapture::default();
     let mut q = world.query::<(
         Entity,
@@ -124,6 +135,9 @@ pub fn capture_world(world: &mut World, epoch: EpochRef) -> WorldCapture {
     // Query order is not stable across worlds; entity order is.
     out.vehicles.sort_by_key(|(e, _)| *e);
     out.bodies.sort_by_key(|(e, _)| *e);
+    if !contacts {
+        return out;
+    }
     if let Some(graph) = world.get_resource::<ContactGraph>() {
         for pair in graph.iter_active().chain(graph.iter_sleeping()) {
             if pair.manifolds.is_empty() {

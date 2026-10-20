@@ -392,3 +392,86 @@ component outside the captured set from inside `FixedPostUpdate` must gate
 itself. Wiring the ring and replay into the client's correction path is
 NETPLAY-04; deduplicating gameplay reactions to the replayed contacts
 (damage, pickups) beyond suppressing the events is NETPLAY-03E.
+
+## Authoritative-state wire round trip (NETPLAY-03D, #1781)
+
+`mm2_vehicle::wire`: `capture_authoritative(&mut World, generation,
+reset_epochs, tick) -> AuthoritativeState` on the host and
+`apply_authoritative(&mut World, &AuthoritativeState, session_generation,
+expected_reset_epoch)
+-> ApplyReport` on a peer. The DTO is serde and format-agnostic; the byte
+encoding is the transport's choice (NETPLAY-02 owns the message layout; this
+module does not depend on it). The tests encode with `serde_json`, which
+round-trips every f32 exactly, and the decoded value must equal the sent one.
+
+**Identities.** A vehicle is a `VehicleSlot(u16)` (seat or trailer slot), a
+dynamic prop a `PropSlot(u16)`, both components the session stamps
+identically on every peer. Every vehicle carries its own `EpochRef`
+(session generation and reset epoch). No `Entity`, Avian proxy or collider
+id is in the snapshot. A vehicle or dynamic body without a slot makes
+`capture_authoritative` fail (`UnslottedVehicle`/`UnslottedProp`) rather than
+be skipped. A peer maps slots to its own entities at apply time; snapshot
+slots it lacks are reported (`unknown_*`), local vehicles the snapshot does
+not mention are left alone (`unmentioned_vehicles`).
+
+**One tick, not a history.** A snapshot is the post-step state of one host
+tick: the full `VehicleCapture` of each vehicle and `PropWire` (pose,
+velocities, sleep flag and timer) of each prop. It is about 9 kB of JSON for
+three vehicles and one prop; the binary size is the transport's. The 121-tick
+`HistoryRing` and the contact graph stay local. Bounds: `MAX_VEHICLES` 64,
+`MAX_PROPS` 512.
+
+**Field classification on the wire.** The 03A table's T and H classes both
+travel inside the vehicle's `VehicleCapture`: a receiver's own H history
+(suspension, tyre and solver history) describes a different timeline, so
+adopting the authority's H as well is what makes a receiver with divergent
+history converge, and splitting T from H on the wire would only save bytes
+at the cost of exactness. R fields are written but re-derived by the next
+step; I fields never travel. Contact manifolds, warm-start impulses and the
+recycling cache (03B "restored/invalidated") are **not** sent.
+
+**Solver-cache invalidation on a correction.** `apply_authoritative` builds a
+`WorldCapture` with no contact pairs and calls `restore_world`, so every
+contact pair in the receiver is cold-started (impulses zeroed, recycling
+cache dropped) and counted in `ApplyReport::world.pairs_invalidated`
+(`pairs_restored` is always 0). Islands, broad phase and AABBs are rebuilt by
+Avian through change detection from the written poses, as in 03B. A prop
+captured asleep is put to sleep, deferred one step if a stale contact still
+links it to an awake island (03B `PendingSleeps`).
+
+**Validation, before the first write.** Counts, unique slots, every
+vehicle's generation equal to the snapshot's (`MixedGeneration`), finite
+floats (`NonFinite`), and a reset epoch not older than the peer's own for
+that slot (`StaleResetEpoch`: a late packet cannot resurrect a pre-reset
+car). A vehicle whose wheel count or model disagrees is refused by
+`restore_vehicle` and reported in `ApplyReport::refused`. A snapshot from another
+session generation than the one passed to `apply_authoritative` is refused
+(`StaleGeneration`).
+
+### Measured convergence
+
+Receiver: a second world with another spawn order (so no `Entity` matches),
+37 despawned and 11 live junk entities ahead of the scene, and its own
+25-tick-longer history under different commands, so its cars, tyres, prop
+and contact graph disagree with the host's at T (asserted: > 1.0 from the
+host before the apply, 0 after). Both worlds then run the host's commands
+for 60 ticks and are compared every tick on the full capture.
+
+| T | Situation | Worst float, any field | Worst position / velocity |
+|---|---|---|---|
+| 120 | cars driving, prop asleep, no contact beyond the ground | 0 (bit-identical) | 0 / 0 |
+| 236 | car A at the wall, rig reaching the prop | 64 N (wheel force scalar, tick 262) | 4.9e-4 m / 8.3e-3 m/s |
+| 300 | car A pinned, rig at the prop | 8.1 N | 5.1e-3 m / 9.6e-3 m/s |
+
+Accepted bounds in `tests/wire.rs`: with no contact in play 1e-3 per float
+(`TOLERANCE`, as 03A/03B); with cold-started wall or prop contacts 1e-2 m,
+2e-2 m/s, 130 N. The contact rows are the same floor 03B measured for a
+contact onset in a world whose solver ordering differs: bounded, not exact.
+Exactness is claimed only when no contact pair other than the ground exists.
+Without the apply, the worlds stay > 1.0 apart (`applying_nothing_leaves_the_worlds_apart`).
+
+Not covered: other platforms, a real transport (loss, ordering, delta
+snapshots: NETPLAY-02/04), bodies other than the trailer joint, and the cost
+of `capture_authoritative` (NETPLAY-03F). Applying a correction on a peer
+while it predicts ahead (rewind to T, replay local inputs) composes this
+with 03C's `replay_from`; that wiring is NETPLAY-04.
