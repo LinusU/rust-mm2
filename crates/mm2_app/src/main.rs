@@ -22,8 +22,8 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, contracts, controls, crowd, damage,
-    damage_fx, dash, display_trial, environment, hud, hudmap, input, lesson, lesson_text, menu,
-    nav_overlay, navarrow, net, netdrive, oppind, opponents, pause, pedestrian, perf, police,
+    damage_fx, dash, display_trial, drowned, environment, hud, hudmap, input, lesson, lesson_text,
+    menu, nav_overlay, navarrow, net, netdrive, oppind, opponents, pause, pedestrian, perf, police,
     police_debug, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
     scripted, sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
@@ -2028,6 +2028,7 @@ fn main() {
                 race::update_checkpoint_markers,
                 navarrow::update_nav_arrow,
                 race::update_race_warning,
+                drowned::update_drowned_message,
                 race::update_countdown_banner,
                 race::watch_countdown_hold,
             ),

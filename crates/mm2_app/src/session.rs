@@ -2134,6 +2134,7 @@ pub fn load_session_world(
             }
             commands.insert_resource(arrow_report);
             race::spawn_race_warning(&mut commands, owner);
+            crate::drowned::spawn_drowned_message(&mut commands, owner);
             race::spawn_countdown_banner(&mut commands, owner);
             // F22-A.4: the authored race timer (HUD-2's
             // stopwatch/countdown pair — `mmHUD`'s `mmTimer`s) —

@@ -31,6 +31,7 @@ pub mod dev_world;
 pub mod devices;
 pub mod display_trial;
 pub mod drawbridge;
+pub mod drowned;
 pub mod environment;
 pub mod hud;
 pub mod hudmap;
