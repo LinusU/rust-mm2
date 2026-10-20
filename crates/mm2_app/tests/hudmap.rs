@@ -539,3 +539,124 @@ fn known_world_positions_project_to_their_map_coordinates() {
     let marker_pos = app.world().get::<Transform>(marker).unwrap().translation;
     assert!(map_ndc(&app, camera, marker_pos).truncate().length() < 1e-4);
 }
+
+/// A networked session binds every non-local participant to an opponent
+/// tri in the pool: a remote human who joins takes a free slot, one who
+/// leaves frees it (hidden — no dot left behind), and a respawn moves the
+/// dot with the car. The map draws no team colouring, so a team change
+/// has nothing to update here.
+#[test]
+fn remote_humans_bind_opponent_tris_across_join_leave_and_respawn() {
+    use mm2_app::hud::HudVisible;
+    use mm2_app::hudmap::{self, HudMapMarker, HudMapReport, MarkerRole};
+    use mm2_game::{HudMap, Player, PlayerControl, PlayerId, Session};
+
+    const POOL: usize = 3;
+    let spec = HudMapSpec::parse(TUNE).unwrap();
+    let mut app = App::new();
+    app.add_plugins(TransformPlugin)
+        .insert_resource(Time::<()>::default())
+        .insert_resource(Session::new())
+        .insert_resource(HudVisible(true))
+        .insert_resource(HudMap::new(spec, 0))
+        .insert_resource(HudMapReport {
+            spec_path: "tune/test.mmhudmap".into(),
+            pkg_path: "geometry/hudmap_test.pkg".into(),
+            tiles: 1,
+            markers: 1,
+            absent: None,
+            dot_materials: Vec::new(),
+            marker_y: 5.0,
+        })
+        .add_systems(Update, hudmap::drive_hud_map);
+    app.world_mut().spawn((
+        bevy::window::PrimaryWindow,
+        Window {
+            resolution: bevy::window::WindowResolution::new(1280, 960),
+            ..default()
+        },
+    ));
+    let car = |id: u16, control: PlayerControl, at: Vec3| {
+        (
+            Player {
+                id: PlayerId(id),
+                control,
+            },
+            Transform::from_translation(at),
+            GlobalTransform::from_translation(at),
+        )
+    };
+    app.world_mut()
+        .spawn(car(0, PlayerControl::Local, Vec3::ZERO));
+    for _ in 0..POOL {
+        app.world_mut().spawn((
+            HudMapMarker {
+                role: MarkerRole::Opponent,
+                extent: 1.0,
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+            Visibility::Hidden,
+            MeshMaterial3d::<StandardMaterial>::default(),
+        ));
+    }
+    // The visible opponent dots' map positions, ordered by x.
+    let dots = |app: &mut App| -> Vec<Vec3> {
+        let mut q = app
+            .world_mut()
+            .query::<(&HudMapMarker, &Transform, &Visibility)>();
+        let mut v: Vec<Vec3> = q
+            .iter(app.world())
+            .filter(|(m, _, vis)| {
+                matches!(m.role, MarkerRole::Opponent) && **vis == Visibility::Visible
+            })
+            .map(|(_, xf, _)| xf.translation)
+            .collect();
+        v.sort_by(|a, b| a.x.total_cmp(&b.x));
+        v
+    };
+
+    app.update();
+    app.update();
+    assert!(dots(&mut app).is_empty(), "no other driver, no dot");
+
+    // Two remote humans join after the world loaded.
+    let a = app
+        .world_mut()
+        .spawn(car(1, PlayerControl::Remote, Vec3::new(10.0, 0.0, 0.0)))
+        .id();
+    let b = app
+        .world_mut()
+        .spawn(car(2, PlayerControl::Remote, Vec3::new(20.0, 0.0, 0.0)))
+        .id();
+    app.update();
+    app.update();
+    let d = dots(&mut app);
+    assert_eq!(d.len(), 2, "each remote human binds a tri: {d:?}");
+    assert_eq!((d[0].x, d[0].z), (10.0, 0.0));
+    assert_eq!((d[1].x, d[1].z), (20.0, 0.0));
+    assert!(d.iter().all(|p| p.y == 5.0), "dots sit at the marker plane");
+
+    // A respawn teleports the car; its dot follows.
+    app.world_mut().entity_mut(a).insert((
+        Transform::from_xyz(-30.0, 0.0, 40.0),
+        GlobalTransform::from_xyz(-30.0, 0.0, 40.0),
+    ));
+    app.update();
+    let d = dots(&mut app);
+    assert_eq!(d.len(), 2);
+    assert_eq!((d[0].x, d[0].z), (-30.0, 40.0), "respawned dot moved");
+    assert_eq!((d[1].x, d[1].z), (20.0, 0.0), "the other dot stayed");
+
+    // One leaves: exactly one dot remains, at the remaining car.
+    app.world_mut().entity_mut(a).despawn();
+    app.update();
+    let d = dots(&mut app);
+    assert_eq!(d.len(), 1, "a departed human leaves no dot: {d:?}");
+    assert_eq!((d[0].x, d[0].z), (20.0, 0.0));
+
+    // The last one leaves: the map is clear again.
+    app.world_mut().entity_mut(b).despawn();
+    app.update();
+    assert!(dots(&mut app).is_empty());
+}
