@@ -225,8 +225,8 @@ NETPLAY-03D's; this table is the closure of what a step reads.
 | `Transform` | R | rewritten from the restored pose |
 | `EpochRef` (session generation, reset epoch) | T | opaque to the vehicle crate; the replay layer rejects stale epochs |
 | `VehicleConfig`, `OriginalHandling`, collider, `StrikeBound` | I | never captured |
-| Avian contact manifolds, solver warm start, broad phase, sleep timers | out of scope | physics world; NETPLAY-03B |
-| Trailer hitch, other bodies, `HumanDriver`, `RemoteReplica`, input filters in the app | out of scope | NETPLAY-03B/C/D |
+| Avian contact manifolds, solver warm start, broad phase, sleep timers | see below | physics world; NETPLAY-03B (`mm2_vehicle::physics_world`) |
+| Trailer hitch joint, other dynamic bodies | see below | NETPLAY-03B; `HumanDriver`, `RemoteReplica`, input filters in the app stay NETPLAY-03C/D |
 
 Findings:
 
@@ -246,11 +246,103 @@ Findings:
   on a second rewind. The test tolerance is `1e-3`, kept loose on
   purpose so a legitimate libm/platform difference is not a false alarm.
 
-Determinism limits (what this does **not** prove): one machine, one
+Determinism limits (what 03A does **not** prove): one machine, one
 build, a flat ground plane. Bit identity relies on the fixed step being
 exactly one tick per update and on Avian's solver being reproducible for
 the same inputs; it was observed with Avian's contact warm-start cache
-left as the replay found it, which is only safe on this fixture. Contacts
-with props, walls, other cars and sleeping bodies need the physics-world
-restore or invalidation of NETPLAY-03B, and cross-platform float
-determinism is not claimed.
+left as the replay found it, which is only safe on that fixture. Contacts
+with props, walls, other cars and sleeping bodies are NETPLAY-03B, below.
+Cross-platform float determinism is not claimed anywhere.
+
+## Avian 0.8 physics-world restore (NETPLAY-03B, #1779)
+
+`mm2_vehicle::physics_world`: `capture_world(&mut World, EpochRef) ->
+WorldCapture` and `restore_world(&mut World, &WorldCapture) ->
+RestoreReport`. Local history (class H): it names `Entity` ids of one
+world and never goes on the wire. Call between fixed steps. Tests:
+`crates/mm2_vehicle/tests/physics_world.rs`, the production
+`VehiclePlugin` schedules at 60 Hz, one step per `update()`.
+
+### What Avian 0.8 keeps between steps, and what we do with it
+
+| Avian state | Strategy | Why |
+|---|---|---|
+| `Position`/`Rotation`/velocities of dynamic bodies | **restored** (vehicles through `restore_vehicle`, props through `BodyState`) | the body |
+| `Sleeping`, `SleepTimer` | **restored**; see sleeping below | a prop at rest is part of the world |
+| `ContactGraph` manifolds (points, `normal_impulse`, warm-start normal/tangent impulses, feature ids) and the contact recycling cache | **restored** per collider pair when the manifold layout is unchanged, otherwise **invalidated** (cold start, recycling cache dropped) | the next solve warm-starts from them; a pair born in the abandoned future must not warm-start the replay |
+| `ConstraintGraph`, `PhysicsIslands`, `BodyIslandNode`, `JointGraph` | **left to Avian**, rebuilt lazily | the narrow phase removes/creates pairs and Avian's own `SleepBody`/`WakeBody` commands split or merge islands; there is no public way to rewrite them consistently. Joints (the trailer hitch `SphericalJoint`) carry no solver state in 0.8: anchors and limits are component fields, re-solved from the restored poses |
+| `ColliderTrees`, `MovedProxies`, `ColliderAabb`/`EnlargedAabb` | **left to Avian**, refreshed through change detection | writing `Position`/`Rotation` marks the collider moved after `LastPhysicsTick`, so the next step re-fits its AABB and tree proxy. Not snapshotted |
+| `LastPhysicsTick` | **never written** | it is a Bevy change-detection `Tick`, not a simulation tick; assigning a simulation tick to it would hide the restore from Avian's change detection. `restore_leaves_avians_change_tick_and_the_cars_awake` pins it |
+| `Time<Physics>`, `Time<Substeps>` clocks | **not restored** | nothing a step reads depends on their elapsed value; the simulation tick belongs to the replay layer |
+| `CollidingEntities`, collision start/stop events | **not restored** | derived from the contact graph; a replay re-emits events from the live graph. Gameplay that reacts to them (impacts, damage, pickups) must be suppressed or deduplicated by the replay layer: NETPLAY-03E |
+| Force accumulators, `OriginalContactSnapshots` | n/a | empty at a step boundary (see the 03A table) |
+
+The Lightyear reference at `8abe00453b52` (`crates/integration/avian/src/rollback.rs`)
+was read as an inventory. It rolls back `ContactGraph`, `ConstraintGraph`,
+`JointGraph`, `PhysicsIslands`, `BodyIslandNode`, `Sleeping`, `SleepTimer`,
+both clocks, and snapshots `ColliderTrees` + `MovedProxies` + `ColliderAabb`
++ `EnlargedAabb` + `ColliderTreeProxyKey` wholesale, then re-registers
+colliders whose proxy keys went stale and rebuilds `CollidingEntities`.
+That makes the whole persistent Avian state a function of the tick. We
+chose the smaller surface: restore what the solve reads and the poses,
+invalidate pairs we cannot restore, and let Avian's own change detection
+and narrow phase rebuild the rest. The measurements below are what that
+costs; if a scenario later shows the broad phase or island graph
+diverging, snapshotting them is the next step, not a rewrite.
+
+### Sleeping
+
+Avian wakes a sleeping body when its `Position`, `Rotation`,
+velocities or `SleepTimer` *change-detect* (even to an equal value), so
+`restore_world` only writes what differs. A body captured awake and found
+asleep is woken (`WakeBody`). A body captured asleep and found awake is put
+to sleep (`SleepBody`) when its island holds nothing else. If a stale
+contact still links it to an awake island (the trailer rig reached the prop
+after the capture), sleeping it now would sleep the cars too, so the
+restore parks it in `PendingSleeps`; `finish_sleep_restore`, a system at
+the end of the `PhysicsSchedule` (before Avian advances `LastPhysicsTick`),
+writes the captured state back and sleeps it once the narrow phase has
+dropped the stale contact, unless it touches a live dynamic body. The
+result is bit-exact: sleep flags match the reference on every tick.
+`SleepingDisabled` stays on every car; cars never sleep. A prop that is
+jointed to a dynamic body is not handled (none exist).
+
+### Measured tolerances
+
+Scene: an original-model human car (child sphere collider + sensor on its
+own collision layer, driving into a static wall until pinned), a generic
+car towing a jointed trailer into a sleeping prop, ground. `TOLERANCE` is
+`1e-3` per float in the field's unit (m, m/s, rad, N).
+
+| Rewind (ticks) | Crosses | Largest deviation over 40+ replayed ticks |
+|---|---|---|
+| 19→20 | loaded tyres, depth 1 | 0 (bit-identical) |
+| 60→120 | brake, forced gear change | 0 |
+| 100→120 | prop asleep throughout | 0 |
+| 150→200 | wall contact onset | 0 |
+| 236→300 | multi-step wall pin | 0 |
+| 299→300, 300→380 | pinned, depth 1 and 80 | 0 |
+| 190→250 | **new** car–prop contact onset after the rewind | position 4e-5 m, velocity 3.5e-3 m/s over 140 ticks; per-wheel force scalars up to ~65 N on the impact tick |
+
+The last row is a floor, not a defect to be tuned away: the replay
+creates the contact pair again in a world whose contact slots and solver
+ordering were built in a different order than the reference's, so a
+chaotic impact differs at the 1e-6 level and the wheel forces carry that
+noise for a few ticks. Positions and velocities do not drift (the test
+bounds them at 1e-3 m and 2e-2 m/s). Exactness is therefore claimed for
+replays whose contact pairs already exist at the restore point; a new
+dynamic contact onset is bounded, not exact. `skipping_the_world_restore_makes_the_replay_diverge`
+shows the same replays without the world restore are off by 2.5 to 7
+(wheel force scalars) on the first tick, and wake the sleeping prop.
+
+Changed body membership: a dynamic body spawned after the capture is
+reported in `RestoreReport::uncaptured` and left alone (the replay layer
+despawns it; the continuation then matches to `TOLERANCE`); a captured
+body that no longer exists is reported in `missing` and skipped; a vehicle
+whose capture no longer fits is reported in `refused` and written
+nowhere.
+
+Not covered, and not claimed: other platforms, `CollidingEntities` and
+collision events (above), bodies with joints other than the trailer
+hitch, more than one prop island, and the cost of `capture_world`
+(NETPLAY-03F).
