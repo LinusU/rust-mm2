@@ -118,6 +118,14 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
 /// launch and for the menu (whose *Host lobby* row opens a link at run
 /// time); every one only runs while a [`net::HostLink`] exists.
 pub fn add_host_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + Clone) {
+    // NETPLAY-02B: one command per remote seat per fixed step, ahead of
+    // the physics schedule; only under the fixed-tick selector.
+    app.add_systems(
+        FixedUpdate,
+        netdrive::consume_seat_commands
+            .run_if(crate::netplay_timeline::timeline_enabled)
+            .run_if(resource_exists::<net::HostLink>),
+    );
     app.add_systems(
         Update,
         (

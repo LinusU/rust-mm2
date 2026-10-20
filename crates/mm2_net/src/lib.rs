@@ -41,12 +41,17 @@
 //! wire-layer concern. See `docs/research/net.md` for the transport
 //! decision record.
 
+mod cmdbuf;
 mod conn;
 mod frame;
 mod impair;
 mod lobby;
 mod proto;
 
+pub use cmdbuf::{
+    BUFFER_CAP, COMMAND_BURST, COMMAND_RATE_HZ, Consumed, HOLD_LAST_TICKS, NEUTRAL, SeatStats,
+    Source,
+};
 pub use conn::{
     Conn, HANDSHAKE_TIMEOUT, Writer, accept_hello, accept_hello_within, hello, listen_loopback,
     send_hello, send_hello_within,

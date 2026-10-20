@@ -144,7 +144,7 @@ use mm2_game::{
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
     SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry, SnapImpact, SnapProp,
-    SnapRace, SnapTrailer, VehiclePick,
+    SnapRace, SnapTrailer, Source as CommandSource, TickCommand, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, HumanDriver, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -157,6 +157,7 @@ use crate::breakaway::{self, BreakVisualMut};
 use crate::car_visual;
 use crate::input::control_just_pressed;
 use crate::net::{HostLink, LobbyLink, LobbyState};
+use crate::netplay_timeline::NetplayTimeline;
 use crate::opponents::SPAWN_LIFT;
 use crate::session::SpawnPoint;
 
@@ -1296,14 +1297,42 @@ pub fn encode_input(input: &VehicleInput, generation: u64, seq: u64) -> DriveInp
 /// `-1.008` — and the host's sim reads steering unclamped; the result is
 /// clamped here, at the one place wire controls become sim controls.
 pub fn decode_input(input: &DriveInput) -> VehicleInput {
+    decode_controls(
+        input.throttle,
+        input.brake,
+        input.steer,
+        input.handbrake,
+        input.forced_gear,
+    )
+}
+
+/// [`decode_input`] for a fixed-tick [`TickCommand`] (NETPLAY-02): the same
+/// quantization, so the host, prediction and replay see identical numbers.
+pub fn decode_tick_command(command: &TickCommand) -> VehicleInput {
+    decode_controls(
+        command.throttle,
+        command.brake,
+        command.steer,
+        command.handbrake,
+        command.forced_gear,
+    )
+}
+
+fn decode_controls(
+    throttle: u8,
+    brake: u8,
+    steer: i8,
+    handbrake: u8,
+    forced_gear: Option<u32>,
+) -> VehicleInput {
     // Match retail's loaded f32 reciprocals, as local keyboard decoding does.
     // Division rounds some byte values differently before the physics step.
     VehicleInput {
-        throttle: input.throttle as f32 * (1.0 / 255.0),
-        brake: input.brake as f32 * (1.0 / 255.0),
-        steering: (input.steer as f32 * (1.0 / 127.0)).clamp(-1.0, 1.0),
-        handbrake: input.handbrake as f32 * (1.0 / 255.0),
-        forced_gear: input.forced_gear.map(|gear| gear as usize),
+        throttle: throttle as f32 * (1.0 / 255.0),
+        brake: brake as f32 * (1.0 / 255.0),
+        steering: (steer as f32 * (1.0 / 127.0)).clamp(-1.0, 1.0),
+        handbrake: handbrake as f32 * (1.0 / 255.0),
+        forced_gear: forced_gear.map(|gear| gear as usize),
     }
 }
 
@@ -2250,10 +2279,12 @@ pub fn send_drive_input(
 pub fn apply_remote_inputs(
     host: Res<HostLink>,
     session: Res<Session>,
+    timeline: Option<Res<NetplayTimeline>>,
     mut remotes: Query<(&NetPlayer, &mut VehicleInput, &mut HumanDriver), With<RemotePick>>,
     mut report: ResMut<NetDriveReport>,
 ) {
-    if !session.is_playing() {
+    // The fixed-tick path (`consume_seat_commands`) owns remote controls.
+    if !session.is_playing() || timeline.is_some_and(|t| t.enabled) {
         return;
     }
     let inputs: RemoteInputs = host.remote_inputs();
@@ -2272,6 +2303,41 @@ pub fn apply_remote_inputs(
                 *input = VehicleInput::default();
                 report.inputs_staled += 1;
             }
+        }
+    }
+}
+
+/// Host-side, fixed-tick timeline (NETPLAY-02B, behind
+/// [`NetplayTimeline`]): hand every remote seat exactly one command from
+/// its bounded buffer for the step about to run. Scheduled in
+/// `FixedUpdate`, so it runs once per fixed step before the physics
+/// schedule (`FixedPostUpdate`) — a burst of arrivals deepens a buffer but
+/// can never make a seat step twice. A missing command is an explicit
+/// substitute (`mm2_net::cmdbuf`), counted as `inputs_staled`; the ack the
+/// next `Snap` carries ([`publish_snapshots`]) names the last slot this
+/// system finalized, so it is always at or behind the state it rides.
+pub fn consume_seat_commands(
+    host: Res<HostLink>,
+    session: Res<Session>,
+    mut remotes: Query<(&NetPlayer, &mut VehicleInput, &mut HumanDriver), With<RemotePick>>,
+    mut report: ResMut<NetDriveReport>,
+) {
+    let inputs: RemoteInputs = host.remote_inputs();
+    if !session.is_playing() {
+        inputs.set_running_generation(None);
+        return;
+    }
+    inputs.set_running_generation(Some(session.wire_generation()));
+    report.inputs_limited = inputs.rate_limited();
+    for (wire, mut input, mut human) in &mut remotes {
+        let Some(slot) = inputs.consume_command_at(wire.0, Instant::now()) else {
+            continue;
+        };
+        *input = decode_tick_command(&slot.command);
+        human.auto_reverse = slot.command.auto_reverse;
+        match slot.source {
+            CommandSource::Command => report.inputs_applied += 1,
+            CommandSource::HeldLast | CommandSource::Neutral => report.inputs_staled += 1,
         }
     }
 }
@@ -2579,12 +2645,10 @@ pub fn retire_stalled_wire_seats(
         {
             continue;
         }
-        let stamped = inputs.latest(wire.0);
-        let live = stamped
-            .as_ref()
-            .is_some_and(|s| s.input.generation == generation);
+        let stamped = inputs.last_activity(wire.0);
+        let live = stamped.is_some_and(|(g, _)| g == generation);
         let silent_past_bound = if live {
-            stamped.expect("live implies a sample").received.elapsed() > stall.live_silence
+            stamped.expect("live implies a sample").1.elapsed() > stall.live_silence
         } else {
             now.duration_since(*clock.first_seen.entry(wire.0).or_insert(now)) > stall.join_grace
         };
@@ -2739,6 +2803,9 @@ pub const IMPACT_ROW_REPEATS: u32 = 10;
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
+    // NETPLAY-02B: with the fixed-tick timeline on, each seat's entry
+    // carries the finalized-command ack.
+    timeline: Option<Res<NetplayTimeline>>,
     // The v13 race row's source — `None` on a raceless session (cruise,
     // dev worlds), so the field stays `None` on the wire too.
     race: Option<Res<RaceState>>,
@@ -2808,6 +2875,13 @@ pub fn publish_snapshots(
         .iter()
         .map(|(entity, wire, ..)| (entity, wire.0))
         .collect();
+    // The ack is read once, here, after every fixed step of this update
+    // has completed: `consume_seat_commands` finalizes a slot before the
+    // step that uses it, so the value never runs ahead of the state.
+    let inputs = timeline
+        .as_ref()
+        .is_some_and(|t| t.enabled)
+        .then(|| host.remote_inputs());
     let mut entries: Vec<SnapEntry> = players
         .iter()
         .map(
@@ -2850,6 +2924,7 @@ pub fn publish_snapshots(
                     skid_slip,
                     skid_speed,
                     surf_roll,
+                    input_ack: inputs.as_ref().map_or(0, |i| i.command_ack(wire.0)),
                     ..SnapEntry::default()
                 };
                 // The v14 progress tail (F25-B): the seat's replicated

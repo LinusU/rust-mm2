@@ -1331,6 +1331,11 @@ fn run_headless(
             add_lobby_client_systems(&mut app);
         }
         RunSource::Host(link) => {
+            app.add_systems(
+                FixedUpdate,
+                crate::netdrive::consume_seat_commands
+                    .run_if(crate::netplay_timeline::timeline_enabled),
+            );
             app.insert_resource(*link)
                 .init_resource::<net::LobbyState>()
                 .init_resource::<crate::netdrive::NetDriveReport>()

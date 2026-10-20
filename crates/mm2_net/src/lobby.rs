@@ -52,6 +52,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::NetError;
+use crate::cmdbuf::{Consumed, SeatBuffer, SeatStats};
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
 use crate::proto::{
     DriveInput, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry,
@@ -299,6 +300,13 @@ struct PeerMail {
     resets: BTreeMap<u16, u64>,
     buckets: BTreeMap<u16, Bucket>,
     rate_limited: u64,
+    /// NETPLAY-02B: the generation the host is simulating (`None` while no
+    /// session runs), the per-seat command buffers keyed by roster id, and
+    /// the newest generation each seat's windows named — whether or not
+    /// they were accepted — for [`RemoteInputs::entered`].
+    running: Option<u64>,
+    seats: BTreeMap<u16, SeatBuffer>,
+    window_gens: BTreeMap<u16, (u64, Instant)>,
 }
 
 /// Sustained per-seat `Input` budget, samples per second. The client
@@ -425,6 +433,23 @@ impl RemoteInputs {
             .rate_limited
     }
 
+    /// The newest sign of life from `id`'s data plane — a `Input` sample
+    /// or an `InputWindow` — as the generation it named and when it
+    /// landed. The stalled-seat watch measures silence against this, so
+    /// it works the same on the latest-only and the fixed-tick path.
+    pub fn last_activity(&self, id: u16) -> Option<(u64, Instant)> {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let sample = mail
+            .inputs
+            .get(&id)
+            .map(|s| (s.input.generation, s.received));
+        let window = mail.window_gens.get(&id).copied();
+        match (sample, window) {
+            (Some(a), Some(b)) => Some(if b.1 >= a.1 { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// `id`'s newest sample, if one ever arrived.
     pub fn latest(&self, id: u16) -> Option<StampedInput> {
         self.inner
@@ -443,9 +468,11 @@ impl RemoteInputs {
     /// driving the old session keeps being told the new one.
     fn entered(&self, id: u16, generation: u64) -> bool {
         let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        mail.inputs
-            .get(&id)
-            .is_some_and(|s| s.input.generation == generation)
+        mail.window_gens.get(&id).is_some_and(|w| w.0 == generation)
+            || mail
+                .inputs
+                .get(&id)
+                .is_some_and(|s| s.input.generation == generation)
             || mail.resets.get(&id).is_some_and(|g| *g == generation)
     }
 
@@ -480,6 +507,87 @@ impl RemoteInputs {
         mail.inputs.remove(&id);
         mail.resets.remove(&id);
         mail.buckets.remove(&id);
+        mail.seats.remove(&id);
+        mail.window_gens.remove(&id);
+    }
+
+    /// Tell the mailbox which session generation the host is simulating
+    /// (`None` when no session runs). A change discards every seat's
+    /// buffer: per-seat state never survives a generation change, and
+    /// windows for any other generation are dropped on arrival.
+    pub fn set_running_generation(&self, generation: Option<u64>) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.running != generation {
+            mail.running = generation;
+            mail.seats.clear();
+        }
+    }
+
+    /// Absorb one `InputWindow` for `id` (NETPLAY-02B). Dropped, counted,
+    /// when no session runs, the generation is not the running one, the
+    /// seat's flood bound is spent or the roster ceiling is reached.
+    fn store_window(
+        &self,
+        id: u16,
+        generation: u64,
+        epoch: u8,
+        first_seq: u64,
+        cmds: &[TickCommand],
+    ) {
+        self.store_window_at(id, generation, epoch, first_seq, cmds, Instant::now());
+    }
+
+    /// [`Self::store_window`] against an explicit arrival instant.
+    fn store_window_at(
+        &self,
+        id: u16,
+        generation: u64,
+        epoch: u8,
+        first_seq: u64,
+        cmds: &[TickCommand],
+        now: Instant,
+    ) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.window_gens.len() < MAX_PLAYERS as usize || mail.window_gens.contains_key(&id) {
+            mail.window_gens.insert(id, (generation, now));
+        }
+        if mail.seats.len() >= MAX_PLAYERS as usize && !mail.seats.contains_key(&id) {
+            return;
+        }
+        let running = mail.running;
+        let seat = mail.seats.entry(id).or_insert_with(|| SeatBuffer::new(now));
+        if running != Some(generation) {
+            seat.note_wrong_generation();
+            return;
+        }
+        seat.accept(epoch, first_seq, cmds, now);
+    }
+
+    /// Consume `id`'s slot for the fixed step about to run — exactly one
+    /// per seat per tick (see [`SeatBuffer::consume`]). `None` when no
+    /// session runs or the seat has no buffer.
+    pub fn consume_command(&self, id: u16) -> Option<Consumed> {
+        self.consume_command_at(id, Instant::now())
+    }
+
+    /// [`Self::consume_command`] against an explicit instant.
+    pub fn consume_command_at(&self, id: u16, now: Instant) -> Option<Consumed> {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.running?;
+        let seat = mail.seats.entry(id).or_insert_with(|| SeatBuffer::new(now));
+        Some(seat.consume(now))
+    }
+
+    /// `id`'s finalized-command ack for the running generation (`0` = none).
+    pub fn command_ack(&self, id: u16) -> u64 {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.seats.get(&id).map_or(0, SeatBuffer::ack)
+    }
+
+    /// `id`'s command-buffer counters, if it has a buffer.
+    pub fn seat_stats(&self, id: u16) -> Option<SeatStats> {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.seats.get(&id).map(SeatBuffer::stats)
     }
 
     /// Occupied input slots — for the consumer's diagnostics; never
@@ -499,7 +607,7 @@ impl RemoteInputs {
     /// mail behind.
     pub fn is_idle(&self) -> bool {
         let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        mail.inputs.is_empty() && mail.resets.is_empty()
+        mail.inputs.is_empty() && mail.resets.is_empty() && mail.seats.is_empty()
     }
 
     /// Drop every slot — the lobby teardown's final state.
@@ -508,6 +616,9 @@ impl RemoteInputs {
         mail.inputs.clear();
         mail.resets.clear();
         mail.buckets.clear();
+        mail.seats.clear();
+        mail.window_gens.clear();
+        mail.running = None;
     }
 }
 
@@ -1668,11 +1779,15 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) 
                     inputs.store(id, input);
                     continue;
                 }
-                Ok(Message::InputWindow { .. }) => {
-                    // Legal data-plane traffic that nothing consumes yet:
-                    // the per-seat buffer lands with NETPLAY-02B. Dropping
-                    // the peer as malformed would punish a well-formed
-                    // v29 frame, so it is ignored until then.
+                Ok(Message::InputWindow {
+                    generation,
+                    epoch,
+                    first_seq,
+                    commands,
+                }) => {
+                    // Data-plane like `Input`: absorbed into the seat's
+                    // bounded command buffer, never forwarded.
+                    inputs.store_window(id, generation, epoch, first_seq, &commands);
                     continue;
                 }
                 Ok(Message::ResetRequest { generation }) => {
@@ -3475,6 +3590,76 @@ mod tests {
         // roster (the removal rebroadcast) then errors — it does not
         // sit blocked on a dead lobby.
         while alice.recv().is_ok() {}
+    }
+
+    fn tick_cmd(n: u8) -> TickCommand {
+        TickCommand {
+            throttle: n,
+            brake: 0,
+            steer: 0,
+            handbrake: 0,
+            auto_reverse: false,
+            forced_gear: None,
+        }
+    }
+
+    #[test]
+    fn windows_are_dropped_until_a_session_runs_and_for_other_generations() {
+        let inputs = RemoteInputs::default();
+        let t = Instant::now();
+        inputs.store_window_at(1, 5, 0, 1, &[tick_cmd(1)], t);
+        assert!(inputs.consume_command_at(1, t).is_none(), "no session yet");
+        assert!(
+            inputs.entered(1, 5),
+            "a window still shows the peer entered"
+        );
+        inputs.set_running_generation(Some(5));
+        inputs.store_window_at(1, 4, 0, 1, &[tick_cmd(9)], t);
+        assert_eq!(inputs.seat_stats(1).unwrap().wrong_generation, 1);
+        inputs.store_window_at(1, 5, 0, 1, &[tick_cmd(1)], t);
+        let c = inputs.consume_command_at(1, t).unwrap();
+        assert_eq!((c.command.throttle, c.finalized), (1, Some(1)));
+        assert_eq!(inputs.command_ack(1), 1);
+    }
+
+    #[test]
+    fn generation_change_resets_every_seat_and_ack() {
+        let inputs = RemoteInputs::default();
+        let t = Instant::now();
+        inputs.set_running_generation(Some(1));
+        inputs.store_window_at(1, 1, 0, 1, &[tick_cmd(1), tick_cmd(2)], t);
+        inputs.consume_command_at(1, t);
+        assert_eq!(inputs.command_ack(1), 1);
+        inputs.set_running_generation(Some(2));
+        assert_eq!(inputs.command_ack(1), 0);
+        assert!(inputs.seat_stats(1).is_none());
+        // The old session's leftover window cannot revive it.
+        inputs.store_window_at(1, 1, 0, 2, &[tick_cmd(2)], t);
+        assert_eq!(inputs.seat_stats(1).unwrap().received, 0);
+    }
+
+    #[test]
+    fn seats_are_independent() {
+        let inputs = RemoteInputs::default();
+        let t = Instant::now();
+        inputs.set_running_generation(Some(1));
+        inputs.store_window_at(1, 1, 0, 1, &[tick_cmd(1)], t);
+        inputs.store_window_at(2, 1, 0, 1, &[tick_cmd(7), tick_cmd(8)], t);
+        assert_eq!(inputs.consume_command_at(2, t).unwrap().command.throttle, 7);
+        assert_eq!(
+            inputs.command_ack(1),
+            0,
+            "seat 2 consuming never acks seat 1"
+        );
+        // A flooding seat spends only its own bucket.
+        for k in 0..64 {
+            inputs.store_window_at(2, 1, 0, 100 + 16 * k, &[tick_cmd(0); 16], t);
+        }
+        assert!(inputs.seat_stats(2).unwrap().rate_limited > 0);
+        assert_eq!(inputs.seat_stats(1).unwrap().rate_limited, 0);
+        inputs.remove(2);
+        assert!(inputs.seat_stats(2).is_none());
+        assert_eq!(inputs.consume_command_at(1, t).unwrap().finalized, Some(1));
     }
 
     /// Poll the mailbox until a sample with `seq` (or newer) lands for

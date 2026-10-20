@@ -39,6 +39,11 @@ impl NetplayTimeline {
     }
 }
 
+/// Run condition: the fixed-tick timeline is selected.
+pub fn timeline_enabled(timeline: Option<Res<NetplayTimeline>>) -> bool {
+    timeline.is_some_and(|t| t.enabled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

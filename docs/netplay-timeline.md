@@ -61,11 +61,27 @@ already seen is stale and ignored.
 
 ## Missing input
 
-The host advances at fixed dt regardless. When a seat's next-seq command is
-absent at consume time the slot is **finalized with a substitute** (design
-choice, finalised in 02B: hold the last command for a small bounded number of
-ticks, then neutral) and the ack advances over it. A command arriving later
-for a finalized seq is dropped and never applied twice.
+The host advances at fixed dt regardless, consuming **one slot per seat per
+fixed step** in `FixedUpdate`, ahead of the physics schedule (design choice,
+implemented in 02B as `mm2_net::cmdbuf`). When a seat's next-seq command is
+absent the tick is driven by a substitute: the last real command held for
+`HOLD_LAST_TICKS` (6, 100 ms) consecutive substituted ticks, then neutral.
+Two cases differ in what is *finalized*:
+
+- **Gap** — a later seq is buffered, so the missing one is lost: the slot is
+  finalized with the substitute and the ack advances over it. A late arrival
+  for that seq is dropped as old and is never applied twice.
+- **Starved** — nothing at or past the next seq is buffered, so lost cannot
+  be told from late: the substitute drives the tick but **nothing is
+  finalized and the ack holds**. The command is applied in order whenever it
+  arrives, and a stalled peer cannot run the host's cursor ahead of the
+  client's. (This refines the earlier draft, which finalized every empty
+  slot.)
+
+Every slot reports its `Source` (`Command`, `HeldLast`, `Neutral`) so a
+fallback is never mistaken for driver input. The cursor starts at the first
+command a seat is seen to send; the buffer holds at most `BUFFER_CAP` (32)
+unconsumed commands and drops the excess as overflow.
 
 ## Window semantics (`Message::InputWindow`)
 
@@ -80,23 +96,29 @@ for a finalized seq is dropped and never applied twice.
 
 ## Edge policy (host side, implemented in 02B)
 
+Counters per seat (`SeatStats`): received, duplicates, old, overflow,
+wrong_generation, stale_epoch, rate_limited, finalized, fallback, underflow,
+gap_finalized, occupancy/max_occupancy, last/max command age.
+
 | Case | Policy |
 | --- | --- |
 | Duplicate seq | Ignored. |
 | Reordered | Gap-filling seqs within the unconsumed range are accepted by seq. |
 | Old (already consumed/finalized) | Dropped, counted. |
 | Future (beyond buffer bound) | Excess beyond the per-seat bound is dropped, counted; never moves another seat. |
-| Generation change | `generation` must equal the running one; a mismatch is dropped, never revives an old session. Per-seat state resets on a new generation. |
+| Generation change | The app tells the mailbox the running generation each fixed step; `generation` must equal it; a mismatch is dropped, never revives an old session. Per-seat state resets on a new generation. |
 | Reset epoch change | Commands under a stale `epoch` are dropped; the buffer restarts at the new epoch. |
 | Seq overflow | Unreachable in practice (u64 at 60 Hz); the codec still rejects windows that would wrap. |
 | Start / countdown | Commands before the seat is simulating are dropped, not queued; consumption starts at the first simulated tick. |
 | Escape capture | The client keeps emitting a command every tick; with input captured by UI it is neutral. Ticks are never skipped. |
 | Host's own seat | Not a command stream; it feeds its own controls directly and carries `input_ack = 0`. |
 | Disconnect | Seat buffer discarded; simulation continues on the documented fallback until the seat is removed. |
-| Flood | Rate limits become command-aware (windows count by commands, not packets); the #1236 protections stay. |
+| Flood | A per-seat token bucket charged by window length: `COMMAND_RATE_HZ` 1920/s (2x a full window every tick), `COMMAND_BURST` 128. An unaffordable window is dropped whole and counted; other seats are untouched. |
 
 ## Not in this slice
 
-The host buffer, client history/send loop, the prediction-lead controller and
-the impairment matrix are 02B..02E. v29 hosts currently ignore a well-formed
-`InputWindow` instead of dropping the peer.
+The client history/send loop, the prediction-lead controller and the
+impairment matrix are 02C..02E; until 02C no client sends `InputWindow`.
+With the selector on, the host's `apply_remote_inputs` stands down and
+`consume_seat_commands` owns remote controls; the stalled-seat watch counts a
+window as a sign of life.

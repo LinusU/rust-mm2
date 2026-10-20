@@ -13614,3 +13614,122 @@ fn a_dropped_snapshot_does_not_lose_its_impact_rows() {
         1
     );
 }
+
+/// NETPLAY-02B / AC2: with the fixed-tick selector on, the host consumes
+/// exactly one command per seat per fixed step and the `Snap` ack names
+/// the last finalized command — a received-but-unconsumed command is never
+/// acked, and a starved tick substitutes without moving the ack.
+#[test]
+fn the_snapshot_ack_names_the_command_the_last_step_consumed() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    app.insert_resource(mm2_app::netplay_timeline::NetplayTimeline { enabled: true });
+    let mut peer = ready_peer(addr, "ivy", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let remote = app
+        .world_mut()
+        .query_filtered::<Entity, With<RemotePick>>()
+        .single(app.world())
+        .unwrap();
+    let remote_throttle = |app: &App| app.world().get::<VehicleInput>(remote).unwrap().throttle;
+    let expect = |t: u8| t as f32 * (1.0 / 255.0);
+    let consume = |app: &mut App| {
+        app.world_mut()
+            .run_system_once(netdrive::consume_seat_commands)
+            .unwrap();
+    };
+    // The first fixed step tells the mailbox which generation runs; the
+    // stream has not started, so the seat gets neutral and nothing acks.
+    consume(&mut app);
+    assert_eq!(remote_throttle(&app), 0.0);
+
+    let command = |throttle: u8| mm2_net::TickCommand {
+        throttle,
+        brake: 0,
+        steer: 0,
+        handbrake: 0,
+        auto_reverse: true,
+        forced_gear: None,
+    };
+    peer.ctl()
+        .unwrap()
+        .send_input_window(
+            generation,
+            0,
+            1,
+            vec![command(10), command(20), command(30), command(40)],
+        )
+        .unwrap();
+    let inputs = app.world().resource::<HostLink>().remote_inputs();
+    spin(&mut app, |_| {
+        inputs.seat_stats(1).is_some_and(|s| s.received == 4)
+    });
+    // Received but unconsumed: published snapshots carry ack 0.
+    let Message::Snap { entries, .. } = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1)),
+    ) else {
+        unreachable!()
+    };
+    assert_eq!(entries.iter().find(|e| e.player == 1).unwrap().input_ack, 0);
+
+    // One consume per fixed step: one command, one ack step.
+    for seq in 1..=4u64 {
+        consume(&mut app);
+        assert_eq!(remote_throttle(&app), expect(seq as u8 * 10), "seq {seq}");
+        assert_eq!(inputs.command_ack(1), seq);
+        app.update();
+        // Every snapshot on the wire is at or behind the consumed step,
+        // and the one published after it carries exactly its ack.
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let Message::Snap { entries, .. } = until_wire(
+                &mut peer,
+                |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1)),
+            ) else {
+                unreachable!()
+            };
+            let ack = entries.iter().find(|e| e.player == 1).unwrap().input_ack;
+            assert!(ack <= seq, "ack {ack} ran ahead of consumed step {seq}");
+            if ack == seq {
+                break;
+            }
+            assert!(Instant::now() < deadline, "ack {seq} never published");
+            app.update();
+        }
+    }
+    // Starved: the last command is held, the ack does not move.
+    consume(&mut app);
+    assert_eq!(remote_throttle(&app), expect(40));
+    assert_eq!(inputs.command_ack(1), 4);
+    let stats = inputs.seat_stats(1).unwrap();
+    assert_eq!(
+        (stats.finalized, stats.underflow, stats.fallback),
+        (4, 1, 1)
+    );
+    // A repeated window is redundancy, never a second application.
+    peer.ctl()
+        .unwrap()
+        .send_input_window(generation, 0, 1, vec![command(10), command(20)])
+        .unwrap();
+    spin(&mut app, |_| inputs.seat_stats(1).unwrap().old >= 2);
+    assert_eq!(inputs.command_ack(1), 4);
+}
