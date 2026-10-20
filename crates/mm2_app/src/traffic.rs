@@ -1265,7 +1265,7 @@ pub(crate) fn class_assets(vfs: &Vfs, spec: &AmbientSpec) -> Option<AmbientClass
         .bound
         .as_ref()
         .and_then(|b| {
-            Collider::convex_hull(b.verts.iter().map(|v| Vec3::from(*v)).collect::<Vec<_>>())
+            Collider::convex_hull(&b.verts.iter().map(|v| Vec3::from(*v)).collect::<Vec<_>>())
         })
         .unwrap_or_else(|| size_collider(spec.tuning.as_ref()));
     let audio = match mm2_content::ambient_engine_audio(vfs, &spec.id) {
@@ -1322,7 +1322,7 @@ fn box_collider(size: Vec3, cg: Vec3) -> Collider {
             })
         })
         .collect();
-    Collider::convex_hull(corners).unwrap_or_else(|| Collider::cuboid(size.x, size.y, size.z))
+    Collider::convex_hull(&corners).unwrap_or_else(|| Collider::cuboid(size.x, size.y, size.z))
 }
 
 /// Spawn one planned car as a session-owned kinematic rigid body —

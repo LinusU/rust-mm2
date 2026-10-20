@@ -36,7 +36,7 @@ path = "tests/network.rs"
 
 [dependencies]
 avian3d.workspace = true
-bevy = { version = "0.19", features = ["tga", "bevy_audio"] }
+bevy = { version = "0.20", features = ["tga", "bevy_audio"] }
 clap.workspace = true
 mm2_assets.workspace = true
 mm2_content.workspace = true

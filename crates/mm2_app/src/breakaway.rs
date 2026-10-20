@@ -156,7 +156,7 @@ impl BreakPartVisual {
             vehicle,
             part: part.name.clone(),
             local,
-            collider: Collider::convex_hull(verts),
+            collider: Collider::convex_hull(&verts),
             centroid,
         }
     }

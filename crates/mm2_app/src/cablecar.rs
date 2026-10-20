@@ -267,26 +267,26 @@ pub fn spawn_cable_cars(
         model
             .collider
             .as_ref()
-            .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).min.y),
+            .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).min.y),
     );
     let nose = model
         .collider
         .as_ref()
-        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).max.z)
+        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).max.z)
         .filter(|z| z.is_finite())
         .unwrap_or(4.0)
         .clamp(1.0, 12.0);
     let tail = model
         .collider
         .as_ref()
-        .map(|c| -c.aabb(Vec3::ZERO, Quat::IDENTITY).min.z)
+        .map(|c| -c.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).min.z)
         .filter(|z| z.is_finite())
         .unwrap_or(nose)
         .clamp(1.0, 12.0);
     let half_width = model
         .collider
         .as_ref()
-        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY).max.x)
+        .map(|c| c.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).max.x)
         .filter(|x| x.is_finite())
         .unwrap_or(1.5)
         .clamp(0.5, 4.0);

@@ -21,8 +21,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/linus/rust-mm2"
 
 [workspace.dependencies]
-bevy = { version = "0.19", default-features = false }
-avian3d = "0.7"
+bevy = { version = "0.20", default-features = false }
+avian3d = "0.8"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

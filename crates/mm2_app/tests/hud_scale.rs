@@ -16,7 +16,7 @@ use std::path::Path;
 use bevy::ecs::world::CommandQueue;
 use bevy::prelude::*;
 use bevy::reflect::structs::Struct;
-use bevy::text::FontCx;
+use bevy::text::{FontCx, RemSize};
 use bevy::ui::widget::update_image_content_size_system;
 use bevy::ui::{ComputedUiRenderTargetInfo, ui_layout_system, ui_surface::UiSurface};
 use mm2_app::hud::HudVisible;
@@ -145,6 +145,7 @@ fn hud_app() -> App {
         .init_resource::<UiSurface>()
         .init_resource::<UiScale>()
         .init_resource::<FontCx>()
+        .init_resource::<RemSize>()
         .insert_resource(Target {
             scale_factor: 1.0,
             physical: UVec2::new(1280, 720),

@@ -51,6 +51,13 @@ pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
+        // Keep Avian 0.7's collision defaults, which every contact
+        // rule here was built on: unbounded speculative contacts on
+        // each body, and no swept CCD (Avian 0.8 flips both).
+        app.register_required_components::<RigidBody, SpeculativeCcd>();
+        app.register_required_components_with::<RigidBody, SweptCcd>(|| {
+            SweptCcd::default().with_filter(CcdFilter::NONE)
+        });
         app.add_message::<ResetVehicle>()
             .init_resource::<VehicleDebugEnabled>()
             // A session under a remote authority overwrites this at
@@ -134,7 +141,7 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
         .collider_points
         .as_ref()
         .and_then(|pts| {
-            Collider::convex_hull(pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
+            Collider::convex_hull(&pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
         })
         .unwrap_or_else(|| {
             let chassis = Vec3::from(config.chassis_size);
@@ -147,7 +154,7 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
         .striker_points
         .as_ref()
         .and_then(|pts| {
-            Collider::convex_hull(pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
+            Collider::convex_hull(&pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
         })
         .map_or_else(|| StrikeBound(collider.clone()), StrikeBound);
     // Inertia: authored principal tensor when present, otherwise the solid

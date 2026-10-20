@@ -440,7 +440,7 @@ fn spawn_bodied(
     let (car, _) = spawn_participant(app, def, pos);
     let rotation = Quat::from_rotation_y(yaw);
     let hull = Collider::convex_hull(
-        [-1.0f32, 1.0]
+        &[-1.0f32, 1.0]
             .into_iter()
             .flat_map(|sx| {
                 [-1.0f32, 1.0].into_iter().flat_map(move |sz| {
@@ -448,7 +448,7 @@ fn spawn_bodied(
                         .map(move |y| Vec3::new(sx * half.0 + shift.0, y, sz * half.1 + shift.1))
                 })
             })
-            .collect(),
+            .collect::<Vec<Vec3>>(),
     )
     .unwrap();
     app.world_mut()

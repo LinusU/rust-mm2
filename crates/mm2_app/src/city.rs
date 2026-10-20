@@ -2559,7 +2559,7 @@ impl PropCollision {
             // volume. Their trimesh mass properties can produce NaN inertia
             // when a dormant banger becomes dynamic. Like debris, intact
             // movable props need a closed convex collision volume.
-            return Collider::convex_hull(self.positions);
+            return Collider::convex_hull(&self.positions);
         }
         Some(Collider::trimesh(self.positions, self.tris))
     }
@@ -2572,7 +2572,7 @@ impl PropCollision {
         if self.positions.is_empty() || self.tris.is_empty() {
             return None;
         }
-        Collider::convex_hull(self.positions.clone())
+        Collider::convex_hull(&self.positions)
             .or_else(|| Some(Collider::trimesh(self.positions, self.tris)))
     }
 }

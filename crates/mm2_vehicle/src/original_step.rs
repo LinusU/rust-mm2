@@ -107,8 +107,8 @@ pub(crate) fn step(
     world: &StepWorld,
 ) {
     let dt = world.dt;
-    let pos = forces.position().0;
-    let rot = forces.rotation().0;
+    let pos = forces.position();
+    let rot = forces.rotation();
     let linvel = forces.linear_velocity();
     let angvel = forces.angular_velocity();
     let right = rot * Vec3::X;
@@ -709,9 +709,9 @@ pub(crate) fn integrate(
             continue;
         };
         let mass = cfg.mass.max(1e-3);
-        os.step_start_position = forces.position().0;
-        os.step_start_rotation = forces.rotation().0;
-        let rotation = Mat3::from_quat(forces.rotation().0);
+        os.step_start_position = forces.position();
+        os.step_start_rotation = forces.rotation();
+        let rotation = Mat3::from_quat(forces.rotation());
         let inertia = rotation
             * Mat3::from_diagonal(Vec3::from(cfg.inertia.unwrap_or([mass; 3])))
             * rotation.transpose();

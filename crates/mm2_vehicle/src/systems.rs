@@ -111,8 +111,8 @@ pub fn vehicle_simulation(
         &mut vehicles
     {
         let cfg = &vehicle.config;
-        let pos = forces.position().0;
-        let rot = forces.rotation().0;
+        let pos = forces.position();
+        let rot = forces.rotation();
         let linvel = forces.linear_velocity();
         let angvel = forces.angular_velocity();
         if let Some(mut pre_step) = pre_step {

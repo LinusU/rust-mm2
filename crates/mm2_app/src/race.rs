@@ -572,7 +572,7 @@ pub fn watch_countdown_hold(
 /// authored bound: the bound's local box about the body origin, so a
 /// model origin off the bound's centre is carried in the offset.
 fn car_footprint(rotation: Quat, bound: &Collider) -> CarFootprint {
-    let aabb = bound.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let aabb = bound.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
     let (min, max) = (aabb.min, aabb.max);
     let ground = |axis: Vec3| (rotation * axis).xz().normalize_or_zero();
     CarFootprint {
