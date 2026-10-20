@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use avian3d::prelude::{
-    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation, SpatialQuery,
+    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation, Sensor, SpatialQuery,
     SpatialQueryFilter,
 };
 use bevy::asset::RenderAssetUsages;
@@ -391,8 +391,11 @@ pub fn spawn_pedestrian(
     });
     if let Some(collider) = &shape.collider {
         // The walker's body (F19-B.8b): a kinematic capsule on the
-        // pedestrian layer, so a car that catches it is blocked instead
-        // of driving through the figure (DSN-89's designed departure).
+        // pedestrian layer that a car overlaps without being pushed
+        // back. It is a `Sensor` (#1712): a solid kinematic body is an
+        // immovable wall to the solver, which stopped or bounced the
+        // player's car at any speed. The overlap is still detected, so
+        // the pair exists, but no impulse reaches the car.
         // The authored walk/dive still writes `Transform` in `Update`;
         // Avian's transform→position sync carries this body along with
         // it one physics step later (the velocity stays zero), so the
@@ -401,6 +404,7 @@ pub fn spawn_pedestrian(
         commands.entity(root).insert((
             RigidBody::Kinematic,
             collider.clone(),
+            Sensor,
             GameLayer::pedestrian(),
             Position(transform.translation),
             Rotation(transform.rotation),

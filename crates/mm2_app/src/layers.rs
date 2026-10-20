@@ -20,7 +20,8 @@
 //! Vehicles, bangers and traffic stay on the default layer, so the
 //! player still collides with the train and the ground, ambient traffic
 //! still strikes parked cars, a mover still shoves a dynamic prop, and a
-//! car is now blocked by a walker it catches (F19-B.8b). Spatial queries
+//! car overlaps a walker it catches without being pushed by it
+//! (F19-B.8b; the body is a sensor since #1712). Spatial queries
 //! default to every layer, so a query that must not see a walker says so
 //! with [`GameLayer::probe_mask`]: wheel rays and the original step's
 //! probes (via `VehicleProbeLayers`), the chase camera and the recovery

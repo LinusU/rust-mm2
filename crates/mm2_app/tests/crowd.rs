@@ -572,13 +572,19 @@ struct Approach {
     /// never moved by the car.
     body_lag: f32,
     dives: u64,
+    /// Slowest forward speed the car had once it was within 1 m of the
+    /// walker's line, and its worst backward speed (negative = bounce).
+    min_forward: f32,
+    max_back: f32,
+    /// Forward speed at the end of the run.
+    end_speed: f32,
 }
 
 /// Drive a real dynamic car straight at the first walker along its
-/// sidewalk line — from 6 m back at 15 m/s, the same shape as the
+/// sidewalk line — from 6 m back at `speed`, the same shape as the
 /// existing hand-stepped car tests — for 5 s and report the closest
 /// approach and the walker's response.
-fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
+fn drive_at_first_walker_at(dir: &Path, seed: u64, speed: f32) -> Approach {
     let mut app = physics_app(dir, seed, 0.1);
     run(&mut app, 3);
     let walker = first_walker(&mut app);
@@ -586,7 +592,7 @@ fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
     let car = spawn_physics_car(
         &mut app,
         Vec3::new(start.x, 0.3, start.z - 6.0),
-        Vec3::new(0.0, 0.0, 15.0),
+        Vec3::new(0.0, 0.0, speed),
     );
     let mut r = Approach {
         min_gap: f32::INFINITY,
@@ -597,6 +603,9 @@ fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
         reacted: false,
         body_lag: 0.0,
         dives: 0,
+        min_forward: f32::INFINITY,
+        max_back: 0.0,
+        end_speed: 0.0,
     };
     for _ in 0..300 {
         app.update();
@@ -614,6 +623,12 @@ fn drive_at_first_walker(dir: &Path, seed: u64) -> Approach {
         r.grounded &= now.y.abs() < 0.1;
         r.finite &= now.is_finite() && car_pos.is_finite();
         r.reacted |= phase(&app, walker) != Phase::Walking;
+        let vz = app.world().entity(car).get::<LinearVelocity>().unwrap().z;
+        r.end_speed = vz;
+        if (car_pos.z - now.z).abs() < 1.0 {
+            r.min_forward = r.min_forward.min(vz);
+        }
+        r.max_back = r.max_back.max(-vz);
     }
     let crowd = app.world().resource::<PedCrowd>();
     r.dives = crowd.dives;
@@ -1096,63 +1111,57 @@ fn two_cars_closing_on_one_walker_from_both_ends_still_let_it_dive_and_walk_back
     assert_eq!(actors(&mut app), found.len());
 }
 
-/// F19-B.8b: the retail narrow phase is live — a car that catches a
-/// walker contacts its body capsule instead of driving through the
-/// figure, while the walker's authored avoidance still runs. The
-/// documented deterministic scenario: seed 7, density 0.1, the
-/// stunted-dive archetype of [`crate::pedestrian::CONTACT_CSV`], and a
-/// real dynamic default car released 6 m behind the first walker at
-/// 15 m/s (the same shape as the hand-stepped car tests above). The car
-/// is stopped at the body; with the body-less figure the identical
-/// release drives straight through, which is what proves the block is
-/// the collider and not the reaction.
+/// F19-B.8b / #1712: a car that catches a walker overlaps its body
+/// capsule but is not stopped or bounced by it (the owner's play-test:
+/// hitting a walker should disrupt the car like a parking meter), while
+/// the walker's authored avoidance still runs. The documented
+/// deterministic scenario: seed 7, density 0.1, the stunted-dive
+/// archetype of [`crate::pedestrian::CONTACT_CSV`], and a real dynamic
+/// default car released 6 m behind the first walker at a range of
+/// speeds. The body-less figure is the baseline: the car must keep
+/// (nearly) the speed it keeps without any body, and never be thrown
+/// backwards.
 #[test]
-fn a_car_catching_a_walker_contacts_its_body_and_its_authored_avoidance_still_runs() {
+fn a_car_catching_a_walker_is_neither_stopped_nor_bounced_and_its_avoidance_still_runs() {
     let solid = install_solid(CONTACT_CSV);
-    let blocked = drive_at_first_walker(solid.path(), 7);
     let flat = install_flat(CONTACT_CSV);
-    let through = drive_at_first_walker(flat.path(), 7);
-
-    assert!(
-        blocked.finite && blocked.grounded,
-        "no run-over: {blocked:?}"
-    );
-    assert!(
-        blocked.reacted && blocked.dives >= 1,
-        "the walker's authored avoidance ran: {blocked:?}"
-    );
-    assert!(
-        blocked.body_lag < 0.5,
-        "the body rides the authored transform instead of stranding at spawn \
-         (a kinematic body is one physics step behind it, ~0.13 m at this \
-         fixture's walk speed): {blocked:?}"
-    );
-    assert!(through.reacted, "the contrast arm reacts too: {through:?}");
-    assert!(
-        blocked.lateral < 1.0,
-        "the walker stays within its authored dive envelope: {blocked:?}"
-    );
-    // The car's centre comes to rest one chassis (2.2 m) and one torso
-    // radius (0.25 m) short of the walker — the contact surface — not
-    // through it.
-    assert!(
-        (2.0..3.0).contains(&blocked.min_gap),
-        "the car stopped at the walker's body: {blocked:?}"
-    );
-    assert!(
-        blocked.car_progress < 0.0,
-        "the body kept the car behind the walker's line: {blocked:?}"
-    );
-    // The identical release through a body-less figure interpenetrates
-    // and drives on, so the block is the collider, not the reaction.
-    assert!(
-        through.min_gap < 0.5,
-        "without a body the same release passes through: {through:?}"
-    );
-    assert!(
-        through.car_progress > 10.0,
-        "and the car keeps its speed: {through:?}"
-    );
+    for speed in [5.0_f32, 10.0, 15.0, 25.0] {
+        let hit = drive_at_first_walker_at(solid.path(), 7, speed);
+        let baseline = drive_at_first_walker_at(flat.path(), 7, speed);
+        assert!(
+            hit.finite && hit.grounded,
+            "no run-over at {speed}: {hit:?}"
+        );
+        assert!(
+            hit.reacted && hit.dives >= 1,
+            "the walker's authored avoidance ran at {speed}: {hit:?}"
+        );
+        assert!(
+            hit.body_lag < 0.5,
+            "the body rides the authored transform instead of stranding at spawn \
+             (a kinematic body is one physics step behind it) at {speed}: {hit:?}"
+        );
+        assert!(
+            hit.lateral < 1.0,
+            "the walker stays within its authored dive envelope at {speed}: {hit:?}"
+        );
+        assert!(
+            (hit.car_progress - baseline.car_progress).abs() < 0.5,
+            "the car goes as far as it does without a body at {speed}: {hit:?} vs {baseline:?}"
+        );
+        assert!(
+            hit.max_back < 0.1,
+            "no bounce back at {speed}: {hit:?} vs {baseline:?}"
+        );
+        assert!(
+            hit.min_forward >= baseline.min_forward * 0.9,
+            "no hard stop at {speed}: {hit:?} vs {baseline:?}"
+        );
+        assert!(
+            hit.end_speed >= baseline.end_speed - 0.1,
+            "the car keeps its speed at {speed}: {hit:?} vs {baseline:?}"
+        );
+    }
 }
 
 /// F19-B.5: the crowd is cosmetic, so a `Remote` client fields it too.

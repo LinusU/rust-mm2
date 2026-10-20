@@ -490,6 +490,16 @@ without it. The car-side response field `+0x153c` (2.0 vs 1.0,
 `0x55b154`) is not remapped — vehicle feel is owner-owned — and is
 recorded here rather than implemented.
 
+**Superseded by #1712 (2026-10-20, owner play-test):** a solid kinematic
+body is an immovable wall to the solver, so a walker stopped or bounced
+the player's car at any speed. The body is now a `Sensor`: the overlap is
+detected but no impulse reaches the car, so a hit disrupts it no more than
+driving through a body-less figure (`crowd.rs`
+`a_car_catching_a_walker_is_neither_stopped_nor_bounced_...`, 5–25 m/s).
+This is the owner's design preference, not retail evidence: the retail
+response (`+0x153c`) stays unobserved (#1301). The "blocked at the body"
+figures above describe the F19-B.8b behaviour that #1712 replaced.
+
 Conclusion: no walker-side reaction to a contact is evidenced, but the
 car-side broad phase does not exclude walkers and the walker's narrow-phase
 bounds guard resolves non-null (above), so retail cars do collide with
