@@ -505,3 +505,56 @@ checks are skipped when `SessionEpoch` / `ResetEpoch` are absent. Wiring
 pool, traffic recycle-in-place, if any exist) into the app is NETPLAY-04's
 correction path. The city is loaded as one unit, so there is no runtime
 chunk streaming to account for. Tests: `crates/mm2_vehicle/tests/lifetime.rs`.
+
+## State-copy cost in a loaded world (NETPLAY-03F, #1783)
+
+Harness: `crates/mm2_vehicle/tests/profile.rs`. Run
+`cargo test -p mm2_vehicle --test profile -- --ignored --nocapture` (dev
+profile: workspace crates at opt-level 1, dependencies including Avian at 3;
+Apple Silicon macOS, one run, machine otherwise idle). The always-on test in
+the same file runs the scene small and asserts the ring holds exactly
+`MAX_HISTORY` captures and a 60-tick replay from it completes unrefused.
+A counting global allocator measures the capture's real heap bytes.
+
+**Evidence level: synthetic integration.** The world is not the retail city:
+it has 6000 static building colliders (a city-sized broad phase), 8 cars
+(two models), 4 jointed trailers (12 vehicles captured), 200 dynamic props
+(172 asleep at the measured instant, the rest woken by the cars), a wall,
+and 228 touching contact pairs. Cars drive down a street at 0.7-1.0
+throttle with small steering. A retail-city run (real collider counts and
+mesh complexity, bot/traffic/prop systems) was **not** done: `mm2_vehicle`
+cannot load a city and the replay entry point is not wired into `mm2_app`
+until NETPLAY-04. It remains open as the original-content level.
+
+| Operation | mean | p99 | max |
+|---|---|---|---|
+| Ordinary tick (`app.update()`, physics only) | 0.54 ms | 0.70 ms | 0.72 ms |
+| `capture_world` (every tick, 12 vehicles + 200 props + 228 pairs) | 0.056 ms | 0.079 ms | 0.097 ms |
+| `capture_authoritative` (wire snapshot, host) | 0.036 ms | 0.048 ms | 0.077 ms |
+| Restore + 1 replayed tick | 0.84-0.87 ms | 0.98 ms | 0.98 ms |
+| Replay 6 ticks (100 ms) | 3.6 ms | | 3.6 ms |
+| Replay 20 ticks | 11.1 ms | | 11.1 ms |
+| Replay 60 ticks (1 s) | 31.0 ms | | 31.1 ms |
+| Replay 120 ticks (`MAX_REPLAY_STEPS`, 2 s) | 56.8 ms | | 57.6 ms |
+
+Replay costs about 0.47-0.60 ms per tick (the live tick cost) plus a
+~0.3 ms restore, and is linear in depth. At 60 Hz the frame budget is
+16.7 ms: a correction of up to ~25 ticks fits in one frame's budget on this
+machine; the 2 s worst case (57 ms) is three-plus frames and should be spread
+or capped by NETPLAY-04, not run unconditionally.
+
+**Memory.** One capture is 144,584 B in this world (heap bytes, measured),
+so a full ring of 121 captures (2 s, the stress depth) is 17.1 MiB and a
+normal depth of 20 ticks is 2.8 MiB. Eight human cars with trailers is the
+state-copy worst case the task names; the capture grows with props and
+touching pairs, not with the number of static colliders (none are copied).
+
+**Decision.** Copying every dynamic body and touching contact pair each tick
+costs 0.056 ms, about a tenth of the physics tick, and is viable as it
+stands: no change-aware or shared history is needed on this evidence, so the
+whole-world capture per tick is *with* a demonstrated budget. No blocking
+children were filed. Not measured: the retail city (above), more than 200
+props or a crowd of bodies in contact, other platforms and release builds,
+and the cost of the client's own non-physics replay-side work (NETPLAY-04).
+The "normal and stress history depths" are taken as 20 and 120 ticks;
+NETPLAY-09 owns the final choice and can re-run this harness at its values.
