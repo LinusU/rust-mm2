@@ -487,6 +487,25 @@ struct Cli {
     #[arg(long, requires = "headless")]
     paced: bool,
 
+    /// Drive a reproducible input program (`accel`, `slalom`) through the
+    /// production input path (NETPLAY-01 evidence driver).
+    #[arg(long, value_name = "route", requires = "headless", value_parser = mm2_app::netprobe::Route::parse)]
+    net_route: Option<mm2_app::netprobe::Route>,
+
+    /// Write the player car's per-update trajectory (JSONL) here.
+    #[arg(long, value_name = "path", requires = "headless")]
+    net_trace: Option<std::path::PathBuf>,
+
+    /// Stall this whole process `MS` ms after every `EVERY`-th Playing
+    /// update (bounded perturbation for the continuity harness).
+    #[arg(long, value_name = "EVERY:MS", requires = "headless", value_parser = mm2_app::netprobe::Stall::parse)]
+    net_stall: Option<mm2_app::netprobe::Stall>,
+
+    /// Inject a deliberate defect (`kicks`, `yaw`) into the own-seat
+    /// correction path, to prove the continuity checker catches it.
+    #[arg(long, value_name = "fault", value_parser = mm2_app::netprobe::Fault::parse)]
+    net_fault: Option<mm2_app::netprobe::Fault>,
+
     /// Scripted course-follower: the player vehicle steers at the live
     /// race objective (the RACE-6 target / next ordered gate) instead of
     /// waiting for keyboard/gamepad input. An evidence driver for
@@ -1474,7 +1493,12 @@ fn main() {
     // joined lobby parks there too: `headless_lobby` waits on the wire
     // — the host's `Start` is what builds a world.
     if cli.headless {
-        let driver = if cli.bot {
+        if let Some(fault) = cli.net_fault {
+            mm2_app::netprobe::arm_fault(fault);
+        }
+        let driver = if let Some(route) = cli.net_route {
+            smoke::Driver::Route(route)
+        } else if cli.bot {
             smoke::Driver::Scripted
         } else if cli.parked {
             smoke::Driver::Parked
@@ -1500,6 +1524,13 @@ fn main() {
                 deadline: cli.deadline.map(Duration::from_secs),
             },
             paced: cli.paced,
+            probe: smoke::NetProbe {
+                trace: cli
+                    .net_trace
+                    .clone()
+                    .map(|p| &*Box::leak(p.into_boxed_path())),
+                stall: cli.net_stall,
+            },
         };
         let car = SelectedCar {
             def: selected,

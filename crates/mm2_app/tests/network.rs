@@ -4,6 +4,7 @@
 mod support;
 
 mod net_app;
+mod net_baseline;
 mod net_check;
 mod net_drive;
 mod net_edge;

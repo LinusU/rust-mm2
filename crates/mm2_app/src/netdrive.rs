@@ -1093,6 +1093,8 @@ pub struct NetDriveReport {
     pub own_settles: u64,
     /// Own-seat moving-drift corrections applied ([`DriftWatch`]).
     pub own_drifts: u64,
+    /// Highest `Snap` tick applied so far (continuity trace).
+    pub last_snap_tick: Option<u64>,
     /// Driver reset requests this client sent on `R`/pad — the
     /// predicted-session form of the local reset key (F25-B).
     pub requests_sent: u64,
@@ -3608,6 +3610,20 @@ fn apply_snap_frame(
                     // the process tests print them when a leg fails, so a
                     // host copy that parted from the prediction shows
                     // where and by how much.
+                    crate::netprobe::note_correction(
+                        if authority_reset {
+                            "reset"
+                        } else if settled {
+                            "settle"
+                        } else if drift == Drift::Snap {
+                            "snap"
+                        } else {
+                            "pull"
+                        },
+                        snap.tick,
+                        pos.0,
+                        to_pos,
+                    );
                     println!(
                         "event=own_correction kind={} tick={} local={:.1},{:.1},{:.1} wire={:.1},{:.1},{:.1} gap={:.1}",
                         if authority_reset {
@@ -3628,6 +3644,13 @@ fn apply_snap_frame(
                         to_pos.z,
                         pos.0.distance(to_pos),
                     );
+                }
+                // `--net-fault`: a deliberate defect through this same
+                // correction path, to prove the continuity checker.
+                if let Some((offset, turn)) = crate::netprobe::own_fault(rot.0 * Vec3::X) {
+                    pos.0 += offset;
+                    rot.0 = turn * rot.0;
+                    crate::netprobe::note_correction("fault", snap.tick, pos.0 - offset, pos.0);
                 }
                 if let Drift::Pull(f) = drift {
                     // Blend position and heading only: velocity stays the
@@ -3813,6 +3836,7 @@ fn apply_snap_frame(
         }
     }
     report.snaps_applied += 1;
+    report.last_snap_tick = Some(snap.tick);
 }
 
 /// How long a local contact stays eligible to suppress the wire row

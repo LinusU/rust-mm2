@@ -34,13 +34,13 @@ const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 /// (no further `event=left`), and a slow link or loaded runner makes
 /// the clients take longer while the host keeps counting frames, so the
 /// cap must sit well past any bounded wait rather than race it.
-const HOST_FRAME_CEILING: u32 = 500_000;
+pub(crate) const HOST_FRAME_CEILING: u32 = 500_000;
 
 /// The in-app host's flags: a dev-world cruise lobby, headless, playing
 /// seat 0 once `start` fires. `frames` must outlast every client's
 /// budget — a host that exits first drops the sockets and the clients'
 /// records read `lost the host`, not a verdict on their own driving.
-fn host_args(install: &std::path::Path, frames: u32) -> Vec<String> {
+pub(crate) fn host_args(install: &std::path::Path, frames: u32) -> Vec<String> {
     vec![
         "--mm2-path".into(),
         install.to_str().unwrap().into(),
@@ -60,7 +60,7 @@ fn host_args(install: &std::path::Path, frames: u32) -> Vec<String> {
 /// offers the dev car, and drives whatever session the host starts.
 /// `frames` bounds the whole run — the parked `Menu` wait burns ~4
 /// ms/frame of it while the wire decides.
-fn join_args(
+pub(crate) fn join_args(
     install: &std::path::Path,
     addr: SocketAddr,
     driver: &str,
@@ -83,7 +83,7 @@ fn join_args(
 /// The `mm2 --host` `listening=` record — tracing log lines share
 /// stdout, so the record is scanned for rather than assumed first (the
 /// dedicated `mm2-host` prints no logs; the app does).
-fn listening_addr(host: &Proc) -> SocketAddr {
+pub(crate) fn listening_addr(host: &Proc) -> SocketAddr {
     host.until("listening=")
         .split_whitespace()
         .find_map(|t| t.strip_prefix("listening="))
@@ -92,7 +92,7 @@ fn listening_addr(host: &Proc) -> SocketAddr {
 }
 
 /// One `smoke=` line's `key=value` field.
-fn field<'a>(line: &'a str, key: &str) -> &'a str {
+pub(crate) fn field<'a>(line: &'a str, key: &str) -> &'a str {
     line.split_whitespace()
         .find_map(|t| t.strip_prefix(&format!("{key}=")))
         .unwrap_or_else(|| panic!("no {key}= field in {line}"))
@@ -304,7 +304,7 @@ fn until_live(client: &Proc) -> String {
 
 /// Wait until both `mm2 --join` clients have readied on the host's
 /// record stream (`event=ready id=<n> ready=true`), then start.
-fn start_when_ready(host: &mut Proc, clients: u32) {
+pub(crate) fn start_when_ready(host: &mut Proc, clients: u32) {
     for _ in 0..clients {
         host.until("ready=true");
     }

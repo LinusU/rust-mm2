@@ -148,6 +148,9 @@ pub enum Driver {
     /// path — the driven car-to-car collision the straight `Hold`
     /// driver cannot make on a side-by-side grid.
     Ram,
+    /// A reproducible input program (`--net-route`, NETPLAY-01) through
+    /// the production `VehicleInput` path.
+    Route(crate::netprobe::Route),
 }
 
 impl Driver {
@@ -159,6 +162,7 @@ impl Driver {
             Self::Parked => "parked",
             Self::Sequence => "sequence",
             Self::Ram => "ram",
+            Self::Route(_) => "route",
         }
     }
 }
@@ -258,6 +262,18 @@ pub struct RunBudget {
     /// road-graph `--bot` on a client seat) then ends the match in two
     /// places. Paced, the processes share a clock as live play does.
     pub paced: bool,
+    /// Trajectory trace and stall injection (NETPLAY-01).
+    pub probe: NetProbe,
+}
+
+/// The `--net-trace` / `--net-stall` settings of a headless run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetProbe {
+    /// Write one JSONL line per completed update here (a path leaked
+    /// once at startup so the budget stays `Copy`).
+    pub trace: Option<&'static std::path::Path>,
+    /// Stall the whole process on a schedule while `Playing`.
+    pub stall: Option<crate::netprobe::Stall>,
 }
 
 impl RunBudget {
@@ -267,7 +283,53 @@ impl RunBudget {
             frames,
             stop: StopWhen::default(),
             paced: false,
+            probe: NetProbe::default(),
         }
+    }
+}
+
+/// Append the player car's state after a completed update (and any
+/// correction events the update logged) to the `--net-trace` file.
+fn write_trace(
+    app: &mut App,
+    out: &mut std::io::BufWriter<std::fs::File>,
+    frame: u32,
+    start: std::time::Instant,
+) {
+    use std::io::Write;
+    let world = app.world_mut();
+    let tick = world.resource::<Session>().tick();
+    let epoch = world
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .map_or(0, |r| r.resets);
+    let snap_tick = world
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .and_then(|r| r.last_snap_tick);
+    let mut q =
+        world.query_filtered::<(&Position, &Rotation, &LinearVelocity), With<PlayerVehicle>>();
+    let sample = q
+        .iter(world)
+        .next()
+        .map(|(p, r, v)| crate::netprobe::Sample {
+            frame: u64::from(frame),
+            tick,
+            wall_ms: start.elapsed().as_secs_f64() * 1e3,
+            pos: [p.0.x, p.0.y, p.0.z].map(f64::from),
+            vel: [v.0.x, v.0.y, v.0.z].map(f64::from),
+            yaw: f64::from(r.0.to_euler(EulerRot::YXZ).0),
+            epoch,
+            snap_tick,
+        });
+    let mut lines: Vec<String> = crate::netprobe::take_notes()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    lines.extend(sample.map(|s| s.to_json().to_string()));
+    for l in lines {
+        let _ = writeln!(out, "{l}");
+    }
+    if frame.is_multiple_of(120) {
+        let _ = out.flush();
     }
 }
 
@@ -1384,6 +1446,15 @@ fn run_headless(
     let mut frozen_seats: Option<String> = None;
     let mut ran = 0u32;
     let mut pace = budget.paced.then(PaceClock::default);
+    let mut route_tick = 0u64;
+    let mut stall_steps = 0u64;
+    let run_start = std::time::Instant::now();
+    let mut trace = budget.probe.trace.as_ref().map(|path| {
+        std::io::BufWriter::new(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| panic!("--net-trace {}: {e}", path.display())),
+        )
+    });
     for f in 0..frames {
         // The player entity is re-resolved every frame: a mid-run
         // session restart (`RestartEvent` disabled outcome, `--restart`)
@@ -1419,8 +1490,40 @@ fn run_headless(
                 };
             }
         }
+        if let Driver::Route(route) = driver {
+            let driving = {
+                let session = app.world().resource::<Session>();
+                let locked = app
+                    .world()
+                    .get_resource::<RaceState>()
+                    .is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
+                session.is_playing() && !locked
+            };
+            if driving {
+                route_tick += 1;
+            }
+            if let Some(mut input) = player.and_then(|e| app.world_mut().get_mut::<VehicleInput>(e))
+            {
+                *input = if driving {
+                    route.input(route_tick)
+                } else {
+                    VehicleInput::default()
+                };
+            }
+        }
         let t0 = std::time::Instant::now();
         app.update();
+        if let Some(writer) = trace.as_mut() {
+            write_trace(&mut app, writer, f, run_start);
+        }
+        if let Some(stall) = budget.probe.stall
+            && app.world().resource::<Session>().is_playing()
+        {
+            stall_steps += 1;
+            if stall_steps.is_multiple_of(u64::from(stall.every)) {
+                std::thread::sleep(Duration::from_millis(stall.ms));
+            }
+        }
         if let Some(pace) = pace.as_mut() {
             let playing = app.world().resource::<Session>().is_playing();
             pace.hold(playing);

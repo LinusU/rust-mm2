@@ -2096,6 +2096,14 @@ wire actually moved rather than an in-process mailbox's contents.
   below); still open: the stronger-shove cause itself (the kinematic copy's
   infinite mass in the predicted world) is untouched.
 
+> **Superseded design (NETPLAY-01, 2026-10-20).** The own-seat
+> `SettleWatch` and `DriftWatch` threshold policies below (rest settle,
+> >15 m pull, >20 m snap) are stopgaps that
+> [docs/netcode-redesign.md](../netcode-redesign.md) replaces with
+> historically aligned prediction and replay. Their evidence is kept as
+> history; the measured baseline of what they do to a client's car is in
+> that document.
+
 - **Moving drift (#1502, designed).** The rest-only bound left a car
   that is *moving or parked after a ram* unbounded: on retail sf seed
   1291 a carrier bot sat at the delivery marker by its own prediction
