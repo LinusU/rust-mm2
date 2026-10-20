@@ -1239,10 +1239,14 @@ pub fn load_session_world(
             psdl,
             event_race.as_ref().map(|(def, ..)| def),
             matches!(config.mode, SessionMode::CopsAndRobbers(_)),
-            event_race
-                .as_ref()
-                .map(|(_, roster, ..)| roster.entries.len())
-                .unwrap_or(0),
+            map_opponent_pool(
+                event_race
+                    .as_ref()
+                    .map(|(_, roster, ..)| roster.entries.len())
+                    .unwrap_or(0),
+                config.authority,
+                config.cnr_bots,
+            ),
             &mut assets.meshes,
             &mut assets.images,
             &mut assets.materials,
@@ -2258,5 +2262,37 @@ pub fn load_session_world(
                 .then(|| mm2_game::effective_conditions(&config, None)),
             !lesson_installed,
         );
+    }
+}
+
+/// Opponent tris the minimap binds: the authored roster, the Cops &
+/// Robbers bots, and — in a networked session — a seat for every other
+/// human the wire's roster can hold, since remote drivers join after
+/// the world loads. Unused slots stay hidden, so a departed player
+/// leaves no dot.
+pub(crate) fn map_opponent_pool(
+    roster: usize,
+    authority: mm2_game::SessionAuthority,
+    cnr_bots: u8,
+) -> usize {
+    let humans = if authority == mm2_game::SessionAuthority::Local {
+        0
+    } else {
+        usize::from(mm2_net::MAX_PLAYERS) - 1
+    };
+    roster + usize::from(cnr_bots) + humans
+}
+
+#[cfg(test)]
+mod map_pool_tests {
+    use super::map_opponent_pool;
+    use mm2_game::SessionAuthority::{Host, Local, Remote};
+
+    #[test]
+    fn networked_sessions_reserve_a_slot_per_other_human() {
+        assert_eq!(map_opponent_pool(0, Local, 0), 0);
+        assert_eq!(map_opponent_pool(3, Local, 2), 5);
+        assert_eq!(map_opponent_pool(0, Host, 0), 7);
+        assert_eq!(map_opponent_pool(0, Remote, 0), 7);
     }
 }
