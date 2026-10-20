@@ -1,7 +1,8 @@
 # Netplay fixed-tick timeline contract (NETPLAY-02)
 
 Status: contract defined by NETPLAY-02A (#1773), wire codec in
-`mm2_net::proto` at **protocol v29**. The host buffer (02B), client capture
+`mm2_net::proto` at **protocol v30** (v29 added the command window and
+`input_ack`; v30 adds `SnapEntry.input_depth`). The host buffer (02B), client capture
 (02C), lead controller (02D) and impairment matrix (02E) implement against
 this page. Where a rule here is a *design choice* rather than a measurement
 of the retail game, it says so; nothing below is an original-game rule.
@@ -142,9 +143,51 @@ gap_finalized, occupancy/max_occupancy, last/max command age.
   the replay/rebase work (NETPLAY-04, 02D); until then the ring is bounded by
   `HISTORY_CAP`.
 
+## Lead controller (02D, `mm2_app::netlead`)
+
+Design choices, not original rules; deterministic (wall nanoseconds are passed
+in), so the tests drive it on a synthetic clock.
+
+- **Signal: host buffer depth.** The host reports each seat's unconsumed
+  command count in every snapshot entry (`SnapEntry.input_depth`, v30; `0`
+  for the host seat and bots). `LeadController` smooths it (EWMA, 1/4) and
+  steers it to `target_depth` = 2 ticks, with `min_depth` 1 / `max_depth` 6
+  as emergency bounds far below `BUFFER_CAP` (32). Depth does not depend on
+  path symmetry; `RTT / 2` (minimum filter + 4 mean deviations + explicit
+  measurement uncertainty) only seeds `initial_lead_ticks` before the first
+  report.
+- **Actuator: whole ticks over wall time.** `Pacer::advance` turns a frame's
+  wall time into a whole number of 1/60 s ticks; the tick length is never
+  retuned. The controller's rate (ppm of wall time) is bounded to +-4% and
+  slews at most 4%/s. A dead band (3/4 tick) around the target lets the rate
+  decay to zero, so +-100 ppm drift does not hunt; outside it the rate is
+  proportional to the error, and in an emergency it is at full authority.
+- **Stale ack.** No ack advance for 500 ms stops the rate at zero (speeding
+  up into a dead link only builds a backlog); the filter is reseeded from
+  the first report after the ack moves.
+- **Catch-up and rebase.** After a stall the pacer releases at most 4 ticks
+  per call and keeps at most 8 ticks of backlog; the rest of the wall time is
+  dropped and reported as `Rebase::Stall`. A frame of >= 1 s (sleep/resume)
+  drops everything (`Rebase::Sleep`). Neither skips a seq (seq is per
+  simulated tick), but `LeadController::rebase` clears the depth filter and
+  the `SeqMap` (seq -> server tick = seq + base, base = `server_tick - ack`
+  re-derived from every ack), so the pairing is never stale.
+- **History size.** `history_ticks` = confirmation age + lead + snapshot
+  interval + jitter margin + 1 must fit `HISTORY_CAP` (256).
+- Tests (`netlead::tests`): a 1 ms loopback model with a FIFO uplink and a
+  one-command-per-tick host covers startup, delay 50 -> 150 -> 50 ms,
+  asymmetric 100/5 ms paths, +-100 ppm host and client drift, 100/150/250 ms
+  stalls and a 30 s sleep, asserting depth bounds, settling time, zero host
+  overflow and bounded underflow counts.
+- **Not yet wired.** The controller and pacer are library pieces; driving
+  the app's fixed-tick schedule from them, and feeding `observe` from
+  snapshots and `CommandHistory::ack`, belongs with the replay/rebase work
+  (NETPLAY-04), which owns reconciliation. The `CommandStream` capture is
+  unchanged.
+
 ## Not in this slice
 
-The prediction-lead controller and the impairment matrix are 02D and 02E.
+The impairment matrix is 02E.
 With the selector on, the host's `apply_remote_inputs` stands down and
 `consume_seat_commands` owns remote controls; the stalled-seat watch counts a
 window as a sign of life.
