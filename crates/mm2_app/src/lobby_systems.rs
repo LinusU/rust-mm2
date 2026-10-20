@@ -35,6 +35,8 @@ struct JoinedReconcile;
 /// launch and for the menu (whose *Join lobby* row opens a link at run
 /// time); every one only runs while a [`net::LobbyLink`] exists.
 pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + Clone) {
+    // NETPLAY-02C: the fixed-tick command stream (behind the selector).
+    crate::netcmd::add_systems(app);
     app.add_systems(
         Update,
         (

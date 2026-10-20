@@ -115,10 +115,36 @@ gap_finalized, occupancy/max_occupancy, last/max command age.
 | Disconnect | Seat buffer discarded; simulation continues on the documented fallback until the seat is removed. |
 | Flood | A per-seat token bucket charged by window length: `COMMAND_RATE_HZ` 1920/s (2x a full window every tick), `COMMAND_BURST` 128. An unaffordable window is dropped whole and counted; other seats are untouched. |
 
+## Client capture and send (02C, `mm2_app::netcmd`)
+
+- `capture_and_send` runs in `FixedUpdate` after `input::apply_player_input`
+  and captures exactly one `TickCommand` per fixed tick from the settled
+  `VehicleInput` (quantized by `encode_input`, the same quantizer the legacy
+  path and the host decode use). Render rate cannot change which commands
+  exist. While `vehicle_input` holds the car neutral (menu, focus loss,
+  countdown lock) the command is neutral; ticks are never skipped.
+- `CommandHistory` keeps `HISTORY_CAP` (256) records `(seq, predicted tick,
+  epoch, command)`, trimmed by `ack(seq)` (stale acks ignored) and reset on a
+  new wire generation. Overflow evicts the oldest and is counted.
+- Every `SEND_INTERVAL_TICKS` (2) ticks the newest up-to-16 commands sharing
+  the newest reset epoch go out as one `InputWindow`.
+- **Nonblocking contract:** systems never touch the socket or the writer
+  mutex. They `try_send` into a depth-`HANDOFF_DEPTH` channel; a worker thread
+  owns the blocking write. A full queue drops the window (counted) and a
+  worker that fell behind sends only the newest queued window (counted as
+  coalesced). Tested with a sink parked mid-write.
+- Counters on `CommandStream`: `generated_slots`, `queued_slots`,
+  `transmitted_slots` (written by the worker), `handoff_dropped`,
+  `coalesced`, `send_errors`.
+- The legacy `Message::Input` stream still runs beside it; with the selector
+  on the host ignores it for controls (02B). Acks (`CommandHistory::ack`) are
+  not yet fed from `SnapEntry::input_ack` on the client — that belongs to
+  the replay/rebase work (NETPLAY-04, 02D); until then the ring is bounded by
+  `HISTORY_CAP`.
+
 ## Not in this slice
 
-The client history/send loop, the prediction-lead controller and the
-impairment matrix are 02C..02E; until 02C no client sends `InputWindow`.
+The prediction-lead controller and the impairment matrix are 02D and 02E.
 With the selector on, the host's `apply_remote_inputs` stands down and
 `consume_seat_commands` owns remote controls; the stalled-seat watch counts a
 window as a sign of life.

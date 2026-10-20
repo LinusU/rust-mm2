@@ -50,6 +50,7 @@ pub mod nav_overlay;
 pub mod navarrow;
 pub mod navarrow3d;
 pub mod net;
+pub mod netcmd;
 pub mod netdrive;
 pub mod netplay_timeline;
 pub mod netprobe;
