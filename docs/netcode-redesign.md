@@ -511,7 +511,7 @@ chunk streaming to account for. Tests: `crates/mm2_vehicle/tests/lifetime.rs`.
 Harness: `crates/mm2_vehicle/tests/profile.rs`. Run
 `cargo test -p mm2_vehicle --test profile -- --ignored --nocapture` (dev
 profile: workspace crates at opt-level 1, dependencies including Avian at 3;
-Apple Silicon macOS, one run, machine otherwise idle). The always-on test in
+Apple Silicon macOS, one run, machine load not recorded). The always-on test in
 the same file runs the scene small and asserts the ring holds exactly
 `MAX_HISTORY` captures and a 60-tick replay from it completes unrefused.
 A counting global allocator measures the capture's real heap bytes.
@@ -543,9 +543,17 @@ Replay costs about 0.47-0.60 ms per tick (the live tick cost) plus a
 machine; the 2 s worst case (57 ms) is three-plus frames and should be spread
 or capped by NETPLAY-04, not run unconditionally.
 
-**Memory.** One capture is 144,584 B in this world (heap bytes, measured),
-so a full ring of 121 captures (2 s, the stress depth) is 17.1 MiB and a
-normal depth of 20 ticks is 2.8 MiB. Eight human cars with trailers is the
+**Load sensitivity.** The table was measured before
+rebasing onto 03E (machine load not recorded, so not claimed idle). Re-run after the rebase on the same machine at load average
+~13 (other agents building): ordinary tick 1.4 ms, `capture_world` 0.126 ms,
+restore+1 tick 1.8 ms, replay 20 ticks 22 ms, 120 ticks 122-126 ms. Every
+figure scaled by about 2.5x together, so the ratios hold: a capture costs
+~9-10% of a tick and replay is ~tick-cost per step. Treat the absolute
+milliseconds as machine-dependent and the ratios as the finding.
+
+**Memory.** One capture is 156,264 B (144,584 B before NETPLAY-03E added its lifetime records) in this world (heap bytes, measured),
+so a full ring of 121 captures (2 s, the stress depth) is 18.0 MiB and a
+normal depth of 20 ticks is 3.0 MiB. Eight human cars with trailers is the
 state-copy worst case the task names; the capture grows with props and
 touching pairs, not with the number of static colliders (none are copied).
 
