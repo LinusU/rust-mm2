@@ -3503,6 +3503,11 @@ pub fn menu_input(
         {
             ui.push(cue);
         }
+        if let Some(ui) = target.ui_sound.as_deref_mut()
+            && let Some(dest) = crate::ui_sound::entry(cmd, &before, &snap(&shell), activatable)
+        {
+            ui.push(crate::ui_sound::UiCue::Enter(dest));
+        }
         if abandoned.is_some() {
             shell.status = abandoned;
         }

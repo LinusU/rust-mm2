@@ -22,7 +22,7 @@
 //! [`AudioBus::Effects`]: crate::settings::AudioBus::Effects
 
 use bevy::prelude::*;
-use mm2_game::Mm2Vfs;
+use mm2_game::{EventTableKind, Mm2Vfs};
 
 use crate::{
     audio::{AudioVoice, PcmAudio, VoiceKind, WaveBank},
@@ -38,6 +38,10 @@ pub const MAX_VOICES: usize = 4;
 /// Linear gain of a UI voice before the bus level (designed).
 const GAIN: f32 = 0.85;
 
+/// Linear gain of a destination sting (designed): under [`GAIN`] so the
+/// confirm that opened the screen stays the loudest part of the hit.
+const ENTER_GAIN: f32 = 0.6;
+
 /// One UI event the shell produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiCue {
@@ -47,6 +51,19 @@ pub enum UiCue {
     Confirm,
     /// A screen was left.
     Back,
+    /// A destination screen was entered going forward.
+    Enter(Destination),
+}
+
+/// A screen whose forward entry has its own retail sting. The mapping
+/// is owner-confirmed (2026-10-19); the clip identity behind each stem
+/// is by name until listened to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination {
+    /// The races hub and Crash Course lessons share one sting.
+    Races,
+    /// Select Vehicle.
+    Vehicles,
 }
 
 impl UiCue {
@@ -57,7 +74,49 @@ impl UiCue {
             Self::Move => Some("moveselector"),
             Self::Confirm => Some("selectionmade"),
             Self::Back => None,
+            Self::Enter(Destination::Races) => Some("uiraces"),
+            Self::Enter(Destination::Vehicles) => Some("uivehicles"),
         }
+    }
+
+    /// Linear gain before the bus level. A destination sting sits under
+    /// the confirm that caused it so the pair does not stack into one
+    /// loud hit.
+    fn gain(self) -> f32 {
+        match self {
+            Self::Enter(_) => ENTER_GAIN,
+            _ => GAIN,
+        }
+    }
+}
+
+/// The destination a confirmed command entered, if any. Only an
+/// activation that moved the shell forward counts: `Back`, focus moves
+/// and a paint pick that pops to the garage never do, and the garage
+/// reached from its own paints is not a re-entry. `Multiplayer` has no
+/// destination to wire (root Multiplayer is disabled; Host/Join are
+/// separate C&R screens), so it has no entry here.
+pub fn entry(
+    cmd: MenuCommand,
+    before: &NavSnapshot,
+    after: &NavSnapshot,
+    activatable: bool,
+) -> Option<Destination> {
+    if cmd != MenuCommand::Activate || !activatable || before.screen == after.screen {
+        return None;
+    }
+    match (&before.screen, &after.screen) {
+        (Screen::Paints { .. }, Screen::Garage) => None,
+        (_, Screen::Garage) => Some(Destination::Vehicles),
+        (_, Screen::EventTable { .. }) => Some(Destination::Races),
+        (
+            _,
+            Screen::EventList {
+                table: EventTableKind::CrashCourse,
+                ..
+            },
+        ) => Some(Destination::Races),
+        _ => None,
     }
 }
 
@@ -146,6 +205,8 @@ pub struct UiSoundReport {
     pub full: u64,
     /// Cues whose event has no retail clip (`Back`).
     pub unmapped: u64,
+    /// Stings cut short by a newer destination sting.
+    pub cut: u64,
     /// Stems that failed to resolve or decode.
     pub failed: u64,
 }
@@ -173,6 +234,8 @@ impl UiSound {
 pub struct UiVoice {
     /// The wave stem playing.
     pub stem: &'static str,
+    /// A destination sting, replaced by the next one.
+    pub enter: bool,
 }
 
 /// Play what the shell queued this update.
@@ -181,21 +244,32 @@ pub fn ui_sound_play(
     vfs: Res<Mm2Vfs>,
     mut ui: ResMut<UiSound>,
     mut waves: ResMut<Assets<PcmAudio>>,
-    live: Query<(), With<UiVoice>>,
+    live: Query<(Entity, &UiVoice)>,
     mut commands: Commands,
 ) {
     if ui.queue.is_empty() {
         return;
     }
     let now = time.elapsed_secs_f64();
-    let mut live = live.iter().count();
+    let mut live_count = live.iter().count();
     let ui = &mut *ui;
     for cue in std::mem::take(&mut ui.queue) {
         let Some(stem) = cue.stem() else {
             ui.report.unmapped += 1;
             continue;
         };
-        match ui.gate.admit(cue, now, live) {
+        // A newer destination sting replaces the one still sounding, so
+        // rapid navigation never stacks them.
+        if matches!(cue, UiCue::Enter(_)) {
+            for (entity, voice) in &live {
+                if voice.enter {
+                    commands.entity(entity).despawn();
+                    live_count = live_count.saturating_sub(1);
+                    ui.report.cut += 1;
+                }
+            }
+        }
+        match ui.gate.admit(cue, now, live_count) {
             Verdict::Coalesced => {
                 ui.report.coalesced += 1;
                 continue;
@@ -213,16 +287,19 @@ pub fn ui_sound_play(
                     AudioVoice {
                         kind: VoiceKind::Ui,
                     },
-                    UiVoice { stem },
+                    UiVoice {
+                        stem,
+                        enter: matches!(cue, UiCue::Enter(_)),
+                    },
                     AudioPlayer(handle),
                     PlaybackSettings {
                         mode: bevy::audio::PlaybackMode::Despawn,
-                        volume: bevy::audio::Volume::Linear(GAIN),
+                        volume: bevy::audio::Volume::Linear(cue.gain()),
                         ..default()
                     },
                 ));
                 ui.report.played += 1;
-                live += 1;
+                live_count += 1;
             }
             Err(error) => {
                 ui.report.failed += 1;

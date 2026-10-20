@@ -7189,6 +7189,168 @@ fn ui_gate_bounds_voices_and_a_missing_clip_is_reported() {
     assert_eq!(UiCue::Back.stem(), None);
 }
 
+/// Destination stings fire once per completed forward entry: table-driven
+/// over confirmed destinations and the negative cases.
+#[test]
+fn destination_entry_cues_follow_forward_confirmed_navigation_only() {
+    use menu::{MenuCommand as C, Screen};
+    use mm2_app::ui_sound::{Destination as D, NavSnapshot, UiCue, entry};
+    use mm2_game::EventTableKind as K;
+
+    let nav = |screen| NavSnapshot {
+        screen,
+        focus: 0,
+        side: false,
+    };
+    let table = || Screen::EventTable { city: "sf".into() };
+    let list = |table| Screen::EventList {
+        city: "sf".into(),
+        table,
+    };
+    let paints = || Screen::Paints {
+        car: "vpbug".into(),
+    };
+    let cases = [
+        // (name, cmd, from, to, activatable, expected)
+        (
+            "races hub",
+            C::Activate,
+            Screen::EventCity,
+            table(),
+            true,
+            Some(D::Races),
+        ),
+        (
+            "crash course",
+            C::Activate,
+            table(),
+            list(K::CrashCourse),
+            true,
+            Some(D::Races),
+        ),
+        (
+            "plain race list",
+            C::Activate,
+            table(),
+            list(K::Circuit),
+            true,
+            None,
+        ),
+        (
+            "vehicles",
+            C::Activate,
+            Screen::Root,
+            Screen::Garage,
+            true,
+            Some(D::Vehicles),
+        ),
+        (
+            "paints is not a re-entry",
+            C::Activate,
+            Screen::Garage,
+            paints(),
+            true,
+            None,
+        ),
+        (
+            "paint pick back to garage",
+            C::Activate,
+            paints(),
+            Screen::Garage,
+            true,
+            None,
+        ),
+        (
+            "back to garage",
+            C::Back,
+            paints(),
+            Screen::Garage,
+            true,
+            None,
+        ),
+        (
+            "back to hub",
+            C::Back,
+            list(K::CrashCourse),
+            table(),
+            true,
+            None,
+        ),
+        (
+            "disabled row",
+            C::Activate,
+            Screen::Root,
+            Screen::Root,
+            false,
+            None,
+        ),
+        (
+            "disabled but moved",
+            C::Activate,
+            Screen::Root,
+            Screen::Garage,
+            false,
+            None,
+        ),
+        (
+            "focus move",
+            C::Down,
+            Screen::Root,
+            Screen::Root,
+            true,
+            None,
+        ),
+    ];
+    for (name, cmd, from, to, act, want) in cases {
+        assert_eq!(entry(cmd, &nav(from), &nav(to), act), want, "{name}");
+    }
+    assert_eq!(UiCue::Enter(D::Races).stem(), Some("uiraces"));
+    assert_eq!(UiCue::Enter(D::Vehicles).stem(), Some("uivehicles"));
+}
+
+/// Entering Select Vehicle through the real shell plays one sting with the
+/// confirm; backing out and a second quick entry replace rather than stack.
+#[test]
+fn entering_select_vehicle_plays_one_sting_and_rapid_entries_replace_it() {
+    use mm2_app::audio::PcmAudio;
+    use mm2_app::ui_sound::{UiSound, UiVoice, ui_sound_play};
+
+    let tmp = install();
+    for stem in ["moveselector", "selectionmade", "uivehicles"] {
+        write(tmp.path(), &format!("aud/aud22/{stem}.22k.wav"), ui_wav());
+    }
+    let mut app = menu_app(tmp.path(), None);
+    app.init_resource::<Assets<PcmAudio>>()
+        .init_resource::<UiSound>()
+        .add_systems(Update, ui_sound_play.after(menu::menu_input));
+    app.update();
+    focus_row(&mut app, "Vehicle");
+    if shell(&app).focused_row().is_none_or(|r| r.enabled.is_err()) {
+        eprintln!("fixture has no listed vehicles: Select Vehicle entry NOT run");
+        return;
+    }
+    let base = ui_report(&app);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).screen, menu::Screen::Garage);
+    let r = ui_report(&app);
+    assert_eq!(r.played, base.played + 2, "confirm + sting: {r:?}");
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(ui_report(&app).played, r.played, "rendering is silent");
+
+    press(&mut app, KeyCode::Escape);
+    focus_row(&mut app, "Vehicle");
+    press(&mut app, KeyCode::Enter);
+    let w = app.world_mut();
+    let stings = w
+        .query::<&UiVoice>()
+        .iter(w)
+        .filter(|v| v.stem == "uivehicles")
+        .count();
+    assert!(stings <= 1, "stings must not stack: {stings}");
+}
+
 /// Original-content validation (opt-in: `MM2_RETAIL`): the two retail
 /// UI stems resolve and decode through the production bank.
 #[test]
@@ -7205,7 +7367,12 @@ fn retail_ui_stems_resolve_and_decode() {
     mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
     let mut bank = WaveBank::index(&vfs);
     let mut waves = Assets::<PcmAudio>::default();
-    for cue in [UiCue::Move, UiCue::Confirm] {
+    for cue in [
+        UiCue::Move,
+        UiCue::Confirm,
+        UiCue::Enter(mm2_app::ui_sound::Destination::Races),
+        UiCue::Enter(mm2_app::ui_sound::Destination::Vehicles),
+    ] {
         let stem = cue.stem().unwrap();
         bank.load(&vfs, &mut waves, stem)
             .unwrap_or_else(|e| panic!("{stem}: {e}"));

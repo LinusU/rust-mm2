@@ -662,6 +662,19 @@ executable):
 | focus moved (row or side entry) | `moveselector` |
 | enabled `Activate` | `selectionmade` |
 | `Back` | none — no clip is identifiable; counted `unmapped`, silent |
+| forward entry to the races hub (`EventTable`) or a Crash Course list | `uiraces` (shared sting) |
+| forward entry to Select Vehicle (`Garage`) | `uivehicles` |
+
+The destination stings follow the owner-confirmed mapping (2026-10-19:
+Races/Crash Course "wroooooom", Select Vehicle engine revving); the
+clip identity behind each stem is by name, **not yet confirmed by
+listening**. One sting per confirmed forward entry
+(`ui_sound::entry`): focus moves, disabled rows, `Back`, a paint pick
+returning to the garage and re-rendering never replay it. It plays at a
+lower gain than the confirm that caused it, and a newer sting cuts the
+one still sounding. Multiplayer (`beep-beep-crssshh`, probably
+`uimulti`) is not wired: root Multiplayer is disabled and Host/Join are
+separate C&R screens, so there is no destination to attach it to.
 
 The `ui*` stings, `switch`, `messagenote` and `*select` clips have
 unrecovered triggers and are unbound. `ui.csv` is a music cue
