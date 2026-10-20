@@ -396,6 +396,7 @@ fn known_world_positions_project_to_their_map_coordinates() {
             markers: 1,
             absent: None,
             dot_materials: Vec::new(),
+            tri_materials: Vec::new(),
             marker_y: 5.0,
         })
         .add_systems(Update, hudmap::drive_hud_map);
@@ -543,8 +544,8 @@ fn known_world_positions_project_to_their_map_coordinates() {
 /// A networked session binds every non-local participant to an opponent
 /// tri in the pool: a remote human who joins takes a free slot, one who
 /// leaves frees it (hidden — no dot left behind), and a respawn moves the
-/// dot with the car. The map draws no team colouring, so a team change
-/// has nothing to update here.
+/// dot with the car. Team colours are covered separately in
+/// `cnr_tris_take_team_colours_and_mark_the_gold_carrier`.
 #[test]
 fn remote_humans_bind_opponent_tris_across_join_leave_and_respawn() {
     use mm2_app::hud::HudVisible;
@@ -566,6 +567,7 @@ fn remote_humans_bind_opponent_tris_across_join_leave_and_respawn() {
             markers: 1,
             absent: None,
             dot_materials: Vec::new(),
+            tri_materials: Vec::new(),
             marker_y: 5.0,
         })
         .add_systems(Update, hudmap::drive_hud_map);
@@ -659,4 +661,203 @@ fn remote_humans_bind_opponent_tris_across_join_leave_and_respawn() {
     app.world_mut().entity_mut(b).despawn();
     app.update();
     assert!(dots(&mut app).is_empty());
+}
+
+/// In a Cops & Robbers match the opponent tris take their side's colour
+/// from the replicated roster, the gold carrier's tri is drawn larger
+/// and above its peers, and a participant the roster does not know (or
+/// a free-for-all seat) keeps its slot colour.
+#[test]
+fn cnr_tris_take_team_colours_and_mark_the_gold_carrier() {
+    use mm2_app::cnrnet::CnrReplica;
+    use mm2_app::hud::HudVisible;
+    use mm2_app::hudmap::{self, HudMapMarker, HudMapReport, MarkerRole};
+    use mm2_app::netdrive::NetPlayer;
+    use mm2_game::gold::{CnrVariant, EndRule, GoldState, GoldView, Side, Sites, Standing};
+    use mm2_game::{HudMap, Player, PlayerControl, PlayerId, Session};
+
+    const POOL: usize = 3;
+    let spec = HudMapSpec::parse(TUNE).unwrap();
+    // One distinguishable material per authored tri paint job.
+    let paints: Vec<Handle<StandardMaterial>> = (0..10u128)
+        .map(|i| {
+            Handle::Uuid(
+                bevy::asset::uuid::Uuid::from_u128(0xC0DE + i),
+                std::marker::PhantomData,
+            )
+        })
+        .collect();
+    let mut app = App::new();
+    app.add_plugins(TransformPlugin)
+        .insert_resource(Time::<()>::default())
+        .insert_resource(Session::new())
+        .insert_resource(HudVisible(true))
+        .insert_resource(HudMap::new(spec, 0))
+        .insert_resource(HudMapReport {
+            spec_path: "tune/test.mmhudmap".into(),
+            pkg_path: "geometry/hudmap_test.pkg".into(),
+            tiles: 1,
+            markers: 1,
+            absent: None,
+            dot_materials: Vec::new(),
+            tri_materials: paints.clone(),
+            marker_y: 5.0,
+        })
+        .add_systems(Update, hudmap::drive_hud_map);
+    app.world_mut().spawn((
+        bevy::window::PrimaryWindow,
+        Window {
+            resolution: bevy::window::WindowResolution::new(1280, 960),
+            ..default()
+        },
+    ));
+    let car = |id: u16, control: PlayerControl, at: Vec3| {
+        (
+            Player {
+                id: PlayerId(id),
+                control,
+            },
+            Transform::from_translation(at),
+            GlobalTransform::from_translation(at),
+        )
+    };
+    app.world_mut()
+        .spawn(car(0, PlayerControl::Local, Vec3::ZERO));
+    // Remote humans, spawned in entity order: seat 1 robber, seat 2 cop,
+    // seat 3 not on the roster.
+    for seat in 1..=POOL as u16 {
+        app.world_mut().spawn((
+            car(
+                seat,
+                PlayerControl::Remote,
+                Vec3::new(10.0 * seat as f32, 0.0, 0.0),
+            ),
+            NetPlayer(seat),
+        ));
+    }
+    for _ in 0..POOL {
+        app.world_mut().spawn((
+            HudMapMarker {
+                role: MarkerRole::Opponent,
+                extent: 1.0,
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+            Visibility::Hidden,
+            MeshMaterial3d::<StandardMaterial>::default(),
+        ));
+    }
+    let view = |variant: CnrVariant, state: GoldState, rows: &[(u16, Side)]| GoldView {
+        generation: 1,
+        variant,
+        end: EndRule::None,
+        round: 0,
+        revision: 1,
+        elapsed: 0,
+        state,
+        sites: Sites {
+            gold: Vec3::ZERO,
+            hideout: Vec3::ZERO,
+            bank: Vec3::ZERO,
+        },
+        outcome: None,
+        standings: rows
+            .iter()
+            .map(|&(id, side)| Standing {
+                player: PlayerId(id),
+                side,
+                score: 0,
+                connected: true,
+            })
+            .collect(),
+    };
+    // Each visible tri's `(x, paint index, scale, y)`, ordered by x.
+    let tris = |app: &mut App| -> Vec<(f32, usize, f32, f32)> {
+        let mut q = app.world_mut().query::<(
+            &HudMapMarker,
+            &Transform,
+            &Visibility,
+            &MeshMaterial3d<StandardMaterial>,
+        )>();
+        let mut v: Vec<_> = q
+            .iter(app.world())
+            .filter(|(m, _, vis, _)| {
+                matches!(m.role, MarkerRole::Opponent) && **vis == Visibility::Visible
+            })
+            .map(|(_, xf, _, mat)| {
+                let paint = paints
+                    .iter()
+                    .position(|p| *p == mat.0)
+                    .unwrap_or(usize::MAX);
+                (xf.translation.x, paint, xf.scale.x, xf.translation.y)
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    };
+
+    // No match: the slot cycle, nobody marked.
+    app.update();
+    let t = tris(&mut app);
+    assert_eq!(t.len(), POOL);
+    let base_scale = t[0].2;
+    // The slot colours (whatever order the pool binds in).
+    let slot_paints: Vec<usize> = t.iter().map(|p| p.1).collect();
+    assert!(t.iter().all(|p| p.2 == base_scale && p.3 == 5.0));
+
+    // Cops & Robbers with the cop (seat 2) carrying the gold.
+    let rows = [(0, Side::Cops), (1, Side::Robbers), (2, Side::Cops)];
+    app.insert_resource(CnrReplica(view(
+        CnrVariant::CopsVsRobbers,
+        GoldState::Carried { by: PlayerId(2) },
+        &rows,
+    )));
+    app.update();
+    let t = tris(&mut app);
+    assert_eq!(t[0].1, 4, "a robber draws red");
+    assert_eq!(t[1].1, 8, "a cop draws blue");
+    assert_eq!(
+        t[2].1, slot_paints[2],
+        "an unlisted participant keeps its slot paint"
+    );
+    assert_eq!(t[0].2, base_scale);
+    assert!(t[1].2 > base_scale * 1.4, "the carrier is larger: {t:?}");
+    assert!(t[1].3 > 5.0, "and rides above its peers");
+    assert_eq!((t[0].3, t[2].3), (5.0, 5.0));
+
+    // The gold changes hands: the mark follows it, colours stay.
+    app.insert_resource(CnrReplica(view(
+        CnrVariant::CopsVsRobbers,
+        GoldState::Carried { by: PlayerId(1) },
+        &rows,
+    )));
+    app.update();
+    let t = tris(&mut app);
+    assert!(t[0].2 > base_scale * 1.4 && t[1].2 == base_scale, "{t:?}");
+    assert_eq!((t[0].1, t[1].1), (4, 8));
+
+    // Dropped: no carrier, no mark. Robbers vs Robbers: red and blue.
+    app.insert_resource(CnrReplica(view(
+        CnrVariant::RobbersVsRobbers,
+        GoldState::Resting { at: Vec3::ZERO },
+        &[(1, Side::Blue), (2, Side::Red)],
+    )));
+    app.update();
+    let t = tris(&mut app);
+    assert_eq!((t[0].1, t[1].1), (8, 4), "team colours follow the roster");
+    assert!(t.iter().all(|p| p.2 == base_scale));
+
+    // Free-for-all has no teams: back to the slot cycle.
+    app.insert_resource(CnrReplica(view(
+        CnrVariant::FreeForAll,
+        GoldState::Resting { at: Vec3::ZERO },
+        &[(1, Side::Solo), (2, Side::Solo), (3, Side::Solo)],
+    )));
+    app.update();
+    let t = tris(&mut app);
+    assert_eq!(
+        t.iter().map(|p| p.1).collect::<Vec<_>>(),
+        slot_paints,
+        "the per-slot opponent cycle"
+    );
 }

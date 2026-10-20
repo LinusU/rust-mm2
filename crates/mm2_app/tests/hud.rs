@@ -380,6 +380,7 @@ fn the_map_camera_parks_with_the_layer() {
         markers: 1,
         absent: None,
         dot_materials: Vec::new(),
+        tri_materials: Vec::new(),
         marker_y: 5.0,
     });
     app.add_systems(Update, mm2_app::hudmap::drive_hud_map);

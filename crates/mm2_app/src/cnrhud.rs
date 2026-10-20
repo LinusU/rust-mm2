@@ -316,6 +316,12 @@ pub struct CnrScene<'w, 's> {
 }
 
 impl CnrScene<'_, '_> {
+    /// The match as this process sees it (the authority's own, or a
+    /// client's replica), with the roster's sides and the gold's carrier.
+    pub fn view(&self) -> Option<GoldView> {
+        match_view(self.host.as_deref(), self.replica.as_deref())
+    }
+
     /// The local driver's objective, or `None` with no match in this
     /// process (a race or cruise session, or a client before its first
     /// frame).

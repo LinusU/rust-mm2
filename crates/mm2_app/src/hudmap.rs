@@ -58,6 +58,7 @@ use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
 use mm2_formats::hudmap::HudMapSpec;
 use mm2_formats::pkg::Pkg;
+use mm2_game::gold::Side;
 use mm2_game::{
     HudMap, MapView, NavTarget, Player, PlayerControl, RaceDefinition, RacePhase, RaceProgress,
     RaceState, Session, SessionEntity, SessionPhase, TargetSelection, navigation_target,
@@ -100,6 +101,18 @@ const PLAYER_LIFT: f32 = 1.0;
 /// with `oppind`'s in-world arrows so an opponent's indicator and map
 /// tri agree on colour (both pools bind in entity order).
 pub(crate) const TRI_PAINT_OPPONENTS: &[usize] = &[4, 1, 3, 6, 7, 8, 2, 9];
+/// Team paints on the `hudmap_tri` jobs (read from the package's diffuse
+/// colours: 4 is red, 8 is blue) for the Cops & Robbers sides — robbers
+/// and the Red team draw red, cops and the Blue team draw blue. Which
+/// colour the original gave which side is unrecovered, so the pairing is
+/// a designed reading; free-for-all keeps the per-slot opponent cycle.
+const TRI_PAINT_RED: usize = 4;
+const TRI_PAINT_BLUE: usize = 8;
+/// The gold carrier's tri is drawn this much larger than its peers
+/// (designed) and rides above them, so it stands out on a crowded map
+/// without losing its team colour.
+const CARRIER_ICON_SCALE: f32 = 1.5;
+const CARRIER_LIFT: f32 = 0.5;
 /// `hudmap_square` paint jobs (authored order red/blue/green/grey/
 /// yellow/finish/gold/bank/hideout) bound to marker roles — designed
 /// picks matching HUD-4's bright/dark/highlight vocabulary.
@@ -160,6 +173,24 @@ pub enum MarkerRole {
     Bank,
 }
 
+/// The `hudmap_tri` paint a participant on `side` draws with, or `None`
+/// to keep the per-slot opponent cycle (free-for-all has no team).
+pub(crate) fn team_tri_paint(side: Side) -> Option<usize> {
+    match side {
+        Side::Solo => None,
+        Side::Robbers | Side::Red => Some(TRI_PAINT_RED),
+        Side::Cops | Side::Blue => Some(TRI_PAINT_BLUE),
+    }
+}
+
+/// One opponent tri's look: the explicit team paint (if any) and
+/// whether the car holds the gold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OpponentLook {
+    paint: Option<usize>,
+    carrier: bool,
+}
+
 /// A session-owned map marker entity.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HudMapMarker {
@@ -192,6 +223,9 @@ pub struct HudMapReport {
     /// Square paint-job materials for gate-dot repaints, indexed by
     /// authored paint (`*_DOT` order).
     pub dot_materials: Vec<Handle<StandardMaterial>>,
+    /// `hudmap_tri` paint-job materials for opponent repaints, indexed
+    /// by authored paint (empty when the tri package is absent).
+    pub tri_materials: Vec<Handle<StandardMaterial>>,
     /// The height markers ride at — tallest tile vertex + margin.
     pub marker_y: f32,
 }
@@ -389,6 +423,7 @@ pub fn spawn_hud_map(
         markers: 0,
         absent: None,
         dot_materials: Vec::new(),
+        tri_materials: Vec::new(),
         marker_y: MARKER_LIFT,
     };
 
@@ -503,6 +538,13 @@ pub fn spawn_hud_map(
             .next()
             .map(|(m, _)| m);
         if let Some(tri_mesh) = mesh {
+            if let Some(shaders) = tri.shaders() {
+                for paint in 0..shaders.paint_jobs as usize {
+                    if let Some(mat) = paint_material(tri, paint, &mut mats) {
+                        report.tri_materials.push(mat);
+                    }
+                }
+            }
             // The opponent pool — paint cycled over the authored jobs.
             for slot in 0..opponent_count {
                 let paint = TRI_PAINT_OPPONENTS[slot % TRI_PAINT_OPPONENTS.len()];
@@ -888,6 +930,7 @@ pub fn drive_hud_map(
     ui_scale: Option<Res<UiScale>>,
     cnr: crate::cnrhud::CnrScene,
     participants: MapParticipants,
+    nets: Query<&crate::netdrive::NetPlayer>,
     mut camera: MapCam,
     mut markers: MapMarkers,
     mut frames: MapFrames,
@@ -909,14 +952,30 @@ pub fn drive_hud_map(
         .find(|(_, p, ..)| p.control == PlayerControl::Local);
     // Opponent tris bind pool slots in entity order — stable for the
     // roster's fixed membership.
-    let opponents: Vec<(Vec3, f32)> = {
-        let mut v: Vec<(Entity, Vec3, f32)> = participants
+    // In a Cops & Robbers match each tri also takes its side's colour and
+    // marks the gold carrier, read from the same replicated roster the
+    // scoreboard shows (a participant not yet on the roster keeps the
+    // slot colour).
+    let cnr_view = cnr.view();
+    let opponents: Vec<(Vec3, f32, OpponentLook)> = {
+        let mut v: Vec<(Entity, Vec3, f32, OpponentLook)> = participants
             .iter()
             .filter(|(_, p, ..)| p.control != PlayerControl::Local)
-            .map(|(e, _, gt, ..)| (e, gt.translation(), yaw_of(gt)))
+            .map(|(e, p, gt, ..)| {
+                let look = cnr_view.as_ref().map_or_else(Default::default, |view| {
+                    let id = crate::cnr::participant_id(p, nets.get(e).ok());
+                    OpponentLook {
+                        paint: view.side_of(id).and_then(team_tri_paint),
+                        carrier: view.carrier() == Some(id),
+                    }
+                });
+                (e, gt.translation(), yaw_of(gt), look)
+            })
             .collect();
         v.sort_by_key(|(e, ..)| *e);
-        v.into_iter().map(|(_, pos, yaw)| (pos, yaw)).collect()
+        v.into_iter()
+            .map(|(_, pos, yaw, look)| (pos, yaw, look))
+            .collect()
     };
 
     for (_, mut visibility) in &mut frames {
@@ -1009,6 +1068,7 @@ pub fn drive_hud_map(
     // the eased zoom, then bind the tracked poses.
     let icon_scale = map.icon_scale();
     let mut opp_iter = opponents.iter();
+    let mut opp_slot = 0usize;
     // The local participant's view of the course (the same
     // disambiguation `update_checkpoint_markers` uses).
     let progress = local.and_then(|(.., prog, _)| prog);
@@ -1028,6 +1088,7 @@ pub fn drive_hud_map(
     };
     let cnr_objective = cnr.objective();
     for (marker, mut xf, mut vis, mut mat) in &mut markers {
+        let mut carrier_scale = false;
         match marker.role {
             MarkerRole::Player => match player_pose {
                 Some((pos, yaw)) => {
@@ -1037,14 +1098,30 @@ pub fn drive_hud_map(
                 }
                 None => *vis = Visibility::Hidden,
             },
-            MarkerRole::Opponent => match opp_iter.next() {
-                Some((pos, yaw)) => {
-                    xf.translation = Vec3::new(pos.x, report.marker_y, pos.z);
-                    xf.rotation = Quat::from_rotation_y(*yaw);
-                    *vis = Visibility::Visible;
+            MarkerRole::Opponent => {
+                let slot = opp_slot;
+                opp_slot += 1;
+                match opp_iter.next() {
+                    Some((pos, yaw, look)) => {
+                        let lift = if look.carrier { CARRIER_LIFT } else { 0.0 };
+                        xf.translation = Vec3::new(pos.x, report.marker_y + lift, pos.z);
+                        xf.rotation = Quat::from_rotation_y(*yaw);
+                        *vis = Visibility::Visible;
+                        // Team colour where there is one, else the slot's
+                        // own; only touch the component when it changes.
+                        let paint = look
+                            .paint
+                            .unwrap_or(TRI_PAINT_OPPONENTS[slot % TRI_PAINT_OPPONENTS.len()]);
+                        if let Some(m) = report.tri_materials.get(paint)
+                            && mat.0 != *m
+                        {
+                            mat.0 = m.clone();
+                        }
+                        carrier_scale = look.carrier;
+                    }
+                    None => *vis = Visibility::Hidden,
                 }
-                None => *vis = Visibility::Hidden,
-            },
+            }
             MarkerRole::Gate(i) => {
                 *vis = Visibility::Visible;
                 if race_def.is_some() {
@@ -1102,7 +1179,12 @@ pub fn drive_hud_map(
                 }
             }
         }
-        let s = (icon_scale / marker.extent).max(0.0);
+        let s = (icon_scale / marker.extent).max(0.0)
+            * if carrier_scale {
+                CARRIER_ICON_SCALE
+            } else {
+                1.0
+            };
         xf.scale = Vec3::splat(s);
     }
 }
@@ -1284,6 +1366,7 @@ Ocean Color 0.084 0.7 0.94
                 markers: 0,
                 absent: None,
                 dot_materials: Vec::new(),
+                tri_materials: Vec::new(),
                 marker_y: 5.0,
             })
             .add_systems(Update, drive_hud_map);
