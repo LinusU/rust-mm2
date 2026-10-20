@@ -566,3 +566,28 @@ props or a crowd of bodies in contact, other platforms and release builds,
 and the cost of the client's own non-physics replay-side work (NETPLAY-04).
 The "normal and stress history depths" are taken as 20 and 120 ticks;
 NETPLAY-09 owns the final choice and can re-run this harness at its values.
+
+## NETPLAY-03 integration status (#1764)
+
+All six slices (03A-03F) are on main. This section maps the parent
+acceptance criteria to the evidence that exists and names what stays open.
+Evidence level reached: **synthetic integration** (production `VehiclePlugin`
+and Avian schedules at 60 Hz in `mm2_vehicle`); no original-content or
+rendered level.
+
+| AC | Evidence | Status |
+|---|---|---|
+| 1 capture, advance, restore, replay, compare | `tests/capture.rs` (generic and original, steer/brake/forced gear/handbrake route, deviation 0 on this machine, tolerance `1e-3`); `tests/replay.rs`, `tests/physics_world.rs` (two cars, trailer, wall, sleeping prop, several rollback depths) | met |
+| 2 original handling, contact, trailer, multi-tick comparison | original path in `capture.rs`; wall contact onset and trailer rig in `replay.rs`/`physics_world.rs`, compared at every replayed tick | met except jump/landing, see below |
+| 3 reset versus pose-only snap | `capture.rs::a_host_reset_and_a_pose_only_snap_are_not_the_same_state` | met |
+| 4 no second render frame or duplicate side effects, bounded | `replay.rs::a_replay_runs_the_physics_schedule_and_nothing_else`, `replay_work_is_bounded`, `the_history_ring_is_bounded_and_rewrites_the_future`; memory in the cost section | met for the primitive; gameplay-reaction dedup is NETPLAY-08 |
+| 5 determinism and limits | bit-identical on one Apple Silicon machine; the wire convergence bound needed a looser contact-onset velocity on the Linux CI runner (`dd34fc6`). No cross-platform bit identity is claimed | measured on two platforms, limits stated |
+
+Open, not claimed:
+
+- A replay across an **airborne jump and landing** is not in the replay or
+  world-restore suites (`drive.rs` covers a landing live, not a rewind
+  through one).
+- The loaded-city profile uses a synthetic world, not the retail city.
+- Release builds and non-Apple/Linux platforms are unmeasured.
+- Wiring the ring and replay into the client correction path is NETPLAY-04.
