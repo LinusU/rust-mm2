@@ -65,15 +65,6 @@ impl MapZoom {
             MapZoom::Close => MapZoom::Standard,
         }
     }
-
-    /// Short name for the `map=` record field.
-    pub fn name(self) -> &'static str {
-        match self {
-            MapZoom::Close => "close",
-            MapZoom::Standard => "std",
-            MapZoom::Wide => "wide",
-        }
-    }
 }
 
 /// Which corner-map presentation the HUD shows — TAB cycles it
