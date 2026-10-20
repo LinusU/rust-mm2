@@ -3058,7 +3058,7 @@ mod tests {
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("29"), "{why}");
+            assert!(why.contains("30"), "{why}");
         }
     }
 }
