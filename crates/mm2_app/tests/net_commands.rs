@@ -108,6 +108,16 @@ fn run(frame_secs: f64) -> (usize, usize, BTreeMap<u64, TickCommand>, u64, u64) 
     while app.world().resource::<Ticks>().0 < TICKS {
         app.update();
         frames += 1;
+        // The test runs far faster than real time; let the worker drain so
+        // a loaded machine does not fill the (deliberately lossy) handoff
+        // queue. Bounded: a stuck worker shows as a failed count below.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stream = app.world().resource::<CommandStream>();
+        while stream.transmitted_windows() + stream.send_errors() < stream.queued_windows()
+            && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
         assert!(frames < 10_000, "fixed schedule never ran");
     }
     // The worker thread delivers asynchronously: bounded deadline.
