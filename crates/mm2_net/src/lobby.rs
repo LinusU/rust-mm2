@@ -55,7 +55,7 @@ use crate::NetError;
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
 use crate::proto::{
     DriveInput, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry,
-    SessionAdvertisement, VehiclePick,
+    SessionAdvertisement, TickCommand, VehiclePick,
 };
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
@@ -919,6 +919,24 @@ impl ClientCtl {
         self.send(&Message::Input(input))
     }
 
+    /// Send one redundant window of fixed-tick commands (v29,
+    /// NETPLAY-02A) — the client→host data-plane verb of the
+    /// fixed-tick timeline. Bounds are enforced by the codec.
+    pub fn send_input_window(
+        &self,
+        generation: u64,
+        epoch: u8,
+        first_seq: u64,
+        commands: Vec<TickCommand>,
+    ) -> Result<(), NetError> {
+        self.send(&Message::InputWindow {
+            generation,
+            epoch,
+            first_seq,
+            commands,
+        })
+    }
+
     /// Ask the authority to reset this client's own seat (F25-B) —
     /// the predicted-session answer to the local `R` bundle, which a
     /// `Remote` session must never fire itself. Fire-and-forget like
@@ -1648,6 +1666,13 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) 
                     // tick — far above the event channel's cadence — and
                     // only the newest sample matters anyway.
                     inputs.store(id, input);
+                    continue;
+                }
+                Ok(Message::InputWindow { .. }) => {
+                    // Legal data-plane traffic that nothing consumes yet:
+                    // the per-seat buffer lands with NETPLAY-02B. Dropping
+                    // the peer as malformed would punish a well-formed
+                    // v29 frame, so it is ignored until then.
                     continue;
                 }
                 Ok(Message::ResetRequest { generation }) => {
@@ -3168,6 +3193,7 @@ mod tests {
                     skid_slip: 0,
                     skid_speed: 0,
                     surf_roll: SNAP_NO_SURFACE,
+                    input_ack: 0,
                 }],
                 trailers: Vec::new(),
                 impacts: Vec::new(),
@@ -3644,6 +3670,7 @@ mod tests {
                 skid_slip: 0,
                 skid_speed: 0,
                 surf_roll: SNAP_NO_SURFACE,
+                input_ack: 0,
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),

@@ -625,6 +625,13 @@ struct Cli {
     #[arg(long, requires = "join")]
     ready: bool,
 
+    /// Development selector for the fixed-tick multiplayer timeline
+    /// (NETPLAY-02A, `docs/netplay-timeline.md`): the one switch the
+    /// staged NETPLAY-04..08 behaviour sits behind. Off by default;
+    /// `MM2_NETPLAY_TIMELINE=1` selects it too.
+    #[arg(long)]
+    netplay_timeline: bool,
+
     /// Host a multiplayer lobby inside the app (F24-B.8): the
     /// session-shaping flags name the advertised session — world,
     /// mode, difficulty, conditions, seed — and this process plays the
@@ -1723,6 +1730,9 @@ fn main() {
     ))
     .insert_resource(ClearColor(Color::srgb(0.5, 0.65, 0.85)))
     .insert_resource(session)
+    .insert_resource(
+        mm2_app::netplay_timeline::NetplayTimeline::from_flag_and_env(cli.netplay_timeline),
+    )
     .insert_resource(SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
     .insert_resource(Mm2Vfs(vfs))
     .insert_resource(TunedVehicle(vehicle))

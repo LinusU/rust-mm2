@@ -87,7 +87,11 @@
 /// none (F26-A.4b). v28: `Message::Keepalive` carries the host's newest
 /// session generation and whether it is still running, so a client that
 /// missed every bounded `Cancel` copy still returns to the lobby (#1612).
-pub const PROTOCOL_VERSION: u16 = 28;
+/// v29: the fixed-tick command stream (NETPLAY-02A, see
+/// `docs/netplay-timeline.md`) — `Message::InputWindow` carries a bounded
+/// redundant window of consecutive per-tick commands, and `SnapEntry`
+/// gained `input_ack`, the host's per-seat finalized-command ack.
+pub const PROTOCOL_VERSION: u16 = 29;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -120,6 +124,7 @@ const TAG_CNR: u8 = 0x13;
 const TAG_KEEPALIVE: u8 = 0x14;
 const TAG_LEAVES: u8 = 0x15;
 const TAG_SIGNALS: u8 = 0x16;
+const TAG_INPUT_WINDOW: u8 = 0x17;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -242,6 +247,33 @@ pub struct DriveInput {
     pub forced_gear: Option<u32>,
 }
 
+/// Most consecutive per-tick commands one [`Message::InputWindow`] may
+/// carry: 16 ticks is ~267 ms at the 60 Hz fixed step — enough redundancy
+/// to bridge a burst of lost datagrams, small enough that one frame stays
+/// well under [`MAX_FRAME`](crate::MAX_FRAME) and a hostile sender cannot
+/// make the host buffer unbounded work from one packet.
+pub const MAX_INPUT_WINDOW: usize = 16;
+
+/// One fixed-tick driver command — the controls for exactly one 1/60 s
+/// step (`C[n]`, NETPLAY-02A). Same quantization and meaning as the
+/// control fields of [`DriveInput`]; the tick it belongs to is implied by
+/// its position in an [`Message::InputWindow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickCommand {
+    /// Quantized throttle, 0..=255.
+    pub throttle: u8,
+    /// Quantized brake, 0..=255.
+    pub brake: u8,
+    /// Quantized steering, -127..=127 (0 = centered).
+    pub steer: i8,
+    /// Quantized handbrake, 0..=255.
+    pub handbrake: u8,
+    /// Human pedal swapping preference; 0/1 is strictly validated on the wire.
+    pub auto_reverse: bool,
+    /// Manual forward gear index (zero is first), absent for automatic.
+    pub forced_gear: Option<u32>,
+}
+
 /// One participant's authoritative rigid state inside a [`Message::Snap`].
 /// `player` is the wire roster id — the host's own seat is 0 (it is never
 /// a roster entry, but its car is part of the shared sim). Positions and
@@ -359,6 +391,13 @@ pub struct SnapEntry {
     /// loop's speed is the car's forward speed, derivable from `vel`
     /// and `rot`, so nothing else rides.
     pub surf_roll: u16,
+    /// Finalized-input ack (v29, NETPLAY-02A): the highest command `seq`
+    /// of this seat whose slot is included in the completed authoritative
+    /// state this entry was captured from — consumed by a step, or
+    /// explicitly finalized by the missing-input policy. Never merely
+    /// received. `0` = nothing finalized yet (command seqs start at 1),
+    /// and for seats that send no commands (the host's own seat, bots).
+    pub input_ack: u64,
 }
 
 impl Default for SnapEntry {
@@ -390,6 +429,7 @@ impl Default for SnapEntry {
             skid_slip: 0,
             skid_speed: 0,
             surf_roll: SNAP_NO_SURFACE,
+            input_ack: 0,
         }
     }
 }
@@ -807,6 +847,24 @@ pub enum Message {
     /// up (the generation field, not the send timing, decides whether a
     /// sample applies).
     Input(DriveInput),
+    /// Client → host: a bounded redundant window of consecutive per-tick
+    /// commands (v29, NETPLAY-02A). Command `i` has sequence
+    /// `first_seq + i`; the window is `1..=`[`MAX_INPUT_WINDOW`] commands
+    /// and `first_seq + len` must not overflow `u64`. `epoch` is the
+    /// sender's vehicle reset epoch. Data-plane traffic like `Input`;
+    /// the host's treatment of duplicates, gaps and old/future seqs is
+    /// the contract in `docs/netplay-timeline.md`.
+    InputWindow {
+        /// The session generation these commands belong to.
+        generation: u64,
+        /// The sender's vehicle reset epoch (wraps at 256) the commands
+        /// were captured under.
+        epoch: u8,
+        /// Sequence of `commands[0]`; seqs start at 1.
+        first_seq: u64,
+        /// Consecutive commands, oldest first.
+        commands: Vec<TickCommand>,
+    },
     /// Client → host: the driver asked to be reset (F25-B). The sender's
     /// roster slot names the seat — a request carries no target, so a
     /// client can only ever ask for its own car. `generation` namespaces
@@ -1000,6 +1058,23 @@ pub enum ProtoError {
     /// A leaves frame declared more than [`MAX_SNAP_LEAVES`] rows.
     #[error("leaves frame declares {0} rows, bound is {MAX_SNAP_LEAVES}")]
     OversizeLeaves(u8),
+    /// An input window declared more than [`MAX_INPUT_WINDOW`] commands.
+    #[error("input window declares {0} commands, bound is {MAX_INPUT_WINDOW}")]
+    OversizeInputWindow(usize),
+    /// An input window declared no commands.
+    #[error("input window declares no commands")]
+    EmptyInputWindow,
+    /// An input window's last sequence would pass `u64::MAX`.
+    #[error("input window from seq {first_seq} with {len} commands overflows the sequence space")]
+    InputWindowOverflow {
+        /// Declared sequence of the first command.
+        first_seq: u64,
+        /// Declared command count.
+        len: usize,
+    },
+    /// An input window started at sequence 0 (seqs start at 1).
+    #[error("input window starts at seq 0, sequences start at 1")]
+    InputWindowZeroSeq,
     /// A signals frame declared more than [`MAX_SNAP_SIGNALS`] rows.
     #[error("signals frame declares {0} rows, bound is {MAX_SNAP_SIGNALS}")]
     OversizeSignals(u16),
@@ -1157,6 +1232,24 @@ fn get_opt_pick(cur: &mut Cursor<'_>) -> Result<Option<VehiclePick>, ProtoError>
     })
 }
 
+/// The shared bounds on an input window, applied identically on encode
+/// and decode so a malformed window can be neither sent nor accepted.
+fn check_input_window(first_seq: u64, len: usize) -> Result<(), ProtoError> {
+    if len == 0 {
+        return Err(ProtoError::EmptyInputWindow);
+    }
+    if len > MAX_INPUT_WINDOW {
+        return Err(ProtoError::OversizeInputWindow(len));
+    }
+    if first_seq == 0 {
+        return Err(ProtoError::InputWindowZeroSeq);
+    }
+    if first_seq.checked_add(len as u64).is_none() {
+        return Err(ProtoError::InputWindowOverflow { first_seq, len });
+    }
+    Ok(())
+}
+
 impl Message {
     /// Serialize into one frame payload.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
@@ -1246,6 +1339,30 @@ impl Message {
                     out.extend_from_slice(&gear.to_le_bytes());
                 }
             }
+            Self::InputWindow {
+                generation,
+                epoch,
+                first_seq,
+                commands,
+            } => {
+                check_input_window(*first_seq, commands.len())?;
+                out.push(TAG_INPUT_WINDOW);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.push(*epoch);
+                out.extend_from_slice(&first_seq.to_le_bytes());
+                out.push(commands.len() as u8);
+                for c in commands {
+                    out.push(c.throttle);
+                    out.push(c.brake);
+                    out.push(c.steer as u8);
+                    out.push(c.handbrake);
+                    out.push(u8::from(c.auto_reverse));
+                    out.push(u8::from(c.forced_gear.is_some()));
+                    if let Some(gear) = c.forced_gear {
+                        out.extend_from_slice(&gear.to_le_bytes());
+                    }
+                }
+            }
             Self::ResetRequest { generation } => {
                 out.push(TAG_RESET_REQUEST);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -1295,6 +1412,7 @@ impl Message {
                     out.push(e.skid_slip);
                     out.extend_from_slice(&e.skid_speed.to_le_bytes());
                     out.extend_from_slice(&e.surf_roll.to_le_bytes());
+                    out.extend_from_slice(&e.input_ack.to_le_bytes());
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -1556,6 +1674,30 @@ impl Message {
                 auto_reverse: cur.bool()?,
                 forced_gear: if cur.bool()? { Some(cur.u32()?) } else { None },
             }),
+            TAG_INPUT_WINDOW => {
+                let generation = cur.u64()?;
+                let epoch = cur.u8()?;
+                let first_seq = cur.u64()?;
+                let count = cur.u8()? as usize;
+                check_input_window(first_seq, count)?;
+                let mut commands = Vec::with_capacity(count);
+                for _ in 0..count {
+                    commands.push(TickCommand {
+                        throttle: cur.u8()?,
+                        brake: cur.u8()?,
+                        steer: cur.u8()? as i8,
+                        handbrake: cur.u8()?,
+                        auto_reverse: cur.bool()?,
+                        forced_gear: if cur.bool()? { Some(cur.u32()?) } else { None },
+                    });
+                }
+                Self::InputWindow {
+                    generation,
+                    epoch,
+                    first_seq,
+                    commands,
+                }
+            }
             TAG_RESET_REQUEST => Self::ResetRequest {
                 generation: cur.u64()?,
             },
@@ -1593,6 +1735,7 @@ impl Message {
                         skid_slip: cur.u8()?,
                         skid_speed: cur.i16()?,
                         surf_roll: cur.u16()?,
+                        input_ack: cur.u64()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -2010,6 +2153,7 @@ mod tests {
                         skid_slip: 179,
                         skid_speed: -124,
                         surf_roll: 1,
+                        input_ack: 4242,
                     },
                     SnapEntry {
                         player: 3,
@@ -2036,6 +2180,7 @@ mod tests {
                         skid_slip: 0,
                         skid_speed: 0,
                         surf_roll: SNAP_NO_SURFACE,
+                        input_ack: 0,
                     },
                 ],
                 trailers: vec![
@@ -2659,6 +2804,7 @@ mod tests {
                 skid_slip: 0,
                 skid_speed: 0,
                 surf_roll: SNAP_NO_SURFACE,
+                input_ack: 0,
             };
             MAX_PLAYERS as usize + 1
         ];
@@ -2766,5 +2912,138 @@ mod tests {
             admit(&wrong_content, 0xdead_beef),
             Err((RejectCode::ContentMismatch, _))
         ));
+    }
+
+    fn cmd(n: u8) -> TickCommand {
+        TickCommand {
+            throttle: n,
+            brake: 255 - n,
+            steer: -(n as i8),
+            handbrake: n / 2,
+            auto_reverse: n.is_multiple_of(2),
+            forced_gear: n.is_multiple_of(3).then_some(n as u32),
+        }
+    }
+
+    fn window(first_seq: u64, n: usize) -> Message {
+        Message::InputWindow {
+            generation: 7,
+            epoch: 3,
+            first_seq,
+            commands: (0..n).map(|i| cmd(i as u8)).collect(),
+        }
+    }
+
+    #[test]
+    fn input_window_roundtrips_at_every_legal_size() {
+        for n in 1..=MAX_INPUT_WINDOW {
+            let m = window(1, n);
+            assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        }
+        // The very last representable window ends exactly at u64::MAX.
+        let edge = window(u64::MAX - 3, 3);
+        assert_eq!(Message::decode(&edge.encode().unwrap()).unwrap(), edge);
+    }
+
+    #[test]
+    fn input_window_bounds_are_enforced_on_encode() {
+        assert_eq!(window(1, 0).encode(), Err(ProtoError::EmptyInputWindow));
+        assert_eq!(
+            window(1, MAX_INPUT_WINDOW + 1).encode(),
+            Err(ProtoError::OversizeInputWindow(MAX_INPUT_WINDOW + 1))
+        );
+        assert_eq!(window(0, 1).encode(), Err(ProtoError::InputWindowZeroSeq));
+        assert_eq!(
+            window(u64::MAX - 1, 3).encode(),
+            Err(ProtoError::InputWindowOverflow {
+                first_seq: u64::MAX - 1,
+                len: 3
+            })
+        );
+    }
+
+    #[test]
+    fn input_window_malformed_frames_are_rejected_on_decode() {
+        let header = |first_seq: u64, count: u8| {
+            let mut b = vec![TAG_INPUT_WINDOW];
+            b.extend_from_slice(&7u64.to_le_bytes());
+            b.push(3);
+            b.extend_from_slice(&first_seq.to_le_bytes());
+            b.push(count);
+            b
+        };
+        let body = [0u8, 0, 0, 0, 0, 0];
+        let with = |mut h: Vec<u8>, n: usize| {
+            for _ in 0..n {
+                h.extend_from_slice(&body);
+            }
+            h
+        };
+        assert_eq!(
+            Message::decode(&with(header(1, 0), 0)),
+            Err(ProtoError::EmptyInputWindow)
+        );
+        // Oversize is refused from the count byte, before any command is read.
+        assert_eq!(
+            Message::decode(&header(1, MAX_INPUT_WINDOW as u8 + 1)),
+            Err(ProtoError::OversizeInputWindow(MAX_INPUT_WINDOW + 1))
+        );
+        assert_eq!(
+            Message::decode(&header(1, 255)),
+            Err(ProtoError::OversizeInputWindow(255))
+        );
+        assert_eq!(
+            Message::decode(&with(header(0, 1), 1)),
+            Err(ProtoError::InputWindowZeroSeq)
+        );
+        assert!(matches!(
+            Message::decode(&with(header(u64::MAX, 2), 2)),
+            Err(ProtoError::InputWindowOverflow { .. })
+        ));
+        // Declared three commands, carried two: truncated.
+        assert!(Message::decode(&with(header(1, 3), 2)).is_err());
+        // A non-0/1 bool in a command is refused.
+        let mut bad_bool = with(header(1, 1), 1);
+        let at = bad_bool.len() - 2;
+        bad_bool[at] = 2;
+        assert_eq!(Message::decode(&bad_bool), Err(ProtoError::InvalidBool(2)));
+        // Trailing bytes after a complete window are refused.
+        let mut trailing = with(header(1, 1), 1);
+        trailing.push(0);
+        assert!(Message::decode(&trailing).is_err());
+    }
+
+    #[test]
+    fn snap_entry_carries_input_ack() {
+        let m = Message::Snap {
+            generation: 1,
+            tick: 900,
+            entries: vec![SnapEntry {
+                player: 2,
+                input_ack: u64::MAX,
+                ..SnapEntry::default()
+            }],
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+            race: None,
+        };
+        let Message::Snap { entries, .. } = Message::decode(&m.encode().unwrap()).unwrap() else {
+            panic!("not a snap");
+        };
+        assert_eq!(entries[0].input_ack, u64::MAX);
+        assert_eq!(SnapEntry::default().input_ack, 0);
+    }
+
+    #[test]
+    fn v29_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 29);
+        for protocol in [28, 30] {
+            let mut h = hello();
+            h.protocol = protocol;
+            let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
+                panic!("protocol {protocol} must be refused");
+            };
+            assert!(why.contains("29"), "{why}");
+        }
     }
 }

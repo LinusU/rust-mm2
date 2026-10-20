@@ -59,12 +59,13 @@ pub use lobby::{
     StampedInput,
 };
 pub use proto::{
-    DriveInput, Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_SNAP_CARS, MAX_SNAP_CNR_SEATS,
-    MAX_SNAP_IMPACTS, MAX_SNAP_LEAVES, MAX_SNAP_PROPS, MAX_SNAP_SIGNALS, MAX_STRING, Message,
-    PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry, SIGNAL_NO_GREEN, SNAP_CNR_NO_PLAYER,
-    SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_FRAGMENT, SNAP_NO_SURFACE,
-    SessionAdvertisement, SiteTable, SnapCar, SnapCnr, SnapCnrOutcome, SnapCnrSeat, SnapEntry,
-    SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal, SnapTrailer, VehiclePick,
+    DriveInput, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_SNAP_CARS,
+    MAX_SNAP_CNR_SEATS, MAX_SNAP_IMPACTS, MAX_SNAP_LEAVES, MAX_SNAP_PROPS, MAX_SNAP_SIGNALS,
+    MAX_STRING, Message, PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry, SIGNAL_NO_GREEN,
+    SNAP_CNR_NO_PLAYER, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_FRAGMENT,
+    SNAP_NO_SURFACE, SessionAdvertisement, SiteTable, SnapCar, SnapCnr, SnapCnrOutcome,
+    SnapCnrSeat, SnapEntry, SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal, SnapTrailer,
+    TickCommand, VehiclePick,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire
