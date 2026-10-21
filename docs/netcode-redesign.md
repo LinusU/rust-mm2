@@ -807,3 +807,64 @@ an older one is dropped. Frames for another generation are dropped.
 (hold-last versus an age-aware policy), and where the host takes the
 frame's runs from each tick. Evidence level: synthetic integration; no
 retail data or rendered evidence is involved.
+
+## Remote-input prediction policy (NETPLAY-05A-2, #1893)
+
+`mm2_app::netremote::RemotePredictor` fills a remote seat's tick when the
+store (`RemoteCommands`) has no command for it. Pure: it reads the store and
+returns a `TickCommand`; no body is touched. A stored tick is returned
+unaltered through `consume` (once); a missing tick consumes nothing and is
+extrapolated from the newest stored command at or before it. Only analog
+controls are repeated or scaled *down* toward neutral; `forced_gear` and
+`auto_reverse` are copied, so no reset, horn, gear change or handbrake is
+invented. A command that arrives after its tick was predicted past is
+dropped by the store cursor, never applied late.
+
+Two policies, measured by `tests/net_remote_predict.rs` (`cargo test -p
+mm2_app --test network net_remote_predict -- --nocapture`): **hold-last**
+repeats the newest command at any age; **age-aware** repeats for `hold`
+ticks of age, then fades throttle, brake, steer and handbrake linearly to
+neutral over `fade` ticks.
+
+**Method.** The production vehicle step (`VehiclePlugin`, default
+`VehicleConfig`, flat ground, 60 Hz) runs a reference car on the true
+quantized commands with zero delay, and a second car driven only by the
+predictor. After a 150-tick full-throttle run-up the scripts are *steady
+cruise*, *sudden braking* (throttle to full brake), *steering reversal*
+(+0.8 for 40 ticks, then -0.8 for 40) and *evasive near-miss* (full lock
+left 15, right 30, left 15 ticks, then lift). Error is distance to the
+reference car's position (max over the scored ticks) plus speed gap.
+*Lag*: commands reach the client `d` ticks late, so every tick is
+extrapolated from age `d`. *Stall*: lag 3, then the feed stops 5 ticks into
+the action and the next 15/30/60 ticks (0.25/0.5/1 s) are scored.
+
+**Results** (max position error in metres, summed over the four scripts):
+
+| policy | lag 3 | stalls (12 cases) |
+|---|---|---|
+| hold-last | 2.78 | **8.04** |
+| age-aware hold 12 / fade 24 | 2.78 | 10.96 |
+| age-aware hold 6 / fade 24 | 2.78 | 12.89 |
+| age-aware hold 6 / fade 12 | 2.78 | 14.89 |
+| age-aware hold 3 / fade 12 | 2.78 | 16.57 |
+| age-aware hold 3 / fade 6 | 2.78 | 18.46 |
+
+Per script, lag 3 / 6 / 12 under hold-last gives 1.49 / 2.23 / 3.78 m
+(sudden braking), 0.38 / 0.79 / 1.74 m (steering reversal), 0.92 / 1.15 /
+1.83 m (evasive). Fading under steady lag is ruinous (age is constant, so
+once `age > hold` the throttle decays forever: hold 3 / fade 6 is 17–51 m
+at lag 6–12); that is a property of the policy, not of the settings. In
+stalls, a 1 s stall on the evasive script is the one place a candidate wins
+(hold 3 / fade 6: 1.82 m against 4.35 m), but every candidate loses on
+cruise and on braking/reversal at 0.25–0.5 s, which are the likelier
+cases, because fading throttle cannot replace the braking or counter-
+steer the driver actually applied.
+
+**Choice: hold-last.** No measured age-aware setting beats it in total
+(`prediction_policies_are_measured_against_a_zero_delay_reference` asserts
+this), and it is the simpler contract. The age-aware code stays as the
+measured candidate, unused by the app. Not decided: any stall longer than
+the 267 ms redundancy (hold-last grows to 0.8–4.4 m at 1 s on the braking and turning
+scripts), and wiring the predictor to a body, which is 05A-3. Evidence
+level: synthetic integration on the production step; flat ground, default
+car, no collisions, no retail data.

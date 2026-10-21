@@ -57,6 +57,7 @@ pub mod netpace;
 pub mod netplay_timeline;
 pub mod netpredict;
 pub mod netprobe;
+pub mod netremote;
 pub mod neural;
 pub mod object_sound;
 pub mod oppind;
