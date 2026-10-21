@@ -1109,3 +1109,19 @@ frames, before the 06D cadence reduces both.
 Evidence level: synthetic integration on the production step. No retail
 data, no sockets, no rendered capture. Open: acceptance-level evidence over
 the real transport with a second process, and the quarantine finding.
+
+## NETPLAY-05A integration status (#1889)
+
+All five slices are on main: wire contract (#1892), prediction policy
+(#1893), dynamic remote body (#1894), joint replay (#1895), contact tests
+and costs (#1896). The measurements are in their sections above; the
+two-car CPU/state/bandwidth numbers are in the #1896 cost table.
+
+Advanced (synthetic integration on the production step, no retail data, no
+sockets, no render): F25 AC1 partly (a remote human car is a finite-mass
+dynamic body on the client), AC2 for head-on, rear-end and push, AC3, AC4
+partly, and the two-car causal requirements.
+
+Still open: acceptance evidence over the real transport with a second
+process; contact events discovered only through a replay (#1902); more than
+two cars and trailers (NETPLAY-05B, #1890).
