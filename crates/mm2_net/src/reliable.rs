@@ -326,6 +326,18 @@ impl ReliableReceiver {
         self.delivered.pop_front()
     }
 
+    /// The next delivered message when `take` accepts it, else leave it
+    /// (and everything behind it, to keep id order) queued. Lets the lane
+    /// consume the message classes it owns while the rest stay for
+    /// [`pop`](Self::pop).
+    pub fn pop_if(&mut self, take: impl FnOnce(&[u8]) -> bool) -> Option<Vec<u8>> {
+        if take(self.delivered.front()?) {
+            self.delivered.pop_front()
+        } else {
+            None
+        }
+    }
+
     /// The counters.
     pub fn stats(&self) -> ReceiverStats {
         ReceiverStats {

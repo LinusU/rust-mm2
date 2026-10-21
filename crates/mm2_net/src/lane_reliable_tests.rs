@@ -300,3 +300,185 @@ fn a_seat_without_a_lane_refuses_reliable_sends() {
         Err(ReliableSendError::NoLane)
     );
 }
+
+// NETPLAY-06E-3: the app messages that ride the channel.
+
+fn impact(id: u64) -> crate::SnapImpact {
+    crate::SnapImpact {
+        seat: 1,
+        id,
+        tick: 40 + id,
+        point: [1.0, 2.0, 3.0],
+        normal: [0.0, 1.0, 0.0],
+        severity: 7.5,
+        audio_id: -3,
+    }
+}
+
+fn cnr_with_outcome(generation: u64) -> Message {
+    Message::Cnr {
+        generation,
+        frame: crate::SnapCnr {
+            variant: 1,
+            end: 2,
+            end_value: 500,
+            round: 1,
+            revision: 9,
+            elapsed: 4_000,
+            gold: 0,
+            holder: crate::SNAP_CNR_NO_PLAYER,
+            at: [0.0; 3],
+            free_at: 0,
+            sites: [[0.0; 3]; 3],
+            outcome: Some(crate::SnapCnrOutcome {
+                reason: 1,
+                winner: 0,
+                who: 1,
+                at_tick: 3_999,
+            }),
+            seats: Vec::new(),
+        },
+    }
+}
+
+use crate::Message;
+
+/// The `Cnr`/`Impacts` events the client's `recv` yields until it times
+/// out (the lobby's own setup traffic is filtered out).
+fn client_events(rig: &mut Rig) -> Vec<Message> {
+    rig.client
+        .set_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut out = Vec::new();
+    while let Ok(m) = rig.client.recv() {
+        if matches!(m, Message::Cnr { .. } | Message::Impacts { .. }) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_reset_ask_whose_first_datagram_is_lost_reaches_the_host_once() {
+    let rig = rig(21, 0.15);
+    rig.proxy.drop_next(LinkDir::Up, 1);
+    rig.client
+        .ctl()
+        .unwrap()
+        .request_reset(rig.generation)
+        .unwrap();
+    let inputs = rig.host.remote_inputs();
+    let mut asks = Vec::new();
+    pump(&rig, "the reset ask", || {
+        asks.extend(inputs.drain_resets());
+        !asks.is_empty()
+    });
+    quiesce(&rig, 40);
+    asks.extend(inputs.drain_resets());
+    assert_eq!(asks, vec![(rig.id, rig.generation)]);
+    let client = rig.client.reliable_stats().unwrap();
+    assert!(client.sender.retransmits >= 1, "{client:?}");
+    assert_eq!(
+        rig.host.reliable_stats(rig.id).unwrap().receiver.delivered,
+        1
+    );
+    // The ask was consumed by the mailbox, not left for `reliable_recv`.
+    assert_eq!(rig.host.reliable_recv(), None);
+}
+
+#[test]
+fn a_reset_ask_behind_another_message_class_is_still_absorbed() {
+    let rig = rig(22, 0.0);
+    let ctl = rig.client.ctl().unwrap();
+    rig.client.reliable_send(rig.generation, b"other").unwrap();
+    ctl.request_reset(rig.generation).unwrap();
+    let inputs = rig.host.remote_inputs();
+    pump(&rig, "both messages delivered", || {
+        rig.host.reliable_stats(rig.id).unwrap().receiver.delivered == 2
+    });
+    // The ask waits behind the unconsumed message…
+    assert!(inputs.drain_resets().is_empty());
+    // …and follows the moment the lane's consumer takes it.
+    assert_eq!(rig.host.reliable_recv(), Some((rig.id, b"other".to_vec())));
+    assert_eq!(inputs.drain_resets(), vec![(rig.id, rig.generation)]);
+}
+
+#[test]
+fn a_cnr_outcome_whose_first_datagram_is_lost_reaches_the_client_once() {
+    let mut rig = rig(23, 0.15);
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    let msg = cnr_with_outcome(rig.generation);
+    let fanout = rig
+        .host
+        .ctl()
+        .reliable_broadcast(rig.generation, &msg)
+        .unwrap();
+    assert_eq!((fanout.reliable, fanout.fell_back), (1, 0));
+    pump(&rig, "the outcome frame", || {
+        rig.client.reliable_stats().unwrap().receiver.delivered == 1
+    });
+    quiesce(&rig, 40);
+    assert_eq!(client_events(&mut rig), vec![msg]);
+    let host = rig.host.reliable_stats(rig.id).unwrap();
+    assert!(host.sender.retransmits >= 1, "{host:?}");
+    assert_eq!((host.sender.acked, host.sender.in_flight), (1, 0));
+}
+
+#[test]
+fn impact_events_survive_a_lost_first_datagram_in_order_and_apply_once() {
+    let mut rig = rig(24, 0.15);
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    let sent: Vec<Message> = (1..=3)
+        .map(|i| Message::Impacts {
+            generation: rig.generation,
+            impacts: vec![impact(i)],
+        })
+        .collect();
+    for m in &sent {
+        rig.host
+            .ctl()
+            .reliable_broadcast(rig.generation, m)
+            .unwrap();
+    }
+    pump(&rig, "the impact events", || {
+        rig.client.reliable_stats().unwrap().receiver.delivered == 3
+    });
+    quiesce(&rig, 40);
+    assert_eq!(client_events(&mut rig), sent);
+    assert_eq!(rig.client.reliable_stats().unwrap().receiver.delivered, 3);
+}
+
+#[test]
+fn a_refused_reliable_send_falls_back_to_the_control_stream() {
+    let mut rig = rig(25, 0.0);
+    // Fill the window with messages nobody acks yet (the relay is
+    // frozen until a round runs), then one more.
+    let mut sent = Vec::new();
+    let mut fell_back = 0;
+    for i in 1..=u64::from(RELIABLE_WINDOW as u32) + 2 {
+        let m = Message::Impacts {
+            generation: rig.generation,
+            impacts: vec![impact(i)],
+        };
+        let f = rig
+            .host
+            .ctl()
+            .reliable_broadcast(rig.generation, &m)
+            .unwrap();
+        fell_back += u32::from(f.fell_back);
+        sent.push(m);
+    }
+    assert!(fell_back >= 1, "the window never filled");
+    pump(&rig, "delivery", || {
+        rig.client.reliable_stats().unwrap().receiver.delivered + u64::from(fell_back)
+            >= sent.len() as u64
+    });
+    quiesce(&rig, 40);
+    let mut got = client_events(&mut rig);
+    assert_eq!(got.len(), sent.len(), "every message exactly once");
+    got.sort_by_key(|m| match m {
+        Message::Impacts { impacts, .. } => impacts[0].id,
+        _ => 0,
+    });
+    assert_eq!(got, sent);
+}

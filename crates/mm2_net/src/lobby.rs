@@ -322,6 +322,17 @@ impl PeerMail {
     /// The body of [`RemoteInputs::store_window_at`], on an already-held
     /// mailbox lock so the UDP lane can authenticate and absorb a datagram
     /// atomically with respect to a seat's removal.
+    /// Record `id`'s reset ask under the mailbox lock — the TCP path and
+    /// the lane's reliable channel (NETPLAY-06E-3) share it, so a request
+    /// delivered by both is one newest-wins slot.
+    pub(crate) fn absorb_reset(&mut self, id: u16, generation: u64) {
+        if self.resets.len() >= MAX_PLAYERS as usize && !self.resets.contains_key(&id) {
+            return;
+        }
+        let slot = self.resets.entry(id).or_insert(generation);
+        *slot = (*slot).max(generation);
+    }
+
     pub(crate) fn absorb_window(
         &mut self,
         id: u16,
@@ -526,12 +537,10 @@ impl RemoteInputs {
     /// harness's reorder leg) cannot let a stale session's ask mask a
     /// fresher one. Same admission bound as the input slots.
     fn request_reset(&self, id: u16, generation: u64) {
-        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.resets.len() >= MAX_PLAYERS as usize && !mail.resets.contains_key(&id) {
-            return;
-        }
-        let slot = mail.resets.entry(id).or_insert(generation);
-        *slot = (*slot).max(generation);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .absorb_reset(id, generation);
     }
 
     /// Take every pending reset request — `(roster id, requested
@@ -1111,6 +1120,38 @@ impl HostCtl {
         self.lane.counts()
     }
 
+    /// Send `msg` to every client, each at most once, riding the reliable
+    /// channel for every seat whose lane is established (NETPLAY-06E-3)
+    /// and the control stream for the rest — a TCP-only seat, a body over
+    /// one datagram, and any seat whose channel refuses it (full or dead)
+    /// fall back to TCP, counted in the returned [`ReliableFanout`], so a
+    /// refusal never drops the message. `generation` is the session the
+    /// lane authenticates it under. The receiver dedups (`Cnr` by
+    /// freshness, `Impacts` by `(generation, seat, id)`), so a seat that
+    /// somehow sees both copies applies it once.
+    pub fn reliable_broadcast(
+        &self,
+        generation: u64,
+        msg: &Message,
+    ) -> Result<ReliableFanout, NetError> {
+        let bytes = msg.encode()?;
+        let mut fanout = ReliableFanout::default();
+        let mut by_reliable = Vec::new();
+        if bytes.len() <= crate::rt::MAX_RELIABLE_BODY {
+            for (id, _) in self.lane.established_outs() {
+                match self.lane.send_reliable(id, generation, &bytes) {
+                    Ok(()) => {
+                        fanout.reliable += 1;
+                        by_reliable.push(id);
+                    }
+                    Err(_) => fanout.fell_back += 1,
+                }
+            }
+        }
+        self.send(LoopMsg::BroadcastExcept(msg.clone(), by_reliable))?;
+        Ok(fanout)
+    }
+
     /// Send `body` to `player_id` on the reliable channel (NETPLAY-06E-1):
     /// numbered and repeated until acknowledged, delivered exactly once
     /// and in order, at most [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)
@@ -1125,6 +1166,16 @@ impl HostCtl {
     ) -> Result<(), crate::ReliableSendError> {
         self.lane.send_reliable(player_id, generation, body)
     }
+}
+
+/// What [`HostCtl::reliable_broadcast`] did, per seat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReliableFanout {
+    /// Seats the message went to on the reliable channel.
+    pub reliable: u16,
+    /// Lane seats whose channel refused it (full or dead) and got it
+    /// over the control stream instead. TCP-only seats are not counted.
+    pub fell_back: u16,
 }
 
 /// The joining side of a lobby. `join` completes the handshake and the
@@ -1648,7 +1699,17 @@ impl ClientCtl {
     /// must be the session the sender is driving in; the host drops a
     /// request minted against anything else.
     pub fn request_reset(&self, generation: u64) -> Result<(), NetError> {
-        self.send(&Message::ResetRequest { generation })
+        let msg = Message::ResetRequest { generation };
+        // NETPLAY-06E-3: with a lane the ask rides the reliable channel
+        // (acked, repeated, delivered once); a refusal — no lane, full
+        // window, dead channel — falls back to the control stream, which
+        // the host's mailbox absorbs the same way.
+        if let Some(lane) = &self.lane
+            && lane.send_reliable(generation, &msg.encode()?).is_ok()
+        {
+            return Ok(());
+        }
+        self.send(&msg)
     }
 
     /// A clean quit from another thread: the host records

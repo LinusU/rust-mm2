@@ -774,6 +774,30 @@ enum Verdict {
     Dropped(Refuse),
 }
 
+/// Reset asks the reliable channel delivered, in order, into the
+/// mailbox's newest-wins slot (NETPLAY-06E-3). Only the front of the
+/// delivered queue is looked at: any other message class stays queued for
+/// [`HostLane::recv_reliable`], and the asks behind it follow once that is
+/// consumed (it calls this again).
+fn absorb_reliable_resets(mail: &mut PeerMail, id: u16) {
+    let Some(seat) = mail.lane.seats.get_mut(&id) else {
+        return;
+    };
+    let mut asks = Vec::new();
+    while let Some(body) = seat
+        .rel
+        .receiver
+        .pop_if(|b| matches!(Message::decode(b), Ok(Message::ResetRequest { .. })))
+    {
+        if let Ok(Message::ResetRequest { generation }) = Message::decode(&body) {
+            asks.push(generation);
+        }
+    }
+    for generation in asks {
+        mail.absorb_reset(id, generation);
+    }
+}
+
 /// Authenticate one datagram against the seat table and, if it is good,
 /// apply it. The checks run cheapest-and-least-trusting first and the
 /// replay window moves only after authentication, so a forger cannot
@@ -834,6 +858,7 @@ fn ingest(
                 let ack = seat.rel.receiver.on_data(id, body);
                 seat.out
                     .push_reliable(LaneTag::ReliableAck, h.generation, ack);
+                absorb_reliable_resets(mail, h.seat);
                 Verdict::Accepted
             }
             None => {
@@ -1007,10 +1032,16 @@ impl HostLane {
     /// The next reliably delivered message from any seat, with its seat.
     pub(crate) fn recv_reliable(&self) -> Option<(u16, Vec<u8>)> {
         let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
-        mail.lane
+        let found = mail
+            .lane
             .seats
             .iter_mut()
-            .find_map(|(id, s)| s.rel.receiver.pop().map(|m| (*id, m)))
+            .find_map(|(id, s)| s.rel.receiver.pop().map(|m| (*id, m)));
+        if let Some((id, _)) = found {
+            // The popped message may have been blocking reset asks.
+            absorb_reliable_resets(&mut mail, id);
+        }
+        found
     }
 
     pub(crate) fn reliable_stats(&self, id: u16) -> Option<ReliableStats> {
@@ -1119,6 +1150,19 @@ fn flush(socket: &UdpSocket, to: SocketAddr, header: &Header, payload: &[u8], c:
     }
 }
 
+/// Reliably delivered messages the client inbox holds before the lane
+/// stops taking more out of the channel's receiver.
+const REL_INBOX_CAP: usize = 64;
+
+/// Whether a reliably delivered body is a host event the client's inbox
+/// owns (everything else stays for `recv_reliable`).
+fn is_host_event(body: &[u8]) -> bool {
+    matches!(
+        Message::decode(body),
+        Ok(Message::Cnr { .. } | Message::Impacts { .. })
+    )
+}
+
 /// The client's merged receive side: the TCP reader thread feeds the
 /// reliable queue, the lane receive thread feeds a bounded drop-oldest
 /// queue of `Snap`s, and `Client::recv` drains both.
@@ -1131,6 +1175,10 @@ pub(crate) struct Inbox {
 #[derive(Debug)]
 struct InboxState {
     tcp: VecDeque<Result<Message, NetError>>,
+    /// Messages the lane's reliable channel delivered (NETPLAY-06E-3):
+    /// bounded by [`REL_INBOX_CAP`], never dropped — the receiver keeps
+    /// what does not fit and the sender keeps repeating.
+    rel: VecDeque<Message>,
     lane: Bounded<Message>,
     closed: bool,
 }
@@ -1140,6 +1188,7 @@ impl Inbox {
         Arc::new(Self {
             state: Mutex::new(InboxState {
                 tcp: VecDeque::new(),
+                rel: VecDeque::new(),
                 lane: Bounded::new(QUEUE_CAP),
                 closed: false,
             }),
@@ -1175,6 +1224,21 @@ impl Inbox {
         true
     }
 
+    /// Room left for reliably delivered messages.
+    fn rel_room(&self) -> usize {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        REL_INBOX_CAP.saturating_sub(st.rel.len())
+    }
+
+    fn push_rel(&self, msg: Message) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rel
+            .push_back(msg);
+        self.cv.notify_all();
+    }
+
     fn push_lane(&self, msg: Message) {
         self.state
             .lock()
@@ -1206,6 +1270,9 @@ impl Inbox {
             if let Some(item) = st.tcp.pop_front() {
                 self.cv.notify_all();
                 return item;
+            }
+            if let Some(msg) = st.rel.pop_front() {
+                return Ok(msg);
             }
             if let Some(msg) = st.lane.pop() {
                 return Ok(msg);
@@ -1393,6 +1460,9 @@ impl ClientLane {
                 }
             };
             Counters::bump(&self.counters.received);
+            // Anything an earlier datagram delivered while the inbox
+            // was full goes in now.
+            self.drain_reliable();
             let (header, payload) = match self.check(&buf[..n], from, &mut window) {
                 Ok(ok) => ok,
                 Err(why) => {
@@ -1427,6 +1497,7 @@ impl ClientLane {
                         self.out
                             .push_reliable(LaneTag::ReliableAck, header.generation, ack);
                         Counters::bump(&self.counters.accepted);
+                        self.drain_reliable();
                     }
                     None => {
                         self.rel
@@ -1448,6 +1519,21 @@ impl ClientLane {
                     }
                     None => self.counters.drop_for(Refuse::Malformed),
                 },
+            }
+        }
+    }
+
+    /// Move reliably delivered host events (`Cnr`, `Impacts`) into the
+    /// inbox while it has room; anything else stays queued in the
+    /// receiver for [`ClientLane::recv_reliable`].
+    fn drain_reliable(&self) {
+        let mut rel = self.rel.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..self.inbox.rel_room() {
+            let Some(body) = rel.receiver.pop_if(is_host_event) else {
+                break;
+            };
+            if let Ok(msg) = Message::decode(&body) {
+                self.inbox.push_rel(msg);
             }
         }
     }
@@ -1556,11 +1642,17 @@ impl ClientLane {
     }
 
     pub(crate) fn recv_reliable(&self) -> Option<Vec<u8>> {
-        self.rel
+        let body = self
+            .rel
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .receiver
-            .pop()
+            .pop();
+        if body.is_some() {
+            // The popped message may have been blocking host events.
+            self.drain_reliable();
+        }
+        body
     }
 
     pub(crate) fn reliable_stats(&self) -> ReliableStats {

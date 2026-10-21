@@ -113,8 +113,10 @@ use crate::cmdbuf::Source;
 /// receive them and would have nothing but pose snapshots to go on. v35:
 /// the lane's reliable channel (NETPLAY-06E-1, see [`crate::reliable`]) —
 /// lane datagram tags 5 and 6; a v34 peer would count them malformed and
-/// never acknowledge, so a reliable sender would give up on it.
-pub const PROTOCOL_VERSION: u16 = 35;
+/// never acknowledge, so a reliable sender would give up on it. v36:
+/// `Impacts`, the standalone impact-row message (NETPLAY-06E-3) that
+/// rides the reliable channel; a v35 peer would reject the unknown tag.
+pub const PROTOCOL_VERSION: u16 = 36;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -159,6 +161,7 @@ const TAG_INPUT_WINDOW: u8 = 0x17;
 const TAG_LANE_BIND: u8 = 0x18;
 const TAG_LANE_GRANT: u8 = 0x19;
 const TAG_REMOTE_COMMANDS: u8 = 0x1a;
+const TAG_IMPACTS: u8 = 0x1b;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -1014,6 +1017,18 @@ pub enum Message {
         /// The session generation this request belongs to.
         generation: u64,
     },
+    /// Host → every client: participant impacts as a standalone,
+    /// reliable event message (v36, NETPLAY-06E-3). The same
+    /// [`SnapImpact`] rows a `Snap` carries — the receiver dedups both
+    /// on `(generation, seat, id)` — but not tied to a pose frame, so it
+    /// can ride the reliable channel and survive a dropped datagram.
+    /// Bounded by [`MAX_SNAP_IMPACTS`].
+    Impacts {
+        /// The session generation the rows belong to.
+        generation: u64,
+        /// The impact rows.
+        impacts: Vec<SnapImpact>,
+    },
     /// Host → every client: an authoritative pose snapshot of the
     /// running session's participants (F25-A). `tick` is the host's
     /// session tick when the snapshot was taken; entries are a complete
@@ -1431,6 +1446,47 @@ fn check_input_window(first_seq: u64, len: usize) -> Result<(), ProtoError> {
     Ok(())
 }
 
+/// Append `impacts` as a count byte and fixed rows (shared by `Snap`
+/// and `Impacts`).
+fn encode_impacts(out: &mut Vec<u8>, impacts: &[SnapImpact]) -> Result<(), ProtoError> {
+    if impacts.len() > MAX_SNAP_IMPACTS as usize {
+        return Err(ProtoError::OversizeImpacts(impacts.len() as u8));
+    }
+    out.push(impacts.len() as u8);
+    for m in impacts {
+        out.extend_from_slice(&m.seat.to_le_bytes());
+        out.extend_from_slice(&m.id.to_le_bytes());
+        out.extend_from_slice(&m.tick.to_le_bytes());
+        for v in m.point.iter().chain(m.normal.iter()) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&m.severity.to_le_bytes());
+        out.extend_from_slice(&m.audio_id.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// The inverse of [`encode_impacts`].
+fn decode_impacts(cur: &mut Cursor<'_>) -> Result<Vec<SnapImpact>, ProtoError> {
+    let impact_count = cur.u8()?;
+    if impact_count > MAX_SNAP_IMPACTS {
+        return Err(ProtoError::OversizeImpacts(impact_count));
+    }
+    let mut impacts = Vec::with_capacity(impact_count as usize);
+    for _ in 0..impact_count {
+        impacts.push(SnapImpact {
+            seat: cur.u16()?,
+            id: cur.u64()?,
+            tick: cur.u64()?,
+            point: cur.vec3()?,
+            normal: cur.vec3()?,
+            severity: cur.f32()?,
+            audio_id: cur.i64()?,
+        });
+    }
+    Ok(impacts)
+}
+
 impl Message {
     /// Serialize into one frame payload.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
@@ -1585,6 +1641,14 @@ impl Message {
                 out.push(TAG_RESET_REQUEST);
                 out.extend_from_slice(&generation.to_le_bytes());
             }
+            Self::Impacts {
+                generation,
+                impacts,
+            } => {
+                out.push(TAG_IMPACTS);
+                out.extend_from_slice(&generation.to_le_bytes());
+                encode_impacts(&mut out, impacts)?;
+            }
             Self::Snap {
                 generation,
                 tick,
@@ -1651,20 +1715,7 @@ impl Message {
                     out.extend_from_slice(&t.spin.to_le_bytes());
                     out.push(t.flags);
                 }
-                if impacts.len() > MAX_SNAP_IMPACTS as usize {
-                    return Err(ProtoError::OversizeImpacts(impacts.len() as u8));
-                }
-                out.push(impacts.len() as u8);
-                for m in impacts {
-                    out.extend_from_slice(&m.seat.to_le_bytes());
-                    out.extend_from_slice(&m.id.to_le_bytes());
-                    out.extend_from_slice(&m.tick.to_le_bytes());
-                    for v in m.point.iter().chain(m.normal.iter()) {
-                        out.extend_from_slice(&v.to_le_bytes());
-                    }
-                    out.extend_from_slice(&m.severity.to_le_bytes());
-                    out.extend_from_slice(&m.audio_id.to_le_bytes());
-                }
+                encode_impacts(&mut out, impacts)?;
                 match race {
                     Some(race) => {
                         out.push(1);
@@ -1979,6 +2030,10 @@ impl Message {
             TAG_RESET_REQUEST => Self::ResetRequest {
                 generation: cur.u64()?,
             },
+            TAG_IMPACTS => Self::Impacts {
+                generation: cur.u64()?,
+                impacts: decode_impacts(&mut cur)?,
+            },
             TAG_SNAP => {
                 let generation = cur.u64()?;
                 let tick = cur.u64()?;
@@ -2033,22 +2088,7 @@ impl Message {
                         flags: cur.u8()?,
                     });
                 }
-                let impact_count = cur.u8()?;
-                if impact_count > MAX_SNAP_IMPACTS {
-                    return Err(ProtoError::OversizeImpacts(impact_count));
-                }
-                let mut impacts = Vec::with_capacity(impact_count as usize);
-                for _ in 0..impact_count {
-                    impacts.push(SnapImpact {
-                        seat: cur.u16()?,
-                        id: cur.u64()?,
-                        tick: cur.u64()?,
-                        point: cur.vec3()?,
-                        normal: cur.vec3()?,
-                        severity: cur.f32()?,
-                        audio_id: cur.i64()?,
-                    });
-                }
+                let impacts = decode_impacts(&mut cur)?;
                 // `phase` decodes verbatim — the discriminant's naming
                 // lives in `mm2_app`, which drops what it cannot name.
                 let race = if cur.bool()? {
@@ -3155,6 +3195,39 @@ mod tests {
     }
 
     #[test]
+    fn an_impacts_message_round_trips_and_is_bounded() {
+        let row = |id| SnapImpact {
+            seat: 2,
+            id,
+            tick: 9,
+            point: [1.0, 2.0, 3.0],
+            normal: [0.0, 1.0, 0.0],
+            severity: 4.5,
+            audio_id: i64::MIN,
+        };
+        for n in [0, 1, MAX_SNAP_IMPACTS as u64] {
+            let msg = Message::Impacts {
+                generation: 7,
+                impacts: (0..n).map(row).collect(),
+            };
+            let bytes = msg.encode().unwrap();
+            assert_eq!(Message::decode(&bytes).unwrap(), msg);
+            for cut in 1..bytes.len() {
+                assert!(Message::decode(&bytes[..cut]).is_err());
+            }
+        }
+        let over = Message::Impacts {
+            generation: 7,
+            impacts: (0..=MAX_SNAP_IMPACTS as u64).map(row).collect(),
+        };
+        assert_eq!(over.encode(), Err(ProtoError::OversizeImpacts(65)));
+        let mut wide = vec![TAG_IMPACTS];
+        wide.extend_from_slice(&7u64.to_le_bytes());
+        wide.push(MAX_SNAP_IMPACTS + 1);
+        assert_eq!(Message::decode(&wide), Err(ProtoError::OversizeImpacts(65)));
+    }
+
+    #[test]
     fn an_oversize_session_does_not_encode() {
         let msg = Message::Session(SessionAdvertisement {
             summary: "s".to_string(),
@@ -3340,15 +3413,15 @@ mod tests {
     }
 
     #[test]
-    fn v35_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 35);
-        for protocol in [34, 36] {
+    fn v36_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 36);
+        for protocol in [35, 37] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("35"), "{why}");
+            assert!(why.contains("36"), "{why}");
         }
     }
 
