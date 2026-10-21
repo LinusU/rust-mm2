@@ -42,7 +42,7 @@
 use std::collections::BinaryHeap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -221,6 +221,19 @@ struct Lane {
     order: u64,
     cap: usize,
     stats: LinkStats,
+    /// Frames read and written per message tag (first payload byte), for
+    /// [`ImpairProxy::tagged`].
+    tags: TagCounts,
+}
+
+/// Per-tag frame counters: `[tag] -> (read, written)`.
+#[derive(Clone)]
+struct TagCounts(Box<[(u64, u64); 256]>);
+
+impl Default for TagCounts {
+    fn default() -> Self {
+        Self(Box::new([(0, 0); 256]))
+    }
 }
 
 impl Lane {
@@ -232,6 +245,7 @@ impl Lane {
             order: 0,
             cap,
             stats: LinkStats::default(),
+            tags: TagCounts::default(),
         }
     }
 
@@ -337,6 +351,25 @@ impl Lane {
     }
 }
 
+/// A virtual clock a harness advances by hand, so a lane's release instants
+/// and delivery order depend on the test's own schedule rather than on how
+/// fast the machine ran its threads. Time only moves in [`Self::advance`].
+struct ManualClock {
+    origin: Instant,
+    nanos: AtomicU64,
+    /// Bumped by every advance; a lane writer echoes the epoch it read
+    /// *before* it read the time, so an echo proves the lane acted on it.
+    epoch: AtomicU64,
+    /// One echo cell per lane writer (`u64::MAX` once that writer ended).
+    seen: Mutex<Vec<Arc<AtomicU64>>>,
+}
+
+impl ManualClock {
+    fn now(&self) -> Instant {
+        self.origin + Duration::from_nanos(self.nanos.load(Ordering::Acquire))
+    }
+}
+
 /// The proxy's shared mutable state: the live recipe per direction, one
 /// stats slot per spawned lane (slot parity is the lane's
 /// [`LinkDir`], so several connections' lanes sum correctly on read),
@@ -346,10 +379,22 @@ struct Shared {
     /// Per-direction message tag whose frames are dropped outright.
     drop_tags: Mutex<[Option<u8>; 2]>,
     stats: Mutex<Vec<LinkStats>>,
+    /// Per-lane tag counters, parallel to `stats`; only a manual-clock
+    /// proxy fills them.
+    tags: Mutex<Vec<TagCounts>>,
     stop: AtomicBool,
+    /// `Some` for a proxy built with [`ImpairProxy::loopback_manual`].
+    clock: Option<ManualClock>,
 }
 
 impl Shared {
+    /// The lane's notion of now: the wall clock, or the manual clock.
+    fn now(&self) -> Instant {
+        self.clock
+            .as_ref()
+            .map_or_else(Instant::now, ManualClock::now)
+    }
+
     fn recipe(&self, dir: LinkDir) -> Impair {
         self.params.lock().unwrap_or_else(|e| e.into_inner())[dir as usize]
     }
@@ -361,12 +406,35 @@ impl Shared {
     /// A fresh zeroed slot; its index is the lane's identity.
     fn alloc_stats(&self) -> usize {
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        self.tags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(TagCounts::default());
         stats.push(LinkStats::default());
         stats.len() - 1
     }
 
     fn publish(&self, slot: usize, stats: LinkStats) {
         self.stats.lock().unwrap_or_else(|e| e.into_inner())[slot] = stats;
+    }
+
+    /// Frames with message tag `tag` that `dir`'s lanes have read and
+    /// written, summed over connections.
+    fn tagged(&self, dir: LinkDir, tag: u8) -> (u64, u64) {
+        self.tags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| idx % 2 == dir as usize)
+            .fold((0, 0), |acc, (_, t)| {
+                let (r, w) = t.0[tag as usize];
+                (acc.0 + r, acc.1 + w)
+            })
+    }
+
+    fn publish_tags(&self, slot: usize, tags: &TagCounts) {
+        self.tags.lock().unwrap_or_else(|e| e.into_inner())[slot] = tags.clone();
     }
 
     /// Every `dir` lane's counters summed.
@@ -407,6 +475,20 @@ impl ImpairProxy {
     /// `target`, with a deterministic seed for every lane's draws. The
     /// recipe starts transparent — `set` installs impairment.
     pub fn loopback_seeded(target: SocketAddr, seed: u64) -> io::Result<Self> {
+        Self::start(target, seed, false)
+    }
+
+    /// [`Self::loopback_seeded`] on a virtual clock: delay, jitter and the
+    /// reorder hold are measured against time that only moves in
+    /// [`Self::advance`], so what a lane delivers after each advance is a
+    /// function of the seed and the test's schedule, not of machine load.
+    /// The test pairs every `advance` with its own barrier on the frames it
+    /// expects (see [`Self::advance`] and [`Self::stats`]).
+    pub fn loopback_manual(target: SocketAddr, seed: u64) -> io::Result<Self> {
+        Self::start(target, seed, true)
+    }
+
+    fn start(target: SocketAddr, seed: u64, manual: bool) -> io::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -414,7 +496,14 @@ impl ImpairProxy {
             params: Mutex::new([Impair::default(), Impair::default()]),
             drop_tags: Mutex::new([None; 2]),
             stats: Mutex::new(Vec::new()),
+            tags: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
+            clock: manual.then(|| ManualClock {
+                origin: Instant::now(),
+                nanos: AtomicU64::new(0),
+                epoch: AtomicU64::new(0),
+                seen: Mutex::new(Vec::new()),
+            }),
         });
         let lanes: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let sockets: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
@@ -477,6 +566,43 @@ impl ImpairProxy {
             .drop_tags
             .lock()
             .unwrap_or_else(|e| e.into_inner())[dir as usize] = tag;
+    }
+
+    /// Move a manual clock forward by `by` and return once every lane has
+    /// released and written whatever fell due. Frames offered before the
+    /// call were stamped at the old time; frames written here are on the
+    /// socket, not necessarily read by the far side yet. `false` if a lane
+    /// never caught up (a stuck destination). A wall-clock proxy has no
+    /// clock to move: this does nothing and returns `true`.
+    pub fn advance(&self, by: Duration) -> bool {
+        let Some(clock) = &self.shared.clock else {
+            return true;
+        };
+        clock
+            .nanos
+            .fetch_add(by.as_nanos() as u64, Ordering::AcqRel);
+        let epoch = clock.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let cells: Vec<Arc<AtomicU64>> =
+            clock.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for cell in cells {
+            while cell.load(Ordering::Acquire) < epoch {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::yield_now();
+            }
+        }
+        true
+    }
+
+    /// `(read, written)` frame counts for message tag `tag` (the payload's
+    /// first byte) in `dir`, kept by a [`Self::loopback_manual`] proxy only
+    /// (a wall-clock proxy reports zeros). Unlike [`Self::stats`] this
+    /// separates the data plane from timer-driven traffic such as
+    /// keepalives, whose arrival the virtual clock does not schedule.
+    pub fn tagged(&self, dir: LinkDir, tag: u8) -> (u64, u64) {
+        self.shared.tagged(dir, tag)
     }
 
     /// The recipe `dir` currently runs.
@@ -607,6 +733,17 @@ fn spawn_lane(
         }
     });
     let shared_w = shared.clone();
+    let seen = Arc::new(AtomicU64::new(0));
+    if let Some(clock) = &shared.clock {
+        // Born at the current epoch: an advance that predates the lane
+        // owes it nothing.
+        seen.store(clock.epoch.load(Ordering::Acquire), Ordering::Release);
+        clock
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(seen.clone());
+    }
     let writer = thread::spawn(move || {
         let mut lane = Lane::new(seed, MAX_QUEUED);
         let mut out: Vec<Vec<u8>> = Vec::new();
@@ -615,34 +752,55 @@ fn spawn_lane(
             if shared_w.stop.load(Ordering::Relaxed) {
                 break;
             }
-            let now = Instant::now();
+            // Read the epoch before the time: an echo of epoch `e` then
+            // proves this pass saw at least the time `advance` set for it.
+            let epoch = shared_w
+                .clock
+                .as_ref()
+                .map(|c| c.epoch.load(Ordering::Acquire));
+            let now = shared_w.now();
             lane.collect_due(now, &mut out);
             for payload in out.drain(..) {
                 lane.stats.frames_out += 1;
                 lane.stats.bytes_out += payload.len() as u64;
+                if let Some(tag) = payload.first() {
+                    lane.tags.0[*tag as usize].1 += 1;
+                }
                 if write_frame(&mut dst, &payload).is_err() {
                     open = false;
                     break;
                 }
             }
             shared_w.publish(slot, lane.stats);
+            if let Some(epoch) = epoch {
+                shared_w.publish_tags(slot, &lane.tags);
+                seen.store(epoch, Ordering::Release);
+            }
             if !open {
                 break;
             }
-            let wait = lane
-                .next_due()
-                .map(|due| due.saturating_duration_since(now))
-                .unwrap_or(PUMP_QUANTUM)
-                .min(PUMP_QUANTUM);
+            let wait = if epoch.is_some() {
+                // Virtual time does not pass while waiting: poll briefly
+                // so an offer or an advance is acted on promptly.
+                Duration::from_micros(100)
+            } else {
+                lane.next_due()
+                    .map(|due| due.saturating_duration_since(now))
+                    .unwrap_or(PUMP_QUANTUM)
+                    .min(PUMP_QUANTUM)
+            };
             match rx.recv_timeout(wait.max(Duration::from_micros(50))) {
                 Ok(payload) => {
+                    if let Some(tag) = payload.first() {
+                        lane.tags.0[*tag as usize].0 += 1;
+                    }
                     if shared_w
                         .drop_tag(dir)
                         .is_some_and(|t| payload.first() == Some(&t))
                     {
                         lane.drop_frame(&payload);
                     } else {
-                        lane.offer(&shared_w.recipe(dir), Instant::now(), payload);
+                        lane.offer(&shared_w.recipe(dir), shared_w.now(), payload);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -663,6 +821,8 @@ fn spawn_lane(
         // leaves the far side believing the connection is live.
         let _ = dst.shutdown(std::net::Shutdown::Write);
         shared_w.publish(slot, lane.stats);
+        // An ended lane never holds an advance back.
+        seen.store(u64::MAX, Ordering::Release);
     });
     // Writers first: joining on drop frees the channel receivers a
     // blocked reader's `send` waits on.
@@ -986,6 +1146,41 @@ mod tests {
         assert_eq!(
             stats.bytes_out, 24,
             "each duplicated copy re-pays the payload bytes"
+        );
+    }
+
+    /// On the virtual clock a delay is measured in advances, not in wall
+    /// time: nothing arrives however long the test waits, and the frame is
+    /// written by the advance that reaches its release.
+    #[test]
+    fn a_manual_clock_releases_frames_only_when_advanced() {
+        let (target, in_rx, _out) = sink();
+        let proxy = ImpairProxy::loopback_manual(target, 0).unwrap();
+        proxy.set(
+            LinkDir::Up,
+            Impair {
+                delay: Duration::from_millis(30),
+                ..Impair::default()
+            },
+        );
+        let mut c = client(&proxy);
+        write_frame(&mut c, &frame(7)).unwrap();
+        let _ = stats_at_least(&proxy, LinkDir::Up, 1);
+        assert!(
+            in_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "a frame left before the clock moved"
+        );
+        assert!(proxy.advance(Duration::from_millis(29)));
+        assert!(
+            in_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "a frame left a millisecond early"
+        );
+        assert!(proxy.advance(Duration::from_millis(1)));
+        assert_eq!(received(&in_rx, 1), [7]);
+        assert_eq!(
+            proxy.tagged(LinkDir::Up, 7),
+            (1, 1),
+            "frame(7) leads with 7"
         );
     }
 

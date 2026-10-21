@@ -307,6 +307,9 @@ struct PeerMail {
     running: Option<u64>,
     seats: BTreeMap<u16, SeatBuffer>,
     window_gens: BTreeMap<u16, (u64, Instant)>,
+    /// `InputWindow` frames absorbed per seat, accepted or not — the count
+    /// a harness waits on to know a delivered frame reached the mailbox.
+    windows: BTreeMap<u16, u64>,
 }
 
 /// Sustained per-seat `Input` budget, samples per second. The client
@@ -509,6 +512,7 @@ impl RemoteInputs {
         mail.buckets.remove(&id);
         mail.seats.remove(&id);
         mail.window_gens.remove(&id);
+        mail.windows.remove(&id);
     }
 
     /// Tell the mailbox which session generation the host is simulating
@@ -548,6 +552,9 @@ impl RemoteInputs {
         now: Instant,
     ) {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.windows.len() < MAX_PLAYERS as usize || mail.windows.contains_key(&id) {
+            *mail.windows.entry(id).or_default() += 1;
+        }
         if mail.window_gens.len() < MAX_PLAYERS as usize || mail.window_gens.contains_key(&id) {
             mail.window_gens.insert(id, (generation, now));
         }
@@ -593,6 +600,13 @@ impl RemoteInputs {
             .map_or(0, |s| u8::try_from(s.stats().occupancy).unwrap_or(u8::MAX))
     }
 
+    /// `InputWindow` frames from `id` the mailbox has absorbed over its
+    /// lifetime, whether accepted or dropped (0 for an unknown seat).
+    pub fn windows_received(&self, id: u16) -> u64 {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.windows.get(&id).copied().unwrap_or(0)
+    }
+
     /// `id`'s command-buffer counters, if it has a buffer.
     pub fn seat_stats(&self, id: u16) -> Option<SeatStats> {
         let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -627,6 +641,7 @@ impl RemoteInputs {
         mail.buckets.clear();
         mail.seats.clear();
         mail.window_gens.clear();
+        mail.windows.clear();
         mail.running = None;
     }
 }
