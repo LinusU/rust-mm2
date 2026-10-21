@@ -156,6 +156,11 @@ struct Seat {
     /// Most fixed ticks the pacer released in one frame.
     max_frame_ticks: u64,
     prev_ran: u64,
+    /// Non-lead cells: render this many frames per second of wall time
+    /// instead of one frame per host step (NETPLAY-02G).
+    render_hz: Option<f64>,
+    /// Wall time not yet spent on a render frame, in ns.
+    render_owed_ns: u64,
 }
 
 /// One host tick for one seat, observed after `consume_seat_commands`.
@@ -300,6 +305,8 @@ impl Rig {
                 owed_ns: 0,
                 max_frame_ticks: 0,
                 prev_ran: 0,
+                render_hz: None,
+                render_owed_ns: 0,
             });
         }
         // The first fixed step tells the mailbox which generation runs.
@@ -372,11 +379,24 @@ impl Rig {
                 if seat.frozen {
                     continue;
                 }
-                let ticks = 1 + seat.catch_up;
-                seat.catch_up = 0;
-                seat.client
-                    .insert_resource(TimeUpdateStrategy::ManualDuration(TICK * ticks));
-                seat.client.update();
+                if let Some(hz) = seat.render_hz {
+                    // Frames at the render rate: the wall time of this host
+                    // step is spent in as many whole frames as it holds.
+                    let frame = Duration::from_secs_f64(1.0 / hz);
+                    seat.render_owed_ns += TICK.as_nanos() as u64;
+                    while seat.render_owed_ns >= frame.as_nanos() as u64 {
+                        seat.render_owed_ns -= frame.as_nanos() as u64;
+                        seat.client
+                            .insert_resource(TimeUpdateStrategy::ManualDuration(frame));
+                        seat.client.update();
+                    }
+                } else {
+                    let ticks = 1 + seat.catch_up;
+                    seat.catch_up = 0;
+                    seat.client
+                        .insert_resource(TimeUpdateStrategy::ManualDuration(TICK * ticks));
+                    seat.client.update();
+                }
             }
             // Let the worker hand the window to the socket (it is the only
             // thing allowed to block); bounded so a stuck sink fails.
@@ -1278,4 +1298,50 @@ fn lead_controller_rebases_on_sleep_and_resume() {
     .expect("never back inside the depth band");
     assert!(settled - before <= 600, "slow to recover");
     assert_in_band("lead-sleep", &rig, 200);
+}
+
+/// NETPLAY-02G: the render rate must not change the host-consumed timeline.
+/// A client rendering at 30, 60 and 144 Hz sends through the full path
+/// (worker, lossless proxy, host mailbox); the host's one-slot-per-tick
+/// consumption must name every seq exactly once with its recorded controls
+/// (`check`), and the slot counters must reconcile at every rate: generated
+/// = fixed ticks run, every generated slot but the unsent tail finalized,
+/// nothing dropped, coalesced or substituted after the stream started.
+#[test]
+fn every_render_rate_reaches_the_host_as_the_same_timeline() {
+    for hz in [30.0, 60.0, 144.0] {
+        let mut rig = Rig::new(&[plain("render", busy)], 0x02E7 + hz as u64);
+        rig.seats[0].render_hz = Some(hz);
+        rig.both(0, 5, 5);
+        rig.run(SETTLE + RUN);
+        rig.drain();
+        let cell = format!("render-{hz}hz");
+        rig.check(&cell, 12);
+        let seat = &rig.seats[0];
+        let stream = seat.client.world().resource::<CommandStream>();
+        let s = seat.ticks.last().unwrap().stats;
+        // ~4.5 s of wall time at 60 Hz: the fixed schedule ran one tick
+        // per 1/60 s whatever the render rate (within a frame's slack).
+        let wall_ticks = (SETTLE + RUN) as u64;
+        assert!(
+            stream.generated_slots().abs_diff(wall_ticks) <= 3,
+            "{cell}: generated {} for {wall_ticks} ticks of wall time",
+            stream.generated_slots()
+        );
+        assert_eq!(stream.handoff_dropped(), 0, "{cell}: handoff dropped");
+        assert_eq!(stream.coalesced(), 0, "{cell}: worker coalesced");
+        assert!(
+            s.finalized + netcmd::SEND_INTERVAL_TICKS >= stream.generated_slots(),
+            "{cell}: finalized {} of {} generated",
+            s.finalized,
+            stream.generated_slots()
+        );
+        // The lossless lane gives no reason for a host substitute once the
+        // stream is running, beyond the bursty 30 Hz frames' one-tick lag.
+        assert!(
+            s.fallback <= 2 * SETTLE as u64,
+            "{cell}: {} substitutes",
+            s.fallback
+        );
+    }
 }

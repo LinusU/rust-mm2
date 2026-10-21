@@ -10,6 +10,7 @@ mod net_cnr_lobby_bots;
 mod net_commands;
 mod net_drive;
 mod net_edge;
+mod net_focus_handoff;
 mod net_host;
 mod net_join;
 mod net_matrix;
