@@ -60,11 +60,14 @@ mod impair;
 mod impair_udp;
 mod lobby;
 mod netcmd;
+mod pace;
 mod proto;
 mod rt;
 
 #[cfg(test)]
 mod lane_impair_tests;
+#[cfg(test)]
+mod lane_pace_tests;
 #[cfg(test)]
 mod lane_tests;
 
@@ -91,6 +94,11 @@ pub use lobby::{
     RemoteInputs, StampedInput, Transport,
 };
 pub use netcmd::{REMOTE_BUFFER_CAP, RemoteCommands, RemoteSeatStats};
+pub use pace::{
+    BULK_MAX_AGE, BULK_QUEUE_CAP, Budget, Cadence, MAX_DEBT_BYTES, MAX_SNAPSHOT_HZ,
+    MOVEMENT_MAX_AGE, MOVEMENT_QUEUE_CAP, PEER_BURST_BYTES, PEER_BYTES_PER_SEC, Priority,
+    SNAPSHOT_HZ,
+};
 pub use proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_REMOTE_RUN,
     MAX_REMOTE_SEATS, MAX_SESSION_PARAMS, MAX_SNAP_CARS, MAX_SNAP_CNR_SEATS, MAX_SNAP_IMPACTS,
@@ -103,7 +111,7 @@ pub use proto::{
 };
 pub use rt::{
     HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
-    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow,
+    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, PaceStats, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow,
     decode_datagram, encode_datagram,
 };
 

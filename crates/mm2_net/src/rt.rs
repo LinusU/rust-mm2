@@ -45,6 +45,10 @@ use std::time::{Duration, Instant};
 
 use crate::frag::{Assembler, AssemblerStats, decode_ack, encode_ack};
 use crate::lobby::{PeerMail, RemoteInputs};
+use crate::pace::{
+    BULK_MAX_AGE, BULK_QUEUE_CAP, Budget, MOVEMENT_MAX_AGE, MOVEMENT_QUEUE_CAP, PEER_BURST_BYTES,
+    PEER_BYTES_PER_SEC, Priority,
+};
 use crate::proto::Message;
 use crate::{NetError, ProtoError};
 
@@ -330,6 +334,28 @@ pub struct QueueStats {
     pub oldest_age: Duration,
     /// The longest any popped entry waited in the queue.
     pub max_wait: Duration,
+    /// Entries discarded unsent because they outlived the queue's
+    /// maximum age (NETPLAY-06D).
+    pub expired: u64,
+}
+
+/// A seat's outbound pacing counters (NETPLAY-06D).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaceStats {
+    /// The movement queue.
+    pub movement: QueueStats,
+    /// The bulk queue.
+    pub bulk: QueueStats,
+    /// Movement datagrams sent.
+    pub movement_sent: u64,
+    /// Bulk datagrams sent.
+    pub bulk_sent: u64,
+    /// Payload bytes sent, both priorities.
+    pub bytes_sent: u64,
+    /// Times the bulk queue's head waited for budget credit.
+    pub bulk_deferred: u64,
+    /// The most bytes the seat's budget was ever overdrawn by.
+    pub max_debt: u64,
 }
 
 #[derive(Debug)]
@@ -338,6 +364,7 @@ struct Bounded<T> {
     cap: usize,
     pushed: u64,
     dropped: u64,
+    expired: u64,
     max_wait: Duration,
 }
 
@@ -348,8 +375,26 @@ impl<T> Bounded<T> {
             cap,
             pushed: 0,
             dropped: 0,
+            expired: 0,
             max_wait: Duration::ZERO,
         }
+    }
+
+    /// Pop the oldest entry younger than `max_age` that `gate` admits;
+    /// older entries are discarded and counted. A refused head stays.
+    fn pop_gated(&mut self, max_age: Duration, mut gate: impl FnMut(&T) -> bool) -> Option<T> {
+        while let Some((at, _)) = self.items.front() {
+            if at.elapsed() > max_age {
+                self.items.pop_front();
+                self.expired += 1;
+            } else {
+                break;
+            }
+        }
+        if !gate(&self.items.front()?.1) {
+            return None;
+        }
+        self.pop()
     }
 
     fn push(&mut self, item: T) {
@@ -378,6 +423,7 @@ impl<T> Bounded<T> {
                 .front()
                 .map_or(Duration::ZERO, |(at, _)| at.elapsed()),
             max_wait: self.max_wait,
+            expired: self.expired,
         }
     }
 }
@@ -449,6 +495,13 @@ impl<T> LaneQueue<T> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).pop()
     }
 
+    fn pop_gated(&self, max_age: Duration, gate: impl FnMut(&T) -> bool) -> Option<T> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_gated(max_age, gate)
+    }
+
     /// Occupancy, drop and queue-age counters.
     pub fn stats(&self) -> QueueStats {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).stats()
@@ -463,18 +516,39 @@ pub(crate) struct OutItem {
     payload: Vec<u8>,
 }
 
-/// A lane direction's outbound side: its queue and datagram sequence.
+/// A lane direction's outbound side: two bounded queues (movement drains
+/// before bulk, NETPLAY-06D), the budget that gates bulk, and the
+/// datagram sequence.
 #[derive(Debug)]
 pub(crate) struct SeatOut {
     queue: LaneQueue<OutItem>,
+    bulk: LaneQueue<OutItem>,
     seq: AtomicU64,
+    pace: Mutex<PaceState>,
+}
+
+#[derive(Debug)]
+struct PaceState {
+    budget: Budget,
+    movement_sent: u64,
+    bulk_sent: u64,
+    bulk_deferred: u64,
+    max_debt: u64,
 }
 
 impl SeatOut {
     fn new(wake: Arc<Wake>) -> Self {
         Self {
-            queue: LaneQueue::with_wake(QUEUE_CAP, wake),
+            queue: LaneQueue::with_wake(MOVEMENT_QUEUE_CAP, wake.clone()),
+            bulk: LaneQueue::with_wake(BULK_QUEUE_CAP, wake),
             seq: AtomicU64::new(0),
+            pace: Mutex::new(PaceState {
+                budget: Budget::new(PEER_BYTES_PER_SEC, PEER_BURST_BYTES, Instant::now()),
+                movement_sent: 0,
+                bulk_sent: 0,
+                bulk_deferred: 0,
+                max_debt: 0,
+            }),
         }
     }
 
@@ -483,26 +557,90 @@ impl SeatOut {
     }
 
     pub(crate) fn push_data(&self, generation: u64, payload: Vec<u8>) {
-        self.push_tagged(LaneTag::Data, generation, payload);
+        self.push_tagged(LaneTag::Data, Priority::Movement, generation, payload);
     }
 
-    fn push_tagged(&self, tag: LaneTag, generation: u64, payload: Vec<u8>) {
-        self.queue.push(OutItem {
+    fn push_tagged(&self, tag: LaneTag, priority: Priority, generation: u64, payload: Vec<u8>) {
+        let item = OutItem {
             tag,
             generation,
             payload,
-        });
-    }
-
-    /// Queue fragment payloads (from [`frag::split`]) in order.
-    pub(crate) fn push_fragments(&self, generation: u64, fragments: Vec<Vec<u8>>) {
-        for f in fragments {
-            self.push_tagged(LaneTag::Fragment, generation, f);
+        };
+        match priority {
+            Priority::Movement => self.queue.push(item),
+            Priority::Bulk => self.bulk.push(item),
         }
     }
 
+    /// Queue fragment payloads (from [`frag::split`]) in order, all at
+    /// `priority`.
+    pub(crate) fn push_fragments(&self, generation: u64, fragments: Vec<Vec<u8>>) {
+        for f in fragments {
+            self.push_tagged(LaneTag::Fragment, Priority::Movement, generation, f);
+        }
+    }
+
+    /// Queue fragment payloads, each at the priority of its group
+    /// (`priorities[group]`; a group past the list is bulk).
+    pub(crate) fn push_fragments_prio(
+        &self,
+        generation: u64,
+        fragments: Vec<Vec<u8>>,
+        priorities: &[Priority],
+    ) {
+        for f in fragments {
+            // Byte 8 of a fragment payload is its group index.
+            let group = f.get(8).copied().map_or(0, usize::from);
+            let p = priorities.get(group).copied().unwrap_or(Priority::Bulk);
+            self.push_tagged(LaneTag::Fragment, p, generation, f);
+        }
+    }
+
+    /// The next datagram to send, or `None` when nothing is due: stale
+    /// entries are discarded, movement goes first and always, bulk only
+    /// while the budget covers it.
+    fn next_to_send(&self) -> Option<OutItem> {
+        let now = Instant::now();
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(item) = self.queue.pop_gated(MOVEMENT_MAX_AGE, |_| true) {
+            pace.budget.spend(item.payload.len(), now);
+            pace.movement_sent += 1;
+            let debt = (-pace.budget.credit(now)).max(0) as u64;
+            pace.max_debt = pace.max_debt.max(debt);
+            return Some(item);
+        }
+        let PaceState { budget, .. } = &mut *pace;
+        let mut blocked = false;
+        let item = self.bulk.pop_gated(BULK_MAX_AGE, |i| {
+            let ok = budget.try_spend(i.payload.len(), now);
+            blocked = !ok;
+            ok
+        });
+        if blocked {
+            pace.bulk_deferred += 1;
+        }
+        if item.is_some() {
+            pace.bulk_sent += 1;
+        }
+        item
+    }
+
+    /// The movement queue's counters (the one `Data` and `Ack` use).
     pub(crate) fn stats(&self) -> QueueStats {
         self.queue.stats()
+    }
+
+    pub(crate) fn pace_stats(&self) -> PaceStats {
+        let pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        PaceStats {
+            movement: self.queue.stats(),
+            bulk: self.bulk.stats(),
+            movement_sent: pace.movement_sent,
+            bulk_sent: pace.bulk_sent,
+            bytes_sent: pace.budget.spent(),
+            bulk_deferred: pace.bulk_deferred,
+            max_debt: pace.max_debt,
+        }
     }
 }
 
@@ -795,7 +933,7 @@ impl HostLane {
                     .collect()
             };
             for (seat, addr, token, out) in targets {
-                while let Some(item) = out.queue.pop() {
+                while let Some(item) = out.next_to_send() {
                     let header = Header {
                         tag: item.tag,
                         generation: item.generation,
@@ -1165,8 +1303,12 @@ impl ClientLane {
         if self.stop.load(Ordering::Relaxed) {
             return false;
         }
-        self.out
-            .push_tagged(LaneTag::Ack, generation, encode_ack(epoch, tick));
+        self.out.push_tagged(
+            LaneTag::Ack,
+            Priority::Movement,
+            generation,
+            encode_ack(epoch, tick),
+        );
         true
     }
 

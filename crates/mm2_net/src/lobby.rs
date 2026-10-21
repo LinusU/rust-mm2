@@ -780,6 +780,12 @@ impl Host {
         self.lane.established_out(id).map(|o| o.stats())
     }
 
+    /// Both priority queues' bounds, ages, drops and the budget's use for
+    /// `id`'s established lane (NETPLAY-06D).
+    pub fn lane_pace(&self, id: u16) -> Option<crate::PaceStats> {
+        self.lane.established_out(id).map(|o| o.pace_stats())
+    }
+
     /// [`HostCtl::lane_ack`], from the `Host` itself.
     pub fn lane_ack(&self, id: u16) -> Option<crate::LaneAck> {
         self.lane.latest_ack(id)
@@ -1015,6 +1021,23 @@ impl HostCtl {
         tick: u64,
         groups: &[Message],
     ) -> Result<bool, NetError> {
+        self.send_snap_groups_prio(player_id, generation, tick, groups, &[])
+    }
+
+    /// [`send_snap_groups`](Self::send_snap_groups) with a send
+    /// [`Priority`](crate::Priority) per group (NETPLAY-06D): `Movement`
+    /// groups drain first and are never held by the peer's byte budget;
+    /// `Bulk` groups go from spare budget and are discarded unsent once
+    /// obsolete. A group past the end of `priorities` is `Movement` when
+    /// `priorities` is empty (the plain call) and `Bulk` otherwise.
+    pub fn send_snap_groups_prio(
+        &self,
+        player_id: u16,
+        generation: u64,
+        tick: u64,
+        groups: &[Message],
+        priorities: &[crate::Priority],
+    ) -> Result<bool, NetError> {
         let mut encoded = Vec::with_capacity(groups.len());
         for g in groups {
             match g {
@@ -1035,7 +1058,11 @@ impl HostCtl {
         };
         let slices: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
         let frags = crate::frag::split(tick, &slices).map_err(oversize_snap)?;
-        out.push_fragments(generation, frags);
+        if priorities.is_empty() {
+            out.push_fragments(generation, frags);
+        } else {
+            out.push_fragments_prio(generation, frags, priorities);
+        }
         Ok(true)
     }
 
