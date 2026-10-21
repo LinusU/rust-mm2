@@ -22,16 +22,16 @@ use mm2_vehicle::{VehicleConfig, VehiclePlugin, VehicleProbeLayers, vehicle_bund
 use super::*;
 use crate::netremote::{Policy, RemotePredictor};
 
-const EPOCH: EpochRef = EpochRef {
+pub(super) const EPOCH: EpochRef = EpochRef {
     generation: 1,
     reset_epoch: 0,
 };
-const GEN: u64 = 1;
-const PLAYER: u16 = 2;
+pub(super) const GEN: u64 = 1;
+pub(super) const PLAYER: u16 = 2;
 /// A one-tick velocity change (m/s) that no pedal can make: an impulse.
-const IMPULSE: f32 = 0.6;
+pub(super) const IMPULSE: f32 = 0.6;
 /// Position error (m) below which a car counts as converged.
-const CONVERGED: f32 = 0.1;
+pub(super) const CONVERGED: f32 = 0.1;
 
 /// Contact starts between the two cars, as the live world raised them
 /// (replayed ticks are quarantined, so a replay raises none).
@@ -51,7 +51,7 @@ fn count_starts(mut reader: MessageReader<CollisionStart>, mut pair: ResMut<Pair
     }
 }
 
-fn world() -> App {
+pub(super) fn world() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin::default())
@@ -79,7 +79,7 @@ fn world() -> App {
     app
 }
 
-fn spawn_car(app: &mut App, at: Vec3, flip: bool) -> Entity {
+pub(super) fn spawn_car(app: &mut App, at: Vec3, flip: bool) -> Entity {
     let rot = if flip {
         Quat::from_rotation_y(std::f32::consts::PI)
     } else {
@@ -95,7 +95,7 @@ fn spawn_car(app: &mut App, at: Vec3, flip: bool) -> Entity {
         .id()
 }
 
-fn q(throttle: f32, brake: f32, steer: f32) -> TickCommand {
+pub(super) fn q(throttle: f32, brake: f32, steer: f32) -> TickCommand {
     TickCommand {
         throttle: (throttle * 255.0) as u8,
         brake: (brake * 255.0) as u8,
@@ -108,7 +108,7 @@ fn q(throttle: f32, brake: f32, steer: f32) -> TickCommand {
 
 /// The unit direction a car at identity rotation drives in (measured, not
 /// assumed), and the horizontal direction to its right.
-fn forward() -> Vec3 {
+pub(super) fn forward() -> Vec3 {
     let mut app = world();
     let car = spawn_car(&mut app, Vec3::new(0.0, 1.2, 0.0), false);
     app.update();
@@ -196,20 +196,20 @@ fn scenarios() -> Vec<Scn> {
 }
 
 /// One car's host state at one tick.
-type Body = BodyCapture;
+pub(super) type Body = BodyCapture;
 
-fn body(app: &App, e: Entity) -> Body {
+pub(super) fn body(app: &App, e: Entity) -> Body {
     capture_vehicle(app.world(), e, EPOCH).unwrap().body
 }
 
-fn p(b: &Body) -> Vec3 {
+pub(super) fn p(b: &Body) -> Vec3 {
     Vec3::from(b.position)
 }
-fn v(b: &Body) -> Vec3 {
+pub(super) fn v(b: &Body) -> Vec3 {
     Vec3::from(b.linear_velocity)
 }
 
-fn input(c: &TickCommand) -> VehicleInput {
+pub(super) fn input(c: &TickCommand) -> VehicleInput {
     decode_tick_command(c)
 }
 
@@ -260,9 +260,9 @@ fn frame(s: &Scn, now: u64) -> Message {
     }
 }
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn chance(&mut self, p: f64) -> bool {
+    pub(super) fn chance(&mut self, p: f64) -> bool {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;

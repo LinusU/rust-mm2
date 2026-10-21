@@ -1126,6 +1126,41 @@ Still open: acceptance evidence over the real transport with a second
 process; contact events discovered only through a replay (#1902); more than
 two cars and trailers (NETPLAY-05B, #1890).
 
+## Three or more human cars (NETPLAY-05B, #1890; first slice)
+
+`reconcile` and `Request.remotes` were already N-generic (05A-4 builds one
+`RemoteDrive` per `PredictedRemoteBody`), so this slice adds no production
+code: `netpredict/multi_tests.rs` generalizes the 05A-5 harness to `n` cars
+(host world = zero-delay reference, client drives car 0 on true commands and
+every other car on hold-last commands, `reconcile` from delayed host
+snapshots) with per-seat command delays and seeded snapshot loss. Run
+`cargo test -p mm2_app --lib multi_tests -- --nocapture --test-threads=1`.
+
+| Scene | Result |
+|---|---|
+| side swipe, three-car pileup, pinned against a wall, 4-car ring | Zero delay: both worlds agree to 0.00 m, no replays. Delay 3-12 ticks: hold-last predicts these exactly (drivers hold pedals), 0 replays except the side swipe (1-4 replays). Delay 30: 13-23 replays, depth 30, peak correction 0.35-0.64 m, final error 0.00 m, no recoveries. |
+| pileup, seats at 3 and 24 ticks, 30 % snapshot loss | 6 replays (depth 6), peak error 0.03 m, final 0.00 m. |
+
+The side-swipe drift produced no velocity impulse above 0.6 m/s (the
+rubbing is gentle), so its evidence is the position agreement, not impulse
+counts.
+
+Cost, 2..8 seats (dev profile, one run on a loaded machine, so
+milliseconds are indicative only; the 05A-5 table was measured on a quieter
+one): physics tick 0.8-1.6 ms, `capture_world` 0.008-0.018 ms, vehicle
+capture 552 B/car, replay of a depth-30 correction 10-16 ms at 4 seats.
+Wire at 60 Hz without 06D cadence: `Snap` 255 B (2 seats) to 957 B (8), a
+16-tick `RemoteCommands` frame covering all remote seats 142 B to 886 B,
+i.e. 23.8 kB/s to 110.6 kB/s together. Replay depth is bounded by
+`MAX_REPLAY_STEPS` (120); beyond it the named recovery paths adopt the host
+state.
+
+Evidence level: synthetic integration on the production step. Open for
+#1890: trailer/joint partners in the replay, reset epochs and damage/mass
+changes tied to a tick, desynchronized re-entry, a genuinely causal
+host + two clients test over the real transport with the impairment proxies,
+and showing local input stays responsive when the replay budget bites.
+
 ## Reset asks, Cops & Robbers frames and impact events on the channel (NETPLAY-06E-3, #1899)
 
 Three one-shot message classes ride the 06E-1 reliable channel when the

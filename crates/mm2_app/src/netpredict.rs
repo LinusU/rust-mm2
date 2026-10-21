@@ -1385,3 +1385,5 @@ mod tests {
 
 #[cfg(test)]
 mod contact_tests;
+#[cfg(test)]
+mod multi_tests;
