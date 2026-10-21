@@ -1295,7 +1295,7 @@ like a remote body:
 The predicted client's kinematic trailer copies (`RemoteTrailer`, wire-driven,
 no joint) are not partners. So today only the **own** rig's trailer is a real
 body in the client's physics; a remote car's trailer is not simulated in the
-replay, and a contact with it is not predicted (follow-up filed).
+replay, and a contact with it is not predicted (follow-up #1916).
 
 Tests (`netpredict/trailer_tests.rs`, `cargo test -p mm2_app --lib
 trailer_tests -- --nocapture`): car 1 rear-ends the trailer of car 0 (host
