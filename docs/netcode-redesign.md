@@ -758,3 +758,52 @@ acknowledged baselines.
   correction path (NETPLAY-04).
 - The simulation has no jitter or reordering beyond the fixed ack RTT, and
   loopback tests prove the code, not WAN behaviour.
+
+## Remote controls on the wire (NETPLAY-05A-1, #1892)
+
+Per-seat `input_ack` in `Snap` says how far the host has *finalized* a
+seat's command stream; it is not a coherent record of what the host
+*applied* to each car on each tick. To predict another human's car, a
+client needs those applied commands at their authoritative ticks. Protocol
+v34 adds `Message::RemoteCommands` for that (`mm2_net::proto`); nothing
+reads it yet — no body behaviour changes in this slice.
+
+**Which commands.** The commands the host actually applied to each seat's
+car (`SeatBuffer::consume`'s result), not raw arrivals: a gap or starved
+tick carries the substitute the host used, tagged with its `Source`
+(`Command` / `HeldLast` / `Neutral`), so a predictor can tell the
+driver's input from a host fallback. The receiving client's own seat is
+not sent.
+
+**Canonical tick.** The frame has `tick` (host session tick at capture).
+Each per-seat run has `first_tick`; command `i` was applied on host tick
+`first_tick + i`. A run may not end after `tick` and may not overflow
+(rejected on encode and decode), runs hold `1..=MAX_REMOTE_RUN` (16) ticks,
+a frame at most `MAX_REMOTE_SEATS` (8) runs, one per player. Each run
+carries the seat's reset `epoch`.
+
+**Age.** `age = frame.tick - command_tick` at the frame's capture, and
+`RemoteCommands::age(player, now)` for the newest stored command at the
+client's current notion of host tick. The wire carries ticks, not
+wall-clock ages: age is derived, so it cannot disagree with the tick.
+
+**Loss.** No ack. Every frame repeats each seat's last 16 applied ticks
+(about 267 ms), so a tick is lost only if every frame carrying it is. The
+frame rides the datagram lane when it fits one (`Snap` rules) and the
+control stream otherwise. `lane_impair_tests::remote_commands_survive_loss_reorder_and_duplication_without_an_ack`
+runs 90 ticks through the seeded UDP proxy at 30% loss, 25% duplication
+and reorder with 10–50 ms delay: every tick arrives intact and is consumed
+once, in order.
+
+**Client store** (`mm2_net::netcmd::RemoteCommands`, bounded to 64 ticks
+per seat): keyed by seat and tick. The first copy of a tick is kept and
+never altered — an identical repeat is a counted duplicate, a differing
+one a counted conflict and dropped. `consume(player, tick)` hands a tick
+out once and advances a cursor, so a consumed (or older) tick can never be
+consumed or re-stored again. A newer reset epoch (wrapping) clears the seat;
+an older one is dropped. Frames for another generation are dropped.
+
+**Not decided here** (05A-2): what a predictor does when a tick is missing
+(hold-last versus an age-aware policy), and where the host takes the
+frame's runs from each tick. Evidence level: synthetic integration; no
+retail data or rendered evidence is involved.
