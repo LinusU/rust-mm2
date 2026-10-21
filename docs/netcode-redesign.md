@@ -895,7 +895,7 @@ body is driven neutral. The body is not corrected towards the host:
 `reconcile_own` restoring and replaying both cars is 05A-4. Evidence level:
 synthetic integration (unit tests on `spawn_remote` with a dev car and the
 lerp system); no retail data, no rendered capture.
-=======
+
 ## Send cadence, budgets and priorities (NETPLAY-06D, #1870)
 
 Code: `mm2_net::pace` (pure, clock-injected: `Cadence`, `Budget`,
@@ -965,4 +965,3 @@ a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
 - The tick-driven cadence path is unit-tested (`Cadence`) and exercised
   live only through the stalled-clock keepalive; a render-rate-vs-fixed-rate
   headless run is open.
->>>>>>> b91caae (Publish Playing snapshots at a configurable tick-derived rate and record the NETPLAY-06D budgets)

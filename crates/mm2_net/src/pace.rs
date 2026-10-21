@@ -72,7 +72,19 @@ impl Cadence {
         }
     }
 
-    /// The effective snapshot rate.
+    /// No pacing: every call to `due` is true. For deterministic
+    /// harnesses that step the host one update at a time; a shipped host
+    /// uses [`Cadence::default`].
+    pub fn unpaced() -> Self {
+        Self { hz: 0 }
+    }
+
+    /// Whether this cadence defers nothing.
+    pub fn is_unpaced(&self) -> bool {
+        self.hz == 0
+    }
+
+    /// The effective snapshot rate (0: unpaced).
     pub fn hz(&self) -> u32 {
         self.hz
     }
@@ -80,14 +92,15 @@ impl Cadence {
     /// Simulation ticks between snapshots at `tick_hz` ticks per second
     /// (at least 1: a rate above the tick rate publishes every tick).
     pub fn interval_ticks(&self, tick_hz: u32) -> u64 {
-        u64::from((tick_hz / self.hz).max(1))
+        u64::from((tick_hz / self.hz.max(1)).max(1))
     }
 
     /// Whether the snapshot for `tick` is due, given the tick of the last
     /// one (`None`: none yet). A tick that moved backwards (a new session
     /// restarted the clock) is due.
     pub fn due(&self, tick: u64, last: Option<u64>, tick_hz: u32) -> bool {
-        last.is_none_or(|l| tick < l || tick - l >= self.interval_ticks(tick_hz))
+        self.is_unpaced()
+            || last.is_none_or(|l| tick < l || tick - l >= self.interval_ticks(tick_hz))
     }
 }
 
@@ -179,6 +192,7 @@ mod tests {
         assert_eq!(n, 30);
         assert!(c.due(0, Some(500), 60), "a restarted clock is due");
         assert!(!c.due(501, Some(500), 60));
+        assert!(Cadence::unpaced().due(500, Some(500), 60));
     }
 
     #[test]

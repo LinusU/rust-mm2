@@ -234,6 +234,10 @@ pub(crate) fn host_app(vfs: Vfs, link: HostLink) -> App {
     app.insert_resource(link)
         .init_resource::<netdrive::NetDriveReport>()
         .init_resource::<netdrive::WireStall>()
+        // These legs step the host one update at a time and read the
+        // snapshot that update published; the cadence (NETPLAY-06D) has
+        // its own leg below.
+        .insert_resource(netdrive::SnapshotRate(mm2_net::Cadence::unpaced()))
         // F25-B (v16): `surface_voices` resolves a wire seat's live
         // wheel contact into the `SurfaceContact` the publish encodes.
         // Its surface resources are `Option` — legs that never install
@@ -13756,6 +13760,7 @@ fn playing_snapshots_leave_at_the_snapshot_rate_not_the_update_rate() {
     let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
     let addr = link.addr();
     let mut app = host_app(vfs, link);
+    app.insert_resource(netdrive::SnapshotRate(mm2_net::Cadence::default()));
     let _peer = ready_peer(addr, "eve", fp);
     spin(&mut app, |a| {
         a.world()
