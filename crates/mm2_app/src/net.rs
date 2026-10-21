@@ -838,6 +838,10 @@ pub fn drive_lobby(
                 }
                 snaps.push(generation, tick, entries, trailers, impacts, race)
             }
+            LobbyEvent::Message(Message::Impacts {
+                generation,
+                impacts,
+            }) => snaps.queue_impacts(generation, impacts),
             LobbyEvent::Message(Message::Props {
                 generation,
                 tick,

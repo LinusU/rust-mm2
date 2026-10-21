@@ -938,6 +938,13 @@ impl RemoteSnaps {
                 None => self.race_dropped += 1,
             }
         }
+        self.queue_impacts(generation, impacts);
+    }
+
+    /// Queue received impact rows (from a `Snap` or a reliable `Impacts`
+    /// message): the `(generation, seat, id)` window drops one already
+    /// seen, the bounded queue drops the oldest and counts it.
+    pub fn queue_impacts(&mut self, generation: u64, impacts: Vec<SnapImpact>) {
         for row in impacts {
             let key = (generation, row.seat, row.id);
             if !self.seen.insert(key) {
@@ -1181,6 +1188,14 @@ pub struct NetDriveReport {
     /// generations, unsanitized rows, and rows whose seat has no live
     /// participant entity.
     pub impacts_dropped: u64,
+    /// `Impacts` reliable-channel deliveries queued (authority side,
+    /// NETPLAY-06E-3), one per lane seat per chunk.
+    pub impact_msgs_reliable: u64,
+    /// `Impacts` chunks a lane seat's reliable channel refused (full or
+    /// dead) that went over the control stream instead.
+    pub impact_msgs_fell_back: u64,
+    /// `Impacts` chunks the link refused outright (the host loop is gone).
+    pub impact_msgs_refused: u64,
     /// `SnapEntry.breaks` bitmask transitions applied on this client
     /// (protocol v11, F25-B): parts the wire newly reports off the
     /// rig — each hides its intact node and spawns its pooled
@@ -1280,6 +1295,12 @@ pub struct NetDriveReport {
     pub world_row_throttled: u64,
     /// Cops & Robbers frames the host published (F27-B, protocol v21).
     pub cnr_sent: u64,
+    /// Cops & Robbers frames queued on a lane seat's reliable channel
+    /// (authority side, NETPLAY-06E-3), one per seat.
+    pub cnr_reliable: u64,
+    /// Cops & Robbers frames a lane seat's channel refused (full or
+    /// dead) that went over the control stream instead.
+    pub cnr_fell_back: u64,
     /// Cops & Robbers frames a client folded into its replica (F27-B).
     pub cnr_landed: u64,
     /// Cops & Robbers frames a client dropped as no fresher than one
@@ -2917,13 +2938,17 @@ type SnapTrailerSourceRow<'a> = (
 pub const RESULTS_FRAME_REPEATS: u32 = 30;
 
 /// How many further snapshots re-carry an impact row after the one that
-/// first published it (#1613). Rows are presentation *events* and the
-/// client acknowledges nothing, so a lost frame would drop the hit's
-/// sparks, sound and texel deformation for good. The client dedupes on
-/// `(generation, seat, id)`, so repeating is safe. A designed bound, not
-/// an original rule — 10 updates is a sixth of a second at 60 Hz, which
-/// rides out a burst of drops without keeping stale hits on the wire.
+/// first published it (#1613). The reliable `Impacts` message
+/// (NETPLAY-06E-3) is the delivery guarantee on a lane; this repeat stays
+/// for a seat the host reaches only through the control stream, whose
+/// frames the impairment harness drops whole, and it is retired when that
+/// path goes. The client dedupes on `(generation, seat, id)`, so
+/// repeating is safe. A designed bound, not an original rule.
 pub const IMPACT_ROW_REPEATS: u32 = 10;
+
+/// Impact rows per reliable `Impacts` message: 54 bytes a row keeps the
+/// message well inside one datagram (`MAX_RELIABLE_BODY`).
+pub const IMPACTS_PER_MESSAGE: usize = 16;
 
 /// Host-side: every participant's authoritative pose, broadcast once per
 /// update while the session is live. `tick` is the host's session tick —
@@ -3214,10 +3239,29 @@ pub fn publish_snapshots(
         impact_rows.truncate(MAX_SNAP_IMPACTS as usize);
     }
     let sent_rows = impact_rows.len() as u64;
-    // Recent rows ride again so a dropped frame cannot lose a hit
-    // (#1613). New rows keep priority under the cap; the owed ones fill
-    // what is left, strongest first, and a generation change retires
-    // them. `impacts_sent` counts first publications only.
+    // The rows also ride the reliable channel (NETPLAY-06E-3): a `Snap`
+    // is unacknowledged, so a lost frame would drop the hit's sparks,
+    // sound and texel deformation for good. Each chunk is one standalone
+    // `Impacts` message, acked, repeated and delivered once; the client
+    // dedups it against the `Snap` copy on `(generation, seat, id)`, so
+    // the in-frame rows stay the low-latency path and this the guarantee.
+    for chunk in impact_rows.chunks(IMPACTS_PER_MESSAGE) {
+        let msg = Message::Impacts {
+            generation: wire_generation,
+            impacts: chunk.to_vec(),
+        };
+        match host.ctl().reliable_broadcast(wire_generation, &msg) {
+            Ok(fanout) => {
+                report.impact_msgs_reliable += u64::from(fanout.reliable);
+                report.impact_msgs_fell_back += u64::from(fanout.fell_back);
+            }
+            Err(_) => report.impact_msgs_refused += 1,
+        }
+    }
+    // Recent rows ride again in the frame (#1613). New rows keep priority
+    // under the cap; the owed ones fill what is left, strongest first,
+    // and a generation change retires them. `impacts_sent` counts first
+    // publications only (the reliable chunks above carry those alone).
     owed_rows.retain(|&(g, left, _)| g == wire_generation && left > 0);
     owed_rows.sort_by(|a, b| {
         b.2.severity
@@ -5630,6 +5674,21 @@ mod tests {
             severity: 1.0,
             audio_id: 0,
         }
+    }
+
+    /// NETPLAY-06E-3: the same impact reaching the client twice — once in
+    /// its `Snap` and once in the reliable `Impacts` message, in either
+    /// order, and repeated — queues exactly once.
+    #[test]
+    fn a_reliable_impacts_message_and_the_snap_row_present_the_hit_once() {
+        let mut snaps = RemoteSnaps::default();
+        snaps.queue_impacts(1, vec![snap_impact(7)]);
+        snaps.push(1, 5, Vec::new(), Vec::new(), vec![snap_impact(7)], None);
+        snaps.queue_impacts(1, vec![snap_impact(7), snap_impact(8)]);
+        assert_eq!(snaps.pending_impacts(), 2, "ids 7 and 8, each once");
+        // A new session's restarted id stream is a new hit.
+        snaps.queue_impacts(2, vec![snap_impact(7)]);
+        assert_eq!(snaps.pending_impacts(), 3);
     }
 
     /// `push` is latest-wins on the frame's own `(generation, tick)`,

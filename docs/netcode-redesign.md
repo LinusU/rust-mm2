@@ -1125,3 +1125,59 @@ partly, and the two-car causal requirements.
 Still open: acceptance evidence over the real transport with a second
 process; contact events discovered only through a replay (#1902); more than
 two cars and trailers (NETPLAY-05B, #1890).
+
+## Reset asks, Cops & Robbers frames and impact events on the channel (NETPLAY-06E-3, #1899)
+
+Three one-shot message classes ride the 06E-1 reliable channel when the
+seat has an established lane (`PROTOCOL_VERSION` 36):
+
+- **`ResetRequest`** (client → host): `ClientCtl::request_reset` sends it
+  reliably, falling back to the control stream when there is no lane or
+  the channel refuses it. The lane receive path decodes it as it is
+  delivered and absorbs it into the same newest-wins mailbox slot the TCP
+  path uses (`PeerMail::absorb_reset`), so the host's `drain_resets` and
+  the stale-generation drop are unchanged. The retry ledger in
+  `send_reset_request` stays: it repeats an ask the *host declined* (the
+  epoch snap is still the acknowledgement), the channel only guarantees
+  the ask reaches the mailbox. Only the front of the delivered queue is
+  inspected, so any other message class stays queued for `reliable_recv`
+  (06E-2 consumers) and the asks behind it are absorbed as soon as it is
+  taken.
+- **Cops & Robbers frames** (host → client), including the decided
+  outcome: `publish_cnr` calls `HostCtl::reliable_broadcast`, which queues
+  the frame on every established-lane seat's channel and sends the rest —
+  TCP-only seats and any seat whose channel is full or dead — over the
+  control stream, so a refusal never drops it. The client stage keeps the
+  freshest `(revision, elapsed)`, so a frame seen twice applies once.
+- **Impact events** (host → client): the new `Message::Impacts` carries
+  `SnapImpact` rows in chunks of `IMPACTS_PER_MESSAGE` (16). The in-frame
+  `Snap` rows and their `IMPACT_ROW_REPEATS` stay (the app-level impairment
+  harness drops *TCP* frames whole, which only an in-frame repeat
+  survives); the client dedups both copies on `(generation, seat, id)`
+  (`RemoteSnaps::queue_impacts`).
+
+Client side, a delivered `Cnr`/`Impacts` goes to a bounded
+(`REL_INBOX_CAP`) reliable queue of the lane inbox that `Client::recv`
+drains before lane `Snap`s; nothing is dropped, because the receiver keeps
+what does not fit and the sender repeats.
+
+**Not moved: damage and reset epochs.** Both are *state* in every
+`SnapEntry` (`damage` fraction, `epoch`), re-asserted by each snapshot, so a
+lost frame is corrected by the next; there is no one-shot damage message.
+The one-shot part of damage — texel deformation — is the impact events
+above.
+
+**Known limit.** The channel is ordered, per seat, and survives
+generations; a datagram for a generation the receiver is not running is
+refused without an ack, so a reliable message minted against a dead
+generation eats its 8 attempts and kills the channel (later reliable sends
+return `Dead` and fall back to the control stream). The senders here only
+send inside the running generation; resetting a channel on a new
+generation belongs with 06E-2's Start/Cancel sequencing.
+
+Evidence level: synthetic integration over the seeded UDP impairment proxy
+(`lane_reliable_tests`): the first reset ask, the first Cnr outcome frame
+and the first impact event are each lost on purpose from connection start
+under 15 % loss/duplication/reorder and arrive exactly once; a reset ask
+behind another message class is still absorbed; a full window falls back to
+TCP with every message delivered once. No retail data, no rendered capture.

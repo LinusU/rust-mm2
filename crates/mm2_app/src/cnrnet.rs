@@ -492,11 +492,18 @@ pub fn publish_cnr(
         generation,
         frame: encode_view(&view),
     };
-    if host.ctl().broadcast(&frame).is_ok() {
+    // Reliable lane delivery (NETPLAY-06E-3): a decided outcome is sent
+    // once per change, and the periodic repeats are state; either way the
+    // frame must not vanish with one datagram. TCP-only seats and seats
+    // whose channel refuses it get the control stream; the stage keeps
+    // the freshest by `(revision, elapsed)`, so a duplicate is dropped.
+    if let Ok(fanout) = host.ctl().reliable_broadcast(generation, &frame) {
         *last = Some((generation, key));
         *quiet_runs = 0;
         if let Some(mut report) = report {
             report.cnr_sent += 1;
+            report.cnr_reliable += u64::from(fanout.reliable);
+            report.cnr_fell_back += u64::from(fanout.fell_back);
         }
     }
 }
