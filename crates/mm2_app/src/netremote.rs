@@ -29,7 +29,13 @@
 
 use std::collections::BTreeMap;
 
+use bevy::prelude::*;
+use mm2_game::Session;
 use mm2_net::{MAX_REMOTE_RUN, RemoteCommands, TickCommand};
+use mm2_vehicle::VehicleInput;
+
+use crate::netdrive::{PredictedRemoteBody, decode_tick_command};
+use crate::netplay_timeline::NetplayTimeline;
 
 /// How a missing tick is filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +170,58 @@ fn extrapolate(policy: Policy, command: TickCommand, age: u64) -> TickCommand {
         handbrake: scale(u32::from(command.handbrake)) as u8,
         ..command
     }
+}
+
+/// The client's store of the host's remote-seat commands and the
+/// predictor that fills its gaps, one per client. Frames are absorbed
+/// into `store` by the receive path (not wired yet); the contact bodies
+/// below read it.
+#[derive(Resource, Debug)]
+pub struct RemoteFeed {
+    /// Commands the host applied to remote seats, by seat and tick.
+    pub store: RemoteCommands,
+    /// The policy for ticks the store lacks: hold-last (the measured
+    /// choice, see `docs/netcode-redesign.md`).
+    pub predictor: RemotePredictor,
+}
+
+impl Default for RemoteFeed {
+    fn default() -> Self {
+        Self {
+            store: RemoteCommands::new(),
+            predictor: RemotePredictor::new(Policy::HoldLast),
+        }
+    }
+}
+
+/// Fixed-tick: give every predicted contact body exactly one command for
+/// the step about to run, from [`RemoteFeed`]. The tick is the client's
+/// fixed-tick count (`Session::tick`), the clock its own commands carry.
+pub fn drive_predicted_bodies(
+    session: Res<Session>,
+    mut feed: ResMut<RemoteFeed>,
+    mut bodies: Query<(&PredictedRemoteBody, &mut VehicleInput)>,
+) {
+    if !session.is_playing() {
+        return;
+    }
+    let feed = &mut *feed;
+    for (body, mut input) in &mut bodies {
+        let p = feed
+            .predictor
+            .command_for(&mut feed.store, body.wire, session.tick());
+        *input = decode_tick_command(&p.command);
+    }
+}
+
+/// Register the contact-body driver behind the [`NetplayTimeline`]
+/// selector, before the physics schedule steps the bodies.
+pub fn add_systems(app: &mut App) {
+    app.init_resource::<RemoteFeed>().add_systems(
+        FixedUpdate,
+        drive_predicted_bodies
+            .run_if(|timeline: Option<Res<NetplayTimeline>>| timeline.is_some_and(|t| t.enabled)),
+    );
 }
 
 #[cfg(test)]

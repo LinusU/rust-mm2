@@ -762,6 +762,8 @@ fn add_lobby_client_systems(app: &mut App) {
                     .after(net::drive_lobby)
                     .after(crate::netdrive::reconcile_remote_players),
                 crate::netdrive::drive_remote_lerp,
+                crate::netdrive::sweep_remote_bodies
+                    .after(crate::netdrive::reconcile_remote_players),
                 // F26-A: replicated world props — same wiring as the
                 // app.
                 crate::worldprops::apply_props.after(net::drive_lobby),

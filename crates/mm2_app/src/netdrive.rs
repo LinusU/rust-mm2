@@ -130,7 +130,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
-    AngularVelocity, LinearVelocity, Position, RigidBody, Rotation, TransformInterpolation,
+    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
+    TransformInterpolation,
 };
 use bevy::prelude::*;
 use mm2_game::{
@@ -430,6 +431,24 @@ pub struct RemoteTrailer {
 /// value means the asserted pose is an authority teleport, not motion.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetEpoch(pub u8);
+
+/// The contact body of a remote human car under the
+/// [`NetplayTimeline`] selector (NETPLAY-05A-3): a finite-mass dynamic
+/// body with the seat's authored mass, inertia, collider and production
+/// vehicle dynamics, stepped by `vehicle_simulation` from the predicted
+/// remote commands ([`crate::netremote::drive_predicted_bodies`]). It
+/// carries the car's only collider and no mesh. `visual` is the
+/// kinematic [`RemoteReplica`] copy that wears the model and follows the
+/// delayed interpolation ([`RemoteLerp`]); it has no collider. The body
+/// is a session-owned entity of its own, swept when its visual goes
+/// ([`sweep_remote_bodies`]).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PredictedRemoteBody {
+    /// The seat's wire id (the same one the visual's [`NetPlayer`] holds).
+    pub wire: u16,
+    /// The presentation entity this body belongs to.
+    pub visual: Entity,
+}
 
 /// Blend state on a `Predicted` remote copy: the pose it displayed when
 /// the newest snapshot arrived, the pose that snapshot asserts, and the
@@ -1818,7 +1837,11 @@ pub fn reconcile_remote_players(
     // The trailer census, and the host's planned bots a client sets
     // copies down for ([`crate::cnr_bots::CnrBotRoster`]; absent on the
     // host, which spawns its bots itself).
-    (census, bots): (TrailerCensus, Option<Res<crate::cnr_bots::CnrBotRoster>>),
+    (census, bots, timeline): (
+        TrailerCensus,
+        Option<Res<crate::cnr_bots::CnrBotRoster>>,
+        Option<Res<NetplayTimeline>>,
+    ),
     local: Query<Entity, (With<PlayerVehicle>, Without<NetPlayer>)>,
     mut report: ResMut<NetDriveReport>,
 ) {
@@ -1908,6 +1931,7 @@ pub fn reconcile_remote_players(
         Some(self_wire),
     );
     let mut spawned_now = 0usize;
+    let dynamic = timeline.is_some_and(|t| t.enabled);
     for (wire, pick) in desired {
         if present.contains_key(&wire) {
             continue;
@@ -1927,6 +1951,7 @@ pub fn reconcile_remote_players(
             bots.as_deref().and_then(|b| b.get(wire)),
             owner,
             role,
+            dynamic,
         ) {
             report.spawned += 1;
             spawned_now += 1;
@@ -1964,6 +1989,7 @@ fn spawn_remote(
     bot: Option<(u8, &crate::cnr_bots::PlannedBot)>,
     owner: SessionEntity,
     role: mm2_game::AuthorityRole,
+    dynamic: bool,
 ) -> bool {
     let predicted = !role.is_authority();
     // A host-owned bot's car is the one its plan chose (opponent tuning,
@@ -2073,6 +2099,15 @@ fn spawn_remote(
                 end: 0.0,
             },
         ));
+        // NETPLAY-05A-3: a remote human under the timeline selector is
+        // also a finite-mass dynamic body on the production dynamics.
+        // The copy above stays the delayed visual and loses its
+        // collider, so the car has exactly one. Host-planned bots keep
+        // the legacy kinematic copy.
+        if dynamic && bot.is_none() {
+            commands.entity(vehicle).remove::<Collider>();
+            spawn_contact_body(commands, &cfg, wire, vehicle, pos, yaw, owner);
+        }
     }
     // F25-A.4: the authority resolves a remote driver's world outcomes
     // like an AI opponent's — the authored damage/stuck records gate
@@ -2249,6 +2284,46 @@ fn spawn_remote(
     }
     info!(player = wire, "remote participant spawned");
     true
+}
+
+/// Spawn the dynamic contact body of a remote human car (NETPLAY-05A-3):
+/// the same `vehicle_bundle` the host steps for that seat — authored
+/// mass, inertia, centre of mass, collider and friction — with the
+/// seat's input and `HumanDriver` and nothing presentational. It is not
+/// a `NetPlayer`/`RemotePick`/`Player`, so reconcile, snapshot, damage
+/// and race systems keep seeing one participant per seat.
+fn spawn_contact_body(
+    commands: &mut Commands,
+    cfg: &mm2_vehicle::VehicleConfig,
+    wire: u16,
+    visual: Entity,
+    pos: Vec3,
+    yaw: f32,
+    owner: SessionEntity,
+) -> Entity {
+    commands
+        .spawn((
+            owner,
+            PredictedRemoteBody { wire, visual },
+            HumanDriver::default(),
+            vehicle_bundle(cfg),
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        ))
+        .id()
+}
+
+/// Despawn contact bodies whose visual is gone (a departed player or a
+/// changed pick despawns the visual in [`reconcile_remote_players`]).
+pub fn sweep_remote_bodies(
+    mut commands: Commands,
+    bodies: Query<(Entity, &PredictedRemoteBody)>,
+    visuals: Query<(), With<RemotePick>>,
+) {
+    for (body, link) in &bodies {
+        if !visuals.contains(link.visual) {
+            commands.entity(body).despawn();
+        }
+    }
 }
 
 /// The predicted-client half of [`spawn_remote`]'s trailer rig (F25-B):
@@ -4252,6 +4327,8 @@ mod tests {
     }
 
     use super::*;
+    use avian3d::prelude::Mass;
+    use bevy::ecs::system::RunSystemOnce;
 
     /// The settled-divergence count: only an unbroken run of at-rest,
     /// diverged snaps reseats, and any motion or agreement restarts it.
@@ -5089,6 +5166,147 @@ mod tests {
         assert_eq!(encode_breaks(Some(&wide)), 0);
         wide.detach(1, None);
         assert_eq!(encode_breaks(Some(&wide)), 0b10);
+    }
+
+    /// Spawn one predicted-client dev-car remote seat through the real
+    /// `spawn_remote`, `dynamic` as the selector would set it.
+    fn spawn_predicted_seat(world: &mut World, wire: u16, dynamic: bool) {
+        let mut session = Session::new();
+        let spawn = SpawnPoint {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+            origin: Vec3::new(5.0, 1.0, 5.0),
+            origin_yaw: 0.0,
+            trailers: Vec::new(),
+        };
+        let mut meshes = Assets::<Mesh>::default();
+        let mut images = Assets::<Image>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        assert!(spawn_remote(
+            &mut commands,
+            &mm2_assets::Vfs::new(),
+            &mut session,
+            None,
+            &[0, wire],
+            &spawn,
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            wire,
+            &VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            },
+            None,
+            SessionEntity(7),
+            mm2_game::AuthorityRole::Predicted,
+            dynamic,
+        ));
+        queue.apply(world);
+    }
+
+    fn colliders(world: &mut World) -> usize {
+        world.query::<&Collider>().iter(world).count()
+    }
+
+    /// Under the selector a remote human car is a dynamic contact body
+    /// plus a collider-less kinematic visual: exactly one collider, the
+    /// body's, and the sweep takes the body down with its visual. With
+    /// the selector off the legacy kinematic copy keeps its own collider
+    /// and no body exists.
+    #[test]
+    fn a_dynamic_remote_has_one_collider_on_a_body_apart_from_its_visual() {
+        let mut off = World::new();
+        spawn_predicted_seat(&mut off, 1, false);
+        assert_eq!(colliders(&mut off), 1, "legacy copy keeps its collider");
+        assert_eq!(off.query::<&PredictedRemoteBody>().iter(&off).count(), 0);
+
+        let mut world = World::new();
+        spawn_predicted_seat(&mut world, 1, true);
+        spawn_predicted_seat(&mut world, 2, true);
+        assert_eq!(colliders(&mut world), 2, "one collider per car");
+        let bodies: Vec<_> = world
+            .query::<(Entity, &PredictedRemoteBody)>()
+            .iter(&world)
+            .map(|(e, b)| (e, *b))
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        for (body, link) in &bodies {
+            assert!(world.get::<Collider>(*body).is_some());
+            assert!(matches!(
+                world.get::<RigidBody>(*body),
+                Some(RigidBody::Dynamic)
+            ));
+            assert!(world.get::<Mass>(*body).is_some_and(|m| m.0 > 0.0));
+            assert!(world.get::<Vehicle>(*body).is_some());
+            assert!(world.get::<RemoteReplica>(*body).is_none());
+            assert!(
+                world.get::<NetPlayer>(*body).is_none(),
+                "one seat, one participant"
+            );
+            assert!(world.get::<RemotePick>(*body).is_none());
+            assert_eq!(world.get::<SessionEntity>(*body).unwrap().0, 7);
+            let visual = link.visual;
+            assert_eq!(world.get::<NetPlayer>(visual).unwrap().0, link.wire);
+            assert!(world.get::<Collider>(visual).is_none(), "visual has none");
+            assert!(world.get::<RemoteReplica>(visual).is_some());
+            assert!(world.get::<RemoteLerp>(visual).is_some());
+            assert_eq!(
+                world.get::<Transform>(visual).unwrap().translation,
+                world.get::<Transform>(*body).unwrap().translation,
+                "both start on the seat"
+            );
+        }
+
+        // Lifecycle: a seat that leaves despawns its visual; the sweep
+        // takes its body and only its body.
+        let (gone_body, gone) = bodies[0];
+        world.despawn(gone.visual);
+        world.run_system_once(sweep_remote_bodies).unwrap();
+        assert!(world.get_entity(gone_body).is_err());
+        assert!(world.get_entity(bodies[1].0).is_ok());
+        assert_eq!(colliders(&mut world), 1);
+    }
+
+    /// The visual follows its interpolation window while the body is
+    /// left to the dynamics: advancing the lerp moves the visual and
+    /// never the contact body.
+    #[test]
+    fn the_visual_follows_the_lerp_while_the_body_is_dynamic() {
+        let mut world = World::new();
+        spawn_predicted_seat(&mut world, 1, true);
+        world.init_resource::<NetDriveReport>();
+        world.insert_resource(Time::<()>::default());
+        let (body, link) = world
+            .query::<(Entity, &PredictedRemoteBody)>()
+            .single(&world)
+            .map(|(e, b)| (e, *b))
+            .unwrap();
+        let body_before = world.get::<Transform>(body).unwrap().translation;
+        {
+            let mut lerp = world.get_mut::<RemoteLerp>(link.visual).unwrap();
+            lerp.to_pos = lerp.from_pos + Vec3::new(10.0, 0.0, 0.0);
+            lerp.start = 0.0;
+            lerp.end = 1.0;
+        }
+        world
+            .resource_mut::<Time>()
+            .advance_to(Duration::from_millis(500));
+        world.run_system_once(drive_remote_lerp).unwrap();
+        let from = world.get::<RemoteLerp>(link.visual).unwrap().from_pos;
+        let shown = world.get::<Position>(link.visual).unwrap().0;
+        assert!(
+            (shown - (from + Vec3::new(5.0, 0.0, 0.0))).length() < 1e-3,
+            "visual at the halfway blend: {shown}"
+        );
+        assert_eq!(
+            world.get::<Transform>(body).unwrap().translation,
+            body_before,
+            "the lerp never moves the contact body"
+        );
+        assert!(world.get::<Position>(body).is_none_or(|p| p.0 != shown));
     }
 
     /// The predicted trailer copy lands the same contract the

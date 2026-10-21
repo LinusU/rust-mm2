@@ -868,3 +868,30 @@ the 267 ms redundancy (hold-last grows to 0.8–4.4 m at 1 s on the braking and 
 scripts), and wiring the predictor to a body, which is 05A-3. Evidence
 level: synthetic integration on the production step; flat ground, default
 car, no collisions, no retail data.
+
+## Dynamic remote body, visual apart (NETPLAY-05A-3, #1894)
+
+Behind `NetplayTimeline`, `spawn_remote` on a predicted client gives each
+remote **human** seat two entities. The *contact body*
+(`netdrive::PredictedRemoteBody`) is built from the same `vehicle_bundle`
+the host steps for that seat: authored mass, inertia, centre of mass,
+convex-hull collider, friction and restitution, `RigidBody::Dynamic`,
+stepped by `vehicle_simulation`. It has no mesh and none of the
+participant markers (`NetPlayer`, `RemotePick`, `Player`), so reconcile,
+snapshots, damage and race systems still see one participant per seat.
+`netremote::drive_predicted_bodies` (`FixedUpdate`) hands it one command
+per fixed step from `RemoteFeed` (store + hold-last predictor) at the
+client's `Session::tick`. The *visual* is the existing kinematic
+`RemoteReplica` copy: it wears the model and keeps following the delayed
+`RemoteLerp` interpolation, and its collider is removed, so each car has
+exactly one collider. `sweep_remote_bodies` despawns a body whose visual is
+gone (leave, changed pick); both carry the session's `SessionEntity`.
+Host-planned bots and trailers keep the legacy kinematic copies; with the
+selector off nothing changes.
+
+**Not done here.** Frames are not yet absorbed into `RemoteFeed.store`
+(no receive path calls `RemoteCommands::absorb`), so until that lands the
+body is driven neutral. The body is not corrected towards the host:
+`reconcile_own` restoring and replaying both cars is 05A-4. Evidence level:
+synthetic integration (unit tests on `spawn_remote` with a dev car and the
+lerp system); no retail data, no rendered capture.

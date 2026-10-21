@@ -469,6 +469,7 @@ pub fn capture_and_send(
 /// Register the stream behind the [`NetplayTimeline`] selector.
 pub fn add_systems(app: &mut App) {
     crate::netpredict::add_systems(app);
+    crate::netremote::add_systems(app);
     app.init_resource::<CommandStream>().add_systems(
         FixedUpdate,
         capture_and_send

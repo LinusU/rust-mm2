@@ -65,6 +65,7 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
                 .after(net::drive_lobby)
                 .after(JoinedReconcile),
             netdrive::drive_remote_lerp,
+            netdrive::sweep_remote_bodies.after(JoinedReconcile),
             // F26-A: the host's knocked/broken/settled props
             // fold into the client's own stamped world.
             worldprops::apply_props.after(net::drive_lobby),
