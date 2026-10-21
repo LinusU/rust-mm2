@@ -965,3 +965,45 @@ a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
 - The tick-driven cadence path is unit-tested (`Cadence`) and exercised
   live only through the stalled-clock keepalive; a render-rate-vs-fixed-rate
   headless run is open.
+
+## Two cars on one tick (NETPLAY-05A-4, #1895)
+
+`netpredict::reconcile_own` now restores and replays the own car and every
+remote contact body (`PredictedRemoteBody`) together. The recorded world
+already holds the bodies (`capture_world` takes every `Vehicle`), so the
+change is in what is compared, corrected and driven:
+
+- **Common tick.** The snapshot that carries the own assertion
+  (`input_ack`, host tick `T`) also carries each remote seat's body state at
+  `T`. `apply_snapshots` stages those as `RemoteAssertion`s beside it
+  (`OwnStage.remotes`, tagged with the snapshot's generation and tick, and
+  used only with that snapshot's assertion). Own state at the ack and remote
+  state at `T` are therefore one simulation instant, with no tick
+  arithmetic.
+- **Compare.** The replay runs when the own car *or any* remote body passes
+  a position/orientation/velocity tolerance (the same four tolerances).
+  `OwnPrediction.remote_replays` counts replays where a remote body
+  diverged; `Outcome::Replayed` carries `remote_error`/`remote_diverged`.
+- **Restore + replay.** The corrected capture takes the host state for the
+  own car and each remote body; every replayed step drives all of them. The
+  own car uses its stored command. A remote body uses
+  `RemoteFeed::command_at(wire, client_tick)` for the `predicted_tick` of
+  that step: the store's authoritative command if still there (it may have
+  arrived after the tick was predicted), else what the live step applied
+  (`RemoteFeed.applied`, recorded by `drive_predicted_bodies`, since
+  `RemoteCommands::consume` forgets a used tick). The predictor itself is
+  not run during a replay and the store's cursor is not moved.
+- **Not put back.** Replayed contact bodies keep their replayed state. Only
+  the delayed visual (`RemoteReplica`, driven by the snapshot lerp) is put
+  back, because the restore writes its old captured pose.
+- **Bounded recovery.** The named paths are unchanged and also cover the
+  remote bodies: a remote body with an unknown command for any replayed step
+  is `CommandGap`; `HistoryExhausted`, `TooDeep` and `ReplayRefused` as
+  before. Each adopts the host state of the own car and of every remote body
+  that had an assertion.
+
+Still open: `RemoteFeed.store` has no receive path yet (bodies run on
+predicted/neutral commands until frames are absorbed), and contact-specific
+tests and cost numbers are 05A-5. Evidence level: synthetic integration on
+the production step (twin-world equality for a two-car replay); no retail
+data, no rendered capture.

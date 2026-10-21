@@ -27,9 +27,23 @@
 //! The vehicle's wheels, drivetrain and force history come from the
 //! client's own recorded state (the wire carries only the body); a
 //! divergence there shows up in the body and is corrected on the next
-//! comparison. Remote replicas are put back to where they were before the
-//! replay (they are driven by the snapshot lerp, not by the replay);
-//! contact between predicted cars is NETPLAY-05.
+//! comparison.
+//!
+//! **Two cars on one tick (NETPLAY-05A-4).** Under the selector a remote
+//! human car is a dynamic contact body ([`PredictedRemoteBody`]) that the
+//! recorded world already holds. The snapshot that carries the own
+//! assertion carries that seat's host body state at the *same* host tick,
+//! staged as [`RemoteAssertion`]s. So the comparison covers every such
+//! body, a divergence in any of them triggers the replay, the restored
+//! world takes the host state for the own car *and* each remote body, and
+//! each replayed step drives them all: the own car with its stored command
+//! and each remote body with the command [`RemoteFeed::command_at`] gives
+//! for the client tick of that step (the store's authoritative command if
+//! it is still there, else what the live step applied). Contact between
+//! the cars therefore replays like any other dynamics. The delayed visual
+//! of a remote car (`RemoteReplica`, driven by the snapshot lerp) is not
+//! part of the replay and is put back to where it was; the contact bodies
+//! are not put back — their replayed state is the corrected one.
 //!
 //! **Bounded recovery.** A routine correction is never reported as a
 //! reset. The cases that cannot be replayed each take a distinct, counted
@@ -48,8 +62,9 @@ use mm2_vehicle::{RemoteReplica, Teleported, VehicleInput};
 
 use crate::net::LobbyLink;
 use crate::netcmd::CommandStream;
-use crate::netdrive::{RemoteSnaps, ResetEpoch, decode_tick_command};
+use crate::netdrive::{PredictedRemoteBody, RemoteSnaps, ResetEpoch, decode_tick_command};
 use crate::netplay_timeline::NetplayTimeline;
+use crate::netremote::RemoteFeed;
 
 /// Position difference (m) below which a replayed snapshot is "the same
 /// state". Designed: the two simulations run the same step on the same
@@ -79,6 +94,17 @@ pub struct OwnAssertion {
     pub ang: Vec3,
 }
 
+/// The host's body state for a remote human seat, from the same snapshot
+/// (so the same host tick) as the [`OwnAssertion`] it travels with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemoteAssertion {
+    pub wire: u16,
+    pub pos: Vec3,
+    pub rot: Quat,
+    pub vel: Vec3,
+    pub ang: Vec3,
+}
+
 /// What `apply_snapshots` hands the fixed schedule: the newest assertion
 /// (latest wins; acks only move forward, so a superseded one carries
 /// nothing the newer lacks) and whether an authority reset happened.
@@ -87,6 +113,11 @@ pub struct OwnStage {
     /// Set by `apply_snapshots` from the selector each run.
     pub enabled: bool,
     pub assertion: Option<OwnAssertion>,
+    /// The remote seats' host state from the snapshot tagged
+    /// `remotes_at` (`generation`, `server_tick`); used only with the
+    /// assertion of that same snapshot.
+    pub remotes: Vec<RemoteAssertion>,
+    pub remotes_at: Option<(u64, u64)>,
     /// The host reset the own car: forget the history.
     pub reset: bool,
 }
@@ -145,6 +176,11 @@ pub enum Outcome {
         /// How far the *present* car moved because of the replay.
         shift: f32,
         turn: f32,
+        /// Largest host-versus-recorded position difference of a remote
+        /// body at the compared boundary (0 with none compared).
+        remote_error: f32,
+        /// Whether any remote body exceeded a tolerance (not just position).
+        remote_diverged: bool,
     },
     Recovered(RecoveryCause),
     Skipped(Skip),
@@ -168,6 +204,8 @@ pub struct OwnPrediction {
     pub compared: u64,
     pub matched: u64,
     pub replays: u64,
+    /// Replays in which a remote body diverged beyond the tolerances.
+    pub remote_replays: u64,
     pub replayed_steps: u64,
     /// Sum of present-car shifts caused by replays (m).
     pub shift_total: f32,
@@ -193,6 +231,7 @@ impl Default for OwnPrediction {
             compared: 0,
             matched: 0,
             replays: 0,
+            remote_replays: 0,
             replayed_steps: 0,
             shift_total: 0.0,
             turn_total: 0.0,
@@ -226,6 +265,18 @@ impl OwnPrediction {
     }
 }
 
+/// A remote contact body to compare, correct and replay with the own car.
+#[derive(Debug, Clone)]
+pub struct RemoteDrive {
+    pub body: Entity,
+    /// The host's state for it at the assertion's tick, if the snapshot had
+    /// the seat.
+    pub assertion: Option<RemoteAssertion>,
+    /// Its command for each step `ack+1..=newest`, oldest first; `None`
+    /// when any step's command is unknown (a [`RecoveryCause::CommandGap`]).
+    pub commands: Option<Vec<VehicleInput>>,
+}
+
 /// Everything a replay needs besides the world.
 pub struct Request<'a> {
     pub own: Entity,
@@ -235,6 +286,8 @@ pub struct Request<'a> {
     /// The stored commands as `(seq, input)`, oldest first, starting at
     /// `assertion.ack + 1` when complete.
     pub commands: &'a [(u64, VehicleInput)],
+    /// The remote contact bodies replayed together with the own car.
+    pub remotes: &'a [RemoteDrive],
     pub epoch: EpochRef,
 }
 
@@ -275,10 +328,15 @@ pub fn reconcile(world: &mut World, pred: &mut OwnPrediction, req: &Request<'_>)
             pred.last_ack = a.ack;
         }
         Outcome::Replayed {
-            steps, shift, turn, ..
+            steps,
+            shift,
+            turn,
+            remote_diverged,
+            ..
         } => {
             pred.compared += 1;
             pred.replays += 1;
+            pred.remote_replays += u64::from(remote_diverged);
             pred.replayed_steps += steps as u64;
             pred.shift_total += shift;
             pred.turn_total += turn;
@@ -335,11 +393,12 @@ fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'
     };
     let pos_error = pos.distance(a.pos);
     let rot_error = rot.angle_between(a.rot);
-    if pos_error <= POS_TOLERANCE
+    let own_agrees = pos_error <= POS_TOLERANCE
         && rot_error <= ROT_TOLERANCE
         && vel.distance(a.vel) <= VEL_TOLERANCE
-        && ang.distance(a.ang) <= ANG_TOLERANCE
-    {
+        && ang.distance(a.ang) <= ANG_TOLERANCE;
+    let (remote_error, remote_diverged) = compare_remotes(past, req.remotes);
+    if own_agrees && !remote_diverged {
         return Outcome::Matched;
     }
     let depth = (req.newest - a.ack) as usize;
@@ -348,7 +407,12 @@ fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'
             .commands
             .iter()
             .zip(a.ack + 1..)
-            .all(|((seq, _), want)| *seq == want);
+            .all(|((seq, _), want)| *seq == want)
+        && req
+            .remotes
+            .iter()
+            .filter(|r| in_capture(past, r.body))
+            .all(|r| r.commands.as_ref().is_some_and(|c| c.len() == depth));
     if !complete {
         adopt(world, req);
         pred.ring.clear();
@@ -361,7 +425,38 @@ fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'
         pred.floor = req.newest + 1;
         return Outcome::Recovered(RecoveryCause::TooDeep);
     }
-    replay(world, pred, req, pos_error, rot_error)
+    replay(
+        world,
+        pred,
+        req,
+        (pos_error, rot_error),
+        (remote_error, remote_diverged),
+    )
+}
+
+fn in_capture(capture: &WorldCapture, e: Entity) -> bool {
+    capture.vehicles.iter().any(|(v, _)| *v == e)
+}
+
+/// Compare each remote body the host reported with its recorded state:
+/// the largest position difference, and whether any tolerance was passed.
+/// A body that is not in the recorded world (it spawned after that tick)
+/// has nothing to compare.
+fn compare_remotes(past: &WorldCapture, remotes: &[RemoteDrive]) -> (f32, bool) {
+    let mut worst = 0.0_f32;
+    let mut diverged = false;
+    for r in remotes {
+        let (Some(a), Some((pos, rot, vel, ang))) = (r.assertion, own_body(past, r.body)) else {
+            continue;
+        };
+        let err = pos.distance(a.pos);
+        worst = worst.max(err);
+        diverged |= err > POS_TOLERANCE
+            || rot.angle_between(a.rot) > ROT_TOLERANCE
+            || vel.distance(a.vel) > VEL_TOLERANCE
+            || ang.distance(a.ang) > ANG_TOLERANCE;
+    }
+    (worst, diverged)
 }
 
 /// The host's body state, written onto the own car.
@@ -369,6 +464,19 @@ fn adopt(world: &mut World, req: &Request<'_>) {
     let a = req.assertion;
     if let Ok(mut car) = world.get_entity_mut(req.own) {
         car.insert((
+            Position(a.pos),
+            Rotation(a.rot),
+            LinearVelocity(a.vel),
+            AngularVelocity(a.ang),
+            Teleported,
+        ));
+    }
+    // The remote contact bodies take the host's state of the same tick.
+    for r in req.remotes {
+        let (Some(a), Ok(mut body)) = (r.assertion, world.get_entity_mut(r.body)) else {
+            continue;
+        };
+        body.insert((
             Position(a.pos),
             Rotation(a.rot),
             LinearVelocity(a.vel),
@@ -414,8 +522,8 @@ fn replay(
     world: &mut World,
     pred: &mut OwnPrediction,
     req: &Request<'_>,
-    pos_error: f32,
-    rot_error: f32,
+    (pos_error, rot_error): (f32, f32),
+    (remote_error, remote_diverged): (f32, bool),
 ) -> Outcome {
     let a = req.assertion;
     let mut corrected = pred.ring.get(a.ack).expect("checked by the caller").clone();
@@ -424,6 +532,15 @@ fn replay(
         vc.body.rotation = a.rot.to_array();
         vc.body.linear_velocity = a.vel.to_array();
         vc.body.angular_velocity = a.ang.to_array();
+    }
+    for r in req.remotes {
+        let Some(a) = r.assertion else { continue };
+        if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == r.body) {
+            vc.body.position = a.pos.to_array();
+            vc.body.rotation = a.rot.to_array();
+            vc.body.linear_velocity = a.vel.to_array();
+            vc.body.angular_velocity = a.ang.to_array();
+        }
     }
     let before = present(world, req.own);
     let remotes = remote_poses(world);
@@ -435,10 +552,13 @@ fn replay(
     scratch.record(a.ack, corrected.clone());
     let mut staged: Vec<(u64, WorldCapture)> = Vec::with_capacity(req.commands.len());
     let mut from = a.ack;
-    for (seq, input) in req.commands {
-        let step = ReplayStep {
-            inputs: vec![(req.own, *input)],
-        };
+    for (i, (seq, input)) in req.commands.iter().enumerate() {
+        let mut inputs = vec![(req.own, *input)];
+        inputs.extend(req.remotes.iter().filter_map(|r| {
+            let command = r.commands.as_ref()?.get(i)?;
+            in_capture(&corrected, r.body).then_some((r.body, *command))
+        }));
+        let step = ReplayStep { inputs };
         if replay_from(world, &scratch, from, std::slice::from_ref(&step)).is_err() {
             put_back(world, &remotes);
             adopt(world, req);
@@ -466,6 +586,8 @@ fn replay(
         rot_error,
         shift,
         turn,
+        remote_error,
+        remote_diverged,
     }
 }
 
@@ -519,12 +641,20 @@ pub fn reconcile_own(world: &mut World) {
     if !gate(world) {
         return;
     }
-    let (assertion, reset) = {
+    let (assertion, remote_states, reset) = {
         let Some(mut snaps) = world.get_resource_mut::<RemoteSnaps>() else {
             return;
         };
         let stage = snaps.own_stage_mut();
-        (stage.assertion.take(), std::mem::take(&mut stage.reset))
+        let assertion = stage.assertion.take();
+        let at = stage.remotes_at.take();
+        let remotes = std::mem::take(&mut stage.remotes);
+        // The seats only travel with the assertion of their own snapshot.
+        let remotes = match (assertion, at) {
+            (Some(a), Some((g, t))) if a.generation == g && a.server_tick == t => remotes,
+            _ => Vec::new(),
+        };
+        (assertion, remotes, std::mem::take(&mut stage.reset))
     };
     let generation = world.resource::<Session>().wire_generation();
     let Some((own, epoch)) = own_entity(world) else {
@@ -550,6 +680,7 @@ pub fn reconcile_own(world: &mut World) {
             .filter(|r| r.seq > assertion.ack)
             .map(|r| (r.seq, decode_tick_command(&r.command)))
             .collect();
+        let remotes = remote_drives(world, &assertion, &remote_states);
         let epoch = epoch_ref(world.resource::<Session>(), epoch);
         let before = present(world, own);
         let outcome = reconcile(
@@ -560,6 +691,7 @@ pub fn reconcile_own(world: &mut World) {
                 assertion: &assertion,
                 newest,
                 commands: &commands,
+                remotes: &remotes,
                 epoch,
             },
         );
@@ -577,6 +709,42 @@ pub fn reconcile_own(world: &mut World) {
         }
     }
     world.insert_resource(pred);
+}
+
+/// Every remote contact body with its host state (when the snapshot had
+/// the seat) and the command it needs for each step after `assertion.ack`.
+/// The client tick of a step is the `predicted_tick` of its own command.
+fn remote_drives(
+    world: &mut World,
+    assertion: &OwnAssertion,
+    states: &[RemoteAssertion],
+) -> Vec<RemoteDrive> {
+    let ticks: Vec<u64> = world
+        .resource::<CommandStream>()
+        .history()
+        .unacked()
+        .filter(|r| r.seq > assertion.ack)
+        .map(|r| r.predicted_tick)
+        .collect();
+    let bodies: Vec<(Entity, u16)> = world
+        .query::<(Entity, &PredictedRemoteBody)>()
+        .iter(world)
+        .map(|(e, b)| (e, b.wire))
+        .collect();
+    let Some(feed) = world.get_resource::<RemoteFeed>() else {
+        return Vec::new();
+    };
+    bodies
+        .into_iter()
+        .map(|(body, wire)| RemoteDrive {
+            body,
+            assertion: states.iter().find(|s| s.wire == wire).copied(),
+            commands: ticks
+                .iter()
+                .map(|t| feed.command_at(wire, *t).map(|c| decode_tick_command(&c)))
+                .collect(),
+        })
+        .collect()
 }
 
 fn report(
@@ -745,6 +913,7 @@ mod tests {
                 assertion: a,
                 newest,
                 commands: &cmds,
+                remotes: &[],
                 epoch: EPOCH,
             },
         )
@@ -931,9 +1100,285 @@ mod tests {
                 assertion: &a,
                 newest: 30,
                 commands: &cmds,
+                remotes: &[],
                 epoch: EPOCH,
             },
         );
         assert_eq!(out, Outcome::Recovered(RecoveryCause::CommandGap));
+    }
+
+    // ---- Two cars on one tick (NETPLAY-05A-4) ----
+
+    /// The remote car's scripted command of client tick `seq`: its own mix
+    /// of turns and brakes, different from the own car's.
+    fn remote_command(seq: u64) -> VehicleInput {
+        match seq {
+            0..=5 => VehicleInput {
+                throttle: 0.6,
+                ..VehicleInput::default()
+            },
+            6..=16 => VehicleInput {
+                throttle: 1.0,
+                steering: -0.5,
+                ..VehicleInput::default()
+            },
+            _ => VehicleInput {
+                brake: 0.5,
+                steering: 0.2,
+                ..VehicleInput::default()
+            },
+        }
+    }
+
+    /// A world with the own car and a second vehicle (the remote contact
+    /// body) close enough to the first that the pair can touch.
+    fn two_cars() -> (App, Entity, Entity) {
+        let (mut app, own) = app();
+        let remote = app
+            .world_mut()
+            .spawn((
+                vehicle_bundle(&VehicleConfig::default()),
+                Position(Vec3::new(2.6, 1.2, 4.0)),
+                Transform::from_xyz(2.6, 1.2, 4.0),
+            ))
+            .id();
+        app.update();
+        (app, own, remote)
+    }
+
+    fn live2(app: &mut App, own: Entity, remote: Entity, seq: u64) {
+        *app.world_mut().get_mut::<VehicleInput>(own).unwrap() = command(seq);
+        *app.world_mut().get_mut::<VehicleInput>(remote).unwrap() = remote_command(seq);
+        app.update();
+    }
+
+    fn run2(app: &mut App, own: Entity, remote: Entity, pred: &mut OwnPrediction, n: u64) {
+        for seq in 1..=n {
+            live2(app, own, remote, seq);
+            let cap = capture_world(app.world_mut(), EPOCH);
+            pred.ring.record(seq, cap);
+        }
+    }
+
+    fn remote_assertion_from(pred: &OwnPrediction, remote: Entity, ack: u64) -> RemoteAssertion {
+        let (pos, rot, vel, ang) = own_body(pred.ring.get(ack).unwrap(), remote).unwrap();
+        RemoteAssertion {
+            wire: 2,
+            pos,
+            rot,
+            vel,
+            ang,
+        }
+    }
+
+    fn drive(
+        remote: Entity,
+        assertion: Option<RemoteAssertion>,
+        from: u64,
+        to: u64,
+    ) -> RemoteDrive {
+        RemoteDrive {
+            body: remote,
+            assertion,
+            commands: Some((from..=to).map(remote_command).collect()),
+        }
+    }
+
+    fn go2(
+        app: &mut App,
+        pred: &mut OwnPrediction,
+        own: Entity,
+        a: &OwnAssertion,
+        remotes: &[RemoteDrive],
+        newest: u64,
+    ) -> Outcome {
+        let cmds = commands(a.ack + 1, newest);
+        reconcile(
+            app.world_mut(),
+            pred,
+            &Request {
+                own,
+                assertion: a,
+                newest,
+                commands: &cmds,
+                remotes,
+                epoch: EPOCH,
+            },
+        )
+    }
+
+    fn pose(app: &App, e: Entity) -> (Vec3, Quat, Vec3) {
+        (
+            app.world().get::<Position>(e).unwrap().0,
+            app.world().get::<Rotation>(e).unwrap().0,
+            app.world().get::<LinearVelocity>(e).unwrap().0,
+        )
+    }
+
+    /// Both cars agreeing with the host change nothing, whatever the pair
+    /// has done in between.
+    #[test]
+    fn two_agreeing_cars_change_nothing() {
+        let (mut app, own, remote) = two_cars();
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let (before_o, before_r) = (pose(&app, own), pose(&app, remote));
+        let a = assertion_from(&pred, own, 20);
+        let r = drive(
+            remote,
+            Some(remote_assertion_from(&pred, remote, 20)),
+            21,
+            30,
+        );
+        assert_eq!(
+            go2(&mut app, &mut pred, own, &a, &[r], 30),
+            Outcome::Matched
+        );
+        assert_eq!((pose(&app, own), pose(&app, remote)), (before_o, before_r));
+    }
+
+    /// A remote body that alone disagrees with the host triggers the
+    /// replay, and the result equals the twin world that took the host
+    /// state of both cars at the common tick and ran the same commands.
+    #[test]
+    fn a_two_car_replay_equals_the_twin_world() {
+        let (mut app, own, remote) = two_cars();
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let a = assertion_from(&pred, own, 8);
+        let mut ra = remote_assertion_from(&pred, remote, 8);
+        ra.pos += Vec3::new(-0.5, 0.0, 0.35);
+        ra.vel += Vec3::new(0.0, 0.0, 1.2);
+        let out = go2(
+            &mut app,
+            &mut pred,
+            own,
+            &a,
+            &[drive(remote, Some(ra), 9, 30)],
+            30,
+        );
+        let Outcome::Replayed {
+            steps,
+            remote_diverged,
+            remote_error,
+            ..
+        } = out
+        else {
+            panic!("expected a replay, got {out:?}");
+        };
+        assert_eq!(steps, 22);
+        assert!(remote_diverged && remote_error > 0.5);
+        assert_eq!((pred.replays, pred.remote_replays), (1, 1));
+
+        // Reference: the host state of both cars at tick 8, run live.
+        let (mut twin, town, tremote) = two_cars();
+        let mut scratch = fresh();
+        run2(&mut twin, town, tremote, &mut scratch, 8);
+        let mut cap = capture_vehicle(twin.world(), tremote, EPOCH).unwrap();
+        cap.body.position = ra.pos.to_array();
+        cap.body.linear_velocity = ra.vel.to_array();
+        restore_vehicle(twin.world_mut(), tremote, &cap).unwrap();
+        for seq in 9..=30 {
+            live2(&mut twin, town, tremote, seq);
+        }
+        for (got, want) in [(own, town), (remote, tremote)] {
+            let (g, w) = (pose(&app, got), pose(&twin, want));
+            assert!(g.0.distance(w.0) < 1e-3, "position {} vs {}", g.0, w.0);
+            assert!(g.2.distance(w.2) < 1e-2, "velocity {} vs {}", g.2, w.2);
+        }
+        // The history holds the corrected two-car past.
+        let (p, ..) = own_body(pred.ring.get(30).unwrap(), remote).unwrap();
+        assert!(p.distance(pose(&app, remote).0) < 1e-3);
+        let again = assertion_from(&pred, own, 25);
+        let r = drive(
+            remote,
+            Some(remote_assertion_from(&pred, remote, 25)),
+            26,
+            30,
+        );
+        assert_eq!(
+            go2(&mut app, &mut pred, own, &again, &[r], 30),
+            Outcome::Matched
+        );
+    }
+
+    /// The remote body is not put back after the replay (its replayed
+    /// state is the corrected one), while the delayed visual is.
+    #[test]
+    fn the_replayed_remote_body_stays_corrected_and_the_visual_is_put_back() {
+        let (mut app, own, remote) = two_cars();
+        let visual = app
+            .world_mut()
+            .spawn((
+                vehicle_bundle(&VehicleConfig::default()),
+                RemoteReplica,
+                Position(Vec3::new(-6.0, 1.2, 4.0)),
+                Transform::from_xyz(-6.0, 1.2, 4.0),
+            ))
+            .id();
+        app.update();
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let visual_at = pose(&app, visual).0;
+        let a = assertion_from(&pred, own, 10);
+        let mut ra = remote_assertion_from(&pred, remote, 10);
+        ra.pos.x += 1.0;
+        let present = pose(&app, remote).0;
+        let out = go2(
+            &mut app,
+            &mut pred,
+            own,
+            &a,
+            &[drive(remote, Some(ra), 11, 30)],
+            30,
+        );
+        assert!(matches!(out, Outcome::Replayed { .. }));
+        assert!(pose(&app, remote).0.distance(present) > 0.5);
+        assert_eq!(pose(&app, visual).0, visual_at);
+    }
+
+    /// A remote command that is unknown for a replayed step is the named
+    /// command-gap recovery, which adopts the host state of both cars.
+    #[test]
+    fn an_unknown_remote_command_is_a_named_recovery_for_both_cars() {
+        let (mut app, own, remote) = two_cars();
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let mut a = assertion_from(&pred, own, 10);
+        a.pos.z += 1.0;
+        let ra = remote_assertion_from(&pred, remote, 10);
+        let mut r = drive(remote, Some(ra), 11, 30);
+        r.commands = None;
+        let out = go2(&mut app, &mut pred, own, &a, &[r], 30);
+        assert_eq!(out, Outcome::Recovered(RecoveryCause::CommandGap));
+        assert_eq!(pose(&app, own).0, a.pos);
+        assert_eq!(pose(&app, remote).0, ra.pos);
+        assert_eq!((pred.recoveries, pred.recovered_gap), (1, 1));
+    }
+
+    /// A stale history is the same bounded path for two cars as for one.
+    #[test]
+    fn a_two_car_state_older_than_the_history_is_a_named_recovery() {
+        let (mut app, own, remote) = two_cars();
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let mut a = assertion_from(&pred, own, 20);
+        a.ack = 10;
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.pos.y += 0.1;
+        pred.ring = HistoryRing::new(10);
+        let cap = capture_world(app.world_mut(), EPOCH);
+        pred.ring.record(30, cap);
+        let out = go2(
+            &mut app,
+            &mut pred,
+            own,
+            &a,
+            &[drive(remote, Some(ra), 11, 30)],
+            30,
+        );
+        assert_eq!(out, Outcome::Recovered(RecoveryCause::HistoryExhausted));
+        assert_eq!(pose(&app, remote).0, ra.pos);
+        assert_eq!(pred.recovered_exhausted, 1);
     }
 }

@@ -3790,6 +3790,9 @@ fn apply_snap_frame(
     // The frame's `Banger::active` census for the breakaway reconcile's
     // pool claims — one count serves every fragment this frame spawns.
     let mut occupied = None::<usize>;
+    // The remote seats' host state of this frame, staged beside the own
+    // assertion for the two-car replay (NETPLAY-05A-4).
+    let mut staged_remotes: Vec<crate::netpredict::RemoteAssertion> = Vec::new();
     for entry in &snap.entries {
         for (
             entity,
@@ -3992,6 +3995,15 @@ fn apply_snap_frame(
                 }
                 break;
             }
+            if snaps.own_stage.enabled {
+                staged_remotes.push(crate::netpredict::RemoteAssertion {
+                    wire: entry.player,
+                    pos: to_pos,
+                    rot: to_rot,
+                    vel: Vec3::from(entry.vel),
+                    ang: Vec3::from(entry.angvel),
+                });
+            }
             *vel = LinearVelocity(Vec3::from(entry.vel));
             *ang = AngularVelocity(Vec3::from(entry.angvel));
             // The v7 tail drives the copy's wheel/glow presentation
@@ -4051,6 +4063,10 @@ fn apply_snap_frame(
             }
             break;
         }
+    }
+    if snaps.own_stage.enabled {
+        snaps.own_stage.remotes = staged_remotes;
+        snaps.own_stage.remotes_at = Some((snap.generation, snap.tick));
     }
     // The v9 trailer rows (F25-B): a remote copy blends like its seat —
     // an owner-epoch advance snaps it — and the own rig's trailer snaps

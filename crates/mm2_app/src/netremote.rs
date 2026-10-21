@@ -33,6 +33,7 @@ use bevy::prelude::*;
 use mm2_game::Session;
 use mm2_net::{MAX_REMOTE_RUN, RemoteCommands, TickCommand};
 use mm2_vehicle::VehicleInput;
+use mm2_vehicle::replay::MAX_REPLAY_STEPS;
 
 use crate::netdrive::{PredictedRemoteBody, decode_tick_command};
 use crate::netplay_timeline::NetplayTimeline;
@@ -183,14 +184,44 @@ pub struct RemoteFeed {
     /// The policy for ticks the store lacks: hold-last (the measured
     /// choice, see `docs/netcode-redesign.md`).
     pub predictor: RemotePredictor,
+    /// The command each contact body was actually stepped with, by seat and
+    /// client tick. [`RemoteCommands::consume`] forgets a tick once it is
+    /// used, so a replay (NETPLAY-05A-4) re-reads its past from here.
+    applied: BTreeMap<(u16, u64), TickCommand>,
 }
+
+/// Ticks of applied commands kept per seat: past [`MAX_REPLAY_STEPS`]
+/// nothing can be replayed, so older entries are dead weight.
+const APPLIED_KEEP: u64 = MAX_REPLAY_STEPS as u64 * 2;
 
 impl Default for RemoteFeed {
     fn default() -> Self {
         Self {
             store: RemoteCommands::new(),
             predictor: RemotePredictor::new(Policy::HoldLast),
+            applied: BTreeMap::new(),
         }
+    }
+}
+
+impl RemoteFeed {
+    /// Remember what `player`'s body was stepped with at `tick`, and drop
+    /// that seat's entries older than the replay bound.
+    pub fn note_applied(&mut self, player: u16, tick: u64, command: TickCommand) {
+        self.applied.insert((player, tick), command);
+        let floor = tick.saturating_sub(APPLIED_KEEP);
+        self.applied.retain(|(p, t), _| *p != player || *t >= floor);
+    }
+
+    /// The command to replay `player`'s body with at `tick`: the stored
+    /// authoritative one when it is still there (it may have arrived after
+    /// the tick was predicted), else what the live step used. `None` when
+    /// neither is known. Read-only: the predictor and cursor are untouched.
+    pub fn command_at(&self, player: u16, tick: u64) -> Option<TickCommand> {
+        self.store
+            .get(player, tick)
+            .map(|c| c.command)
+            .or_else(|| self.applied.get(&(player, tick)).copied())
     }
 }
 
@@ -211,6 +242,7 @@ pub fn drive_predicted_bodies(
             .predictor
             .command_for(&mut feed.store, body.wire, session.tick());
         *input = decode_tick_command(&p.command);
+        feed.note_applied(body.wire, session.tick(), p.command);
     }
 }
 
@@ -337,5 +369,33 @@ mod tests {
         let mut s = store_with(20, &[cmd(200, 0)]);
         let got = RemotePredictor::new(Policy::HoldLast).command_for(&mut s, 3, 10);
         assert_eq!(got.basis, Basis::Neutral);
+    }
+
+    /// A consumed tick leaves the store, so a replay finds it in the
+    /// applied log; a stored tick wins over the log; the log is bounded.
+    #[test]
+    fn command_at_reads_the_store_then_the_applied_log() {
+        let mut feed = RemoteFeed {
+            store: store_with(10, &[cmd(100, 0), cmd(110, 0), cmd(120, 0)]),
+            ..RemoteFeed::default()
+        };
+        let p = feed.predictor.command_for(&mut feed.store, 3, 10);
+        feed.note_applied(3, 10, p.command);
+        // Tick 10 is consumed (gone from the store) but replayable.
+        assert!(feed.store.get(3, 10).is_none());
+        assert_eq!(feed.command_at(3, 10), Some(cmd(100, 0)));
+        // A late authoritative command for a predicted tick beats the log.
+        feed.note_applied(3, 11, cmd(1, 0));
+        assert_eq!(feed.command_at(3, 11), Some(cmd(110, 0)));
+        assert_eq!(feed.command_at(3, 99), None);
+        assert_eq!(feed.command_at(4, 10), None);
+        // Bounded per seat, and another seat's entries are left alone.
+        feed.note_applied(4, 1, cmd(7, 0));
+        for t in 100..100 + 3 * APPLIED_KEEP {
+            feed.note_applied(3, t, cmd(5, 0));
+        }
+        assert_eq!(feed.command_at(3, 10), None);
+        assert_eq!(feed.command_at(4, 1), Some(cmd(7, 0)));
+        assert!(feed.applied.len() as u64 <= APPLIED_KEEP + 2);
     }
 }
