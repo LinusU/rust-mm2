@@ -1111,13 +1111,13 @@ impl ClientLane {
                 // A late duplicate echo of the establishing probe.
                 LaneTag::Probe => Counters::bump(&self.counters.accepted),
                 LaneTag::Data => match Message::decode(payload) {
-                    Ok(msg @ Message::Snap { generation, .. })
-                        if generation == header.generation =>
-                    {
+                    Ok(msg) if host_lane_generation(&msg) == Some(header.generation) => {
                         Counters::bump(&self.counters.accepted);
                         self.inbox.push_lane(msg);
                     }
-                    Ok(Message::Snap { .. }) => self.counters.drop_for(Refuse::WrongGeneration),
+                    Ok(msg) if host_lane_generation(&msg).is_some() => {
+                        self.counters.drop_for(Refuse::WrongGeneration);
+                    }
                     Ok(_) => self.counters.drop_for(Refuse::Unexpected),
                     Err(_) => self.counters.drop_for(Refuse::Malformed),
                 },
@@ -1224,6 +1224,18 @@ impl Drop for ClientLaneGuard {
 /// threads see the flag within one [`POLL`].
 #[derive(Debug)]
 pub(crate) struct ClientLaneGuard(pub(crate) Arc<ClientLane>);
+
+/// The generation of a host→client message that may ride the datagram
+/// lane (`Snap` and, v34, `RemoteCommands`); `None` for everything else,
+/// which stays on the control stream.
+pub(crate) fn host_lane_generation(msg: &Message) -> Option<u64> {
+    match msg {
+        Message::Snap { generation, .. } | Message::RemoteCommands { generation, .. } => {
+            Some(*generation)
+        }
+        _ => None,
+    }
+}
 
 /// Encode `msg` for the lane, or `None` when it exceeds a datagram's
 /// payload budget.

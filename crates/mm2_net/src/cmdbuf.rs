@@ -66,6 +66,7 @@ const TOKEN: u64 = 1000;
 
 /// Where a consumed slot's controls came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Source {
     /// The driver's own command for the next sequence.
     Command,

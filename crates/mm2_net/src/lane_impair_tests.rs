@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use crate::lane_tests::{WAIT, cmd, eventually, hello_for, host, start_session};
 use crate::{
-    Client, Host, Impair, LinkDir, MAX_DATAGRAM, Message, NetError, RemoteInputs, SeatStats,
-    SnapEntry, Source, TickCommand, UdpImpair, UdpImpairProxy,
+    Client, Host, Impair, LinkDir, MAX_DATAGRAM, MAX_REMOTE_RUN, Message, NetError, RemoteCommand,
+    RemoteCommands, RemoteInputs, RemoteSeat, SeatStats, SnapEntry, Source, TickCommand, UdpImpair,
+    UdpImpairProxy,
 };
 
 /// Virtual time each lockstep step advances (one 60 Hz tick).
@@ -616,4 +617,90 @@ fn a_black_hole_never_blocks_the_sender_and_is_counted() {
     assert_eq!(rig.inputs.windows_received(rig.id), 0, "nothing arrived");
     // The control stream is a separate path and is unaffected.
     assert!(rig.host.lane_established(rig.id));
+}
+
+/// The applied command for tick `t` of the fictitious remote seat the
+/// remote-commands test drives (throttle encodes the tick).
+fn applied(t: u64) -> RemoteCommand {
+    RemoteCommand {
+        command: cmd(t as u8),
+        source: Source::Command,
+    }
+}
+
+/// 90 ticks of a host repeating its last [`MAX_REMOTE_RUN`] applied ticks
+/// of another seat to the lane client through loss, duplication, reorder
+/// and delay, then a clean tail: the client's store ends with every tick
+/// exactly as the host applied it, each consumed once, in order.
+#[test]
+fn remote_commands_survive_loss_reorder_and_duplication_without_an_ack() {
+    const OTHER: u16 = 77;
+    const N: u64 = 90;
+    let mut rig = Rig::new(0x5eed_0501);
+    rig.set_both(UdpImpair {
+        link: Impair {
+            delay: Duration::from_millis(10),
+            jitter: Duration::from_millis(40),
+            loss: 0.3,
+            duplicate: 0.25,
+            reorder: 0.25,
+        },
+        ..UdpImpair::default()
+    });
+    let mut store = RemoteCommands::new();
+    store.set_generation(Some(rig.generation));
+    let mut next = 1;
+    let mut seen_ages = BTreeSet::new();
+    for t in 1..=N + 5 {
+        if t == N + 1 {
+            rig.set_both(UdpImpair::default());
+            rig.settle(Duration::from_secs(1));
+        }
+        let host_tick = t.min(N);
+        let first = host_tick.saturating_sub(MAX_REMOTE_RUN as u64 - 1).max(1);
+        let before = rig.host.lane_counts().sent;
+        let msg = Message::RemoteCommands {
+            generation: rig.generation,
+            tick: host_tick,
+            seats: vec![RemoteSeat {
+                player: OTHER,
+                epoch: 0,
+                first_tick: first,
+                commands: (first..=host_tick).map(applied).collect(),
+            }],
+        };
+        rig.host.ctl().send_to(rig.id, &msg).unwrap();
+        eventually("the frame to leave the host", || {
+            rig.host.lane_counts().sent == before + 1
+        });
+        rig.settle(STEP);
+        while rig.client.lane_inbox_stats().unwrap().len > 0 {
+            let got = rig.client.recv().unwrap();
+            // The control stream's own traffic (roster) shares the inbox.
+            if let Message::RemoteCommands { tick, .. } = &got {
+                store.absorb(&got);
+                seen_ages.insert(host_tick.saturating_sub(*tick));
+            }
+        }
+        // The client consumes what it has, strictly in order, once.
+        while let Some(c) = store.consume(OTHER, next) {
+            assert_eq!(c, applied(next), "tick {next} was altered");
+            assert_eq!(store.consume(OTHER, next), None, "consumed twice");
+            next += 1;
+        }
+        thread::sleep(TICK_PACE);
+    }
+    let link = rig.proxy.stats(LinkDir::Down).link;
+    assert!(
+        link.dropped > 0 && link.duplicated > 0 && link.reordered > 0,
+        "{link:?}"
+    );
+    assert!(seen_ages.iter().any(|a| *a > 0), "a delayed frame was seen");
+    // Ticks skipped only if no frame carrying them arrived before the
+    // cursor passed; with a 16-tick repeat none may be skipped here.
+    let stats = store.stats(OTHER).unwrap();
+    assert_eq!(stats.consumed, N, "{stats:?}");
+    assert_eq!(next, N + 1);
+    assert_eq!(stats.conflicts, 0, "{stats:?}");
+    assert_eq!(store.wrong_generation(), 0);
 }

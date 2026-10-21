@@ -928,6 +928,20 @@ impl HostCtl {
     /// producer draw the group boundaries.
     pub fn broadcast(&self, msg: &Message) -> Result<(), NetError> {
         let bytes = msg.encode()?;
+        if let Message::RemoteCommands { generation, .. } = msg
+            && bytes.len() <= crate::rt::MAX_PAYLOAD
+        {
+            // Never fragmented: a frame that does not fit one datagram
+            // stays on the control stream like any non-`Snap` message.
+            let outs = self.lane.established_outs();
+            if !outs.is_empty() {
+                let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
+                for (_, out) in outs {
+                    out.push_data(*generation, bytes.clone());
+                }
+                return self.send(LoopMsg::BroadcastExcept(msg.clone(), ids));
+            }
+        }
         if let Message::Snap {
             generation, tick, ..
         } = msg
@@ -961,6 +975,13 @@ impl HostCtl {
     /// lane like [`broadcast`](Self::broadcast) does.
     pub fn send_to(&self, player_id: u16, msg: &Message) -> Result<(), NetError> {
         let bytes = msg.encode()?;
+        if let Message::RemoteCommands { generation, .. } = msg
+            && bytes.len() <= crate::rt::MAX_PAYLOAD
+            && let Some(out) = self.lane.established_out(player_id)
+        {
+            out.push_data(*generation, bytes);
+            return Ok(());
+        }
         if let Message::Snap {
             generation, tick, ..
         } = msg

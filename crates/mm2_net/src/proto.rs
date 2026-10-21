@@ -7,6 +7,8 @@
 //! all errors — a peer speaking something we cannot name is a protocol
 //! violation, not a parse to fudge.
 
+use crate::cmdbuf::Source;
+
 /// Wire version. Bumped for any incompatible message change; peers must
 /// match exactly. v2: `RosterEntry` gained the driver's `pick` field and
 /// the `SetVehicle`/`VehicleRefused` negotiation pair landed. v3:
@@ -103,8 +105,13 @@
 /// [`crate::rt`]) — `Message::LaneBind` / `Message::LaneGrant` negotiate
 /// a per-seat endpoint and token over the TCP control channel, after
 /// which `InputWindow` and `Snap` may ride sequenced unreliable
-/// datagrams; a v32 peer has no lane to negotiate.
-pub const PROTOCOL_VERSION: u16 = 33;
+/// datagrams; a v32 peer has no lane to negotiate. v34:
+/// `Message::RemoteCommands` — the host's finalized per-seat commands at
+/// their canonical authoritative ticks (NETPLAY-05A-1, see
+/// `docs/netcode-redesign.md`), so a client can predict another human's
+/// car from what the host actually applied; a v33 peer would never
+/// receive them and would have nothing but pose snapshots to go on.
+pub const PROTOCOL_VERSION: u16 = 34;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -148,6 +155,7 @@ const TAG_SIGNALS: u8 = 0x16;
 const TAG_INPUT_WINDOW: u8 = 0x17;
 const TAG_LANE_BIND: u8 = 0x18;
 const TAG_LANE_GRANT: u8 = 0x19;
+const TAG_REMOTE_COMMANDS: u8 = 0x1a;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -295,6 +303,83 @@ pub struct TickCommand {
     pub auto_reverse: bool,
     /// Manual forward gear index (zero is first), absent for automatic.
     pub forced_gear: Option<u32>,
+}
+
+/// Most seats one [`Message::RemoteCommands`] frame may carry.
+pub const MAX_REMOTE_SEATS: usize = MAX_PLAYERS as usize;
+
+/// Most consecutive ticks one seat's run in a [`Message::RemoteCommands`]
+/// frame may carry — the same redundancy bound as an input window.
+pub const MAX_REMOTE_RUN: usize = MAX_INPUT_WINDOW;
+
+/// One command the host actually applied to a seat on one authoritative
+/// tick (NETPLAY-05A-1): the controls plus where they came from, so a
+/// client can tell the driver's own input from a host substitute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteCommand {
+    /// The controls the host applied on that tick.
+    pub command: TickCommand,
+    /// Whether they were the driver's or a substitute.
+    pub source: Source,
+}
+
+/// One seat's consecutive applied commands inside a
+/// [`Message::RemoteCommands`] frame. Command `i` was applied by the host
+/// on authoritative tick `first_tick + i`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSeat {
+    /// The wire player id of the seat the commands drove.
+    pub player: u16,
+    /// The seat's vehicle reset epoch (wraps at 256) at those ticks.
+    pub epoch: u8,
+    /// Authoritative tick of `commands[0]`.
+    pub first_tick: u64,
+    /// Consecutive applied commands, oldest first;
+    /// `1..=`[`MAX_REMOTE_RUN`].
+    pub commands: Vec<RemoteCommand>,
+}
+
+impl RemoteSeat {
+    /// Authoritative tick of this run's newest command.
+    pub fn last_tick(&self) -> u64 {
+        self.first_tick + self.commands.len().saturating_sub(1) as u64
+    }
+}
+
+fn put_command(out: &mut Vec<u8>, c: &TickCommand) {
+    out.push(c.throttle);
+    out.push(c.brake);
+    out.push(c.steer as u8);
+    out.push(c.handbrake);
+    out.push(u8::from(c.auto_reverse));
+    out.push(u8::from(c.forced_gear.is_some()));
+    if let Some(gear) = c.forced_gear {
+        out.extend_from_slice(&gear.to_le_bytes());
+    }
+}
+
+/// The shared bounds on a remote-commands frame, applied identically on
+/// encode and decode. A run may not end after the frame's own `tick`: the
+/// host cannot have applied a command it has not simulated yet.
+fn check_remote_seat(tick: u64, seat: &RemoteSeat, seen: &[u16]) -> Result<(), ProtoError> {
+    let len = seat.commands.len();
+    if len == 0 {
+        return Err(ProtoError::EmptyRemoteRun(seat.player));
+    }
+    if len > MAX_REMOTE_RUN {
+        return Err(ProtoError::OversizeRemoteRun(len));
+    }
+    if seen.contains(&seat.player) {
+        return Err(ProtoError::DuplicateRemoteSeat(seat.player));
+    }
+    match seat.first_tick.checked_add(len as u64 - 1) {
+        Some(last) if last <= tick => Ok(()),
+        _ => Err(ProtoError::RemoteRunPastTick {
+            first_tick: seat.first_tick,
+            len,
+            tick,
+        }),
+    }
 }
 
 /// One participant's authoritative rigid state inside a [`Message::Snap`].
@@ -894,6 +979,26 @@ pub enum Message {
         /// Consecutive commands, oldest first.
         commands: Vec<TickCommand>,
     },
+    /// Host → client: the commands the host actually applied to other
+    /// seats (v34, NETPLAY-05A-1) — the finalized, canonical stream a
+    /// client predicts a remote car from, never the raw arrivals.
+    /// `tick` is the host session tick at capture; each [`RemoteSeat`]
+    /// run names the authoritative tick of its first command, so the
+    /// receiver keys commands by tick and the *age* of a command at
+    /// `tick` is `tick - command_tick`. Every frame repeats the last
+    /// [`MAX_REMOTE_RUN`] ticks per seat, so a command survives a dropped
+    /// datagram without an ack; a receiver keeps the first copy of a
+    /// tick and never alters it (see `netcmd::RemoteCommands`). The
+    /// receiver's own seat is not sent. Bounded by [`MAX_REMOTE_SEATS`]
+    /// runs of `1..=`[`MAX_REMOTE_RUN`] commands, one run per player.
+    RemoteCommands {
+        /// The session generation these commands belong to.
+        generation: u64,
+        /// Host session tick at capture.
+        tick: u64,
+        /// One run per seat, none past `tick`.
+        seats: Vec<RemoteSeat>,
+    },
     /// Client → host: the driver asked to be reset (F25-B). The sender's
     /// roster slot names the seat — a request carries no target, so a
     /// client can only ever ask for its own car. `generation` namespaces
@@ -1126,6 +1231,31 @@ pub enum ProtoError {
     /// A signals frame declared more than [`MAX_SNAP_SIGNALS`] rows.
     #[error("signals frame declares {0} rows, bound is {MAX_SNAP_SIGNALS}")]
     OversizeSignals(u16),
+    /// A remote-commands frame declared more than [`MAX_REMOTE_SEATS`] runs.
+    #[error("remote-commands frame declares {0} seats, bound is {MAX_REMOTE_SEATS}")]
+    OversizeRemoteSeats(usize),
+    /// A remote run declared more than [`MAX_REMOTE_RUN`] commands.
+    #[error("remote run declares {0} commands, bound is {MAX_REMOTE_RUN}")]
+    OversizeRemoteRun(usize),
+    /// A remote run declared no commands.
+    #[error("remote run for seat {0} declares no commands")]
+    EmptyRemoteRun(u16),
+    /// Two runs in one frame named the same seat.
+    #[error("remote-commands frame names seat {0} twice")]
+    DuplicateRemoteSeat(u16),
+    /// A remote run ends after the frame's capture tick (or overflows).
+    #[error("remote run from tick {first_tick} with {len} commands passes frame tick {tick}")]
+    RemoteRunPastTick {
+        /// Declared tick of the run's first command.
+        first_tick: u64,
+        /// Declared command count.
+        len: usize,
+        /// The frame's capture tick.
+        tick: u64,
+    },
+    /// A remote command declared a source byte that is not a known source.
+    #[error("remote command declares unknown source {0}")]
+    BadRemoteSource(u8),
 }
 
 impl RejectCode {
@@ -1408,6 +1538,34 @@ impl Message {
                     out.push(u8::from(c.forced_gear.is_some()));
                     if let Some(gear) = c.forced_gear {
                         out.extend_from_slice(&gear.to_le_bytes());
+                    }
+                }
+            }
+            Self::RemoteCommands {
+                generation,
+                tick,
+                seats,
+            } => {
+                if seats.len() > MAX_REMOTE_SEATS {
+                    return Err(ProtoError::OversizeRemoteSeats(seats.len()));
+                }
+                let mut seen = Vec::with_capacity(seats.len());
+                for s in seats {
+                    check_remote_seat(*tick, s, &seen)?;
+                    seen.push(s.player);
+                }
+                out.push(TAG_REMOTE_COMMANDS);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                out.push(seats.len() as u8);
+                for s in seats {
+                    out.extend_from_slice(&s.player.to_le_bytes());
+                    out.push(s.epoch);
+                    out.extend_from_slice(&s.first_tick.to_le_bytes());
+                    out.push(s.commands.len() as u8);
+                    for c in &s.commands {
+                        out.push(c.source as u8);
+                        put_command(&mut out, &c.command);
                     }
                 }
             }
@@ -1754,6 +1912,60 @@ impl Message {
                     epoch,
                     first_seq,
                     commands,
+                }
+            }
+            TAG_REMOTE_COMMANDS => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let count = cur.u8()? as usize;
+                if count > MAX_REMOTE_SEATS {
+                    return Err(ProtoError::OversizeRemoteSeats(count));
+                }
+                let mut seats: Vec<RemoteSeat> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let player = cur.u16()?;
+                    let epoch = cur.u8()?;
+                    let first_tick = cur.u64()?;
+                    let len = cur.u8()? as usize;
+                    // Bound the run before reading it, so a hostile count
+                    // cannot make this allocate or loop.
+                    if len > MAX_REMOTE_RUN {
+                        return Err(ProtoError::OversizeRemoteRun(len));
+                    }
+                    let mut commands = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        let source = match cur.u8()? {
+                            0 => Source::Command,
+                            1 => Source::HeldLast,
+                            2 => Source::Neutral,
+                            other => return Err(ProtoError::BadRemoteSource(other)),
+                        };
+                        commands.push(RemoteCommand {
+                            source,
+                            command: TickCommand {
+                                throttle: cur.u8()?,
+                                brake: cur.u8()?,
+                                steer: cur.u8()? as i8,
+                                handbrake: cur.u8()?,
+                                auto_reverse: cur.bool()?,
+                                forced_gear: if cur.bool()? { Some(cur.u32()?) } else { None },
+                            },
+                        });
+                    }
+                    let seat = RemoteSeat {
+                        player,
+                        epoch,
+                        first_tick,
+                        commands,
+                    };
+                    let seen: Vec<u16> = seats.iter().map(|s| s.player).collect();
+                    check_remote_seat(tick, &seat, &seen)?;
+                    seats.push(seat);
+                }
+                Self::RemoteCommands {
+                    generation,
+                    tick,
+                    seats,
                 }
             }
             TAG_LANE_BIND => Self::LaneBind { port: cur.u16()? },
@@ -3125,15 +3337,136 @@ mod tests {
     }
 
     #[test]
-    fn v33_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 33);
-        for protocol in [32, 34] {
+    fn v34_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 34);
+        for protocol in [33, 35] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("33"), "{why}");
+            assert!(why.contains("34"), "{why}");
         }
+    }
+
+    fn remote_cmd(n: u8) -> RemoteCommand {
+        RemoteCommand {
+            command: cmd(n),
+            source: [Source::Command, Source::HeldLast, Source::Neutral][n as usize % 3],
+        }
+    }
+
+    fn run(player: u16, first_tick: u64, n: usize) -> RemoteSeat {
+        RemoteSeat {
+            player,
+            epoch: 9,
+            first_tick,
+            commands: (0..n).map(|i| remote_cmd(i as u8)).collect(),
+        }
+    }
+
+    fn remote(tick: u64, seats: Vec<RemoteSeat>) -> Message {
+        Message::RemoteCommands {
+            generation: 4,
+            tick,
+            seats,
+        }
+    }
+
+    #[test]
+    fn remote_commands_roundtrip_every_run_size_and_source() {
+        for n in 1..=MAX_REMOTE_RUN {
+            let m = remote(100, vec![run(2, 100 - n as u64 + 1, n), run(3, 100, 1)]);
+            assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        }
+        let all: Vec<RemoteSeat> = (0..MAX_REMOTE_SEATS as u16)
+            .map(|p| run(p + 1, 1, MAX_REMOTE_RUN))
+            .collect();
+        let m = remote(MAX_REMOTE_RUN as u64, all);
+        assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        let m = remote(u64::MAX, vec![run(2, u64::MAX - 2, 3)]);
+        assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        assert_eq!(run(2, 10, 3).last_tick(), 12);
+        let empty = remote(5, Vec::new());
+        assert_eq!(Message::decode(&empty.encode().unwrap()).unwrap(), empty);
+    }
+
+    #[test]
+    fn remote_commands_bounds_are_enforced_on_encode() {
+        assert_eq!(
+            remote(9, vec![run(2, 1, 0)]).encode(),
+            Err(ProtoError::EmptyRemoteRun(2))
+        );
+        assert_eq!(
+            remote(99, vec![run(2, 1, MAX_REMOTE_RUN + 1)]).encode(),
+            Err(ProtoError::OversizeRemoteRun(MAX_REMOTE_RUN + 1))
+        );
+        assert_eq!(
+            remote(9, vec![run(2, 1, 1), run(2, 2, 1)]).encode(),
+            Err(ProtoError::DuplicateRemoteSeat(2))
+        );
+        let crowd = (0..=MAX_REMOTE_SEATS as u16)
+            .map(|p| run(p, 1, 1))
+            .collect();
+        assert_eq!(
+            remote(9, crowd).encode(),
+            Err(ProtoError::OversizeRemoteSeats(MAX_REMOTE_SEATS + 1))
+        );
+        // A run may not end after the frame's own tick.
+        assert!(matches!(
+            remote(5, vec![run(2, 4, 3)]).encode(),
+            Err(ProtoError::RemoteRunPastTick { .. })
+        ));
+        assert!(matches!(
+            remote(u64::MAX, vec![run(2, u64::MAX, 2)]).encode(),
+            Err(ProtoError::RemoteRunPastTick { .. })
+        ));
+    }
+
+    #[test]
+    fn remote_commands_malformed_frames_are_rejected_on_decode() {
+        let good = remote(10, vec![run(2, 8, 3)]).encode().unwrap();
+        // Every truncation is an error, never a partial frame.
+        for cut in 0..good.len() {
+            assert!(Message::decode(&good[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(Message::decode(&trailing).is_err());
+        // Header: tag, generation u64, tick u64, seat count; then player
+        // u16, epoch, first_tick u64, run length; then the first source.
+        let seat_count = 1 + 8 + 8;
+        let run_len = seat_count + 1 + 2 + 1 + 8;
+        let source = run_len + 1;
+        let mut b = good.clone();
+        b[seat_count] = MAX_REMOTE_SEATS as u8 + 1;
+        assert_eq!(
+            Message::decode(&b),
+            Err(ProtoError::OversizeRemoteSeats(MAX_REMOTE_SEATS + 1))
+        );
+        let mut b = good.clone();
+        b[run_len] = 0;
+        assert_eq!(Message::decode(&b), Err(ProtoError::EmptyRemoteRun(2)));
+        let mut b = good.clone();
+        b[run_len] = 255;
+        assert_eq!(Message::decode(&b), Err(ProtoError::OversizeRemoteRun(255)));
+        let mut b = good.clone();
+        b[source] = 3;
+        assert_eq!(Message::decode(&b), Err(ProtoError::BadRemoteSource(3)));
+        // Frame tick lowered below the run's end.
+        let mut b = good.clone();
+        b[1 + 8..1 + 16].copy_from_slice(&9u64.to_le_bytes());
+        assert!(matches!(
+            Message::decode(&b),
+            Err(ProtoError::RemoteRunPastTick { .. })
+        ));
+        // Same seat twice.
+        let dup = remote(10, vec![run(2, 8, 1), run(3, 8, 1)])
+            .encode()
+            .unwrap();
+        let mut b = dup.clone();
+        let second = seat_count + 1 + (2 + 1 + 8 + 1 + 1 + 6 + 4);
+        b[second..second + 2].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(Message::decode(&b), Err(ProtoError::DuplicateRemoteSeat(2)));
     }
 }

@@ -59,6 +59,7 @@ mod frame;
 mod impair;
 mod impair_udp;
 mod lobby;
+mod netcmd;
 mod proto;
 mod rt;
 
@@ -89,14 +90,16 @@ pub use lobby::{
     KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LaneRoute, LateJoin, LeaveCause, PickValidator,
     RemoteInputs, StampedInput, Transport,
 };
+pub use netcmd::{REMOTE_BUFFER_CAP, RemoteCommands, RemoteSeatStats};
 pub use proto::{
-    DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_SESSION_PARAMS,
-    MAX_SNAP_CARS, MAX_SNAP_CNR_SEATS, MAX_SNAP_IMPACTS, MAX_SNAP_LEAVES, MAX_SNAP_PROPS,
-    MAX_SNAP_SIGNALS, MAX_STRING, Message, PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry,
-    SIGNAL_NO_GREEN, SNAP_CNR_NO_PLAYER, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE,
-    SNAP_NO_FRAGMENT, SNAP_NO_SURFACE, SessionAdvertisement, SiteTable, SnapCar, SnapCnr,
-    SnapCnrOutcome, SnapCnrSeat, SnapEntry, SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal,
-    SnapTrailer, TickCommand, VehiclePick,
+    DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_REMOTE_RUN,
+    MAX_REMOTE_SEATS, MAX_SESSION_PARAMS, MAX_SNAP_CARS, MAX_SNAP_CNR_SEATS, MAX_SNAP_IMPACTS,
+    MAX_SNAP_LEAVES, MAX_SNAP_PROPS, MAX_SNAP_SIGNALS, MAX_STRING, Message, PROTOCOL_VERSION,
+    ProtoError, RejectCode, RemoteCommand, RemoteSeat, RosterEntry, SIGNAL_NO_GREEN,
+    SNAP_CNR_NO_PLAYER, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_FRAGMENT,
+    SNAP_NO_SURFACE, SessionAdvertisement, SiteTable, SnapCar, SnapCnr, SnapCnrOutcome,
+    SnapCnrSeat, SnapEntry, SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal, SnapTrailer,
+    TickCommand, VehiclePick,
 };
 pub use rt::{
     HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
