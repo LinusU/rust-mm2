@@ -72,6 +72,8 @@ mod rt;
 #[cfg(test)]
 mod lane_impair_tests;
 #[cfg(test)]
+mod lane_lobby_tests;
+#[cfg(test)]
 mod lane_pace_tests;
 #[cfg(test)]
 mod lane_reliable_tests;

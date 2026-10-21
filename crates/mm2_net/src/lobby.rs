@@ -1986,7 +1986,7 @@ fn run(
                         cancel_resend = None;
                     }
                 }
-                broadcast_roster(&mut players, &events, &inputs);
+                broadcast_roster(&mut players, &events, &inputs, None);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -2097,7 +2097,7 @@ fn run(
                     driver: hello.driver,
                     build: hello.build,
                 });
-                broadcast_roster(&mut players, &events, &inputs);
+                broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 // The newcomer's own first roster send may have removed
                 // it as `Lost` — a departed slot gets no reader.
                 if players.contains_key(&id) {
@@ -2125,7 +2125,7 @@ fn run(
                         .is_some_and(|slot| slot.writer.send(&msg).is_err());
                     if failed && remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs)
                     {
-                        broadcast_roster(&mut players, &events, &inputs);
+                        broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                     } else if players.contains_key(&id) {
                         // The newcomer's own `Start` is as one-shot as the
                         // original broadcast was, and it may join long
@@ -2146,7 +2146,7 @@ fn run(
                 if let Some(slot) = players.get_mut(&id) {
                     slot.ready = ready;
                     let _ = events.send(HostEvent::ReadyChanged { id, ready });
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::PeerMessage {
@@ -2168,7 +2168,7 @@ fn run(
                                 slot.pick = Some(pick);
                                 let _ =
                                     events.send(HostEvent::VehicleChanged { id, vehicle, paint });
-                                broadcast_roster(&mut players, &events, &inputs);
+                                broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                             }
                         }
                     }
@@ -2202,7 +2202,7 @@ fn run(
                                     &inputs,
                                 )
                             {
-                                broadcast_roster(&mut players, &events, &inputs);
+                                broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                             }
                         }
                     }
@@ -2225,7 +2225,7 @@ fn run(
                         .is_err()
                 });
                 if failed && remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::PeerMessage { .. } => {}
@@ -2234,7 +2234,7 @@ fn run(
                 // Removals under the session send change the roster too —
                 // survivors get the corrected snapshot after the ad.
                 if !broadcast(&mut players, &Message::Session(ad), &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::Broadcast(msg) => {
@@ -2243,12 +2243,12 @@ fn run(
                 // the write is reaped `Lost` and survivors get the
                 // corrected roster.
                 if !broadcast(&mut players, &msg, &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::BroadcastExcept(msg, skip) => {
                 if !broadcast_except(&mut players, &msg, &skip, &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::SendTo(id, msg) => {
@@ -2257,7 +2257,7 @@ fn run(
                     .is_some_and(|slot| slot.writer.send(&msg).is_err());
                 if failed {
                     remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs);
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
             LoopMsg::Start { late_join } => {
@@ -2310,7 +2310,7 @@ fn run(
                         // `Started` reports the roster the session
                         // actually began with.
                         if !broadcast(&mut players, &msg, &events, &inputs) {
-                            broadcast_roster(&mut players, &events, &inputs);
+                            broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                         }
                         // Re-send `Start` until every peer is in the
                         // session or the window elapses (F31-B.4 /
@@ -2341,7 +2341,7 @@ fn run(
                     let _ = events.send(HostEvent::Cancelled { generation });
                     // Departures under the `Cancel` send and the
                     // readiness reset both changed the roster.
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                     // Keep re-sending `Cancel` for a bounded window
                     // (F31-B.4 / #1489): the single frame may be lost, and
                     // a client still in the ended session would never
@@ -2352,7 +2352,7 @@ fn run(
             }
             LoopMsg::PeerGone { id, cause } => {
                 if remove_player(&mut players, id, cause, &events, &inputs) {
-                    broadcast_roster(&mut players, &events, &inputs);
+                    broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                 }
             }
         }
@@ -2473,10 +2473,18 @@ fn broadcast_except(
 /// each removal — a survivor must never see a snapshot still listing a
 /// departed peer. Each pass removes at least one player, so the resend
 /// loop terminates.
+///
+/// With a `lane` (a roster *change*, NETPLAY-06E-2a) the final snapshot is
+/// also queued on every rostered seat's reliable channel at the lobby
+/// scope, so a lane client learns of a join or a removal even when the
+/// datagram is lost; a TCP-only seat has no lane and is skipped. The
+/// keepalive tick passes `None`: its TCP resend stays, and it must not
+/// refill a stalled peer's bounded reliable window every second.
 fn broadcast_roster(
     players: &mut BTreeMap<u16, Slot>,
     events: &Sender<HostEvent>,
     inputs: &RemoteInputs,
+    lane: Option<&HostLane>,
 ) {
     loop {
         let msg = Message::Roster {
@@ -2492,6 +2500,16 @@ fn broadcast_roster(
                 .collect(),
         };
         if broadcast(players, &msg, events, inputs) {
+            if let Some(lane) = lane
+                && let Ok(body) = msg.encode()
+            {
+                for &id in players.keys() {
+                    // `NoLane`: a TCP-only peer. A full or dead channel
+                    // is counted in its `ReliableStats`; the TCP copy
+                    // and the keepalive resend still cover the peer.
+                    let _ = lane.send_reliable(id, crate::rt::LOBBY_SCOPE, &body);
+                }
+            }
             return;
         }
     }
@@ -2914,7 +2932,7 @@ mod tests {
         let (events, rx) = mpsc::channel();
         let inputs = RemoteInputs::default();
 
-        broadcast_roster(&mut players, &events, &inputs);
+        broadcast_roster(&mut players, &events, &inputs, None);
 
         assert!(players.is_empty());
         for _ in 0..9 {

@@ -768,6 +768,28 @@ impl LaneTable {
     }
 }
 
+/// The generation value of the lobby scope (NETPLAY-06E-2a): no session
+/// runs, so a reliable datagram names generation 0. Authentication is the
+/// same seat token, address and replay window as for every other tag;
+/// only the generation test is relaxed, and only for the two reliable
+/// tags. `Data`, `Fragment` and `Ack` still need the running generation,
+/// and a reliable datagram naming a *nonzero* generation must still match
+/// the running one.
+pub(crate) const LOBBY_SCOPE: u64 = 0;
+
+fn is_reliable_tag(tag: LaneTag) -> bool {
+    matches!(tag, LaneTag::Reliable | LaneTag::ReliableAck)
+}
+
+/// Whether the host accepts a datagram header under `running` (0: none).
+fn generation_admits(h: &Header, running: u64) -> bool {
+    match h.tag {
+        LaneTag::Probe => true,
+        t if is_reliable_tag(t) && h.generation == LOBBY_SCOPE => true,
+        _ => running != 0 && h.generation == running,
+    }
+}
+
 /// What the host did with a datagram, for the receive loop's counters.
 enum Verdict {
     Accepted,
@@ -819,7 +841,7 @@ fn ingest(
     if from.ip().to_canonical() != seat.ip || from.port() != seat.port {
         return Verdict::Dropped(Refuse::WrongAddr);
     }
-    if h.tag != LaneTag::Probe && (generation == 0 || h.generation != generation) {
+    if !generation_admits(h, generation) {
         return Verdict::Dropped(Refuse::WrongGeneration);
     }
     if !seat.window.accept(h.seq) {
@@ -1155,11 +1177,12 @@ fn flush(socket: &UdpSocket, to: SocketAddr, header: &Header, payload: &[u8], c:
 const REL_INBOX_CAP: usize = 64;
 
 /// Whether a reliably delivered body is a host event the client's inbox
-/// owns (everything else stays for `recv_reliable`).
+/// owns (everything else stays for `recv_reliable`). A lobby `Roster`
+/// (NETPLAY-06E-2a) is one: `Client::recv` returns it.
 fn is_host_event(body: &[u8]) -> bool {
     matches!(
         Message::decode(body),
-        Ok(Message::Cnr { .. } | Message::Impacts { .. })
+        Ok(Message::Cnr { .. } | Message::Impacts { .. } | Message::Roster { .. })
     )
 }
 
@@ -1432,6 +1455,7 @@ impl ClientLane {
             return Err(Refuse::BadToken);
         }
         if h.tag != LaneTag::Probe
+            && !(is_reliable_tag(h.tag) && h.generation == LOBBY_SCOPE)
             && (h.generation == 0 || h.generation < self.started.load(Ordering::Relaxed))
         {
             return Err(Refuse::WrongGeneration);

@@ -556,7 +556,14 @@ fn the_outbound_queue_holds_its_bound_and_counts_drops() {
         assert!(s.len <= s.capacity && s.capacity == QUEUE_CAP, "{s:?}");
     }
     let s = host.lane_queue(raw.seat).unwrap();
-    assert_eq!(s.pushed, 2001, "2000 snaps plus the probe echo: {s:?}");
+    // The roster datagrams the start queued on the reliable channel
+    // (NETPLAY-06E-2a) and their repeats are movement-queue entries too.
+    let rel = host.reliable_stats(raw.seat).unwrap().sender;
+    assert_eq!(
+        s.pushed,
+        2001 + rel.queued + rel.retransmits,
+        "2000 snaps plus the probe echo and the reliable roster: {s:?} {rel:?}"
+    );
     eventually("the queue to drain", || {
         host.lane_queue(raw.seat).unwrap().len == 0
     });

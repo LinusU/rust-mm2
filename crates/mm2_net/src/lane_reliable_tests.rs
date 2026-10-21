@@ -41,7 +41,7 @@ fn lossy(loss: f64) -> UdpImpair {
 /// and reorders: the relay's virtual clock is frozen until a test advances
 /// it, so a delayed probe could never establish the lane. Both reliable
 /// clocks are manual.
-fn rig(seed: u64, loss: f64) -> Rig {
+fn rig(seed: u64, loss: f64) -> Lobby {
     let from_start = UdpImpair {
         link: Impair {
             loss,
@@ -54,7 +54,43 @@ fn rig(seed: u64, loss: f64) -> Rig {
     rig.set_both(lossy(loss));
     rig.host.use_manual_reliable_clock();
     rig.client.use_manual_reliable_clock();
-    rig
+    // Starting the session broadcast rosters, which the host sends to the
+    // client on this very channel (NETPLAY-06E-2a). Settle and discard
+    // them so a test counts only its own messages; `base` is how many
+    // the host→client direction carried.
+    let lobby = Lobby { rig, base: 0 };
+    let id = lobby.id;
+    pump(&lobby, "the join and start rosters", || {
+        let s = lobby.host.reliable_stats(id).unwrap().sender;
+        s.queued > 0 && s.in_flight == 0
+    });
+    while lobby.client.reliable_recv().is_some() {}
+    let base = lobby.host.reliable_stats(id).unwrap().sender.queued;
+    assert_eq!(
+        lobby.client.reliable_stats().unwrap().receiver.delivered,
+        base
+    );
+    Lobby { base, ..lobby }
+}
+
+/// A [`Rig`] plus the count of roster messages already carried
+/// host→client before the test began.
+struct Lobby {
+    rig: Rig,
+    base: u64,
+}
+
+impl std::ops::DerefMut for Lobby {
+    fn deref_mut(&mut self) -> &mut Rig {
+        &mut self.rig
+    }
+}
+
+impl std::ops::Deref for Lobby {
+    type Target = Rig;
+    fn deref(&self) -> &Rig {
+        &self.rig
+    }
 }
 
 /// One virtual round: both reliable clocks and the relay move by [`STEP`].
@@ -124,8 +160,14 @@ fn the_first_host_message_lost_from_connection_start_is_repeated_and_applied_onc
     assert_eq!(got, vec![b"cancel".to_vec()]);
     let host = rig.host.reliable_stats(rig.id).unwrap();
     assert!(host.sender.retransmits >= 1, "{host:?}");
-    assert_eq!((host.sender.acked, host.sender.in_flight), (1, 0));
-    assert_eq!(rig.client.reliable_stats().unwrap().receiver.delivered, 1);
+    assert_eq!(
+        (host.sender.acked, host.sender.in_flight),
+        (rig.base + 1, 0)
+    );
+    assert_eq!(
+        rig.client.reliable_stats().unwrap().receiver.delivered,
+        rig.base + 1
+    );
 }
 
 #[test]
@@ -183,18 +225,19 @@ fn a_stream_both_ways_survives_loss_reorder_duplication_and_a_burst() {
     }
     let client = rig.client.reliable_stats().unwrap();
     let host = rig.host.reliable_stats(rig.id).unwrap();
-    for (name, tx, rx) in [
-        ("client→host", client.sender, host.receiver),
-        ("host→client", host.sender, client.receiver),
+    for (name, tx, rx, base) in [
+        ("client→host", client.sender, host.receiver, 0),
+        ("host→client", host.sender, client.receiver, rig.base),
     ] {
-        assert_eq!(tx.queued, u64::from(N), "{name} {tx:?}");
-        assert_eq!((tx.acked, tx.in_flight), (u64::from(N), 0), "{name} {tx:?}");
+        let n = u64::from(N) + base;
+        assert_eq!(tx.queued, n, "{name} {tx:?}");
+        assert_eq!((tx.acked, tx.in_flight), (n, 0), "{name} {tx:?}");
         assert!(!tx.dead && tx.given_up == 0, "{name} {tx:?}");
         assert!(
             tx.refused_full > 0,
             "{name}: the window was exercised {tx:?}"
         );
-        assert_eq!(rx.delivered, u64::from(N), "{name} {rx:?}");
+        assert_eq!(rx.delivered, n, "{name} {rx:?}");
     }
 }
 
@@ -415,13 +458,16 @@ fn a_cnr_outcome_whose_first_datagram_is_lost_reaches_the_client_once() {
         .unwrap();
     assert_eq!((fanout.reliable, fanout.fell_back), (1, 0));
     pump(&rig, "the outcome frame", || {
-        rig.client.reliable_stats().unwrap().receiver.delivered == 1
+        rig.client.reliable_stats().unwrap().receiver.delivered == rig.base + 1
     });
     quiesce(&rig, 40);
     assert_eq!(client_events(&mut rig), vec![msg]);
     let host = rig.host.reliable_stats(rig.id).unwrap();
     assert!(host.sender.retransmits >= 1, "{host:?}");
-    assert_eq!((host.sender.acked, host.sender.in_flight), (1, 0));
+    assert_eq!(
+        (host.sender.acked, host.sender.in_flight),
+        (rig.base + 1, 0)
+    );
 }
 
 #[test]
@@ -441,11 +487,14 @@ fn impact_events_survive_a_lost_first_datagram_in_order_and_apply_once() {
             .unwrap();
     }
     pump(&rig, "the impact events", || {
-        rig.client.reliable_stats().unwrap().receiver.delivered == 3
+        rig.client.reliable_stats().unwrap().receiver.delivered == rig.base + 3
     });
     quiesce(&rig, 40);
     assert_eq!(client_events(&mut rig), sent);
-    assert_eq!(rig.client.reliable_stats().unwrap().receiver.delivered, 3);
+    assert_eq!(
+        rig.client.reliable_stats().unwrap().receiver.delivered,
+        rig.base + 3
+    );
 }
 
 #[test]
@@ -470,7 +519,7 @@ fn a_refused_reliable_send_falls_back_to_the_control_stream() {
     }
     assert!(fell_back >= 1, "the window never filled");
     pump(&rig, "delivery", || {
-        rig.client.reliable_stats().unwrap().receiver.delivered + u64::from(fell_back)
+        rig.client.reliable_stats().unwrap().receiver.delivered - rig.base + u64::from(fell_back)
             >= sent.len() as u64
     });
     quiesce(&rig, 40);

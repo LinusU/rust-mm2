@@ -1053,6 +1053,30 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   black hole gives up bounded (`3 × 8` datagrams, `given_up` 3), window and
   size refusals are counted. The reliable clock is manual in these tests.
 
+### Lobby scope and the roster (NETPLAY-06E-2a, #1903)
+
+- **Admission with no running generation**: a `Reliable`/`ReliableAck`
+  datagram naming generation `0` (`rt::LOBBY_SCOPE`) is admitted by the
+  host and the client lane even when no session runs (lobby, after
+  Cancel). Authentication is unchanged — seat, token, source address and
+  replay window. Every other tag, and a reliable datagram naming a
+  nonzero generation, still needs the running one (`wrong_generation`).
+  A reliable message names the generation it was sent under and repeats
+  under it.
+- **Roster and removal**: each roster *change* (join, ready, pick,
+  removal) queues the final `Message::Roster` on every lane seat's
+  reliable channel at generation 0 (`broadcast_roster`); a removal is a
+  roster without the departed peer. The client lane moves a delivered
+  `Roster` into the inbox like the other host events (`is_host_event`),
+  so `Client::recv` returns it and `reliable_recv` never sees it. The TCP copy and the per-keepalive TCP roster
+  resend stay (the resend does not touch the reliable window); the app
+  replaces its roster wholesale, so the second copy is harmless.
+- **Tests** (`lane_lobby_tests`): a lobby-scope message each way with the
+  first datagram lost from connection start, a stale nonzero generation
+  refused, and a join roster (first datagram lost) plus a removal
+  delivered exactly once each (`receiver.delivered`).
+- Open: Start/Cancel (2b), Leave and rematch (2c); retiring the TCP copy.
+
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 
 `crates/mm2_app/src/netpredict/contact_tests.rs` (unit tests of the
