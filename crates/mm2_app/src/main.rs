@@ -1531,6 +1531,9 @@ fn main() {
                 deadline: cli.deadline.map(Duration::from_secs),
             },
             paced: cli.paced,
+            timeline: mm2_app::netplay_timeline::NetplayTimeline::from_flag_and_env(
+                cli.netplay_timeline,
+            ),
             probe: smoke::NetProbe {
                 trace: cli
                     .net_trace

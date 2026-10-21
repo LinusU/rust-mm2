@@ -264,6 +264,9 @@ pub struct RunBudget {
     pub paced: bool,
     /// Trajectory trace and stall injection (NETPLAY-01).
     pub probe: NetProbe,
+    /// The fixed-tick timeline selector (`--netplay-timeline`): the
+    /// headless app has no `main` to insert it, so the budget carries it.
+    pub timeline: crate::netplay_timeline::NetplayTimeline,
 }
 
 /// The `--net-trace` / `--net-stall` settings of a headless run.
@@ -284,6 +287,7 @@ impl RunBudget {
             stop: StopWhen::default(),
             paced: false,
             probe: NetProbe::default(),
+            timeline: crate::netplay_timeline::NetplayTimeline::default(),
         }
     }
 }
@@ -731,6 +735,12 @@ fn record_world(session: &Session, lobby_mode: bool, launch_world: &str) -> Stri
 /// skipping the just-stamped local seat's rows — its v14 terminal edge
 /// included, whose `Playing → Results` release could never re-fire.
 fn add_lobby_client_systems(app: &mut App) {
+    // NETPLAY-02C/04: the fixed-tick command stream and the own-car
+    // prediction replay (idle unless the selector is on), and the lead
+    // controller that keeps the host's command buffer fed so its
+    // simulation never outruns the commands the replay aligns on.
+    crate::netcmd::add_systems(app);
+    crate::netpace::add_systems(app);
     app.init_resource::<net::LobbyState>()
         .init_resource::<crate::netdrive::RemoteSnaps>()
         .init_resource::<crate::netdrive::InputSeq>()
@@ -1325,6 +1335,7 @@ fn run_headless(
     if let Some(profile) = profile {
         app.insert_resource(profile);
     }
+    app.insert_resource(budget.timeline);
     match source {
         RunSource::Lobby(link) => {
             app.insert_resource(*link);
@@ -1450,7 +1461,12 @@ fn run_headless(
     let mut stopped: Option<StopReason> = None;
     let mut frozen_seats: Option<String> = None;
     let mut ran = 0u32;
-    let mut pace = budget.paced.then(PaceClock::default);
+    // The fixed-tick timeline aligns host and client on command seqs
+    // that only mean something at the real 60 Hz tick rate (the host
+    // consumes one slot per tick, the client's lead controller works in
+    // wall time), so a selected headless run is wall-paced like live
+    // play whether or not `--paced` was given.
+    let mut pace = (budget.paced || budget.timeline.enabled).then(PaceClock::default);
     let mut route_tick = 0u64;
     let mut stall_steps = 0u64;
     let run_start = std::time::Instant::now();
@@ -3106,15 +3122,11 @@ fn run_headless(
 }
 
 /// Whether the dev-world "car never drove" bar applies to `driver`.
-/// `Parked` never requests motion. `Route` is the NETPLAY baseline
-/// harness's input program: its evidence is the per-update trace that
-/// `netprobe` measures, and a client under unequal frame pacing is
-/// legitimately re-seated onto the host's copy by the own-seat drift
-/// snap (docs/netcode-redesign.md), which can leave the predicted car
-/// wedged against a wall for the whole run — a measured baseline defect
-/// the harness reports, not a smoke failure (#1787).
+/// Only `Parked` never requests motion; the NETPLAY baseline's `Route`
+/// driver must really drive, since the own car follows the host by
+/// prediction replay rather than by snapping onto its copy.
 fn driver_must_reach_speed(driver: Driver) -> bool {
-    !matches!(driver, Driver::Parked | Driver::Route(_))
+    !matches!(driver, Driver::Parked)
 }
 
 /// Whether a missing player entity at the frame cap is a legitimate
@@ -3835,12 +3847,12 @@ mod tests {
     }
 
     #[test]
-    fn the_dev_world_speed_bar_skips_parked_and_route_drivers_only() {
+    fn the_dev_world_speed_bar_skips_parked_drivers_only() {
         assert!(driver_must_reach_speed(Driver::Hold));
         assert!(driver_must_reach_speed(Driver::Ram));
         assert!(driver_must_reach_speed(Driver::Scripted));
         assert!(!driver_must_reach_speed(Driver::Parked));
-        assert!(!driver_must_reach_speed(Driver::Route(
+        assert!(driver_must_reach_speed(Driver::Route(
             crate::netprobe::Route::Accel
         )));
     }

@@ -75,7 +75,9 @@ fn run(s: &Scenario<'_>) -> Outcome {
     let trace = |seat: &str| dir.join(format!("{}-{seat}.jsonl", s.name));
     let with = |mut args: Vec<String>, seat: &str, route: &str, extra: &[&str]| {
         args.extend(
-            ["--net-route", route, "--net-trace"]
+            // The own car follows the host by prediction replay
+            // (NETPLAY-04); the whole harness measures that path.
+            ["--netplay-timeline", "--net-route", route, "--net-trace"]
                 .map(String::from)
                 .into_iter()
                 .chain([trace(seat).to_str().unwrap().to_string()])
