@@ -33,7 +33,7 @@ use mm2_assets::Vfs;
 use mm2_content::{EntryStatus, VehicleCatalog, VehicleClass, VehicleDef};
 use mm2_game::{
     DamageSignals, LaneKind, MAX_CNR_BOTS, NavGraph, NavRng, ObjectIdentity, Player, PlayerControl,
-    RecoveryPolicy, Session, SessionEntity, VehicleRecovery,
+    PlayerId, RecoveryPolicy, Session, SessionAuthority, SessionEntity, VehicleRecovery,
 };
 use mm2_vehicle::vehicle_bundle;
 use tracing::{info, warn};
@@ -48,6 +48,13 @@ pub struct CnrBot {
     /// Position in the roster, `0..n`.
     pub index: u8,
 }
+
+/// First `PlayerId` of a host session's bots. A networked match keys
+/// humans by their wire seat (`participant_id`), and the minted
+/// counter shares that small range, so a bot's id sits well above any
+/// wire seat ([`mm2_net::MAX_PLAYERS`]) and above anything minted:
+/// `BOT_PLAYER_BASE + index`, stable across the match and a rematch.
+pub const NET_BOT_PLAYER_BASE: u16 = 1000;
 
 /// Shortest vehicle lane a bot may stand on, metres: a stub between
 /// junction boxes is no place to park a car.
@@ -182,6 +189,18 @@ pub fn choose_slots(
     human: Vec3,
     sites: &[Vec3],
 ) -> Result<Vec<BotSlot>, BotError> {
+    choose_slots_avoiding(candidates, n, seed, &[human], sites)
+}
+
+/// [`choose_slots`] keeping clear of every start in `humans` — a hosted
+/// match's whole seat grid, not just the host's car.
+pub fn choose_slots_avoiding(
+    candidates: &[(BotSlot, bool)],
+    n: usize,
+    seed: u64,
+    humans: &[Vec3],
+    sites: &[Vec3],
+) -> Result<Vec<BotSlot>, BotError> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     let mut rng = NavRng::new(seed ^ 0xC0B5_B075);
     for i in (1..order.len()).rev() {
@@ -198,7 +217,7 @@ pub fn choose_slots(
         let p = slot.position;
         if wet {
             water += 1;
-        } else if p.distance(human) < HUMAN_CLEARANCE {
+        } else if humans.iter().any(|h| p.distance(*h) < HUMAN_CLEARANCE) {
             near_human += 1;
         } else if sites.iter().any(|s| p.distance(*s) < SITE_CLEARANCE) {
             near_site += 1;
@@ -297,11 +316,23 @@ pub fn plan_bots(
     human: Vec3,
     sites: &[Vec3],
 ) -> Result<Vec<PlannedBot>, BotError> {
+    plan_bots_avoiding(vfs, candidates, n, seed, &[human], sites)
+}
+
+/// [`plan_bots`] keeping clear of every start in `humans`.
+pub fn plan_bots_avoiding(
+    vfs: &Vfs,
+    candidates: &[(BotSlot, bool)],
+    n: u8,
+    seed: u64,
+    humans: &[Vec3],
+    sites: &[Vec3],
+) -> Result<Vec<PlannedBot>, BotError> {
     if n > MAX_CNR_BOTS {
         return Err(BotError::Count(n));
     }
     let n = n as usize;
-    let slots = choose_slots(candidates, n, seed, human, sites)?;
+    let slots = choose_slots_avoiding(candidates, n, seed, humans, sites)?;
     let defs = load_vehicles(vfs, &stock_vehicle_ids(vfs), n, seed)?;
     Ok(defs
         .into_iter()
@@ -325,13 +356,22 @@ pub fn spawn_bots(
     session: &mut Session,
 ) -> Vec<Entity> {
     let role = session.authority_role();
+    let networked = session
+        .config()
+        .is_some_and(|c| c.authority != SessionAuthority::Local);
     let mut spawned = Vec::with_capacity(plan.len());
     for (index, bot) in plan.into_iter().enumerate() {
         let PlannedBot { def, slot } = bot;
         let mut pos = slot.position;
         pos.y += reanchor_lift(&def.config);
         let object = session.mint_object_id();
-        let player_id = session.mint_player_id();
+        // A hosted match keys humans by wire seat, so a bot's id must
+        // not share that range; a local one keeps the minted counter.
+        let player_id = if networked {
+            PlayerId(NET_BOT_PLAYER_BASE + index as u16)
+        } else {
+            session.mint_player_id()
+        };
         let vehicle = commands
             .spawn((
                 owner,
@@ -523,6 +563,32 @@ mod tests {
         choose_slots(c, 3, 1, Vec3::ZERO, &[])
             .unwrap_err()
             .to_string()
+    }
+
+    #[test]
+    fn a_hosted_roster_keeps_clear_of_every_human_seat() {
+        let c = grid();
+        let spawn = crate::session::SpawnPoint::new(Vec3::new(300.0, 0.0, 300.0), 0.0);
+        let local = crate::netdrive::human_start_poses(&spawn, SessionAuthority::Local);
+        assert_eq!(local, vec![spawn.position]);
+        let seats = crate::netdrive::human_start_poses(&spawn, SessionAuthority::Host);
+        assert_eq!(seats.len(), usize::from(mm2_net::MAX_PLAYERS) + 1);
+        assert_eq!(seats[0], spawn.position, "seat 0 is the host's car");
+        let a = choose_slots_avoiding(&c, 8, 5, &seats, &[]).unwrap();
+        assert_eq!(a, choose_slots_avoiding(&c, 8, 5, &seats, &[]).unwrap());
+        for s in &a {
+            assert!(
+                seats
+                    .iter()
+                    .all(|h| s.position.distance(*h) >= HUMAN_CLEARANCE)
+            );
+        }
+    }
+
+    #[test]
+    fn host_bot_ids_sit_above_the_wire_seat_range() {
+        assert!(NET_BOT_PLAYER_BASE > u16::from(mm2_net::MAX_PLAYERS));
+        assert!(u32::from(NET_BOT_PLAYER_BASE) + u32::from(MAX_CNR_BOTS) < u32::from(u16::MAX));
     }
 
     #[test]

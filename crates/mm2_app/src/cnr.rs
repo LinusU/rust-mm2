@@ -170,8 +170,11 @@ pub fn start_match(
     let city = crate::net::city_stem(psdl)
         .ok_or_else(|| format!("{psdl:?} is not a city/<stem>.psdl path"))?;
     let mut content = CnrContent::load(vfs, city);
-    if session.config().is_some_and(|c| c.local_cnr_bots() > 0) {
-        // Local bots follow streets: play the sites a car can reach.
+    // Every process of a session with bots builds the same restricted
+    // draw (a client places its markers from the same seed and pool as
+    // the host), so this keys on the carried count, not on who spawns.
+    if session.config().is_some_and(|c| c.cnr_bots > 0) {
+        // Bots follow streets: play the sites a car can reach.
         let graph = crate::cnr_bots::load_graph(vfs, city)
             .map_err(|e| format!("Cops & Robbers bots in {city:?}: {e}"))?;
         content.sites = crate::cnr_bots::reachable_pool(&graph, &content.sites);
@@ -228,8 +231,9 @@ fn is_teammate(game: &GoldMatch, a: PlayerId, b: PlayerId) -> bool {
 /// in the match, on the side [`GoldMatch::balanced_side`] picks, in
 /// ascending participant order so the split does not depend on query
 /// order. AI cars take part only when tagged [`CnrBot`]. In a
-/// networked session only a car stamped with its wire id counts, which
-/// keeps the local car out until its identity is settled.
+/// networked session only a car stamped with its wire id counts (which
+/// keeps the local car out until its identity is settled) or a
+/// host-spawned [`CnrBot`], whose id lives above the wire range.
 ///
 /// A participant who left and whose car is back (a remote pick change
 /// respawns the car; [`cnr_host_step`] saw it vanish and marked them
@@ -264,7 +268,7 @@ pub fn enroll_cnr_participants(
         // An AI car is a participant only when it is one of the
         // session's tagged bots; traffic, police and race opponents
         // never are.
-        if (player.control == PlayerControl::Ai && !bot) || (networked && net.is_none()) {
+        if (player.control == PlayerControl::Ai && !bot) || (networked && net.is_none() && !bot) {
             continue;
         }
         let id = participant_id(player, net);
@@ -2045,6 +2049,56 @@ mod tests {
         // And it is idempotent.
         app.update();
         assert_eq!(connected(&app), 2);
+    }
+
+    fn bot(app: &mut App, index: u8) -> Entity {
+        let id = crate::cnr_bots::NET_BOT_PLAYER_BASE + u16::from(index);
+        app.world_mut()
+            .spawn((
+                Player {
+                    id: PlayerId(id),
+                    control: PlayerControl::Ai,
+                },
+                CnrBot { index },
+            ))
+            .id()
+    }
+
+    #[test]
+    fn host_bots_are_seated_once_beside_the_wire_seats_and_survive_a_leaver() {
+        let mut app = enroll_app(CnrVariant::CopsVsRobbers, SessionAuthority::Host);
+        car(&mut app, 0, PlayerControl::Local, Some(0));
+        let leaver = car(&mut app, 1, PlayerControl::Remote, Some(1));
+        bot(&mut app, 0);
+        bot(&mut app, 1);
+        // Ordinary AI in a hosted session is still no participant.
+        car(&mut app, 40, PlayerControl::Ai, None);
+        for _ in 0..3 {
+            app.update();
+        }
+        let base = crate::cnr_bots::NET_BOT_PLAYER_BASE;
+        let seated: Vec<PlayerId> = sides(&app).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            seated,
+            vec![PlayerId(0), PlayerId(1), PlayerId(base), PlayerId(base + 1)],
+            "each bot is seated exactly once, clear of the wire seats"
+        );
+        // A human disconnecting does not touch the bots.
+        app.world_mut().despawn(leaver);
+        app.world_mut()
+            .resource_mut::<CnrHost>()
+            .game
+            .leave(PlayerId(1), Vec3::ZERO)
+            .unwrap();
+        app.update();
+        let game = &app.world().resource::<CnrHost>().game;
+        for id in [base, base + 1] {
+            assert!(
+                game.standings()
+                    .iter()
+                    .any(|s| s.player == PlayerId(id) && s.connected)
+            );
+        }
     }
 
     #[test]

@@ -1706,12 +1706,16 @@ pub fn load_session_world(
                             .collect()
                     })
                     .unwrap_or_default();
-                crate::cnr_bots::plan_bots(
+                // A hosted match keeps clear of every seat humans can
+                // take (the host's and each roster seat's), since the
+                // remote cars appear after this boundary.
+                let humans = crate::netdrive::human_start_poses(&spawn, config.authority);
+                crate::cnr_bots::plan_bots_avoiding(
                     &vfs.0,
                     &candidates,
                     config.cnr_bots,
                     config.seed,
-                    spawn.position,
+                    &humans,
                     &sites,
                 )
                 .map_err(|e| e.to_string())

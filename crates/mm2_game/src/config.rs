@@ -70,8 +70,8 @@ pub struct SessionConfig {
     /// seats humans only. On a hosted or joined session it is the host's
     /// lobby choice and rides the session advertisement, bounded by
     /// [`MAX_CNR_LOBBY_BOTS`] ([`Self::validate`]); only
-    /// [`Self::local_cnr_bots`] of it is spawned by this process, since
-    /// the host-authoritative network roster is a later step.
+    /// [`Self::local_cnr_bots`] of it is spawned by this process: the
+    /// host spawns and drives the roster, a client never does.
     /// Part of the config, so a restart reuses the same roster size.
     pub cnr_bots: u8,
     /// Local-only developer overrides — never progression- or
@@ -153,14 +153,15 @@ impl SessionConfig {
         Ok(())
     }
 
-    /// The bots this process spawns itself: the picked count on a local
-    /// session, none on a hosted or joined one (the lobby's count is
-    /// carried, but its network spawn is not built yet).
+    /// The bots this process spawns and drives itself: the picked count
+    /// on a local session and the lobby's count on a hosting one, none
+    /// on a joined one — a client never instantiates a bot, it only
+    /// carries the count ([`Self::cnr_bots`]).
     pub fn local_cnr_bots(&self) -> u8 {
-        if self.authority == SessionAuthority::Local {
-            self.cnr_bots
-        } else {
+        if self.authority == SessionAuthority::Remote {
             0
+        } else {
+            self.cnr_bots
         }
     }
 }
@@ -954,7 +955,8 @@ mod tests {
             );
         }
         assert_eq!(cnr_config(3, SessionAuthority::Local).local_cnr_bots(), 3);
-        assert_eq!(cnr_config(3, SessionAuthority::Host).local_cnr_bots(), 0);
+        assert_eq!(cnr_config(3, SessionAuthority::Host).local_cnr_bots(), 3);
+        assert_eq!(cnr_config(3, SessionAuthority::Remote).local_cnr_bots(), 0);
         let race = SessionConfig {
             cnr_bots: 1,
             ..SessionConfig::default()

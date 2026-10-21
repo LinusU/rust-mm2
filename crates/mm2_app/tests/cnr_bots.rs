@@ -150,3 +150,70 @@ fn vfs_clone(retail: &std::path::Path) -> Vfs {
     mm2_assets::mount_install(&mut vfs, retail, &mm2_assets::InstallMount::default()).unwrap();
     vfs
 }
+
+/// CNR-MP-BOTS-B: a host session spawns its bots with ids above the
+/// wire seats, no wire identity, and only when it is the host.
+#[test]
+fn retail_host_bots_carry_ids_clear_of_the_wire_seats() {
+    use mm2_app::cnr_bots::NET_BOT_PLAYER_BASE;
+    use mm2_app::netdrive::NetPlayer;
+    use mm2_game::{SessionAuthority, SessionMode, WorldMode};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set; the host bot ids were NOT checked");
+        return;
+    };
+    let vfs = vfs_clone(&retail);
+    let graph = mm2_app::cnr_bots::load_graph(&vfs, "sf").unwrap();
+    let candidates = lane_slots(&graph, None);
+    let plan = plan_bots(&vfs, &candidates, 4, 3, Vec3::ZERO, &[]).unwrap();
+
+    let mut app = retail_city_app(vfs_clone(&retail), "city/sf.psdl");
+    let mut plan = Some(plan);
+    app.world_mut()
+        .run_system_once(
+            move |mut commands: Commands,
+                  vfs: Res<VfsRes>,
+                  mut meshes: ResMut<Assets<Mesh>>,
+                  mut images: ResMut<Assets<Image>>,
+                  mut materials: ResMut<Assets<StandardMaterial>>| {
+                let mut session = Session::new();
+                session
+                    .begin(SessionConfig {
+                        world: WorldMode::City {
+                            psdl: "city/sf.psdl".to_string(),
+                        },
+                        mode: SessionMode::CopsAndRobbers(Default::default()),
+                        authority: SessionAuthority::Host,
+                        cnr_bots: 4,
+                        ..SessionConfig::default()
+                    })
+                    .unwrap();
+                spawn_bots(
+                    &mut commands,
+                    &vfs.0,
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                    plan.take().unwrap(),
+                    SessionEntity(1),
+                    &mut session,
+                );
+            },
+        )
+        .unwrap();
+    app.update();
+    let world = app.world_mut();
+    let mut q = world.query::<(&CnrBot, &Player, Has<NetPlayer>)>();
+    let mut bots: Vec<_> = q
+        .iter(world)
+        .map(|(b, p, net)| (b.index, p.id.0, net))
+        .collect();
+    bots.sort();
+    assert_eq!(
+        bots,
+        (0..4)
+            .map(|i| (i, NET_BOT_PLAYER_BASE + u16::from(i), false))
+            .collect::<Vec<_>>()
+    );
+}

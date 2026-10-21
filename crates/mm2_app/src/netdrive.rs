@@ -1700,6 +1700,21 @@ pub fn seat_pose(race: Option<&RaceDefinition>, base: (Vec3, f32), seat: usize) 
     )
 }
 
+/// Every start a human car can take in this session, for the host to
+/// keep its Cops & Robbers bots clear of: the local car alone on a local
+/// session, otherwise each grid seat the roster can fill (the host's
+/// seat 0 and [`mm2_net::MAX_PLAYERS`] more — remote cars appear after
+/// the bots are placed). C&R has no authored grid, so seats fan off the
+/// roam base exactly as [`seat_pose`] does for every process.
+pub fn human_start_poses(spawn: &SpawnPoint, authority: mm2_game::SessionAuthority) -> Vec<Vec3> {
+    if authority == mm2_game::SessionAuthority::Local {
+        return vec![spawn.position];
+    }
+    (0..=usize::from(mm2_net::MAX_PLAYERS))
+        .map(|seat| seat_pose(None, (spawn.origin, spawn.origin_yaw), seat).0)
+        .collect()
+}
+
 /// Seat the local participant on the shared grid: `position`/`yaw`
 /// become the seat's pose while `origin`/`origin_yaw` keep the pre-seat
 /// roam base — the anchor remote seats' fan-out fallback resolves
