@@ -1382,3 +1382,6 @@ mod tests {
         assert_eq!(pred.recovered_exhausted, 1);
     }
 }
+
+#[cfg(test)]
+mod contact_tests;

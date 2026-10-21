@@ -1052,3 +1052,60 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   burst loss both ways exactly once in order, three lost acks converge, a
   black hole gives up bounded (`3 × 8` datagrams, `given_up` 3), window and
   size refusals are counted. The reliable clock is manual in these tests.
+
+## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
+
+`crates/mm2_app/src/netpredict/contact_tests.rs` (unit tests of the
+production step; run `cargo test -p mm2_app --lib contact_tests --
+--nocapture --test-threads=1` for the tables). A *host* world drives both
+cars on the true commands and is the uninterrupted zero-delay reference. A
+*client* world drives its own car on the same commands, the other human's
+contact body only from hold-last commands `delay` ticks old
+(`RemotePredictor`), and corrects both bodies with `reconcile` from host
+snapshots that also arrive `delay` ticks late (every tick; `loss` drops a
+seeded share). Everything is in-process: the lossy-proxy sockets are not
+involved, so "dropped snapshot" here is a seeded draw, not the UDP proxy.
+Delays 3/6/12/30 ticks (50 ms-0.5 s). An *impulse* is a one-tick velocity
+change over 0.6 m/s; a *contact start* is a `CollisionStart` between the two
+cars raised by the live world.
+
+| Scenario (host contact tick) | result with `reconcile` |
+|---|---|
+| head-on (227), rear-end with sudden lead braking (245), push a stationary car (207), pushed while stationary (207) | At every delay the first local response is the host's tick for both cars, impulses and contact starts equal the host's (no duplicate impulse from the up-to-43 replays), corrections at most 0.13 m, final position error < 0.05 m. The drivers hold their pedals into the contact, so hold-last predicts it exactly. Without `reconcile`, the rear-end shunt lands 3-15 ticks late and the cars end 1.5-3.8 m from the reference. |
+| false contact: opponent swerves at tick 200, contact would be ~227 | Delay <= 12: the news arrives first, client never touches, corrections < 0.1 m. Delay 30: the client shoves (6 and 5-11 impulses) until the command arrives; correction 3.4 m on each car, then both end within 0.05 m. Without `reconcile` the cars end 5-87 m from the reference. |
+| missed contact: opponent turns in at tick 210, contact at 227 | Delay 3/6 (< the 17-tick lead): first response on the host's tick, corrections 0.01-0.03 m. Delay 12: response 3 ticks late, correction 1.9 m, off by > 0.1 m for 8 ticks. Delay 30: 23 ticks late, correction 7.9-8.1 m, converged 30 / 41 ticks after the host's contact. Final error 0.00 in all cases. Without `reconcile` the pass is never a contact. |
+| 40 % of snapshots dropped (delay 6 and 30, all six scenarios) | Same end states (< 0.05 m), no recoveries, contact starts equal to the host's where the contact is predicted. Replays are deeper (a correction of up to 0.5 m in the rear-end case). |
+
+**Infinite-mass shove.** The pre-05A-3 client held the remote human car as a
+kinematic copy. In "pushed while stationary" (delay 6) the shoved car peaks
+at 17.2 m/s in the host and with the dynamic body, and 20.2 m/s with the
+kinematic copy (1.17x), ending 13 m from the reference. The 10.5 vs 5.7 m/s
+(1.8x) of `docs/research/net.md` was a different scene (a parked start-grid
+slot, with a lighter push); this synthetic pair reproduces the direction,
+not that ratio.
+
+**Finding (not fixed here).** A contact the client discovers only through a
+replay (the missed-contact runs at delay 12/30) raises *no* live contact
+start: `ReplayQuarantine` swallows the replayed `CollisionStart`, so damage,
+sparks and audio for it never fire on the client, while the car velocity
+does change. Filed as a follow-up.
+
+**Cost for two cars** (dev profile, Apple Silicon, one run, load not
+recorded; treat milliseconds as machine-dependent):
+
+| Item | Value |
+|---|---|
+| Physics tick, median, 1 car / 2 cars apart | 0.167 / 0.171 ms |
+| `capture_world`, 2 cars on a flat plane | 0.003 ms |
+| `reconcile` + replay of both cars, depth 3 / 6 / 12 / 30 | 0.29 / 0.53 / 1.04 / 2.56 ms (about 0.085 ms per replayed tick) |
+| `Snap`, 1 car / 2 cars (encoded) | 138 / 255 B (+117 B) |
+| `RemoteCommands` frame, 1 seat x 16 ticks | 142 B (8.5 kB/s at 60 Hz if sent each tick) |
+
+State memory per capture is the 03F figure (the vehicle part is per car);
+the capture here is tiny because the world holds no props. At 60 Hz a
+second car adds about 7 kB/s of snapshot plus up to 8.5 kB/s of command
+frames, before the 06D cadence reduces both.
+
+Evidence level: synthetic integration on the production step. No retail
+data, no sockets, no rendered capture. Open: acceptance-level evidence over
+the real transport with a second process, and the quarantine finding.
