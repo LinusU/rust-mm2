@@ -8,8 +8,9 @@
 //! `cmd_delay[seat]` ticks old (unequal per seat: unequal pings), and
 //! corrects all bodies together with [`reconcile`] from host snapshots that
 //! arrive `snap_delay` ticks late. In-process and deterministic; a dropped
-//! snapshot is a seeded draw. Trailers, world actors and the real
-//! transport are not covered here. Run with `--nocapture` for the tables
+//! snapshot is a seeded draw. Trailers are in
+//! [`super::trailer_tests`]; world actors and the real transport are not
+//! covered here. Run with `--nocapture` for the tables
 //! recorded in `docs/netcode-redesign.md`.
 
 use std::time::Instant;
@@ -342,6 +343,7 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
                     newest: t,
                     commands: &cmds,
                     remotes: &drives,
+                    trailers: &[],
                     epoch: EPOCH,
                 },
             );

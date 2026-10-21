@@ -438,6 +438,7 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
                     newest: t,
                     commands: &cmds,
                     remotes,
+                    trailers: &[],
                     epoch: EPOCH,
                 },
             );

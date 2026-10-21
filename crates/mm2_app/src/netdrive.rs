@@ -4110,6 +4110,18 @@ fn apply_snap_frame(
     }
     if snaps.own_stage.enabled {
         snaps.own_stage.remotes = staged_remotes;
+        snaps.own_stage.trailers = snap
+            .trailers
+            .iter()
+            .map(|t| crate::netpredict::RemoteAssertion {
+                wire: t.owner,
+                pos: Vec3::from(t.pos),
+                rot: wire_quat(t.rot),
+                vel: Vec3::from(t.vel),
+                ang: Vec3::from(t.angvel),
+            })
+            .collect();
+        snaps.own_stage.own_wire = own_seat.map(|(_, w)| w);
         snaps.own_stage.remotes_at = Some((snap.generation, snap.tick));
     }
     // The v9 trailer rows (F25-B): a remote copy blends like its seat —

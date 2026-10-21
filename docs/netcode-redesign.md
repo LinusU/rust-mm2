@@ -1180,7 +1180,7 @@ i.e. 23.8 kB/s to 110.6 kB/s together. Replay depth is bounded by
 state.
 
 Evidence level: synthetic integration on the production step. Open for
-#1890: trailer/joint partners in the replay, reset epochs and damage/mass
+#1890: reset epochs and damage/mass
 changes tied to a tick, desynchronized re-entry, a genuinely causal
 host + two clients test over the real transport with the impairment proxies,
 and showing local input stays responsive when the replay budget bites.
@@ -1272,3 +1272,42 @@ history stripped diverges by more than 5 cm), a prop that spawns and is
 pushed inside the window, and a prop that despawns. Not covered: the
 client's traffic copies (`worldtraffic::apply_traffic`) in a real session,
 and wiring `RigidBodyDisabled` entrants against the app's own systems.
+
+## Trailer rigs in the predicted replay (NETPLAY-05D, #1911)
+
+A jointed trailer is a `Vehicle`, so `capture_world` / `replay_from` always
+restored and re-simulated it. What was missing in `netpredict` was the
+*correction*: the host's state went onto the own car and the remote bodies,
+and the trailer stayed at its recorded pose. `Request.trailers` now lists
+the real trailers of the own car and of the remote contact bodies
+(`TrailerDrive { body, towing, assertion }`); the trailer is then a partner
+like a remote body:
+
+| Step | Trailer rule |
+|---|---|
+| Staging | `apply_snapshots` stages `Snap.trailers` rows beside the remote seats (`OwnStage::trailers`, keyed by the towing seat; `own_wire` names the own seat), gated on the same snapshot as the assertion. |
+| Compare | A trailer outside the position/rotation/velocity tolerances triggers a replay like a diverged remote body (`remote_diverged`). |
+| Restore | The boundary capture takes the host's trailer row, so the hitch joint never sees a car and a trailer from different ticks. |
+| Replay | The trailer has no command: each step copies the tractor's brake and handbrake onto it, as the live `trailer_input` system does. |
+| Recovery | The host's trailer row is adopted with the car. |
+| Attach / detach in the window | `HitchChanged` makes `replay_from` refuse; the existing `ReplayRefused` recovery adopts the host state for the whole rig and clears the history. |
+
+The predicted client's kinematic trailer copies (`RemoteTrailer`, wire-driven,
+no joint) are not partners. So today only the **own** rig's trailer is a real
+body in the client's physics; a remote car's trailer is not simulated in the
+replay, and a contact with it is not predicted (follow-up filed).
+
+Tests (`netpredict/trailer_tests.rs`, `cargo test -p mm2_app --lib
+trailer_tests -- --nocapture`): car 1 rear-ends the trailer of car 0 (host
+trailer takes two impulses). Zero delay: client matches the reference to
+0.00 m. Delay 3 / 6 / 12 / 30 ticks: 0 recoveries, final error under 1 mm
+for every body, hitch anchor gap at most 0.014 m, peak body error 0.001-0.03 m
+(car 1 at delay 30, 0.65 m, before the first replay). Same run at delay 12
+with the trailer left out of the request: 107 replays instead of 25 and a
+peak trailer error of 0.096 m instead of 0.024 m. A joint removed inside the
+window: `Recovered(ReplayRefused)`, car, remote body and trailer all take the
+host state.
+
+Evidence level: synthetic integration on the production step. Not covered:
+the real transport, a trailer on a retail car, trailer attach by a *new*
+tractor mid-session.

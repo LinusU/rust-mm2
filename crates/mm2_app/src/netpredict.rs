@@ -60,9 +60,12 @@ use mm2_vehicle::physics_world::{WorldCapture, capture_world};
 use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from};
 use mm2_vehicle::{RemoteReplica, Teleported, VehicleInput};
 
+use crate::car_visual::Trailer;
 use crate::net::LobbyLink;
 use crate::netcmd::CommandStream;
-use crate::netdrive::{PredictedRemoteBody, RemoteSnaps, ResetEpoch, decode_tick_command};
+use crate::netdrive::{
+    PredictedRemoteBody, RemoteSnaps, RemoteTrailer, ResetEpoch, decode_tick_command,
+};
 use crate::netplay_timeline::NetplayTimeline;
 use crate::netremote::RemoteFeed;
 
@@ -118,6 +121,12 @@ pub struct OwnStage {
     /// assertion of that same snapshot.
     pub remotes: Vec<RemoteAssertion>,
     pub remotes_at: Option<(u64, u64)>,
+    /// The snapshot's trailer rows (`wire` is the towing seat's id), staged
+    /// and gated exactly like `remotes`.
+    pub trailers: Vec<RemoteAssertion>,
+    /// The own seat's wire id in that snapshot, so the own rig's trailer
+    /// row can be found among `trailers`.
+    pub own_wire: Option<u16>,
     /// The host reset the own car: forget the history.
     pub reset: bool,
 }
@@ -277,6 +286,19 @@ pub struct RemoteDrive {
     pub commands: Option<Vec<VehicleInput>>,
 }
 
+/// A real (jointed) trailer body towed by the own car or a remote contact
+/// body. It has no command of its own: the replay copies the tractor's
+/// brake and handbrake onto it for each step, as
+/// [`trailer_input`](crate::car_visual::trailer_input) does live.
+pub struct TrailerDrive {
+    pub body: Entity,
+    /// The own car or the [`RemoteDrive::body`] pulling it.
+    pub towing: Entity,
+    /// The host's state for it at the assertion's tick, if the snapshot
+    /// had its row (`wire` is the towing seat).
+    pub assertion: Option<RemoteAssertion>,
+}
+
 /// Everything a replay needs besides the world.
 pub struct Request<'a> {
     pub own: Entity,
@@ -288,7 +310,27 @@ pub struct Request<'a> {
     pub commands: &'a [(u64, VehicleInput)],
     /// The remote contact bodies replayed together with the own car.
     pub remotes: &'a [RemoteDrive],
+    /// The jointed trailers of the own car and of the remote bodies; they
+    /// are restored, corrected and replayed with their tractors so the
+    /// hitch never sees a car and a trailer from different ticks.
+    pub trailers: &'a [TrailerDrive],
     pub epoch: EpochRef,
+}
+
+impl Request<'_> {
+    /// Every host-asserted state other than the own car's: remote bodies
+    /// first, then trailers.
+    fn partners(&self) -> impl Iterator<Item = (Entity, RemoteAssertion)> + '_ {
+        let remotes = self
+            .remotes
+            .iter()
+            .filter_map(|r| Some((r.body, r.assertion?)));
+        let trailers = self
+            .trailers
+            .iter()
+            .filter_map(|t| Some((t.body, t.assertion?)));
+        remotes.chain(trailers)
+    }
 }
 
 fn finite3(v: Vec3) -> bool {
@@ -397,7 +439,7 @@ fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'
         && rot_error <= ROT_TOLERANCE
         && vel.distance(a.vel) <= VEL_TOLERANCE
         && ang.distance(a.ang) <= ANG_TOLERANCE;
-    let (remote_error, remote_diverged) = compare_remotes(past, req.remotes);
+    let (remote_error, remote_diverged) = compare_partners(past, req);
     if own_agrees && !remote_diverged {
         return Outcome::Matched;
     }
@@ -438,15 +480,15 @@ fn in_capture(capture: &WorldCapture, e: Entity) -> bool {
     capture.vehicles.iter().any(|(v, _)| *v == e)
 }
 
-/// Compare each remote body the host reported with its recorded state:
-/// the largest position difference, and whether any tolerance was passed.
-/// A body that is not in the recorded world (it spawned after that tick)
-/// has nothing to compare.
-fn compare_remotes(past: &WorldCapture, remotes: &[RemoteDrive]) -> (f32, bool) {
+/// Compare each remote body and trailer the host reported with its
+/// recorded state: the largest position difference, and whether any
+/// tolerance was passed. A body that is not in the recorded world (it
+/// spawned after that tick) has nothing to compare.
+fn compare_partners(past: &WorldCapture, req: &Request<'_>) -> (f32, bool) {
     let mut worst = 0.0_f32;
     let mut diverged = false;
-    for r in remotes {
-        let (Some(a), Some((pos, rot, vel, ang))) = (r.assertion, own_body(past, r.body)) else {
+    for (body, a) in req.partners() {
+        let Some((pos, rot, vel, ang)) = own_body(past, body) else {
             continue;
         };
         let err = pos.distance(a.pos);
@@ -471,9 +513,10 @@ fn adopt(world: &mut World, req: &Request<'_>) {
             Teleported,
         ));
     }
-    // The remote contact bodies take the host's state of the same tick.
-    for r in req.remotes {
-        let (Some(a), Ok(mut body)) = (r.assertion, world.get_entity_mut(r.body)) else {
+    // The remote contact bodies and the trailers take the host's state of
+    // the same tick.
+    for (e, a) in req.partners() {
+        let Ok(mut body) = world.get_entity_mut(e) else {
             continue;
         };
         body.insert((
@@ -533,9 +576,8 @@ fn replay(
         vc.body.linear_velocity = a.vel.to_array();
         vc.body.angular_velocity = a.ang.to_array();
     }
-    for r in req.remotes {
-        let Some(a) = r.assertion else { continue };
-        if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == r.body) {
+    for (body, a) in req.partners() {
+        if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == body) {
             vc.body.position = a.pos.to_array();
             vc.body.rotation = a.rot.to_array();
             vc.body.linear_velocity = a.vel.to_array();
@@ -558,6 +600,28 @@ fn replay(
             let command = r.commands.as_ref()?.get(i)?;
             in_capture(&corrected, r.body).then_some((r.body, *command))
         }));
+        // A trailer brakes with its tractor, the way the live
+        // `trailer_input` system copies it.
+        for t in req.trailers {
+            if !in_capture(&corrected, t.body) {
+                continue;
+            }
+            let tractor = if t.towing == req.own {
+                Some(*input)
+            } else {
+                inputs.iter().find(|(e, _)| *e == t.towing).map(|(_, c)| *c)
+            };
+            if let Some(c) = tractor {
+                inputs.push((
+                    t.body,
+                    VehicleInput {
+                        brake: c.brake,
+                        handbrake: c.handbrake,
+                        ..VehicleInput::default()
+                    },
+                ));
+            }
+        }
         let step = ReplayStep { inputs };
         if replay_from(world, &scratch, from, std::slice::from_ref(&step)).is_err() {
             put_back(world, &remotes);
@@ -641,7 +705,7 @@ pub fn reconcile_own(world: &mut World) {
     if !gate(world) {
         return;
     }
-    let (assertion, remote_states, reset) = {
+    let (assertion, remote_states, trailer_states, own_wire, reset) = {
         let Some(mut snaps) = world.get_resource_mut::<RemoteSnaps>() else {
             return;
         };
@@ -649,12 +713,23 @@ pub fn reconcile_own(world: &mut World) {
         let assertion = stage.assertion.take();
         let at = stage.remotes_at.take();
         let remotes = std::mem::take(&mut stage.remotes);
-        // The seats only travel with the assertion of their own snapshot.
-        let remotes = match (assertion, at) {
-            (Some(a), Some((g, t))) if a.generation == g && a.server_tick == t => remotes,
-            _ => Vec::new(),
+        let trailers = std::mem::take(&mut stage.trailers);
+        let own_wire = stage.own_wire.take();
+        // The seats and trailers only travel with the assertion of their
+        // own snapshot.
+        let (remotes, trailers) = match (assertion, at) {
+            (Some(a), Some((g, t))) if a.generation == g && a.server_tick == t => {
+                (remotes, trailers)
+            }
+            _ => (Vec::new(), Vec::new()),
         };
-        (assertion, remotes, std::mem::take(&mut stage.reset))
+        (
+            assertion,
+            remotes,
+            trailers,
+            own_wire,
+            std::mem::take(&mut stage.reset),
+        )
     };
     let generation = world.resource::<Session>().wire_generation();
     let Some((own, epoch)) = own_entity(world) else {
@@ -681,6 +756,7 @@ pub fn reconcile_own(world: &mut World) {
             .map(|r| (r.seq, decode_tick_command(&r.command)))
             .collect();
         let remotes = remote_drives(world, &assertion, &remote_states);
+        let trailers = trailer_drives(world, own, own_wire, &trailer_states);
         let epoch = epoch_ref(world.resource::<Session>(), epoch);
         let before = present(world, own);
         let outcome = reconcile(
@@ -692,6 +768,7 @@ pub fn reconcile_own(world: &mut World) {
                 newest,
                 commands: &commands,
                 remotes: &remotes,
+                trailers: &trailers,
                 epoch,
             },
         );
@@ -743,6 +820,41 @@ fn remote_drives(
                 .iter()
                 .map(|t| feed.command_at(wire, *t).map(|c| decode_tick_command(&c)))
                 .collect(),
+        })
+        .collect()
+}
+
+/// The real trailer bodies hitched to the own car or to a remote contact
+/// body, each with its row of the snapshot (rows are keyed by the towing
+/// seat's wire id). The predicted client's kinematic trailer copies
+/// ([`RemoteTrailer`]) are wire-driven presentation and stay out.
+fn trailer_drives(
+    world: &mut World,
+    own: Entity,
+    own_wire: Option<u16>,
+    states: &[RemoteAssertion],
+) -> Vec<TrailerDrive> {
+    let remote_wires: Vec<(Entity, u16)> = world
+        .query::<(Entity, &PredictedRemoteBody)>()
+        .iter(world)
+        .map(|(e, b)| (e, b.wire))
+        .collect();
+    let mut q = world.query_filtered::<(Entity, &Trailer), Without<RemoteTrailer>>();
+    q.iter(world)
+        .filter_map(|(body, t)| {
+            let wire = if t.towing == own {
+                own_wire
+            } else {
+                remote_wires
+                    .iter()
+                    .find_map(|(e, w)| (*e == t.towing).then_some(*w))
+            };
+            let known = t.towing == own || wire.is_some();
+            known.then(|| TrailerDrive {
+                body,
+                towing: t.towing,
+                assertion: wire.and_then(|w| states.iter().find(|s| s.wire == w).copied()),
+            })
         })
         .collect()
 }
@@ -914,6 +1026,7 @@ mod tests {
                 newest,
                 commands: &cmds,
                 remotes: &[],
+                trailers: &[],
                 epoch: EPOCH,
             },
         )
@@ -1101,6 +1214,7 @@ mod tests {
                 newest: 30,
                 commands: &cmds,
                 remotes: &[],
+                trailers: &[],
                 epoch: EPOCH,
             },
         );
@@ -1202,6 +1316,7 @@ mod tests {
                 newest,
                 commands: &cmds,
                 remotes,
+                trailers: &[],
                 epoch: EPOCH,
             },
         )
@@ -1387,3 +1502,5 @@ mod tests {
 mod contact_tests;
 #[cfg(test)]
 mod multi_tests;
+#[cfg(test)]
+mod trailer_tests;
