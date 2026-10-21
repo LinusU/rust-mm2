@@ -34,6 +34,12 @@
 //!   reorder while [`LinkStats`](impair::LinkStats) counts what the
 //!   recipe actually did.
 //!
+//! - [`rt`] — the UDP datagram lane (NETPLAY-06A): `InputWindow` and
+//!   `Snap` ride sequenced unreliable datagrams beside the TCP control
+//!   connection, authenticated per seat (token, source address,
+//!   generation, replay window) and handed to the game through bounded
+//!   nonblocking drop-oldest queues.
+//!
 //! Scope deliberately ends at transport: the session advertisement is
 //! an opaque blob (the `mm2_app` bridge owns the `SessionConfig`
 //! mapping) and what `Input`/`Snap` payloads *mean* — vehicle state,
@@ -47,6 +53,10 @@ mod frame;
 mod impair;
 mod lobby;
 mod proto;
+mod rt;
+
+#[cfg(test)]
+mod lane_tests;
 
 pub use cmdbuf::{
     BUFFER_CAP, COMMAND_BURST, COMMAND_RATE_HZ, Consumed, HOLD_LAST_TICKS, NEUTRAL, SeatStats,
@@ -61,7 +71,7 @@ pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
 pub use lobby::{
     Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST, INPUT_RATE_HZ,
     KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LateJoin, LeaveCause, PickValidator, RemoteInputs,
-    StampedInput,
+    StampedInput, Transport,
 };
 pub use proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_SESSION_PARAMS,
@@ -71,6 +81,11 @@ pub use proto::{
     SNAP_NO_FRAGMENT, SNAP_NO_SURFACE, SessionAdvertisement, SiteTable, SnapCar, SnapCnr,
     SnapCnrOutcome, SnapCnrSeat, SnapEntry, SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal,
     SnapTrailer, TickCommand, VehiclePick,
+};
+pub use rt::{
+    HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneCounts, LaneQueue, LaneTag, MAGIC,
+    MAX_DATAGRAM, MAX_PAYLOAD, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow, decode_datagram,
+    encode_datagram,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire
@@ -103,6 +118,21 @@ pub enum NetError {
     /// the peer's first frame was not `Hello`.
     #[error("unexpected message: {0}")]
     Unexpected(&'static str),
+    /// The UDP datagram lane never came up: the host did not echo our
+    /// probes. The TCP connection is fine; UDP between the two machines
+    /// is not.
+    #[error(
+        "no UDP lane echo from {host} within {waited:?}: the host's UDP port {} is blocked or \
+         unreachable — allow inbound UDP on that port (host firewall / router port forward) and \
+         see docs/multiplayer-reachability.md",
+        .host.port()
+    )]
+    LaneTimeout {
+        /// The host's UDP endpoint that stayed silent.
+        host: std::net::SocketAddr,
+        /// How long we probed.
+        waited: std::time::Duration,
+    },
     /// A caller configuration the wire cannot represent — e.g.
     /// `HostConfig::max_clients` above [`MAX_PLAYERS`].
     #[error("invalid host configuration: {0}")]

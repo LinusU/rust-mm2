@@ -44,6 +44,27 @@ impl Conn {
         self.peer
     }
 
+    /// The local end of this connection — the address the peer sees us
+    /// at, which a UDP lane socket binds its IP from.
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.local_addr()
+    }
+
+    /// A second handle on the same socket for a dedicated reader thread;
+    /// socket options (timeouts) are shared with the original.
+    pub(crate) fn try_clone(&self) -> io::Result<Conn> {
+        Ok(Conn {
+            stream: self.stream.try_clone()?,
+            peer: self.peer,
+        })
+    }
+
+    /// Close both directions: any thread blocked in `recv` on a clone of
+    /// this socket wakes with an error.
+    pub(crate) fn shutdown_both(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
     /// Wrap an already-accepted stream — the accept thread's hand-off to
     /// the host loop.
     pub(crate) fn from_stream(stream: TcpStream) -> io::Result<Self> {
@@ -86,6 +107,12 @@ impl Conn {
     /// it was — for a drain that must not shorten its own final send.
     pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.stream.set_read_timeout(timeout)?;
+        Ok(())
+    }
+
+    /// Bound only how long a send may block.
+    pub(crate) fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.stream.set_write_timeout(timeout)?;
         Ok(())
     }
 

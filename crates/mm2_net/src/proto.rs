@@ -99,8 +99,12 @@
 /// v32: a host's lobby bots ride the snapshot stream under player ids
 /// from [`FIRST_RESERVED_PLAYER_ID`] up, which a client sets copies down
 /// for; a v31 client would show the bots' match standings with no car
-/// behind them.
-pub const PROTOCOL_VERSION: u16 = 32;
+/// behind them. v33: the UDP datagram lane (NETPLAY-06A, see
+/// [`crate::rt`]) — `Message::LaneBind` / `Message::LaneGrant` negotiate
+/// a per-seat endpoint and token over the TCP control channel, after
+/// which `InputWindow` and `Snap` may ride sequenced unreliable
+/// datagrams; a v32 peer has no lane to negotiate.
+pub const PROTOCOL_VERSION: u16 = 33;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -142,6 +146,8 @@ const TAG_KEEPALIVE: u8 = 0x14;
 const TAG_LEAVES: u8 = 0x15;
 const TAG_SIGNALS: u8 = 0x16;
 const TAG_INPUT_WINDOW: u8 = 0x17;
+const TAG_LANE_BIND: u8 = 0x18;
+const TAG_LANE_GRANT: u8 = 0x19;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -994,6 +1000,25 @@ pub enum Message {
         /// keepalive saying `false` is the standing form of `Cancel`.
         running: bool,
     },
+    /// Client → host: the joining client opens a UDP datagram lane
+    /// (v33, NETPLAY-06A). `port` is the UDP port the client's lane
+    /// socket is bound to; the host takes the address from the TCP
+    /// peer. Answered by [`Message::LaneGrant`]. Control-plane only: a
+    /// datagram can never create a lane.
+    LaneBind {
+        /// The client's UDP port.
+        port: u16,
+    },
+    /// Host → the binding client only: the host's lane endpoint and the
+    /// per-seat session token every datagram in either direction must
+    /// carry (v33). Delivered over the established TCP connection, so
+    /// the token is as private as the connection is.
+    LaneGrant {
+        /// The host's UDP port (same IP the TCP connection dialed).
+        port: u16,
+        /// Host-minted secret for this seat's lane; never zero.
+        token: u64,
+    },
     /// Host → every client: the authority's proximity drawbridge leaves
     /// (v26, F26-A.4) — a proximity leaf opens for whoever came near it
     /// on the host, so its state is the host's to carry. `tick` is the
@@ -1386,6 +1411,15 @@ impl Message {
                     }
                 }
             }
+            Self::LaneBind { port } => {
+                out.push(TAG_LANE_BIND);
+                out.extend_from_slice(&port.to_le_bytes());
+            }
+            Self::LaneGrant { port, token } => {
+                out.push(TAG_LANE_GRANT);
+                out.extend_from_slice(&port.to_le_bytes());
+                out.extend_from_slice(&token.to_le_bytes());
+            }
             Self::ResetRequest { generation } => {
                 out.push(TAG_RESET_REQUEST);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -1722,6 +1756,11 @@ impl Message {
                     commands,
                 }
             }
+            TAG_LANE_BIND => Self::LaneBind { port: cur.u16()? },
+            TAG_LANE_GRANT => Self::LaneGrant {
+                port: cur.u16()?,
+                token: cur.u64()?,
+            },
             TAG_RESET_REQUEST => Self::ResetRequest {
                 generation: cur.u64()?,
             },
@@ -3065,15 +3104,36 @@ mod tests {
     }
 
     #[test]
-    fn v32_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 32);
-        for protocol in [31, 33] {
+    fn lane_negotiation_messages_roundtrip() {
+        for m in [
+            Message::LaneBind { port: 40000 },
+            Message::LaneGrant {
+                port: 27016,
+                token: u64::MAX,
+            },
+        ] {
+            assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        }
+        let mut bytes = Message::LaneBind { port: 1 }.encode().unwrap();
+        bytes.push(0);
+        assert_eq!(Message::decode(&bytes), Err(ProtoError::Trailing(1)));
+        let bytes = Message::LaneGrant { port: 1, token: 2 }.encode().unwrap();
+        assert_eq!(
+            Message::decode(&bytes[..bytes.len() - 1]),
+            Err(ProtoError::Truncated)
+        );
+    }
+
+    #[test]
+    fn v33_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 33);
+        for protocol in [32, 34] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("32"), "{why}");
+            assert!(why.contains("33"), "{why}");
         }
     }
 }

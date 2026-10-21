@@ -8,9 +8,35 @@ in with real results.
 
 ## What the network does
 
-- One **TCP** listener, on the single address passed to `--bind`. No
-  UDP, no second port, no discovery broadcast: clients need the exact
-  `host:port`.
+- One **TCP** listener, on the single address passed to `--bind`, for the
+  lobby and all reliable traffic. No discovery broadcast: clients need
+  the exact `host:port`.
+- One **UDP** socket (NETPLAY-06A), bound on the same IP as the TCP
+  listener with an **ephemeral port** (`Host::lane_port()`). It carries
+  the sequenced unreliable datagram lane: the client's `InputWindow`
+  stream and the host's `Snap` once a client has negotiated a lane
+  (`Client::join_lane`). The client learns the port from the host over
+  TCP (`LaneGrant`), together with a per-seat token every datagram must
+  carry; datagrams from any other address, seat, token or session
+  generation are dropped and counted.
+- **Firewall / port forward requirement:** inbound UDP to the host's lane
+  port, from every client, must be allowed — in addition to the TCP
+  port. The lane port is ephemeral today, so on a host behind a
+  firewall or NAT either allow the process's UDP traffic or open a
+  range; a fixed lane port is not configurable yet. The client's own UDP
+  socket needs only outbound UDP plus the replies NAT/stateful firewalls
+  allow back. The lane expects datagrams from the exact UDP source port
+  the client announced, so a NAT that rewrites the source port is not
+  supported.
+- A client that joins with a lane and gets no echo within 3 s fails the
+  join with `no UDP lane echo from <host>:<port> within 3s ... allow
+  inbound UDP on that port` rather than carrying on over TCP: a TCP-only
+  data plane (`Client::join`, `Transport::Tcp`) is not equivalent
+  quality (head-of-line blocking) and is never presented as such.
+- **Evidence level:** loopback tests (`crates/mm2_net/src/lane_tests.rs`)
+  prove the code path only. They say nothing about whether UDP crosses a
+  real LAN, router or the Internet; that stays an OWNER measurement
+  (#1249) — fill in the LAN/Internet tables below with the lane in use.
 - The host binds loopback + ephemeral port unless told otherwise. A LAN
   or public bind is always an explicit `--bind`. Use a **fixed port**
   (e.g. `:27015`) for LAN/Internet runs so firewall and port-forward

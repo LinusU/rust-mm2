@@ -42,10 +42,10 @@
 //! blob — the game-rule types stay in `mm2_game` and the wire carries
 //! opaque fields only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -57,6 +57,10 @@ use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_w
 use crate::proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode,
     RosterEntry, SessionAdvertisement, TickCommand, VehiclePick,
+};
+use crate::rt::{
+    ClientLane, ClientLaneGuard, HostLane, Inbox, LANE_ECHO_TIMEOUT, LaneCounts, LaneTable,
+    QueueStats, lane_payload,
 };
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
@@ -295,7 +299,9 @@ pub struct StampedInput {
 /// The mailbox itself: each roster slot's newest input sample plus its
 /// newest pending reset request's generation (F25-B).
 #[derive(Debug, Default)]
-struct PeerMail {
+pub(crate) struct PeerMail {
+    /// NETPLAY-06A: the UDP lane's seat table (see [`crate::rt`]).
+    pub(crate) lane: LaneTable,
     inputs: BTreeMap<u16, StampedInput>,
     resets: BTreeMap<u16, u64>,
     buckets: BTreeMap<u16, Bucket>,
@@ -310,6 +316,39 @@ struct PeerMail {
     /// `InputWindow` frames absorbed per seat, accepted or not — the count
     /// a harness waits on to know a delivered frame reached the mailbox.
     windows: BTreeMap<u16, u64>,
+}
+
+impl PeerMail {
+    /// The body of [`RemoteInputs::store_window_at`], on an already-held
+    /// mailbox lock so the UDP lane can authenticate and absorb a datagram
+    /// atomically with respect to a seat's removal.
+    pub(crate) fn absorb_window(
+        &mut self,
+        id: u16,
+        generation: u64,
+        epoch: u8,
+        first_seq: u64,
+        cmds: &[TickCommand],
+        now: Instant,
+    ) {
+        let mail = self;
+        if mail.windows.len() < MAX_PLAYERS as usize || mail.windows.contains_key(&id) {
+            *mail.windows.entry(id).or_default() += 1;
+        }
+        if mail.window_gens.len() < MAX_PLAYERS as usize || mail.window_gens.contains_key(&id) {
+            mail.window_gens.insert(id, (generation, now));
+        }
+        if mail.seats.len() >= MAX_PLAYERS as usize && !mail.seats.contains_key(&id) {
+            return;
+        }
+        let running = mail.running;
+        let seat = mail.seats.entry(id).or_insert_with(|| SeatBuffer::new(now));
+        if running != Some(generation) {
+            seat.note_wrong_generation();
+            return;
+        }
+        seat.accept(epoch, first_seq, cmds, now);
+    }
 }
 
 /// Sustained per-seat `Input` budget, samples per second. The client
@@ -368,7 +407,7 @@ impl Bucket {
 /// roster removal, and lobby teardown clears both maps.
 #[derive(Debug, Clone, Default)]
 pub struct RemoteInputs {
-    inner: Arc<Mutex<PeerMail>>,
+    pub(crate) inner: Arc<Mutex<PeerMail>>,
 }
 
 impl RemoteInputs {
@@ -513,6 +552,7 @@ impl RemoteInputs {
         mail.seats.remove(&id);
         mail.window_gens.remove(&id);
         mail.windows.remove(&id);
+        mail.lane.remove(id);
     }
 
     /// Tell the mailbox which session generation the host is simulating
@@ -552,22 +592,7 @@ impl RemoteInputs {
         now: Instant,
     ) {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.windows.len() < MAX_PLAYERS as usize || mail.windows.contains_key(&id) {
-            *mail.windows.entry(id).or_default() += 1;
-        }
-        if mail.window_gens.len() < MAX_PLAYERS as usize || mail.window_gens.contains_key(&id) {
-            mail.window_gens.insert(id, (generation, now));
-        }
-        if mail.seats.len() >= MAX_PLAYERS as usize && !mail.seats.contains_key(&id) {
-            return;
-        }
-        let running = mail.running;
-        let seat = mail.seats.entry(id).or_insert_with(|| SeatBuffer::new(now));
-        if running != Some(generation) {
-            seat.note_wrong_generation();
-            return;
-        }
-        seat.accept(epoch, first_seq, cmds, now);
+        mail.absorb_window(id, generation, epoch, first_seq, cmds, now);
     }
 
     /// Consume `id`'s slot for the fixed step about to run — exactly one
@@ -643,6 +668,7 @@ impl RemoteInputs {
         mail.window_gens.clear();
         mail.windows.clear();
         mail.running = None;
+        mail.lane.clear();
     }
 }
 
@@ -654,6 +680,7 @@ pub struct Host {
     events: Receiver<HostEvent>,
     control: Sender<LoopMsg>,
     inputs: RemoteInputs,
+    lane: Arc<HostLane>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -684,16 +711,27 @@ impl Host {
         let control = tx.clone();
         let inputs = RemoteInputs::default();
         let loop_inputs = inputs.clone();
+        let lane = HostLane::bind(addr.ip(), inputs.clone())?;
+        let loop_lane = lane.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let accept = spawn_accept(listener, tx.clone(), stop.clone(), adopt)?;
         let handle = thread::spawn(move || {
-            run(accept, stop, config, tx, rx, events_tx, loop_inputs);
+            run(
+                accept,
+                stop,
+                config,
+                tx,
+                rx,
+                events_tx,
+                (loop_inputs, loop_lane),
+            );
         });
         Ok(Self {
             addr,
             events,
             control,
             inputs,
+            lane,
             handle: Some(handle),
         })
     }
@@ -712,7 +750,34 @@ impl Host {
     pub fn ctl(&self) -> HostCtl {
         HostCtl {
             control: self.control.clone(),
+            lane: self.lane.clone(),
         }
+    }
+
+    /// The UDP port of this host's datagram lane (NETPLAY-06A) — the one
+    /// extra port a firewall or port forward must open beside the TCP
+    /// listener. It is bound on the listener's IP; clients learn it from
+    /// their `LaneGrant`, never from the address they dialed.
+    pub fn lane_port(&self) -> u16 {
+        self.lane.port()
+    }
+
+    /// Lifetime counters of the host's lane: accepted datagrams and every
+    /// kind of drop.
+    pub fn lane_counts(&self) -> LaneCounts {
+        self.lane.counts()
+    }
+
+    /// Whether `id`'s lane has been established (the host has answered a
+    /// valid probe from it).
+    pub fn lane_established(&self, id: u16) -> bool {
+        self.lane.is_established(id)
+    }
+
+    /// The outbound queue's bounds, age and drop counters for `id`'s
+    /// established lane.
+    pub fn lane_queue(&self, id: u16) -> Option<QueueStats> {
+        self.lane.established_out(id).map(|o| o.stats())
     }
 
     /// The data-plane mailbox every admitted peer's `Input` frames and
@@ -794,6 +859,7 @@ impl Host {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        self.lane.shutdown();
     }
 }
 
@@ -810,6 +876,7 @@ impl Drop for Host {
 #[derive(Clone)]
 pub struct HostCtl {
     control: Sender<LoopMsg>,
+    lane: Arc<HostLane>,
 }
 
 impl HostCtl {
@@ -845,8 +912,29 @@ impl HostCtl {
     /// and the survivors get a corrected roster. A payload the wire
     /// cannot carry is refused here (encode-checked) rather than
     /// silently dropped by the loop.
+    ///
+    /// **Datagram lane (NETPLAY-06A):** a `Snap` that fits one datagram
+    /// goes to every seat whose lane is established through its bounded
+    /// nonblocking queue — no socket or `Writer` is touched on the
+    /// calling thread — and over TCP only to the seats without one. A
+    /// `Snap` over the datagram budget stays on TCP for everyone
+    /// (fragmentation is a later task).
     pub fn broadcast(&self, msg: &Message) -> Result<(), NetError> {
-        msg.encode()?;
+        let bytes = msg.encode()?;
+        if let Message::Snap { generation, .. } = msg {
+            if bytes.len() > crate::rt::MAX_PAYLOAD {
+                self.lane.counters().note_oversize_tcp();
+            } else {
+                let outs = self.lane.established_outs();
+                if !outs.is_empty() {
+                    let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
+                    for (_, out) in outs {
+                        out.push_data(*generation, bytes.clone());
+                    }
+                    return self.send(LoopMsg::BroadcastExcept(msg.clone(), ids));
+                }
+            }
+        }
         self.send(LoopMsg::Broadcast(msg.clone()))
     }
 
@@ -855,9 +943,24 @@ impl HostCtl {
     /// discipline as [`broadcast`](Self::broadcast): a failed write
     /// reaps the peer `Lost`. A `player_id` that is not on the roster
     /// (it left since the caller looked) is skipped, not an error.
+    /// A `Snap` for a seat with an established lane takes the datagram
+    /// lane like [`broadcast`](Self::broadcast) does.
     pub fn send_to(&self, player_id: u16, msg: &Message) -> Result<(), NetError> {
-        msg.encode()?;
+        let bytes = msg.encode()?;
+        if let Message::Snap { generation, .. } = msg {
+            if bytes.len() > crate::rt::MAX_PAYLOAD {
+                self.lane.counters().note_oversize_tcp();
+            } else if let Some(out) = self.lane.established_out(player_id) {
+                out.push_data(*generation, bytes);
+                return Ok(());
+            }
+        }
         self.send(LoopMsg::SendTo(player_id, msg.clone()))
+    }
+
+    /// [`Host::lane_counts`], from any thread.
+    pub fn lane_counts(&self) -> LaneCounts {
+        self.lane.counts()
     }
 }
 
@@ -868,6 +971,11 @@ impl HostCtl {
 pub struct Client {
     conn: Conn,
     player_id: u16,
+    /// The datagram lane, when this client joined with one (NETPLAY-06A):
+    /// replies are then read through the merged [`Inbox`], and `backlog`
+    /// holds what the host sent while the lane was being negotiated.
+    lane: Option<LaneLink>,
+    backlog: VecDeque<Message>,
     /// Newest `Start` generation seen (0: none) and newest `Cancel`
     /// generation seen or synthesized — what lets a host-state
     /// keepalive stand in for a `Cancel` every copy of which was lost.
@@ -875,12 +983,61 @@ pub struct Client {
     cancelled: u64,
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        // A lane client's TCP pump thread holds a clone of the socket, so
+        // dropping this handle would not close it; shut it down so the
+        // pump (and the host's view of the peer) ends now.
+        if self.lane.is_some() {
+            self.conn.shutdown_both();
+        }
+    }
+}
+
+/// A client's datagram lane plus the merged receive queue it feeds.
+#[derive(Debug)]
+struct LaneLink {
+    lane: ClientLaneGuard,
+    inbox: Arc<Inbox>,
+    /// `recv` wait bound in milliseconds (0: unbounded) — the lane-mode
+    /// stand-in for the socket read timeout, which the TCP reader thread
+    /// owns.
+    wait_ms: AtomicU64,
+}
+
+/// How a joined client's data plane travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// TCP only: `InputWindow` and `Snap` share the ordered control
+    /// stream, with its head-of-line blocking. Not equivalent to a lane.
+    Tcp,
+    /// The UDP datagram lane is established.
+    Lane,
+}
+
 impl Client {
     /// Connect to `addr`, run the handshake and read the host's
     /// `Welcome` carrying this client's roster slot. `Accept` was only
     /// the compatibility verdict, so the `Welcome` wait gets its own
     /// [`HANDSHAKE_TIMEOUT`] bound — a host may not stall it forever.
+    ///
+    /// This is the **TCP-only** join: no datagram lane is negotiated and
+    /// [`Client::transport`] says [`Transport::Tcp`]. A caller that wants
+    /// real-time quality uses [`Client::join_lane`] and surfaces its
+    /// failure instead of quietly continuing here.
     pub fn join(addr: SocketAddr, hello: &Hello) -> Result<Self, NetError> {
+        let (conn, player_id) = Self::join_tcp(addr, hello)?;
+        Ok(Self {
+            conn,
+            player_id,
+            lane: None,
+            backlog: VecDeque::new(),
+            started: 0,
+            cancelled: 0,
+        })
+    }
+
+    fn join_tcp(addr: SocketAddr, hello: &Hello) -> Result<(Conn, u16), NetError> {
         let mut conn = Conn::connect(addr)?;
         crate::send_hello(&mut conn, hello)?;
         conn.set_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -891,12 +1048,89 @@ impl Client {
             Message::Welcome { player_id } => player_id,
             _ => return Err(NetError::Unexpected("expected Welcome")),
         };
+        Ok((conn, player_id))
+    }
+
+    /// [`Client::join`] plus the UDP datagram lane (NETPLAY-06A), waiting
+    /// up to [`LANE_ECHO_TIMEOUT`] for the host's first echo. A blocked or
+    /// unreachable UDP path is [`NetError::LaneTimeout`] — a connection
+    /// failure naming the port to open, never a silent TCP fallback.
+    pub fn join_lane(addr: SocketAddr, hello: &Hello) -> Result<Self, NetError> {
+        Self::join_lane_within(addr, hello, LANE_ECHO_TIMEOUT)
+    }
+
+    /// [`Client::join_lane`] with an explicit echo deadline.
+    pub fn join_lane_within(
+        addr: SocketAddr,
+        hello: &Hello,
+        echo_timeout: Duration,
+    ) -> Result<Self, NetError> {
+        let (mut conn, player_id) = Self::join_tcp(addr, hello)?;
+        // The UDP socket binds the IP the host sees this connection from,
+        // so the host's source-address check holds on multi-homed hosts.
+        let socket = UdpSocket::bind(SocketAddr::new(conn.local_addr()?.ip(), 0))?;
+        conn.set_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        conn.send(&Message::LaneBind {
+            port: socket.local_addr()?.port(),
+        })?;
+        // The host's `Session`/`Roster` may arrive before the grant; keep
+        // them for `recv` rather than losing the lobby snapshot.
+        let mut backlog = VecDeque::new();
+        let (lane_port, token) = loop {
+            match conn.recv()? {
+                Message::LaneGrant { port, token } => break (port, token),
+                Message::Keepalive { .. } => {}
+                msg if backlog.len() < 64 => backlog.push_back(msg),
+                _ => return Err(NetError::Unexpected("expected LaneGrant")),
+            }
+        };
+        conn.set_timeout(None)?;
+        conn.set_read_timeout(Some(LIVENESS_TIMEOUT))?;
+        let inbox = Inbox::new();
+        let lane = ClientLane::establish(
+            socket,
+            SocketAddr::new(addr.ip(), lane_port),
+            player_id,
+            token,
+            inbox.clone(),
+            echo_timeout,
+        )?;
+        spawn_tcp_pump(conn.try_clone()?, inbox.clone());
         Ok(Self {
             conn,
             player_id,
+            lane: Some(LaneLink {
+                lane: ClientLaneGuard(lane),
+                inbox,
+                wait_ms: AtomicU64::new(0),
+            }),
+            backlog,
             started: 0,
             cancelled: 0,
         })
+    }
+
+    /// Whether this client's data plane is the datagram lane or plain
+    /// TCP. UI and logs should say which: the two are not equivalent
+    /// quality.
+    pub fn transport(&self) -> Transport {
+        if self.lane.is_some() {
+            Transport::Lane
+        } else {
+            Transport::Tcp
+        }
+    }
+
+    /// The lane's counters (accepted datagrams and every kind of drop);
+    /// `None` on a TCP-only client.
+    pub fn lane_counts(&self) -> Option<LaneCounts> {
+        self.lane.as_ref().map(|l| l.lane.0.counts())
+    }
+
+    /// Occupancy, drop and age counters of the bounded queue the lane's
+    /// receive thread feeds `Snap`s through; `None` on a TCP-only client.
+    pub fn lane_inbox_stats(&self) -> Option<QueueStats> {
+        self.lane.as_ref().map(|l| l.inbox.lane_stats())
     }
 
     /// The roster slot the host assigned.
@@ -944,6 +1178,12 @@ impl Client {
         self.conn.set_read_timeout(Some(LEAVE_DRAIN_TIMEOUT))?;
         self.conn.send(&Message::Leave)?;
         self.conn.shutdown_write();
+        if let Some(link) = &self.lane {
+            // The TCP pump owns the read side: drain what it queued until
+            // the host's close ends it.
+            while link.inbox.pop(Some(LEAVE_DRAIN_TIMEOUT)).is_ok() {}
+            return Ok(());
+        }
         // Read until the host closes (its reader thread exits on `Leave`)
         // or the drain bound expires — either way no inbound data is
         // left pending at drop, so the close stays a clean FIN.
@@ -963,7 +1203,7 @@ impl Client {
     /// generation than the client entered is a stale reorder and ignored.
     pub fn recv(&mut self) -> Result<Message, NetError> {
         loop {
-            match self.conn.recv()? {
+            match self.next_message()? {
                 Message::Keepalive {
                     generation,
                     running: false,
@@ -979,6 +1219,9 @@ impl Client {
                     match &msg {
                         Message::Start { generation, .. } => {
                             self.started = self.started.max(*generation);
+                            if let Some(link) = &self.lane {
+                                link.lane.0.note_started(*generation);
+                            }
                         }
                         Message::Cancel { generation } => {
                             self.cancelled = self.cancelled.max(*generation);
@@ -991,10 +1234,35 @@ impl Client {
         }
     }
 
+    /// The next message off the control stream — or, on a lane client,
+    /// off the merged inbox (reliable messages first, then lane `Snap`s).
+    fn next_message(&mut self) -> Result<Message, NetError> {
+        if let Some(msg) = self.backlog.pop_front() {
+            return Ok(msg);
+        }
+        match &self.lane {
+            Some(link) => {
+                let ms = link.wait_ms.load(Ordering::Relaxed);
+                link.inbox.pop((ms > 0).then(|| Duration::from_millis(ms)))
+            }
+            None => self.conn.recv(),
+        }
+    }
+
     /// Bound `recv`/`set_ready` waits — tests install a short backstop so
     /// a broken peer cannot hang the suite.
     pub fn set_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
-        self.conn.set_timeout(timeout)
+        if let Some(link) = &self.lane {
+            // The socket's read timeout belongs to the TCP pump thread
+            // (liveness); a `recv` bound applies to the merged inbox.
+            let ms = timeout.map_or(0, |t| {
+                u64::try_from(t.as_millis()).unwrap_or(u64::MAX).max(1)
+            });
+            link.wait_ms.store(ms, Ordering::Relaxed);
+            self.conn.set_write_timeout(timeout)
+        } else {
+            self.conn.set_timeout(timeout)
+        }
     }
 
     /// A send-side handle for threads other than the one blocked in
@@ -1010,6 +1278,7 @@ impl Client {
         writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(ClientCtl {
             writer: Arc::new(Mutex::new(writer)),
+            lane: self.lane.as_ref().map(|l| l.lane.0.clone()),
         })
     }
 }
@@ -1022,6 +1291,7 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct ClientCtl {
     writer: Arc<Mutex<Writer>>,
+    lane: Option<Arc<ClientLane>>,
 }
 
 impl ClientCtl {
@@ -1057,6 +1327,11 @@ impl ClientCtl {
     /// Send one redundant window of fixed-tick commands (v29,
     /// NETPLAY-02A) — the client→host data-plane verb of the
     /// fixed-tick timeline. Bounds are enforced by the codec.
+    ///
+    /// On a lane client (NETPLAY-06A) the window goes through the lane's
+    /// bounded nonblocking queue to the sender thread: this call takes no
+    /// `Writer` lock and touches no socket. A window over the datagram
+    /// budget, or sent after the lane closed, uses the control stream.
     pub fn send_input_window(
         &self,
         generation: u64,
@@ -1064,12 +1339,30 @@ impl ClientCtl {
         first_seq: u64,
         commands: Vec<TickCommand>,
     ) -> Result<(), NetError> {
-        self.send(&Message::InputWindow {
+        let msg = Message::InputWindow {
             generation,
             epoch,
             first_seq,
             commands,
-        })
+        };
+        if let Some(lane) = &self.lane
+            && let Some(bytes) = lane_payload(&msg)?
+            && lane.send_data(generation, bytes)
+        {
+            return Ok(());
+        }
+        self.send(&msg)
+    }
+
+    /// The lane's counters; `None` on a TCP-only client.
+    pub fn lane_counts(&self) -> Option<LaneCounts> {
+        self.lane.as_ref().map(|l| l.counts())
+    }
+
+    /// The lane's outbound queue bounds, age and drop counters; `None` on
+    /// a TCP-only client.
+    pub fn lane_queue(&self) -> Option<QueueStats> {
+        self.lane.as_ref().map(|l| l.out_stats())
     }
 
     /// Ask the authority to reset this client's own seat (F25-B) —
@@ -1091,6 +1384,40 @@ impl ClientCtl {
     pub fn leave(&self) -> Result<(), NetError> {
         self.send(&Message::Leave)
     }
+}
+
+/// The lane client's TCP reader: the control stream's messages (and its
+/// terminal error) join the lane's `Snap`s in the one inbox `Client::recv`
+/// drains. A read timeout is the liveness clock firing, not the end of
+/// the stream, so it is reported (once) and reading continues.
+fn spawn_tcp_pump(conn: Conn, inbox: Arc<Inbox>) {
+    thread::spawn(move || {
+        let mut conn = conn;
+        loop {
+            match conn.recv() {
+                Ok(msg) => {
+                    if !inbox.push_tcp(Ok(msg)) {
+                        return;
+                    }
+                }
+                Err(NetError::Io(e))
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if !inbox.push_tcp_timeout(e) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    inbox.push_tcp(Err(e));
+                    inbox.close();
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Everything the host loop can be woken by — one channel for the accept
@@ -1118,6 +1445,9 @@ enum LoopMsg {
     Broadcast(Message),
     /// `HostCtl::send_to` — a data-plane send to one player.
     SendTo(u16, Message),
+    /// `HostCtl::broadcast` of a `Snap` already queued on the datagram
+    /// lane of the listed seats: TCP to everyone else.
+    BroadcastExcept(Message, Vec<u16>),
     /// `Host::shutdown`.
     Shutdown,
 }
@@ -1150,6 +1480,8 @@ struct Slot {
     build: String,
     ready: bool,
     pick: Option<VehiclePick>,
+    /// The TCP peer's IP — what the seat's UDP lane must come from.
+    peer: IpAddr,
     writer: Writer,
 }
 
@@ -1213,7 +1545,7 @@ fn run(
     tx: Sender<LoopMsg>,
     rx: Receiver<LoopMsg>,
     events: Sender<HostEvent>,
-    inputs: RemoteInputs,
+    (inputs, lane): (RemoteInputs, Arc<HostLane>),
 ) {
     let mut players: BTreeMap<u16, Slot> = BTreeMap::new();
     // The session this lobby advertises; `None` until the consumer sets
@@ -1420,6 +1752,7 @@ fn run(
                         build: hello.build.clone(),
                         ready: false,
                         pick: None,
+                        peer: conn.peer_addr().ip(),
                         writer,
                     },
                 );
@@ -1539,6 +1872,26 @@ fn run(
                     }
                 }
             }
+            LoopMsg::PeerMessage {
+                id,
+                msg: Message::LaneBind { port },
+            } => {
+                // The client opened a datagram lane: mint the seat's
+                // token and hand it over the TCP connection it belongs
+                // to. A dead grant write is a dead peer, like any send.
+                let failed = players.get_mut(&id).is_some_and(|slot| {
+                    let token = lane.register(id, slot.peer, port);
+                    slot.writer
+                        .send(&Message::LaneGrant {
+                            port: lane.port(),
+                            token,
+                        })
+                        .is_err()
+                });
+                if failed && remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
+                }
+            }
             LoopMsg::PeerMessage { .. } => {}
             LoopMsg::SetSession(ad) => {
                 session = Some(ad.clone());
@@ -1554,6 +1907,11 @@ fn run(
                 // the write is reaped `Lost` and survivors get the
                 // corrected roster.
                 if !broadcast(&mut players, &msg, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
+                }
+            }
+            LoopMsg::BroadcastExcept(msg, skip) => {
+                if !broadcast_except(&mut players, &msg, &skip, &events, &inputs) {
                     broadcast_roster(&mut players, &events, &inputs);
                 }
             }
@@ -1597,6 +1955,7 @@ fn run(
                         // regression the clients' never-regress clamp
                         // would silently adopt.
                         generation = generation.saturating_add(1);
+                        lane.set_generation(generation);
                         // The gate guarantees `session` is `Some`.
                         let started = session.clone().unwrap();
                         phase = Phase::InSession {
@@ -1631,6 +1990,7 @@ fn run(
             LoopMsg::Cancel => {
                 if let Phase::InSession { generation, .. } = phase {
                     phase = Phase::Lobby;
+                    lane.set_generation(0);
                     broadcast(
                         &mut players,
                         &Message::Cancel { generation },
@@ -1748,8 +2108,20 @@ fn broadcast(
     events: &Sender<HostEvent>,
     inputs: &RemoteInputs,
 ) -> bool {
+    broadcast_except(players, msg, &[], events, inputs)
+}
+
+/// [`broadcast`] skipping the seats in `skip` — those already got `msg`
+/// on the datagram lane.
+fn broadcast_except(
+    players: &mut BTreeMap<u16, Slot>,
+    msg: &Message,
+    skip: &[u16],
+    events: &Sender<HostEvent>,
+    inputs: &RemoteInputs,
+) -> bool {
     let mut failed = Vec::new();
-    for (id, slot) in players.iter_mut() {
+    for (id, slot) in players.iter_mut().filter(|(id, _)| !skip.contains(id)) {
         if slot.writer.send(msg).is_err() {
             failed.push(*id);
         }
@@ -1828,9 +2200,11 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) 
                     inputs.request_reset(id, generation);
                     continue;
                 }
-                Ok(msg @ (Message::SetReady { .. } | Message::SetVehicle(_))) => {
-                    LoopMsg::PeerMessage { id, msg }
-                }
+                Ok(
+                    msg @ (Message::SetReady { .. }
+                    | Message::SetVehicle(_)
+                    | Message::LaneBind { .. }),
+                ) => LoopMsg::PeerMessage { id, msg },
                 Ok(_) => LoopMsg::PeerGone {
                     id,
                     cause: LeaveCause::Malformed,
@@ -2188,6 +2562,7 @@ mod tests {
                     build: "b".to_string(),
                     ready: false,
                     pick: None,
+                    peer: conn.peer_addr().ip(),
                     writer: conn.writer().unwrap(),
                 },
             );
