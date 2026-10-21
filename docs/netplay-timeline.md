@@ -232,6 +232,26 @@ the wall time bought and account every missing tick to dropped wall time or
 controller slowing (at most `max_adjust_ppm`); a 30 s sleep/resume releases no ticks, counts one sleep
 rebase and recovers. Loopback only, no real-Internet claim. Still open:
 prediction replay (NETPLAY-04), so no slot is "replayed".
+
+The 02F cells are deterministic: a paced rig's proxies run on a virtual clock
+(`ImpairProxy::loopback_manual`), so delay, jitter and the reorder hold are
+measured against time that only moves in `ImpairProxy::advance`. Each host
+step offers its frames at the current virtual time, advances one tick, and
+waits on exact counts before it ends: windows the proxy read (per wire tag,
+`ImpairProxy::tagged`) against windows the client's worker sent, `Snap`s read
+against `NetDriveReport::snaps_sent`, then windows absorbed by the host
+mailbox (`RemoteInputs::windows_received`) and `Snap`s taken by the client's
+receiver thread against what the lanes wrote. Counting by tag keeps the
+host's timer-driven keepalives, which the virtual clock does not schedule,
+out of the barriers. Machine load therefore changes how long a step takes,
+never what the controller sees: the per-cell occupancy, rate and depth
+reports are byte-identical from run to run, and the cells assert the
+original bounds (`max_occupancy <= LeadConfig::max_depth`, steady mean within
+the target +-1) with no load allowance. A step still never runs faster than a
+tick of wall time, because the host's flood bound refills in real time.
+Delivery takes at least one step (a frame released at the advance reaches
+the far side before the next step), so the cells' RTT is the lane delay plus
+one tick each way. The 02E cells keep the wall-clock proxy.
 With the selector on, the host's `apply_remote_inputs` stands down and
 `consume_seat_commands` owns remote controls; the stalled-seat watch counts a
 window as a sign of life.

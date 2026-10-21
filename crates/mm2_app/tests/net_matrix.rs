@@ -9,7 +9,10 @@
 //! return through the proxy's other lane to the client's `CommandHistory`.
 //! The host and clients step in lock step on a paced wall clock (one tick of
 //! each per 1/60 s), so the impairment recipes — which are wall-clock — are
-//! what skews the two timelines.
+//! what skews the two timelines. The `lead_controller_*` cells instead run
+//! their lanes on a virtual clock and barrier every hop on exact frame
+//! counts (`Rig::deliver`), so machine load cannot change what the
+//! controller sees.
 //!
 //! Evidence level: loopback only, seeded lossy proxy. It says nothing about a
 //! real Internet path. The 02E cells run one fixed tick per host step; the
@@ -161,6 +164,27 @@ struct Seat {
     render_hz: Option<f64>,
     /// Wall time not yet spent on a render frame, in ns.
     render_owed_ns: u64,
+    /// `Snap`s the seat's receiver thread has taken off the wire.
+    received: Arc<AtomicU64>,
+    /// Lead rigs: the frame counts at the end of setup. The lanes run on a
+    /// virtual clock and the step waits for exact frame counts, so none of
+    /// what a cell sees depends on how fast the machine ran its threads.
+    base: LaneBase,
+}
+
+/// Counters taken once the handshake traffic has drained.
+#[derive(Debug, Clone, Copy, Default)]
+struct LaneBase {
+    /// Up windows the proxy had read, before any was sent.
+    up_in: u64,
+    /// Up windows the proxy had written, and windows the host had absorbed.
+    up_out: u64,
+    windows: u64,
+    /// Down snaps the proxy had read beyond the host's `snaps_sent`.
+    down_in_extra: u64,
+    /// Down snaps the proxy had written, and snaps the client had read.
+    down_out: u64,
+    received: u64,
 }
 
 /// One host tick for one seat, observed after `consume_seat_commands`.
@@ -183,6 +207,22 @@ struct Rig {
     /// The clients run under `netpace` (the lead controller) instead of
     /// one fixed step per host step.
     lead: bool,
+    /// Wire tags of the two data-plane messages the lead barriers count.
+    window_tag: u8,
+    snap_tag: u8,
+}
+
+/// Bound on a barrier wait: a lane or thread that never catches up fails
+/// the cell instead of hanging it.
+const BARRIER: Duration = Duration::from_secs(20);
+
+/// Spin until `pred` holds, failing after [`BARRIER`].
+fn barrier(what: &str, pred: impl Fn() -> bool) {
+    let deadline = Instant::now() + BARRIER;
+    while !pred() {
+        assert!(Instant::now() < deadline, "barrier: {what}");
+        thread::yield_now();
+    }
 }
 
 /// One seat of a cell; its lanes are tuned per phase with `Rig::both`.
@@ -219,7 +259,11 @@ impl Rig {
 
         let mut peers = Vec::new();
         for (i, spec) in specs.iter().enumerate() {
-            let proxy = ImpairProxy::loopback_seeded(host_addr, seed + i as u64).unwrap();
+            let proxy = if lead {
+                ImpairProxy::loopback_manual(host_addr, seed + i as u64).unwrap()
+            } else {
+                ImpairProxy::loopback_seeded(host_addr, seed + i as u64).unwrap()
+            };
             let peer = ready_peer(proxy.addr(), spec.name, fp);
             peers.push((proxy, peer));
         }
@@ -251,10 +295,17 @@ impl Rig {
             let halt = Arc::clone(&stop);
             let want = Arc::new(AtomicU64::new(generation));
             let want_reader = Arc::clone(&want);
+            let received = Arc::new(AtomicU64::new(0));
+            let counted = Arc::clone(&received);
             thread::spawn(move || {
                 // Blocks in `recv` until the host drops (EOF) or errors.
                 while !halt.load(Ordering::Relaxed) {
                     let Ok(msg) = peer.recv() else { break };
+                    // Counted after the sample is stored (below), so a
+                    // barrier on the count sees every sample. Only snaps
+                    // count: `Client::recv` swallows keepalives, which
+                    // the host sends on a timer of its own.
+                    let _count = matches!(msg, Message::Snap { .. }).then(|| CountOnDrop(&counted));
                     // Like `apply_snapshots`: another generation's snapshot
                     // is never this session's ack.
                     if let Message::Snap {
@@ -307,6 +358,8 @@ impl Rig {
                 prev_ran: 0,
                 render_hz: None,
                 render_owed_ns: 0,
+                received,
+                base: LaneBase::default(),
             });
         }
         // The first fixed step tells the mailbox which generation runs.
@@ -319,11 +372,124 @@ impl Rig {
             generation,
             stop,
             lead,
+            window_tag: Message::InputWindow {
+                generation: 1,
+                epoch: 0,
+                first_seq: 1,
+                commands: vec![netcmd::tick_command(&VehicleInput::default(), None)],
+            }
+            .encode()
+            .unwrap()[0],
+            snap_tag: Message::Snap {
+                generation: 1,
+                tick: 1,
+                entries: Vec::new(),
+                trailers: Vec::new(),
+                impacts: Vec::new(),
+                race: None,
+            }
+            .encode()
+            .unwrap()[0],
         };
         rig.consume();
+        if lead {
+            rig.settle_lanes();
+        }
         // Keep the tempdir alive for the rig's lifetime (the host mounted it).
         std::mem::forget(install);
         rig
+    }
+
+    /// Wait for the handshake traffic to drain and record the counters the
+    /// per-step barriers measure from.
+    fn settle_lanes(&mut self) {
+        let snapshot = |rig: &Rig| -> Vec<u64> {
+            rig.seats
+                .iter()
+                .flat_map(|s| {
+                    let up = s.proxy.tagged(LinkDir::Up, rig.window_tag);
+                    let down = s.proxy.tagged(LinkDir::Down, rig.snap_tag);
+                    [
+                        up.0,
+                        up.1,
+                        down.0,
+                        down.1,
+                        s.received.load(Ordering::Acquire),
+                        rig.inputs.windows_received(s.id),
+                    ]
+                })
+                .collect()
+        };
+        let deadline = Instant::now() + BARRIER;
+        let mut last = snapshot(self);
+        let mut quiet_since = Instant::now();
+        while quiet_since.elapsed() < Duration::from_millis(50) {
+            assert!(Instant::now() < deadline, "the handshake never went quiet");
+            thread::sleep(Duration::from_millis(5));
+            let now = snapshot(self);
+            if now != last {
+                last = now;
+                quiet_since = Instant::now();
+            }
+        }
+        let snaps = self
+            .host
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent;
+        for seat in &mut self.seats {
+            let up = seat.proxy.tagged(LinkDir::Up, self.window_tag);
+            let down = seat.proxy.tagged(LinkDir::Down, self.snap_tag);
+            let stream = seat.client.world().resource::<CommandStream>();
+            assert_eq!(stream.transmitted_windows(), 0, "{}: sent early", seat.name);
+            seat.base = LaneBase {
+                up_in: up.0,
+                up_out: up.1,
+                windows: self.inputs.windows_received(seat.id),
+                down_in_extra: down.0.saturating_sub(snaps),
+                down_out: down.1,
+                received: seat.received.load(Ordering::Acquire),
+            };
+        }
+    }
+
+    /// Lead rigs: carry one tick of virtual time across every lane, with a
+    /// barrier on each hop so the same frames are in the same place on
+    /// every run. Frames offered during this step are stamped with the
+    /// time before the advance; those that fall due cross to their far
+    /// side before the step ends.
+    fn deliver(&mut self) {
+        let snaps = self
+            .host
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent;
+        for seat in &self.seats {
+            let sent = seat
+                .client
+                .world()
+                .resource::<CommandStream>()
+                .transmitted_windows();
+            barrier(&format!("{}: up frames read", seat.name), || {
+                seat.proxy.tagged(LinkDir::Up, self.window_tag).0 >= seat.base.up_in + sent
+            });
+            barrier(&format!("{}: snaps read", seat.name), || {
+                seat.proxy.tagged(LinkDir::Down, self.snap_tag).0 >= seat.base.down_in_extra + snaps
+            });
+        }
+        for seat in &self.seats {
+            assert!(seat.proxy.advance(TICK), "{}: a lane stalled", seat.name);
+        }
+        for seat in &self.seats {
+            barrier(&format!("{}: windows at the host", seat.name), || {
+                let out = seat.proxy.tagged(LinkDir::Up, self.window_tag).1 - seat.base.up_out;
+                self.inputs.windows_received(seat.id) - seat.base.windows >= out
+            });
+            barrier(&format!("{}: snaps at the client", seat.name), || {
+                let out = seat.proxy.tagged(LinkDir::Down, self.snap_tag).1 - seat.base.down_out;
+                seat.received.load(Ordering::Acquire) - seat.base.received >= out
+            });
+        }
     }
 
     fn consume(&mut self) {
@@ -414,6 +580,9 @@ impl Rig {
             self.observe_seat_after(i);
         }
         self.host.update();
+        if self.lead {
+            self.deliver();
+        }
         for seat in &mut self.seats {
             let samples: Vec<AckSample> = std::mem::take(&mut *seat.acks.lock().unwrap());
             if self.lead {
@@ -450,6 +619,9 @@ impl Rig {
             seat.history_acked = acked;
         }
         self.tick += 1;
+        // The host's flood bound refills in real time, so a step is never
+        // faster than a tick of wall time; only the lower bound matters,
+        // a slow machine delays the step without changing what it sees.
         let due = self.started + TICK * self.tick as u32;
         if let Some(wait) = due.checked_duration_since(Instant::now()) {
             thread::sleep(wait);
@@ -677,6 +849,15 @@ impl Rig {
 impl Drop for Rig {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Adds one to a counter when dropped: the end of a loop pass.
+struct CountOnDrop<'a>(&'a AtomicU64);
+
+impl Drop for CountOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -981,11 +1162,6 @@ fn a_session_restart_drops_the_old_generations_windows() {
 // command per seat per tick and the controller steers the buffer depth the
 // host reports back to `LeadConfig::target_depth`.
 
-/// Ticks of host occupancy the cells allow beyond `max_depth`: the harness
-/// sleeps and the client threads run in real time, and a loaded machine
-/// (the whole suite runs in parallel) delivers windows in clumps.
-const LOAD_SLACK: usize = 3;
-
 fn lead_cfg() -> LeadConfig {
     LeadConfig::default()
 }
@@ -1058,7 +1234,7 @@ fn lead_controller_settles_the_host_buffer_at_the_target() {
         .iter()
         .position(|t| t.stats.received > 0)
         .unwrap();
-    let at = settled_at(&occ[..900], started, 0, cfg.max_depth as usize + LOAD_SLACK)
+    let at = settled_at(&occ[..900], started, 0, cfg.max_depth as usize)
         .expect("the buffer never settled");
     assert!(
         at - started <= 300,
@@ -1067,11 +1243,11 @@ fn lead_controller_settles_the_host_buffer_at_the_target() {
     );
     let tail = &occ[600..900];
     assert!(
-        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 2.0).contains(&mean(tail)),
+        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 1.0).contains(&mean(tail)),
         "steady depth {} is not near the target",
         mean(tail)
     );
-    assert!(*tail.iter().max().unwrap() <= cfg.max_depth as usize + LOAD_SLACK);
+    assert!(*tail.iter().max().unwrap() <= cfg.max_depth as usize);
 }
 
 /// Settle a paced rig, then check the buffer is back in band and near the
@@ -1081,13 +1257,13 @@ fn assert_in_band(tag: &str, rig: &Rig, window: usize) {
     let occ = occupancy(rig, 0);
     let tail = &occ[occ.len() - window..];
     assert!(
-        *tail.iter().max().unwrap() <= cfg.max_depth as usize + LOAD_SLACK,
+        *tail.iter().max().unwrap() <= cfg.max_depth as usize,
         "{tag}: depth {} over max over the last {window} ticks",
         tail.iter().max().unwrap()
     );
     let m = mean(tail);
     assert!(
-        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 2.0).contains(&m),
+        (cfg.target_depth as f64 - 1.0..=cfg.target_depth as f64 + 1.0).contains(&m),
         "{tag}: mean depth {m} is not near the target"
     );
 }
@@ -1109,13 +1285,8 @@ fn drain_after_a_burst(burst: u64) {
         rig.check(&tag, cfg.max_depth as usize + 2 * burst as usize);
         report_lead(&tag, &rig, 0);
         let occ = occupancy(&rig, 0);
-        let settled = settled_at(
-            &occ[..before + 900],
-            before,
-            0,
-            cfg.max_depth as usize + LOAD_SLACK,
-        )
-        .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
+        let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+            .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
         assert!(
             settled - before <= 600,
             "{tag}: took {} ticks to come back",
@@ -1150,7 +1321,7 @@ fn hold_under_clock_error(ppm: i64) {
         let wall = rig.seats[0].ticks.len() as i64;
         rig.drain();
         let tag = format!("lead-ppm{ppm}");
-        rig.check(&tag, lead_cfg().max_depth as usize + LOAD_SLACK);
+        rig.check(&tag, lead_cfg().max_depth as usize);
         report_lead(&tag, &rig, 0);
         assert_in_band(&tag, &rig, 600);
         let lead = lead_of(&rig, 0);
@@ -1216,13 +1387,8 @@ fn catch_up_after_a_stall(stall_ticks: usize) {
             seat.max_frame_ticks
         );
         let occ = occupancy(&rig, 0);
-        let settled = settled_at(
-            &occ[..before + 900],
-            before,
-            0,
-            cfg.max_depth as usize + LOAD_SLACK,
-        )
-        .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
+        let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+            .unwrap_or_else(|| panic!("{tag}: never back inside the depth band"));
         assert!(settled - before <= 600, "{tag}: slow to recover");
         assert_in_band(&tag, &rig, 200);
         // No uncontrolled fast-forward: the client never ran more ticks
@@ -1289,13 +1455,8 @@ fn lead_controller_rebases_on_sleep_and_resume() {
     assert!(lead.controller().stats().rebases >= 1);
     assert!(rig.seats[0].max_frame_ticks <= u64::from(cfg.max_catchup_ticks));
     let occ = occupancy(&rig, 0);
-    let settled = settled_at(
-        &occ[..before + 900],
-        before,
-        0,
-        cfg.max_depth as usize + LOAD_SLACK,
-    )
-    .expect("never back inside the depth band");
+    let settled = settled_at(&occ[..before + 900], before, 0, cfg.max_depth as usize)
+        .expect("never back inside the depth band");
     assert!(settled - before <= 600, "slow to recover");
     assert_in_band("lead-sleep", &rig, 200);
 }
