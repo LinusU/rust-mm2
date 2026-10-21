@@ -778,8 +778,14 @@ impl Rig {
             );
 
             // One slot per tick once the stream started: everything the host
-            // consumed was a command or a counted substitute.
-            let started = seat.ticks.iter().position(|t| t.stats.received > 0);
+            // consumed was a command or a counted substitute. The stream
+            // starts at the first tick that consumed a slot; a window can
+            // land between that tick's consume and its observation, so
+            // `received > 0` may name a tick that consumed nothing.
+            let started = seat
+                .ticks
+                .iter()
+                .position(|t| t.stats.finalized + t.stats.fallback > 0);
             let started = started.expect("commands arrived");
             let consumed_ticks = (seat.ticks.len() - started) as u64;
             assert_eq!(
