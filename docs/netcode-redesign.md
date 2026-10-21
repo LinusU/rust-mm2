@@ -789,7 +789,7 @@ wall-clock ages: age is derived, so it cannot disagree with the tick.
 
 **Loss.** No ack. Every frame repeats each seat's last 16 applied ticks
 (about 267 ms), so a tick is lost only if every frame carrying it is. The
-frame rides the datagram lane when it fits one (`Snap` rules) and the
+frame rides the datagram lane when it fits one datagram (it is never fragmented) and the
 control stream otherwise. `lane_impair_tests::remote_commands_survive_loss_reorder_and_duplication_without_an_ack`
 runs 90 ticks through the seeded UDP proxy at 30% loss, 25% duplication
 and reorder with 10–50 ms delay: every tick arrives intact and is consumed
