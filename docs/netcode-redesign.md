@@ -323,8 +323,19 @@ car towing a jointed trailer into a sleeping prop, ground. `TOLERANCE` is
 | 236→300 | multi-step wall pin | 0 |
 | 299→300, 300→380 | pinned, depth 1 and 80 | 0 |
 | 190→250 | **new** car–prop contact onset after the rewind | position 4e-5 m, velocity 3.5e-3 m/s over 140 ticks; per-wheel force scalars up to ~65 N on the impact tick |
+| 204→, 261→, 308→ (generic car, ramp jump) | before takeoff, mid flight, after landing | 0 (bit-identical) |
+| 306→, 339→, 363→ (original-handling car, ramp jump) | before takeoff, mid flight, after landing | 0 |
 
-The last row is a floor, not a defect to be tuned away: the replay
+The two ramp rows come from `tests/replay_jump.rs` (#1799): both models
+drive full throttle up a 0.2 rad static ramp, leave the lip (all wheels
+off the ground for 84 and 37 ticks), land on the ground plane and brake.
+Each flight is rewound to before takeoff, mid-flight and after landing;
+the whole world is compared with the uninterrupted run at every replayed
+tick (about 200 per rewind) with `TOLERANCE`. Measured deviation 0 in all
+six cases. Contact onsets with the ramp lip and the landing are
+static-geometry contacts, so they fall in the exact class, not the bounded one.
+
+The 190→250 row is a floor, not a defect to be tuned away: the replay
 creates the contact pair again in a world whose contact slots and solver
 ordering were built in a different order than the reference's, so a
 chaotic impact differs at the 1e-6 level and the wheel forces carry that
