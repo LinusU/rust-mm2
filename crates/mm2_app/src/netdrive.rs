@@ -1774,6 +1774,9 @@ fn desired_remotes(lobby: &LobbyState, self_wire: u16) -> BTreeMap<u16, VehicleP
     set
 }
 
+/// The trailer census query: whether each live trailer is a remote copy.
+type TrailerCensus<'w, 's> = Query<'w, 's, Has<RemoteTrailer>, With<car_visual::Trailer>>;
+
 /// Keep the world matching the lobby's remote roster: spawn a
 /// participant entity per picked remote seat (host's included, on
 /// clients), despawn ones whose player left or whose pick changed, and
@@ -1802,7 +1805,10 @@ pub fn reconcile_remote_players(
     mut materials: ResMut<Assets<StandardMaterial>>,
     remotes: Query<(Entity, &NetPlayer, &RemotePick)>,
     trailers: Query<(Entity, &car_visual::Trailer, &RemoteTrailer, &RemotePick)>,
-    census: Query<Has<RemoteTrailer>, With<car_visual::Trailer>>,
+    // The trailer census, and the host's planned bots a client sets
+    // copies down for ([`crate::cnr_bots::CnrBotRoster`]; absent on the
+    // host, which spawns its bots itself).
+    (census, bots): (TrailerCensus, Option<Res<crate::cnr_bots::CnrBotRoster>>),
     local: Query<Entity, (With<PlayerVehicle>, Without<NetPlayer>)>,
     mut report: ResMut<NetDriveReport>,
 ) {
@@ -1837,7 +1843,21 @@ pub fn reconcile_remote_players(
             .insert((NetPlayer(self_wire), ResetEpoch(0)));
     }
 
-    let desired = desired_remotes(&lobby, self_wire);
+    let mut desired = desired_remotes(&lobby, self_wire);
+    // The host's bots are further remote seats, keyed by the ids the
+    // host publishes them under — never in the lobby roster, so a bot
+    // is exactly one copy and never also a peer's.
+    if let Some(bots) = bots.as_deref() {
+        for (i, bot) in bots.0.iter().enumerate() {
+            desired.insert(
+                crate::cnr_bots::NET_BOT_PLAYER_BASE + i as u16,
+                VehiclePick {
+                    vehicle: bot.def.id.clone(),
+                    paint: 0,
+                },
+            );
+        }
+    }
     // Departed players and changed picks despawn — the changed pick
     // respawns below with fresh tuning and visuals.
     let mut kept = 0usize;
@@ -1894,6 +1914,7 @@ pub fn reconcile_remote_players(
             &mut materials,
             wire,
             &pick,
+            bots.as_deref().and_then(|b| b.get(wire)),
             owner,
             role,
         ) {
@@ -1930,11 +1951,14 @@ fn spawn_remote(
     materials: &mut Assets<StandardMaterial>,
     wire: u16,
     pick: &VehiclePick,
+    bot: Option<(u8, &crate::cnr_bots::PlannedBot)>,
     owner: SessionEntity,
     role: mm2_game::AuthorityRole,
 ) -> bool {
     let predicted = !role.is_authority();
-    let def = if pick.vehicle.is_empty() {
+    // A host-owned bot's car is the one its plan chose (opponent tuning,
+    // like the host's own bot); a human's loads from its pick.
+    let loaded = if pick.vehicle.is_empty() || bot.is_some() {
         None
     } else {
         match mm2_content::load_vehicle(vfs, &pick.vehicle, pick.paint as usize) {
@@ -1950,24 +1974,42 @@ fn spawn_remote(
             }
         }
     };
-    let cfg = def.as_ref().map(|d| d.config.clone()).unwrap_or_default();
+    let def: Option<&mm2_content::VehicleDef> = bot.map(|(_, b)| &b.def).or(loaded.as_ref());
+    let cfg = def.map(|d| d.config.clone()).unwrap_or_default();
     // The seat map's slot: an authored grid row, or the designed
     // fan-out past it — identical on host and clients (F25-A.2).
-    let (mut pos, yaw) = seat_pose(
-        race.map(|r| &r.definition),
-        (spawn.origin, spawn.origin_yaw),
-        seat_index(seats, Some(wire)),
-    );
-    // The same hull clearance every participant spawn applies.
-    let hull_min_y = cfg
-        .collider_points
-        .as_ref()
-        .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
-        .unwrap_or(-cfg.chassis_size[1] * 0.5);
-    pos.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+    let (pos, yaw) = match bot {
+        // A bot starts on its planned lane slot, lifted the way the
+        // host's spawn lifts it.
+        Some((_, b)) => (
+            b.slot.position + Vec3::Y * crate::opponents::reanchor_lift(&cfg),
+            b.slot.yaw,
+        ),
+        None => {
+            let (mut pos, yaw) = seat_pose(
+                race.map(|r| &r.definition),
+                (spawn.origin, spawn.origin_yaw),
+                seat_index(seats, Some(wire)),
+            );
+            // The same hull clearance every participant spawn applies.
+            let hull_min_y = cfg
+                .collider_points
+                .as_ref()
+                .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
+                .unwrap_or(-cfg.chassis_size[1] * 0.5);
+            pos.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+            (pos, yaw)
+        }
+    };
 
     let object = session.mint_object_id();
-    let player_id = session.mint_player_id();
+    // A bot keeps the id the host gave it, so a client's match view and
+    // its car name the same participant.
+    let player_id = if bot.is_some() {
+        mm2_game::PlayerId(wire)
+    } else {
+        session.mint_player_id()
+    };
     let vehicle = commands
         .spawn((
             owner,
@@ -1991,6 +2033,11 @@ fn spawn_remote(
             Visibility::Visible,
         ))
         .id();
+    if let Some((index, _)) = bot {
+        commands
+            .entity(vehicle)
+            .insert(crate::cnr_bots::CnrBot { index });
+    }
     if predicted {
         // A client never simulates a remote car's truth: kinematic —
         // it collides as the host says it is, and `RemoteLerp` blends
@@ -2025,7 +2072,7 @@ fn spawn_remote(
     // rule systems are inert — but `VehicleDamage` is where the v8
     // snap tail lands the replicated total, and `VehicleSmoke` renders
     // it.
-    if let Some(d) = def.as_ref().and_then(|d| d.damage.as_ref()) {
+    if let Some(d) = def.and_then(|d| d.damage.as_ref()) {
         commands.entity(vehicle).insert((
             VehicleDamage::new(DamageSpec::from(d)),
             // F25-B: the authored engine-smoke rig rides with the
@@ -2055,7 +2102,7 @@ fn spawn_remote(
             ),
         ));
     }
-    if let Some(s) = def.as_ref().and_then(|d| d.stuck.as_ref()) {
+    if let Some(s) = def.and_then(|d| d.stuck.as_ref()) {
         commands
             .entity(vehicle)
             .insert(VehicleStuck::new(StuckSpec::from(s)));
@@ -2072,7 +2119,7 @@ fn spawn_remote(
     // contact on the authority and replays the v16 `SnapEntry` tail's
     // replicated `SurfaceContact` on a client copy, each process off
     // its own surface table.
-    if let Some(a) = def.as_ref().and_then(|d| d.audio.as_ref()) {
+    if let Some(a) = def.and_then(|d| d.audio.as_ref()) {
         commands
             .entity(vehicle)
             .insert(VehicleAudio { spec: a.clone() });
@@ -2083,7 +2130,7 @@ fn spawn_remote(
     // `SnapEntry.breaks` bitmask publishes it); on a client it is the
     // presentation rig the replicated bitmask reconciles. Same absence
     // policy as the local spawn: no authored parts, no component.
-    if let Some(rig) = def.as_ref().and_then(breakaway::vehicle_rig) {
+    if let Some(rig) = def.and_then(breakaway::vehicle_rig) {
         commands.entity(vehicle).insert(rig);
     }
     commands
@@ -2104,7 +2151,7 @@ fn spawn_remote(
             .entity(vehicle)
             .insert(RaceProgress::join(&race.definition, race));
     }
-    match &def {
+    match def {
         Some(def) => {
             let missing = car_visual::spawn_vehicle_model(
                 commands,
@@ -2139,7 +2186,7 @@ fn spawn_remote(
     // kinematic copy the `Snap.trailers` rows drive (no joint: the wire
     // owns its pose; `RemoteReplica`/`RemoteLerp`/`RemoteDrive` give it
     // the same blend-and-spin treatment the car copy gets).
-    if let Some(trailer) = def.as_ref().and_then(|d| d.trailer.as_ref()) {
+    if let Some(trailer) = def.and_then(|d| d.trailer.as_ref()) {
         if predicted {
             let te = spawn_trailer_copy(
                 commands, session, trailer, pick, wire, vehicle, pos, yaw, owner, role,
@@ -2157,7 +2204,7 @@ fn spawn_remote(
                 None,
             );
             if !missing.is_empty() {
-                warn!(car = %def.as_ref().map(|d| d.id.as_str()).unwrap_or("?"),
+                warn!(car = %def.map(|d| d.id.as_str()).unwrap_or("?"),
                     "remote trailer missing textures: {}", missing.join(", "));
             }
         } else {
@@ -2185,7 +2232,7 @@ fn spawn_remote(
                 RemotePick(pick.clone()),
             ));
             if !tmissing.is_empty() {
-                warn!(car = %def.as_ref().map(|d| d.id.as_str()).unwrap_or("?"),
+                warn!(car = %def.map(|d| d.id.as_str()).unwrap_or("?"),
                     "remote trailer missing textures: {}", tmissing.join(", "));
             }
         }

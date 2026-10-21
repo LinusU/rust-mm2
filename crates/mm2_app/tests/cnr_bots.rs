@@ -213,7 +213,8 @@ fn retail_host_bots_carry_ids_clear_of_the_wire_seats() {
     assert_eq!(
         bots,
         (0..4)
-            .map(|i| (i, NET_BOT_PLAYER_BASE + u16::from(i), false))
+            // A hosted bot publishes under its own id (CNR-MP-BOTS-C).
+            .map(|i| (i, NET_BOT_PLAYER_BASE + u16::from(i), true))
             .collect::<Vec<_>>()
     );
 }

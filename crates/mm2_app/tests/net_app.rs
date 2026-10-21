@@ -182,7 +182,7 @@ fn lobby_app(vfs: Vfs) -> App {
 /// The joined-client bridge app, wired the way `run_headless` wires
 /// it — the lobby drain settles after the session driver, the same
 /// ordering the windowed app and `run_headless` use.
-fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
+pub(crate) fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
     let mut app = lobby_app(vfs);
     app.insert_resource(link)
         .init_resource::<netdrive::RemoteSnaps>()
@@ -296,7 +296,7 @@ fn host_event(host: &Host) -> HostEvent {
 /// Drain host events until the `Started` verdict; returns the minted
 /// generation. A `StartRefused` verdict is the answer too — panic with
 /// its reason instead of timing out on a `Started` that never comes.
-fn until_started(host: &Host) -> u64 {
+pub(crate) fn until_started(host: &Host) -> u64 {
     loop {
         match host_event(host) {
             HostEvent::Started { generation } => return generation,
@@ -328,7 +328,7 @@ fn session_phase(app: &App) -> SessionPhase {
 /// Spin updates until a drained `Start` moves the session off `Menu`
 /// — the host's `Started` verdict precedes the `Start` frame's trip
 /// through the pump thread, so a single `update` can race it.
-fn until_begun(app: &mut App) {
+pub(crate) fn until_begun(app: &mut App) {
     for _ in 0..200 {
         app.update();
         if session_phase(app) != SessionPhase::Menu {
@@ -1442,7 +1442,7 @@ pub(crate) fn spin(app: &mut App, pred: impl Fn(&App) -> bool) {
 /// control channel first and be refused. The loop broadcasts the
 /// roster only after applying each update, so the echoed flag is the
 /// happens-before `host.start` needs.
-fn until_ready(app: &mut App) {
+pub(crate) fn until_ready(app: &mut App) {
     spin(app, |a| {
         let world = a.world();
         let our_id = world.resource::<LobbyLink>().player_id();

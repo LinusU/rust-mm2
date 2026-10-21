@@ -338,6 +338,7 @@ pub fn drive_session(
             // leak into a later race).
             commands.remove_resource::<crate::cnr::CnrHost>();
             commands.remove_resource::<crate::cnr_bot_drive::CnrBotBrain>();
+            commands.remove_resource::<crate::cnr_bots::CnrBotRoster>();
             commands.remove_resource::<crate::cnrnet::CnrReplica>();
             commands.remove_resource::<crate::cnrvoice::CnrCommentary>();
             commands.remove_resource::<crate::progression::EventRewards>();
@@ -871,7 +872,9 @@ pub fn load_session_world(
                     // cities without a usable `.water` get no
                     // resource, so `track_recovery` falls back to the
                     // wheel-`drag` classification alone.
-                    if config.local_cnr_bots() > 0 {
+                    // Every process of a session with bots plans the same
+                    // roster (a client sets down copies of the host's).
+                    if config.cnr_bots > 0 {
                         let stem = std::path::Path::new(psdl)
                             .file_stem()
                             .and_then(|s| s.to_str())
@@ -1245,7 +1248,7 @@ pub fn load_session_world(
                     .map(|(_, roster, ..)| roster.entries.len())
                     .unwrap_or(0),
                 config.authority,
-                config.local_cnr_bots(),
+                config.cnr_bots,
             ),
             &mut assets.meshes,
             &mut assets.images,
@@ -1690,7 +1693,7 @@ pub fn load_session_world(
     // CNRBOT-A: the local Cops & Robbers roster, set down beside the
     // human. A roster that cannot be fielded fails the session — it is
     // never silently shortened.
-    if config.local_cnr_bots() > 0 {
+    if config.cnr_bots > 0 {
         let planned = match bot_candidates.take() {
             Some(Ok(candidates)) => {
                 let city = match &config.world {
@@ -1724,6 +1727,12 @@ pub fn load_session_world(
             None => Err("no city to place bots in".to_string()),
         };
         match planned {
+            // A client only keeps the plan: its copies of the host's bots
+            // are set down by the roster reconcile, and the host's
+            // snapshots pose them.
+            Ok(plan) if config.local_cnr_bots() == 0 => {
+                commands.insert_resource(crate::cnr_bots::CnrBotRoster(plan));
+            }
             Ok(plan) => {
                 crate::cnr_bots::spawn_bots(
                     &mut commands,
@@ -2271,7 +2280,7 @@ pub fn load_session_world(
 }
 
 /// Opponent tris the minimap binds: the authored roster, the Cops &
-/// Robbers bots, and — in a networked session — a seat for every other
+/// Robbers bots (the host's, a client's copies of them included), and — in a networked session — a seat for every other
 /// human the wire's roster can hold, since remote drivers join after
 /// the world loads. Unused slots stay hidden, so a departed player
 /// leaves no dot.

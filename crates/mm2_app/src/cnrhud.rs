@@ -100,12 +100,19 @@ fn reason_text(reason: EndReason) -> &'static str {
     }
 }
 
+/// A participant's name on the readouts: a host's bot is "Bot n", any
+/// other driver "Player n" by its wire id. The same id names the same
+/// driver on the host and on every client.
+fn driver_name(id: PlayerId) -> String {
+    crate::cnr_bots::net_bot_name(id).unwrap_or_else(|| format!("Player {}", id.0))
+}
+
 /// Who won, from `me`'s seat (`YOU WIN` only for the local participant).
 fn verdict_text(winner: Winner, me: Option<PlayerId>) -> String {
     match winner {
         Winner::Tie => "TIE".to_string(),
         Winner::Player(p) if Some(p) == me => "YOU WIN".to_string(),
-        Winner::Player(p) => format!("PLAYER {} WINS", p.0),
+        Winner::Player(p) => format!("{} WINS", driver_name(p).to_uppercase()),
         Winner::Side(s) => format!("{} WIN", side_label(s)),
     }
 }
@@ -147,7 +154,7 @@ pub fn result_lines(view: &GoldView, me: Option<PlayerId>, hz: u32) -> Option<Ve
         let name = if Some(s.player) == me {
             "You".to_string()
         } else {
-            format!("Player {}", s.player.0)
+            driver_name(s.player)
         };
         let side = match side_label(s.side) {
             "" => String::new(),
@@ -227,7 +234,7 @@ pub fn scoreboard_lines(view: &GoldView, me: Option<PlayerId>, hz: u32) -> Vec<S
                     .find(|s| s.player == by)
                     .filter(|_| view.variant != CnrVariant::FreeForAll)
                     .map_or_else(
-                        || format!("PLAYER {}", by.0),
+                        || driver_name(by).to_uppercase(),
                         |s| format!("A {} DRIVER", side_label(s.side)),
                     );
                 format!("{who} HAS THE GOLD")
@@ -525,6 +532,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hosts_bots_are_named_on_every_readout() {
+        let bot = |i: u16| PlayerId(crate::cnr_bots::NET_BOT_PLAYER_BASE + i);
+        let (mut m, _) = game(
+            CnrVariant::FreeForAll,
+            EndRule::None,
+            &[(A, Side::Solo), (bot(0), Side::Solo), (bot(1), Side::Solo)],
+        );
+        let g = m.gold_position().unwrap();
+        m.resolve_pickups(&[mm2_game::gold::Contact {
+            player: bot(1),
+            position: g,
+            round: m.round(),
+        }]);
+        assert_eq!(
+            scoreboard_lines(&m.view(), Some(A), 60)[2],
+            "BOT 2 HAS THE GOLD"
+        );
+        assert_eq!(verdict_text(Winner::Player(bot(0)), Some(A)), "BOT 1 WINS");
+        assert_eq!(verdict_text(Winner::Player(B), Some(A)), "PLAYER 2 WINS");
+        assert_eq!(driver_name(bot(7)), "Bot 8");
+        // An id past the roster bound is no bot.
+        assert_eq!(
+            driver_name(PlayerId(crate::cnr_bots::NET_BOT_PLAYER_BASE + 40)),
+            format!("Player {}", crate::cnr_bots::NET_BOT_PLAYER_BASE + 40)
+        );
+    }
+
+    #[test]
     fn a_finished_match_freezes_its_clock_and_announces_the_result() {
         let (mut m, _) = game(
             CnrVariant::FreeForAll,
@@ -596,6 +631,34 @@ mod tests {
         assert_eq!(lines[0], "ROBBERS WIN");
         assert_eq!(lines[3], "1. Player 1 (ROBBERS) - 25 pts");
         assert_eq!(lines[4], "2. You (COPS) - 0 pts - left");
+    }
+
+    #[test]
+    fn the_results_rank_a_hosts_bots_by_name() {
+        let bot = |i: u16| PlayerId(crate::cnr_bots::NET_BOT_PLAYER_BASE + i);
+        let (mut m, _) = game(
+            CnrVariant::CopsVsRobbers,
+            EndRule::Ticks(60 * 90),
+            &[
+                (A, Side::Robbers),
+                (bot(0), Side::Cops),
+                (bot(1), Side::Robbers),
+            ],
+        );
+        let g = m.gold_position().unwrap();
+        m.resolve_pickups(&[mm2_game::gold::Contact {
+            player: bot(1),
+            position: g,
+            round: m.round(),
+        }]);
+        for _ in 0..(60 * 90) {
+            m.tick();
+        }
+        let lines = result_lines(&m.view(), Some(A), 60).expect("decided");
+        assert!(lines.iter().any(|l| l.starts_with("1. Bot 2 (ROBBERS)")));
+        assert!(lines.iter().any(|l| l.contains("Bot 1 (COPS)")));
+        assert!(lines.iter().any(|l| l.contains("You (ROBBERS)")));
+        assert!(!lines.iter().any(|l| l.contains("Player 10")));
     }
 
     #[test]

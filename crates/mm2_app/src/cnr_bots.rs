@@ -38,6 +38,7 @@ use mm2_game::{
 use mm2_vehicle::vehicle_bundle;
 use tracing::{info, warn};
 
+use crate::netdrive::{NetPlayer, ResetEpoch};
 use crate::opponents::{equip_authored_vehicle, reanchor_lift};
 use crate::water::CityWater;
 
@@ -54,7 +55,34 @@ pub struct CnrBot {
 /// counter shares that small range, so a bot's id sits well above any
 /// wire seat ([`mm2_net::MAX_PLAYERS`]) and above anything minted:
 /// `BOT_PLAYER_BASE + index`, stable across the match and a rematch.
-pub const NET_BOT_PLAYER_BASE: u16 = 1000;
+pub const NET_BOT_PLAYER_BASE: u16 = mm2_net::FIRST_RESERVED_PLAYER_ID;
+
+/// The display name of the bot a participant id belongs to ("Bot 1" is
+/// the first bot), or `None` for any id a hosted match does not give a
+/// bot. Every process names a bot from its id alone, so the host, a
+/// client's HUD, the scoreboard and the results screen agree.
+pub fn net_bot_name(id: PlayerId) -> Option<String> {
+    let index = id.0.checked_sub(NET_BOT_PLAYER_BASE)?;
+    (index < u16::from(MAX_CNR_BOTS)).then(|| format!("Bot {}", index + 1))
+}
+
+/// The roster a networked session planned, kept on a client so
+/// [`crate::netdrive::reconcile_remote_players`] can set down a
+/// kinematic copy of each host-owned bot. Planned from the same seed,
+/// street graph, site pool and seat grid as the host's, so both ends
+/// field the same cars; the host's snapshot stream then owns every
+/// pose. Session-scoped: it goes with the session.
+#[derive(Resource)]
+pub struct CnrBotRoster(pub Vec<PlannedBot>);
+
+impl CnrBotRoster {
+    /// The planned bot a participant id names, if it names one.
+    pub fn get(&self, id: u16) -> Option<(u8, &PlannedBot)> {
+        let index = id.checked_sub(NET_BOT_PLAYER_BASE)?;
+        let index = u8::try_from(index).ok()?;
+        self.0.get(usize::from(index)).map(|b| (index, b))
+    }
+}
 
 /// Shortest vehicle lane a bot may stand on, metres: a stub between
 /// junction boxes is no place to park a car.
@@ -391,6 +419,16 @@ pub fn spawn_bots(
                 Visibility::Visible,
             ))
             .id();
+        if networked {
+            // A host's bot publishes on the snapshot stream like a wire
+            // seat, so every client's copy of it is posed by the same
+            // path as another human's car. It takes no input, so the
+            // input-driven systems (which also need `RemotePick`) leave
+            // it alone.
+            commands
+                .entity(vehicle)
+                .insert((NetPlayer(player_id.0), ResetEpoch(0)));
+        }
         equip_authored_vehicle(
             commands, vfs, meshes, images, materials, vehicle, &def, object, pos, slot.yaw,
         );

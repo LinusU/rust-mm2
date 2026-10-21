@@ -1236,6 +1236,13 @@ pub fn drive_lobby_text(
         lobby.advertised.as_ref().map(|ad| ad.summary.as_str()),
         lobby.notice.as_deref(),
     )
+    .with_bots(
+        lobby
+            .advertised
+            .as_ref()
+            .and_then(|ad| accept(ad).ok())
+            .map_or(0, |c| c.cnr_bots),
+    )
     .render();
 }
 
@@ -2517,6 +2524,7 @@ pub fn drive_host_text(
         link.summary(),
         lobby.notice.as_deref(),
     )
+    .with_bots(link.config().cnr_bots)
     .render();
 }
 

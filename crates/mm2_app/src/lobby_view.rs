@@ -37,6 +37,9 @@ pub struct LobbySeat {
     pub ready: Option<bool>,
     pub is_host: bool,
     pub is_you: bool,
+    /// A host-owned Cops & Robbers bot: it needs no readiness and its
+    /// car is drawn when the session starts.
+    pub is_bot: bool,
 }
 
 /// Everything the lobby screen shows.
@@ -78,6 +81,7 @@ impl LobbyView {
             ready: None,
             is_host: true,
             is_you: false,
+            is_bot: false,
         }];
         seats.extend(roster.iter().map(|e| LobbySeat {
             name: e.driver.clone(),
@@ -85,6 +89,7 @@ impl LobbyView {
             ready: Some(e.ready),
             is_host: false,
             is_you: e.player_id == our_id,
+            is_bot: false,
         }));
         Self {
             role: LobbyRole::Client,
@@ -113,6 +118,7 @@ impl LobbyView {
             ready: None,
             is_host: true,
             is_you: true,
+            is_bot: false,
         }];
         seats.extend(roster.iter().map(|e| LobbySeat {
             name: e.driver.clone(),
@@ -120,6 +126,7 @@ impl LobbyView {
             ready: Some(e.ready),
             is_host: false,
             is_you: false,
+            is_bot: false,
         }));
         Self {
             role: LobbyRole::Host,
@@ -128,6 +135,26 @@ impl LobbyView {
             seats,
             notice: notice.map(str::to_string),
         }
+    }
+
+    /// Add the host's Cops & Robbers bots to the roster: after every
+    /// human, named as the match names them ("Bot 1"…). Their cars are
+    /// drawn at session start, so the roster shows none yet.
+    pub fn with_bots(mut self, bots: u8) -> Self {
+        self.seats.extend((0..u16::from(bots)).map(|i| {
+            LobbySeat {
+                name: crate::cnr_bots::net_bot_name(mm2_game::PlayerId(
+                    crate::cnr_bots::NET_BOT_PLAYER_BASE + i,
+                ))
+                .unwrap_or_else(|| format!("Bot {}", i + 1)),
+                car: "chosen at start".to_string(),
+                ready: None,
+                is_host: false,
+                is_you: false,
+                is_bot: true,
+            }
+        }));
+        self
     }
 
     /// Names the start is waiting on: remote seats not yet ready.
@@ -173,6 +200,7 @@ impl LobbyView {
         for s in &self.seats {
             let status = match (s.is_host, s.ready) {
                 (true, _) => "host",
+                (false, _) if s.is_bot => "bot",
                 (false, Some(true)) => "READY",
                 (false, _) => "not ready",
             };
@@ -186,7 +214,7 @@ impl LobbyView {
         let waiting = self.waiting_on();
         out.push('\n');
         match self.role {
-            LobbyRole::Host if self.seats.len() == 1 => {
+            LobbyRole::Host if self.seats.iter().all(|s| s.is_host || s.is_bot) => {
                 out.push_str("waiting for players to join\n");
             }
             LobbyRole::Host if waiting.is_empty() => out.push_str("everyone is ready\n"),
@@ -290,6 +318,24 @@ mod tests {
         assert_eq!(view.seats.iter().filter(|s| s.is_you).count(), 1);
         assert_eq!(view.waiting_on(), vec!["bob"]);
         assert!(text.lines().any(|l| l.starts_with(" > bob")), "{text}");
+    }
+
+    #[test]
+    fn the_hosts_bots_are_named_seats_the_start_never_waits_on() {
+        let host_pick = VehiclePick {
+            vehicle: "vpbug".into(),
+            paint: 0,
+        };
+        let alone = LobbyView::host(peer(), "hal", &host_pick, &[], "sf, cops", None).with_bots(2);
+        let text = alone.render();
+        assert!(text.contains("Bot 1") && text.contains("Bot 2"), "{text}");
+        assert!(text.contains("waiting for players to join"), "{text}");
+        assert!(alone.waiting_on().is_empty());
+        let roster = [entry(1, "alice", false, "vpbug", 0)];
+        let view = LobbyView::client(peer(), 1, &roster, None, None).with_bots(1);
+        assert_eq!(view.waiting_on(), vec!["alice"], "a bot is never waited on");
+        assert_eq!(view.seats.last().map(|s| s.name.as_str()), Some("Bot 1"));
+        assert_eq!(view.seats.iter().filter(|s| s.is_bot).count(), 1);
     }
 
     #[test]
