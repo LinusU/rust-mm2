@@ -33,7 +33,9 @@
 //! complete encoded `Message`; a [`LaneTag::Probe`] carries none; a
 //! [`LaneTag::Fragment`] carries one piece of a snapshot larger than a
 //! datagram and a [`LaneTag::Ack`] a baseline acknowledgement (NETPLAY-06C,
-//! [`crate::frag`]).
+//! [`crate::frag`]). [`LaneTag::Reliable`] / [`LaneTag::ReliableAck`] carry
+//! the bounded ack/repeat/dedup channel of [`crate::reliable`]
+//! (NETPLAY-06E-1): datagrams that must arrive, in order, exactly once.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -50,6 +52,9 @@ use crate::pace::{
     PEER_BYTES_PER_SEC, Priority,
 };
 use crate::proto::Message;
+use crate::reliable::{
+    ReliableChannel, ReliableStats, SendError, decode_ack as decode_rel_ack, decode_data,
+};
 use crate::{NetError, ProtoError};
 
 /// First four bytes of every lane datagram.
@@ -86,6 +91,48 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// Socket read timeout and queue wait: how often a lane thread notices
 /// its stop flag.
 const POLL: Duration = Duration::from_millis(50);
+
+/// The millisecond clock reliable-message retransmission runs on: wall
+/// time, or — for the lockstep lane tests — a manual one the test
+/// advances, so a retransmission happens when the test says and a seed
+/// replays the same exchange. Switch to manual before the first reliable
+/// send; the two scales are not comparable.
+#[derive(Debug)]
+pub(crate) struct ReliableClock {
+    origin: Instant,
+    manual: AtomicBool,
+    manual_ms: AtomicU64,
+}
+
+impl ReliableClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            manual: AtomicBool::new(false),
+            manual_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        if self.manual.load(Ordering::Relaxed) {
+            self.manual_ms.load(Ordering::Relaxed)
+        } else {
+            u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }
+    }
+
+    pub(crate) fn set_manual(&self) {
+        self.manual.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn advance(&self, by: Duration) {
+        let ms = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+        self.manual_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+}
+
+/// Largest reliable message body: a datagram payload less the id.
+pub const MAX_RELIABLE_BODY: usize = MAX_PAYLOAD - crate::reliable::DATA_HEADER;
 /// TCP messages the client's merged inbox holds before the TCP reader
 /// thread waits (backpressure on the reliable side only).
 const TCP_INBOX_CAP: usize = 1024;
@@ -103,6 +150,12 @@ pub enum LaneTag {
     /// The client's acknowledgement of a state it applied (client to
     /// host); see [`crate::frag`].
     Ack = 4,
+    /// One reliable message, numbered and repeated until acknowledged
+    /// (either direction); see [`crate::reliable`].
+    Reliable = 5,
+    /// Cumulative and selective acknowledgement of [`LaneTag::Reliable`]
+    /// messages (either direction).
+    ReliableAck = 6,
 }
 
 impl LaneTag {
@@ -112,6 +165,8 @@ impl LaneTag {
             2 => Some(Self::Data),
             3 => Some(Self::Fragment),
             4 => Some(Self::Ack),
+            5 => Some(Self::Reliable),
+            6 => Some(Self::ReliableAck),
             _ => None,
         }
     }
@@ -317,6 +372,18 @@ pub struct LaneAck {
     pub epoch: u8,
     /// The server tick of the acknowledged state.
     pub tick: u64,
+}
+
+/// Why [`HostCtl::reliable_send`](crate::HostCtl) /
+/// [`ClientCtl::reliable_send`](crate::ClientCtl) refused a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReliableSendError {
+    /// No lane for that seat (or no lane at all on a TCP-only client).
+    #[error("no datagram lane for the reliable channel")]
+    NoLane,
+    /// The channel refused it: full, too large or dead.
+    #[error("{0}")]
+    Channel(#[from] SendError),
 }
 
 /// A bounded queue's occupancy and history.
@@ -556,6 +623,12 @@ impl SeatOut {
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Queue a reliable-channel payload (data or ack) as a movement
+    /// datagram: control traffic is never starved by the bulk budget.
+    fn push_reliable(&self, tag: LaneTag, generation: u64, payload: Vec<u8>) {
+        self.push_tagged(tag, Priority::Movement, generation, payload);
+    }
+
     pub(crate) fn push_data(&self, generation: u64, payload: Vec<u8>) {
         self.push_tagged(LaneTag::Data, Priority::Movement, generation, payload);
     }
@@ -670,6 +743,7 @@ pub(crate) struct LaneSeat {
     window: SeqWindow,
     out: Arc<SeatOut>,
     ack: Option<LaneAck>,
+    rel: ReliableChannel,
 }
 
 /// Every seat's lane plus the generation datagrams must name. Lives
@@ -755,6 +829,25 @@ fn ingest(
             Err(_) => Verdict::Dropped(Refuse::Malformed),
         },
         LaneTag::Fragment => Verdict::Dropped(Refuse::Unexpected),
+        LaneTag::Reliable => match decode_data(payload) {
+            Some((id, body)) => {
+                let ack = seat.rel.receiver.on_data(id, body);
+                seat.out
+                    .push_reliable(LaneTag::ReliableAck, h.generation, ack);
+                Verdict::Accepted
+            }
+            None => {
+                seat.rel.receiver.note_malformed();
+                Verdict::Dropped(Refuse::Malformed)
+            }
+        },
+        LaneTag::ReliableAck => match decode_rel_ack(payload) {
+            Some((cum, mask)) => {
+                seat.rel.sender.on_ack(cum, mask);
+                Verdict::Accepted
+            }
+            None => Verdict::Dropped(Refuse::Malformed),
+        },
         LaneTag::Ack => match decode_ack(payload) {
             Some((epoch, tick)) => {
                 let newer = seat
@@ -782,6 +875,7 @@ pub(crate) struct HostLane {
     counters: Counters,
     stop: AtomicBool,
     wake: Arc<Wake>,
+    clock: ReliableClock,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -796,6 +890,7 @@ impl HostLane {
             counters: Counters::default(),
             stop: AtomicBool::new(false),
             wake: Arc::new(Wake::default()),
+            clock: ReliableClock::new(),
             threads: Mutex::new(Vec::new()),
         });
         let recv = {
@@ -836,6 +931,7 @@ impl HostLane {
                 window: SeqWindow::default(),
                 out: Arc::new(SeatOut::new(self.wake.clone())),
                 ack: None,
+                rel: ReliableChannel::new(MAX_RELIABLE_BODY),
             },
         );
         token
@@ -881,6 +977,55 @@ impl HostLane {
         self.established_out(id).is_some()
     }
 
+    /// Send `body` to `id` on the reliable channel (NETPLAY-06E-1):
+    /// numbered, repeated until acknowledged, delivered exactly once and
+    /// in order. Nonblocking; allowed before the lane is established (the
+    /// first transmission waits in the seat's queue, repeats start once
+    /// it is).
+    pub(crate) fn send_reliable(
+        &self,
+        id: u16,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), ReliableSendError> {
+        let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let seat = mail
+            .lane
+            .seats
+            .get_mut(&id)
+            .ok_or(ReliableSendError::NoLane)?;
+        let payload = seat
+            .rel
+            .sender
+            .send(self.clock.now_ms(), generation, body)
+            .map_err(ReliableSendError::Channel)?;
+        seat.out
+            .push_reliable(LaneTag::Reliable, generation, payload);
+        Ok(())
+    }
+
+    /// The next reliably delivered message from any seat, with its seat.
+    pub(crate) fn recv_reliable(&self) -> Option<(u16, Vec<u8>)> {
+        let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane
+            .seats
+            .iter_mut()
+            .find_map(|(id, s)| s.rel.receiver.pop().map(|m| (*id, m)))
+    }
+
+    pub(crate) fn reliable_stats(&self, id: u16) -> Option<ReliableStats> {
+        let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane.seats.get(&id).map(|s| s.rel.stats())
+    }
+
+    pub(crate) fn clock(&self) -> &ReliableClock {
+        &self.clock
+    }
+
+    pub(crate) fn poke(&self) {
+        self.wake.notify();
+    }
+
     /// Stop both threads and wait for them.
     pub(crate) fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -924,12 +1069,18 @@ impl HostLane {
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
             let targets: Vec<(u16, SocketAddr, u64, Arc<SeatOut>)> = {
-                let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let now = self.clock.now_ms();
+                let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
                 mail.lane
                     .seats
-                    .iter()
+                    .iter_mut()
                     .filter(|(_, s)| s.established)
-                    .map(|(id, s)| (*id, SocketAddr::new(s.ip, s.port), s.token, s.out.clone()))
+                    .map(|(id, s)| {
+                        for (generation, payload) in s.rel.sender.poll(now) {
+                            s.out.push_reliable(LaneTag::Reliable, generation, payload);
+                        }
+                        (*id, SocketAddr::new(s.ip, s.port), s.token, s.out.clone())
+                    })
                     .collect()
             };
             for (seat, addr, token, out) in targets {
@@ -1100,6 +1251,8 @@ pub(crate) struct ClientLane {
     started: AtomicU64,
     inbox: Arc<Inbox>,
     assembler: Mutex<Assembler>,
+    rel: Mutex<ReliableChannel>,
+    clock: ReliableClock,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -1128,6 +1281,8 @@ impl ClientLane {
             started: AtomicU64::new(0),
             inbox,
             assembler: Mutex::new(Assembler::new()),
+            rel: Mutex::new(ReliableChannel::new(MAX_RELIABLE_BODY)),
+            clock: ReliableClock::new(),
             threads: Mutex::new(Vec::new()),
         });
         let socket = Arc::new(socket);
@@ -1261,6 +1416,38 @@ impl ClientLane {
                 },
                 LaneTag::Fragment => self.on_fragment(&header, payload),
                 LaneTag::Ack => self.counters.drop_for(Refuse::Unexpected),
+                LaneTag::Reliable => match decode_data(payload) {
+                    Some((id, body)) => {
+                        let ack = self
+                            .rel
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .receiver
+                            .on_data(id, body);
+                        self.out
+                            .push_reliable(LaneTag::ReliableAck, header.generation, ack);
+                        Counters::bump(&self.counters.accepted);
+                    }
+                    None => {
+                        self.rel
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .receiver
+                            .note_malformed();
+                        self.counters.drop_for(Refuse::Malformed);
+                    }
+                },
+                LaneTag::ReliableAck => match decode_rel_ack(payload) {
+                    Some((cum, mask)) => {
+                        self.rel
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .sender
+                            .on_ack(cum, mask);
+                        Counters::bump(&self.counters.accepted);
+                    }
+                    None => self.counters.drop_for(Refuse::Malformed),
+                },
             }
         }
     }
@@ -1315,6 +1502,16 @@ impl ClientLane {
     fn send_loop(&self, socket: &UdpSocket) {
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
+            let due = self
+                .rel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sender
+                .poll(self.clock.now_ms());
+            for (generation, payload) in due {
+                self.out
+                    .push_reliable(LaneTag::Reliable, generation, payload);
+            }
             while let Some(item) = self.out.queue.pop() {
                 let header = self.header(item.tag, item.generation);
                 flush(socket, self.host, &header, &item.payload, &self.counters);
@@ -1335,6 +1532,47 @@ impl ClientLane {
         }
         self.out.push_data(generation, payload);
         true
+    }
+
+    /// Send `body` to the host on the reliable channel (NETPLAY-06E-1);
+    /// see [`HostLane::send_reliable`].
+    pub(crate) fn send_reliable(
+        &self,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), ReliableSendError> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(ReliableSendError::NoLane);
+        }
+        let payload = self
+            .rel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sender
+            .send(self.clock.now_ms(), generation, body)?;
+        self.out
+            .push_reliable(LaneTag::Reliable, generation, payload);
+        Ok(())
+    }
+
+    pub(crate) fn recv_reliable(&self) -> Option<Vec<u8>> {
+        self.rel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .receiver
+            .pop()
+    }
+
+    pub(crate) fn reliable_stats(&self) -> ReliableStats {
+        self.rel.lock().unwrap_or_else(|e| e.into_inner()).stats()
+    }
+
+    pub(crate) fn clock(&self) -> &ReliableClock {
+        &self.clock
+    }
+
+    pub(crate) fn poke(&self) {
+        self.wake.notify();
     }
 
     pub(crate) fn note_started(&self, generation: u64) {

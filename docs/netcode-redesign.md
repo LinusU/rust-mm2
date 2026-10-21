@@ -1007,3 +1007,48 @@ predicted/neutral commands until frames are absorbed), and contact-specific
 tests and cost numbers are 05A-5. Evidence level: synthetic integration on
 the production step (twin-world equality for a two-car replay); no retail
 data, no rendered capture.
+
+## Reliable-message channel (NETPLAY-06E-1, #1897)
+
+`mm2_net::reliable` is the transport-independent primitive for the few
+messages that must survive a dropped datagram (Start/Cancel, roster and
+despawn, reset epochs, outcomes — moved onto it by 06E-2/3). It is a pure
+state machine (`ReliableSender`, `ReliableReceiver`, `ReliableChannel`)
+driven by a caller-supplied millisecond clock, carried on two new lane
+tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
+
+- **Wire**: `LaneTag::Reliable` (5) payload `id u64 | body`; `LaneTag::ReliableAck`
+  (6) payload `cum u64 | mask u32` — `cum` is the highest id delivered in
+  order, bit `i` of `mask` marks id `cum + 2 + i` buffered. Ids start at 1.
+  Both ride the movement queue (never starved by the bulk budget) under the
+  lane's normal per-datagram authentication, so they carry the session
+  generation like any `Data` datagram: a reliable message before the host
+  has a running generation is refused as `wrong_generation` and is the
+  caller's (06E-2) problem to sequence.
+- **Order policy**: one channel per direction per seat, **ordered and
+  exactly once**. Lifecycle messages are state machines that must not see
+  Cancel before Start.
+- **Bounds** (designed numbers): at most `RELIABLE_WINDOW` = 32 ids between
+  the oldest unacked message and the next (a span, so selectively acked ids
+  cannot widen it past what the receiver buffers); body at most
+  `MAX_RELIABLE_BODY` (one datagram); 8 transmissions per message, delays
+  100/200/400/800 ms then 800 ms. A refused send is an `Err`
+  (`Full`/`TooLarge`/`Dead`) and counted. When the oldest message runs out
+  of attempts the channel goes **dead** — an ordered channel cannot skip —
+  every unacked message is counted in `given_up`, and later sends return
+  `Dead`. The receiver refuses ids beyond its window and, with 64 delivered
+  messages unpopped, further ones (backpressure); the sender repeats, so
+  nothing is lost silently.
+- **Acks** are sent for every reliable datagram including duplicates, so a
+  lost ack is repaired by the next repeat.
+- **Nonblocking**: `reliable_send` locks only the seat table, pushes to the
+  bounded queue and returns; repeats are emitted by the lane's sender
+  thread. No `Writer`, no socket on the caller.
+- **Untouched**: `LIFECYCLE_RESEND_WINDOW` and its dedup stay as they were;
+  nothing is moved onto the channel yet.
+- **Tests** (`lane_reliable_tests`): the relay drops and duplicates from the
+  first probe, the first reliable datagram is then lost on purpose (both
+  directions), streams of 60 messages survive loss/reorder/duplication and
+  burst loss both ways exactly once in order, three lost acks converge, a
+  black hole gives up bounded (`3 × 8` datagrams, `given_up` 3), window and
+  size refusals are counted. The reliable clock is manual in these tests.

@@ -786,6 +786,40 @@ impl Host {
         self.lane.established_out(id).map(|o| o.pace_stats())
     }
 
+    /// [`HostCtl::reliable_send`], from the `Host` itself.
+    pub fn reliable_send(
+        &self,
+        id: u16,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), crate::ReliableSendError> {
+        self.lane.send_reliable(id, generation, body)
+    }
+
+    /// The next message delivered on any seat's reliable channel, with
+    /// its seat: exactly once, in the sender's order per seat.
+    pub fn reliable_recv(&self) -> Option<(u16, Vec<u8>)> {
+        self.lane.recv_reliable()
+    }
+
+    /// Counters of `id`'s reliable channel (both halves).
+    pub fn reliable_stats(&self, id: u16) -> Option<crate::ReliableStats> {
+        self.lane.reliable_stats(id)
+    }
+
+    /// Run reliable retransmission on a manual clock that only
+    /// [`Host::advance_reliable_clock`] moves (lockstep tests). Call it
+    /// before the first reliable send.
+    pub fn use_manual_reliable_clock(&self) {
+        self.lane.clock().set_manual();
+    }
+
+    /// Advance the manual reliable clock and wake the sender thread.
+    pub fn advance_reliable_clock(&self, by: std::time::Duration) {
+        self.lane.clock().advance(by);
+        self.lane.poke();
+    }
+
     /// [`HostCtl::lane_ack`], from the `Host` itself.
     pub fn lane_ack(&self, id: u16) -> Option<crate::LaneAck> {
         self.lane.latest_ack(id)
@@ -1076,6 +1110,21 @@ impl HostCtl {
     pub fn lane_counts(&self) -> LaneCounts {
         self.lane.counts()
     }
+
+    /// Send `body` to `player_id` on the reliable channel (NETPLAY-06E-1):
+    /// numbered and repeated until acknowledged, delivered exactly once
+    /// and in order, at most [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)
+    /// bytes. Takes no `Writer` lock and touches no socket; a full window,
+    /// an oversize body or a dead channel is an `Err`, counted in
+    /// [`Host::reliable_stats`].
+    pub fn reliable_send(
+        &self,
+        player_id: u16,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), crate::ReliableSendError> {
+        self.lane.send_reliable(player_id, generation, body)
+    }
 }
 
 /// The joining side of a lobby. `join` completes the handshake and the
@@ -1270,6 +1319,48 @@ impl Client {
     /// Fragment reassembly counters, expiry included (NETPLAY-06C).
     pub fn lane_assembly(&self) -> Option<crate::AssemblerStats> {
         self.lane.as_ref().map(|l| l.lane.0.assembly_stats())
+    }
+
+    /// [`ClientCtl::reliable_send`], from the `Client` itself.
+    pub fn reliable_send(
+        &self,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), crate::ReliableSendError> {
+        self.lane
+            .as_ref()
+            .ok_or(crate::ReliableSendError::NoLane)?
+            .lane
+            .0
+            .send_reliable(generation, body)
+    }
+
+    /// The next message the host delivered on the reliable channel:
+    /// exactly once, in order. `None` when nothing is waiting or on a
+    /// TCP-only client.
+    pub fn reliable_recv(&self) -> Option<Vec<u8>> {
+        self.lane.as_ref()?.lane.0.recv_reliable()
+    }
+
+    /// Counters of the reliable channel (both halves); `None` on a
+    /// TCP-only client.
+    pub fn reliable_stats(&self) -> Option<crate::ReliableStats> {
+        self.lane.as_ref().map(|l| l.lane.0.reliable_stats())
+    }
+
+    /// See [`Host::use_manual_reliable_clock`]; a no-op without a lane.
+    pub fn use_manual_reliable_clock(&self) {
+        if let Some(l) = &self.lane {
+            l.lane.0.clock().set_manual();
+        }
+    }
+
+    /// See [`Host::advance_reliable_clock`]; a no-op without a lane.
+    pub fn advance_reliable_clock(&self, by: std::time::Duration) {
+        if let Some(l) = &self.lane {
+            l.lane.0.clock().advance(by);
+            l.lane.0.poke();
+        }
     }
 
     /// [`ClientCtl::lane_ack`] from the `Client` itself.
@@ -1515,6 +1606,21 @@ impl ClientCtl {
     /// The lane's counters; `None` on a TCP-only client.
     pub fn lane_counts(&self) -> Option<LaneCounts> {
         self.lane.as_ref().map(|l| l.counts())
+    }
+
+    /// Send `body` to the host on the reliable channel (NETPLAY-06E-1):
+    /// numbered and repeated until acknowledged, delivered exactly once
+    /// and in order. Takes no `Writer` lock and touches no socket.
+    /// `Err(NoLane)` on a TCP-only client.
+    pub fn reliable_send(
+        &self,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<(), crate::ReliableSendError> {
+        self.lane
+            .as_ref()
+            .ok_or(crate::ReliableSendError::NoLane)?
+            .send_reliable(generation, body)
     }
 
     /// Acknowledge the state at (`epoch`, `tick`) of `generation` to the

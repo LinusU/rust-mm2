@@ -110,8 +110,11 @@ use crate::cmdbuf::Source;
 /// their canonical authoritative ticks (NETPLAY-05A-1, see
 /// `docs/netcode-redesign.md`), so a client can predict another human's
 /// car from what the host actually applied; a v33 peer would never
-/// receive them and would have nothing but pose snapshots to go on.
-pub const PROTOCOL_VERSION: u16 = 34;
+/// receive them and would have nothing but pose snapshots to go on. v35:
+/// the lane's reliable channel (NETPLAY-06E-1, see [`crate::reliable`]) —
+/// lane datagram tags 5 and 6; a v34 peer would count them malformed and
+/// never acknowledge, so a reliable sender would give up on it.
+pub const PROTOCOL_VERSION: u16 = 35;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -3337,15 +3340,15 @@ mod tests {
     }
 
     #[test]
-    fn v34_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 34);
-        for protocol in [33, 35] {
+    fn v35_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 35);
+        for protocol in [34, 36] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("34"), "{why}");
+            assert!(why.contains("35"), "{why}");
         }
     }
 

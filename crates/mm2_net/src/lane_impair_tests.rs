@@ -27,29 +27,40 @@ use crate::{
 };
 
 /// Virtual time each lockstep step advances (one 60 Hz tick).
-const STEP: Duration = Duration::from_millis(16);
+pub(crate) const STEP: Duration = Duration::from_millis(16);
 /// Real time between ticks, keeping the command rate under the host's
 /// wall-clock flood bound (`COMMAND_RATE_HZ`).
-const TICK_PACE: Duration = Duration::from_millis(3);
+pub(crate) const TICK_PACE: Duration = Duration::from_millis(3);
 /// Commands the host holds back before consuming a slot, so a window in
 /// flight can land before its slot is due.
 const LEAD: u64 = 4;
 
 /// A host, one routed lane client, and the relay between them.
-struct Rig {
-    host: Host,
-    client: Client,
-    proxy: UdpImpairProxy,
+pub(crate) struct Rig {
+    pub(crate) host: Host,
+    pub(crate) client: Client,
+    pub(crate) proxy: UdpImpairProxy,
     inputs: RemoteInputs,
-    id: u16,
-    generation: u64,
+    pub(crate) id: u16,
+    pub(crate) generation: u64,
 }
 
 impl Rig {
     fn new(seed: u64) -> Self {
+        Self::new_with(seed, None)
+    }
+
+    /// A rig whose relay already applies `recipe` (both directions) when
+    /// the client first dials: impairment is active from connection
+    /// start, so the lane's own probes and echoes cross it too.
+    pub(crate) fn new_with(seed: u64, recipe: Option<UdpImpair>) -> Self {
         let host = host();
         let target = SocketAddr::new(host.addr().ip(), host.lane_port());
         let proxy = UdpImpairProxy::loopback_manual(target, seed).unwrap();
+        if let Some(recipe) = recipe {
+            proxy.set(LinkDir::Up, recipe);
+            proxy.set(LinkDir::Down, recipe);
+        }
         let mut client =
             Client::join_lane_routed(host.addr(), &hello_for("alice"), WAIT, Some(proxy.route()))
                 .unwrap();
@@ -71,7 +82,7 @@ impl Rig {
         rig
     }
 
-    fn set_both(&self, recipe: UdpImpair) {
+    pub(crate) fn set_both(&self, recipe: UdpImpair) {
         self.proxy.set(LinkDir::Up, recipe);
         self.proxy.set(LinkDir::Down, recipe);
     }
@@ -117,7 +128,7 @@ impl Rig {
     /// The lockstep barrier: the proxy has read everything either side
     /// sent, virtual time moves by `by`, and both sides have received
     /// everything the proxy released.
-    fn settle(&self, by: Duration) {
+    pub(crate) fn settle(&self, by: Duration) {
         eventually("the proxy to read what was sent", || {
             self.proxy.stats(LinkDir::Up).link.frames_in == self.client.lane_counts().unwrap().sent
                 && self.proxy.stats(LinkDir::Down).link.frames_in == self.host.lane_counts().sent

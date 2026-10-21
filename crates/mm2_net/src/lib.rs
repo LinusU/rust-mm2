@@ -45,6 +45,10 @@
 //!   generation, replay window) and handed to the game through bounded
 //!   nonblocking drop-oldest queues.
 //!
+//! - [`reliable`] — the bounded ack/repeat/dedup message channel that
+//!   rides the lane (NETPLAY-06E-1): ordered, exactly-once delivery of
+//!   the few messages that must survive a dropped datagram.
+//!
 //! Scope deliberately ends at transport: the session advertisement is
 //! an opaque blob (the `mm2_app` bridge owns the `SessionConfig`
 //! mapping) and what `Input`/`Snap` payloads *mean* — vehicle state,
@@ -62,12 +66,15 @@ mod lobby;
 mod netcmd;
 mod pace;
 mod proto;
+mod reliable;
 mod rt;
 
 #[cfg(test)]
 mod lane_impair_tests;
 #[cfg(test)]
 mod lane_pace_tests;
+#[cfg(test)]
+mod lane_reliable_tests;
 #[cfg(test)]
 mod lane_tests;
 
@@ -109,10 +116,15 @@ pub use proto::{
     SnapCnrSeat, SnapEntry, SnapImpact, SnapLeaf, SnapProp, SnapRace, SnapSignal, SnapTrailer,
     TickCommand, VehiclePick,
 };
+pub use reliable::{
+    ACK_LEN, DATA_HEADER, DELIVERED_CAP, MAX_ATTEMPTS, RETRY_BASE_MS, RETRY_CAP_MS, ReceiverStats,
+    ReliableChannel, ReliableReceiver, ReliableSender, ReliableStats, SendError, SenderStats,
+    WINDOW as RELIABLE_WINDOW,
+};
 pub use rt::{
     HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
-    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, PaceStats, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow,
-    decode_datagram, encode_datagram,
+    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, MAX_RELIABLE_BODY, PaceStats, QUEUE_CAP, QueueStats,
+    ReliableSendError, SEQ_WINDOW, SeqWindow, decode_datagram, encode_datagram,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire
