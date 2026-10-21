@@ -895,3 +895,74 @@ body is driven neutral. The body is not corrected towards the host:
 `reconcile_own` restoring and replaying both cars is 05A-4. Evidence level:
 synthetic integration (unit tests on `spawn_remote` with a dev car and the
 lerp system); no retail data, no rendered capture.
+=======
+## Send cadence, budgets and priorities (NETPLAY-06D, #1870)
+
+Code: `mm2_net::pace` (pure, clock-injected: `Cadence`, `Budget`,
+`Priority`), applied per seat in `mm2_net::rt` (`SeatOut`) and at the
+source in `mm2_app::netdrive::publish_snapshots`. Evidence level reached:
+**code checks and synthetic integration** over loopback. No WAN, retail or
+rendered level. All numbers are *designed*, not recovered from the retail
+game; the congestion policy that adapts them to a link is NETPLAY-10 (#1771).
+
+### Rules
+
+- **Cadence.** While `Playing`, `publish_snapshots` sends once per
+  `60 / SNAPSHOT_HZ` fixed ticks (`SNAPSHOT_HZ` = 30, resource
+  `SnapshotRate`, clamped 1..=120), counted in session ticks, so the render
+  `Update` rate neither multiplies nor starves the stream and `FIXED_HZ` is
+  untouched. Never deferred: a frame with fresh impact events, a frame
+  whose seat set or reset epoch changed (a reset teleport leaves at once),
+  and — so a stalled clock cannot silence the stream — a frame whose tick
+  has not moved but whose wall interval has elapsed. Ready, Countdown and
+  Results keep their per-update send (the Results repeats rely on it).
+  `NetDriveReport::snaps_skipped` counts deferred updates.
+- **Priority.** Each seat's lane has two bounded queues. `Movement`
+  (`Data`, `Ack`, and snapshots sent by `broadcast`/`send_to`/
+  `send_snap_groups`) always drains first and is never held by the budget.
+  `Bulk` (groups marked so via `HostCtl::send_snap_groups_prio`) is sent
+  only while the seat's byte budget has credit.
+- **Bounds.** Movement queue 32 datagrams, max age 100 ms; bulk queue 32,
+  max age 250 ms. An entry older than its age is discarded unsent and
+  counted (`QueueStats::expired`); a full queue drops its oldest
+  (`dropped`). `Host::lane_pace(seat)` reports both queues, datagrams and
+  bytes sent, bulk deferrals and the deepest budget overdraw.
+- **Budget.** Token bucket, 128 KiB/s sustained (1 Mbit/s), 16 KiB burst.
+  Movement may overdraw it down to -32 KiB so bulk, not movement, pays for
+  congestion.
+
+### Measured (`cargo test -p mm2_net pace -- --nocapture`)
+
+Bulk flood: a producer sends, at 60 Hz for ~2.4 s, a ~4.3 kB bulk group
+(4 fragments, ~258 kB/s offered against the 128 KiB/s budget) next to a
+movement group each tick.
+
+- Movement delivered **120 / 120** ticks, in order; movement queue never
+  dropped or expired anything, `max_wait` ~20-40 µs.
+- Bulk: 480 fragments queued, 144 dropped by the 32-entry bound, 336 sent;
+  112 head-of-queue deferrals for budget; only 22 / 120 bulk groups arrived
+  whole. Bulk `max_wait` 242 ms, under its 250 ms age bound; the queue
+  ends empty.
+- Bandwidth: 349-353 kB sent in the run against a ceiling of
+  `rate * duration + burst + movement overdraw` (about 386 kB); the test
+  asserts that ceiling.
+- A 40-tick burst of bulk into a stalled budget leaves at most 32 queued
+  and drains or expires within the age bound.
+
+App level (`playing_snapshots_leave_at_the_snapshot_rate_not_the_update_rate`):
+a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
+
+### Not done / open
+
+- The app still sends one `Snap` per tick through `broadcast`: it does not
+  yet split owner/world into groups or mark world catch-up (props, signals,
+  ambient cars) `Bulk`, nor engage `BaselineSender` per seat. The mechanism
+  and its bounds are in place and tested; choosing the grouping belongs with
+  the correction path (NETPLAY-04) and congestion work (NETPLAY-10).
+- The world catch-up messages (`Cars`, props, signals) still go over TCP,
+  separate from the lane, so a delayed reliable update cannot queue behind
+  movement on the lane; their own budget is not applied.
+- The tick-driven cadence path is unit-tested (`Cadence`) and exercised
+  live only through the stalled-clock keepalive; a render-rate-vs-fixed-rate
+  headless run is open.
+>>>>>>> b91caae (Publish Playing snapshots at a configurable tick-derived rate and record the NETPLAY-06D budgets)

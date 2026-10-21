@@ -3213,7 +3213,17 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
         assert!(!q.single(app.world()).unwrap().auto_reverse);
     }
 
-    // The host publishes — the peer sees its own seat's snapshot.
+    // The host publishes — the peer sees its own seat's snapshot. The
+    // snapshot rate (NETPLAY-06D) paces publishing by simulation ticks,
+    // or wall time while the clock is stalled as here, so let one more
+    // leave rather than relying on an earlier one still being unread.
+    let published = app
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .snaps_sent;
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::NetDriveReport>().snaps_sent > published
+    });
     let snap = until_wire(
         &mut peer,
         |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1)),
@@ -13732,4 +13742,61 @@ fn the_snapshot_ack_names_the_command_the_last_step_consumed() {
         .unwrap();
     spin(&mut app, |_| inputs.seat_stats(1).unwrap().old >= 2);
     assert_eq!(inputs.command_ack(1), 4);
+}
+
+/// NETPLAY-06D: the host's `Playing` snapshots leave at the configured
+/// rate, not once per render `Update`. The session clock is stalled in
+/// this harness, so the stalled-clock keepalive paces the stream by wall
+/// time; the tick-driven path is covered by `Cadence`'s unit tests.
+///
+/// Evidence level: synthetic integration.
+#[test]
+fn playing_snapshots_leave_at_the_snapshot_rate_not_the_update_rate() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let _peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    app.update();
+    let report = |app: &App| {
+        let r = app.world().resource::<netdrive::NetDriveReport>();
+        (r.snaps_sent, r.snaps_skipped)
+    };
+    let (sent0, skipped0) = report(&app);
+    let started = Instant::now();
+    let mut updates = 0u64;
+    while started.elapsed() < Duration::from_millis(600) {
+        app.update();
+        updates += 1;
+        thread::sleep(Duration::from_millis(1));
+    }
+    let secs = started.elapsed().as_secs_f64();
+    let (sent1, skipped1) = report(&app);
+    let sent = sent1 - sent0;
+    let ceiling = (secs * f64::from(mm2_net::SNAPSHOT_HZ)).ceil() as u64 + 2;
+    assert!(
+        updates > ceiling * 2,
+        "the loop must out-run the rate: {updates} updates"
+    );
+    assert!(
+        sent <= ceiling,
+        "{sent} snapshots in {secs:.2}s > {ceiling}"
+    );
+    assert!(sent >= ceiling / 3, "the stream must keep flowing: {sent}");
+    assert!(skipped1 - skipped0 > 0, "the cadence skipped nothing");
 }

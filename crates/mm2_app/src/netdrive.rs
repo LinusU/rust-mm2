@@ -143,9 +143,9 @@ use mm2_game::{
     VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
-    DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry, SnapImpact, SnapProp,
-    SnapRace, SnapTrailer, Source as CommandSource, TickCommand, VehiclePick,
+    Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE,
+    SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry,
+    SnapImpact, SnapProp, SnapRace, SnapTrailer, Source as CommandSource, TickCommand, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, HumanDriver, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -1098,6 +1098,8 @@ pub struct NetDriveReport {
     pub inputs_limited: u64,
     /// `Snap` frames the host broadcast.
     pub snaps_sent: u64,
+    /// Updates whose snapshot the cadence deferred (NETPLAY-06D).
+    pub snaps_skipped: u64,
     /// Snapshot frames the client applied to its remote copies.
     pub snaps_applied: u64,
     /// Pose frames the client dropped stale at [`RemoteSnaps::push`] —
@@ -2977,11 +2979,15 @@ pub fn publish_snapshots(
     // The v14 progress tail's source: a seat's `ObjectId` → its
     // participant `RaceProgress`, when the race tracks it.
     progresses: Query<(&ObjectIdentity, &RaceProgress), With<Player>>,
+    // NETPLAY-06D: the snapshot rate, and the tick of the last `Playing`
+    // snapshot it is measured from.
+    clocks: CadenceClocks,
+    mut pace: Local<PublishPace>,
 ) {
     // The reader drains every run — including gated-out phases — so a
     // pre-`Start` or post-session stream never replays stale hits into
     // the next publish.
-    let drained: Vec<&ImpactEvent> = impacts.read().collect();
+    let drained: Vec<ImpactEvent> = impacts.read().copied().collect();
     let key = (session.wire_generation(), session.tick());
     // `Results` owes the wire exactly one more frame (F25-B): the fixed
     // step that resolves the last owed wire seat mints the terminal
@@ -3006,6 +3012,38 @@ pub fn publish_snapshots(
     ) && !owed
     {
         return;
+    }
+    // Cadence (NETPLAY-06D): while `Playing` a snapshot leaves once per
+    // `1 / rate` of *simulation* time, counted in fixed ticks, so the
+    // render `Update` rate neither multiplies nor starves the stream.
+    // Three things are never deferred: a frame carrying fresh impact events
+    // (they are one-shot rows), a frame whose seat set or reset epoch changed, and — so a stalled simulation clock cannot
+    // silence the stream — a frame whose tick has not moved but whose
+    // wall-clock interval has elapsed. Ready/Countdown/Results keep their
+    // per-update send (the `Results` repeats rely on it and the clock does
+    // not advance there).
+    let wall = clocks.real.as_ref().map_or(Duration::ZERO, |t| t.elapsed());
+    let mut seats: Vec<(u16, u8)> = players
+        .iter()
+        .map(|(_, wire, epoch, ..)| (wire.0, epoch.0))
+        .collect();
+    seats.sort_unstable();
+    let roster_changed = pace.seats.as_ref() != Some(&seats);
+    if *session.phase() == SessionPhase::Playing && drained.is_empty() && !roster_changed {
+        let tick_hz = clocks
+            .fixed
+            .as_ref()
+            .map_or(60, |t| (1.0 / t.timestep().as_secs_f64()).round() as u32);
+        let cadence = clocks.rate.as_ref().map_or_else(Cadence::default, |r| r.0);
+        let tick_due = cadence.due(session.tick(), pace.last.map(|l| l.0), tick_hz);
+        let stalled_due = pace.last.is_some_and(|(t, w)| {
+            t == session.tick()
+                && wall.saturating_sub(w).as_secs_f64() >= 1.0 / f64::from(cadence.hz())
+        });
+        if !tick_due && !stalled_due {
+            report.snaps_skipped += 1;
+            return;
+        }
     }
     // A seat row is only progress-honest while the session actually
     // has a live race — a raceless or stale `RaceState` leaves every
@@ -3137,6 +3175,7 @@ pub fn publish_snapshots(
     // `generation` field below is the wire namespace.
     let generation = session.generation();
     let wire_generation = session.wire_generation();
+    let (oid_wires, struck_audio) = (&oid_wires, &struck_audio);
     let mut impact_rows: Vec<SnapImpact> = drained
         .into_iter()
         .filter(|e| e.generation == generation)
@@ -3150,7 +3189,7 @@ pub fn publish_snapshots(
                 (e.participants.1, e.participants.0, e.normal),
             ]
             .into_iter()
-            .filter_map(|(who, other, normal)| {
+            .filter_map(move |(who, other, normal)| {
                 let &seat = oid_wires.get(&who)?;
                 let sane = e.point.is_finite() && normal.is_finite() && e.severity.is_finite();
                 sane.then_some(SnapImpact {
@@ -3224,10 +3263,36 @@ pub fn publish_snapshots(
             .filter(|&(last, _)| last == key)
             .map_or(0, |(_, sent)| sent);
         *published = Some((key, sent + 1));
+        if *session.phase() == SessionPhase::Playing {
+            pace.last = Some((session.tick(), wall));
+            pace.seats = Some(seats);
+        }
         report.snaps_sent += 1;
         report.impacts_sent += sent_rows;
         report.surfaces_sent += sent_surfaces;
     }
+}
+
+/// The snapshot rate the host publishes `Playing` snapshots at
+/// (NETPLAY-06D); absent, [`mm2_net::SNAPSHOT_HZ`].
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct SnapshotRate(pub Cadence);
+
+/// The clocks and rate [`publish_snapshots`]' cadence reads.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct CadenceClocks<'w> {
+    rate: Option<Res<'w, SnapshotRate>>,
+    fixed: Option<Res<'w, Time<Fixed>>>,
+    real: Option<Res<'w, Time<Real>>>,
+}
+
+/// What the last `Playing` snapshot looked like, for the cadence.
+#[derive(Default)]
+pub struct PublishPace {
+    /// Its session tick and the wall-clock time it left.
+    last: Option<(u64, Duration)>,
+    /// Its sorted seat set with each seat's reset epoch.
+    seats: Option<Vec<(u16, u8)>>,
 }
 
 /// The snapshot application's query row — factored out of the system
