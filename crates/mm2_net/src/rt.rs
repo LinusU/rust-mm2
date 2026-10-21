@@ -30,7 +30,10 @@
 //! datagram at most [`MAX_DATAGRAM`] bytes:
 //! `magic[4] "MM2R" | version u8 | tag u8 | generation u64 | seat u16 |
 //! token u64 | seq u64`. The payload of a [`LaneTag::Data`] datagram is a
-//! complete encoded `Message`; a [`LaneTag::Probe`] carries none.
+//! complete encoded `Message`; a [`LaneTag::Probe`] carries none; a
+//! [`LaneTag::Fragment`] carries one piece of a snapshot larger than a
+//! datagram and a [`LaneTag::Ack`] a baseline acknowledgement (NETPLAY-06C,
+//! [`crate::frag`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -40,6 +43,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::frag::{Assembler, AssemblerStats, decode_ack, encode_ack};
 use crate::lobby::{PeerMail, RemoteInputs};
 use crate::proto::Message;
 use crate::{NetError, ProtoError};
@@ -89,6 +93,12 @@ pub enum LaneTag {
     Probe = 1,
     /// An encoded `Message`.
     Data = 2,
+    /// One fragment of a snapshot too large for a datagram (host to
+    /// client); see [`crate::frag`].
+    Fragment = 3,
+    /// The client's acknowledgement of a state it applied (client to
+    /// host); see [`crate::frag`].
+    Ack = 4,
 }
 
 impl LaneTag {
@@ -96,6 +106,8 @@ impl LaneTag {
         match v {
             1 => Some(Self::Probe),
             2 => Some(Self::Data),
+            3 => Some(Self::Fragment),
+            4 => Some(Self::Ack),
             _ => None,
         }
     }
@@ -291,6 +303,18 @@ pub(crate) enum Refuse {
     Unexpected,
 }
 
+/// The newest acknowledgement a seat's client sent: it applied the state
+/// at (`epoch`, `tick`) of `generation` (NETPLAY-06C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneAck {
+    /// The session generation.
+    pub generation: u64,
+    /// The reset epoch the state belongs to.
+    pub epoch: u8,
+    /// The server tick of the acknowledged state.
+    pub tick: u64,
+}
+
 /// A bounded queue's occupancy and history.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueStats {
@@ -459,11 +483,22 @@ impl SeatOut {
     }
 
     pub(crate) fn push_data(&self, generation: u64, payload: Vec<u8>) {
+        self.push_tagged(LaneTag::Data, generation, payload);
+    }
+
+    fn push_tagged(&self, tag: LaneTag, generation: u64, payload: Vec<u8>) {
         self.queue.push(OutItem {
-            tag: LaneTag::Data,
+            tag,
             generation,
             payload,
         });
+    }
+
+    /// Queue fragment payloads (from [`frag::split`]) in order.
+    pub(crate) fn push_fragments(&self, generation: u64, fragments: Vec<Vec<u8>>) {
+        for f in fragments {
+            self.push_tagged(LaneTag::Fragment, generation, f);
+        }
     }
 
     pub(crate) fn stats(&self) -> QueueStats {
@@ -496,6 +531,7 @@ pub(crate) struct LaneSeat {
     established: bool,
     window: SeqWindow,
     out: Arc<SeatOut>,
+    ack: Option<LaneAck>,
 }
 
 /// Every seat's lane plus the generation datagrams must name. Lives
@@ -547,7 +583,7 @@ fn ingest(
     if from.ip().to_canonical() != seat.ip || from.port() != seat.port {
         return Verdict::Dropped(Refuse::WrongAddr);
     }
-    if h.tag == LaneTag::Data && (generation == 0 || h.generation != generation) {
+    if h.tag != LaneTag::Probe && (generation == 0 || h.generation != generation) {
         return Verdict::Dropped(Refuse::WrongGeneration);
     }
     if !seat.window.accept(h.seq) {
@@ -579,6 +615,23 @@ fn ingest(
             }
             Ok(_) => Verdict::Dropped(Refuse::Unexpected),
             Err(_) => Verdict::Dropped(Refuse::Malformed),
+        },
+        LaneTag::Fragment => Verdict::Dropped(Refuse::Unexpected),
+        LaneTag::Ack => match decode_ack(payload) {
+            Some((epoch, tick)) => {
+                let newer = seat
+                    .ack
+                    .is_none_or(|a| a.generation != h.generation || a.tick < tick);
+                if newer {
+                    seat.ack = Some(LaneAck {
+                        generation: h.generation,
+                        epoch,
+                        tick,
+                    });
+                }
+                Verdict::Accepted
+            }
+            None => Verdict::Dropped(Refuse::Malformed),
         },
     }
 }
@@ -630,10 +683,6 @@ impl HostLane {
         self.counters.snapshot()
     }
 
-    pub(crate) fn counters(&self) -> &Counters {
-        &self.counters
-    }
-
     /// Open (or replace) `id`'s lane for a peer at `ip`, expecting
     /// datagrams from `port`; returns the token to grant.
     pub(crate) fn register(&self, id: u16, ip: IpAddr, port: u16) -> u64 {
@@ -648,6 +697,7 @@ impl HostLane {
                 established: false,
                 window: SeqWindow::default(),
                 out: Arc::new(SeatOut::new(self.wake.clone())),
+                ack: None,
             },
         );
         token
@@ -681,6 +731,12 @@ impl HostLane {
             .get(&id)
             .filter(|s| s.established)
             .map(|s| s.out.clone())
+    }
+
+    /// The newest acknowledgement `id`'s client sent.
+    pub(crate) fn latest_ack(&self, id: u16) -> Option<LaneAck> {
+        let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane.seats.get(&id).and_then(|s| s.ack)
     }
 
     pub(crate) fn is_established(&self, id: u16) -> bool {
@@ -905,6 +961,7 @@ pub(crate) struct ClientLane {
     /// datagram naming an older one is stale.
     started: AtomicU64,
     inbox: Arc<Inbox>,
+    assembler: Mutex<Assembler>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -932,6 +989,7 @@ impl ClientLane {
             stop: AtomicBool::new(false),
             started: AtomicU64::new(0),
             inbox,
+            assembler: Mutex::new(Assembler::new()),
             threads: Mutex::new(Vec::new()),
         });
         let socket = Arc::new(socket);
@@ -1013,7 +1071,7 @@ impl ClientLane {
         if h.token != self.token {
             return Err(Refuse::BadToken);
         }
-        if h.tag == LaneTag::Data
+        if h.tag != LaneTag::Probe
             && (h.generation == 0 || h.generation < self.started.load(Ordering::Relaxed))
         {
             return Err(Refuse::WrongGeneration);
@@ -1029,7 +1087,13 @@ impl ClientLane {
         while !self.stop.load(Ordering::Relaxed) {
             let (n, from) = match socket.recv_from(&mut buf) {
                 Ok(r) => r,
-                Err(e) if is_timeout(&e) => continue,
+                Err(e) if is_timeout(&e) => {
+                    self.assembler
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .expire(Instant::now());
+                    continue;
+                }
                 Err(_) => {
                     thread::sleep(POLL);
                     continue;
@@ -1057,8 +1121,53 @@ impl ClientLane {
                     Ok(_) => self.counters.drop_for(Refuse::Unexpected),
                     Err(_) => self.counters.drop_for(Refuse::Malformed),
                 },
+                LaneTag::Fragment => self.on_fragment(&header, payload),
+                LaneTag::Ack => self.counters.drop_for(Refuse::Unexpected),
             }
         }
+    }
+
+    /// One fragment: reassemble, and hand each completed group to the
+    /// game as its own `Snap` the moment it is whole.
+    fn on_fragment(&self, header: &Header, payload: &[u8]) {
+        let done = self
+            .assembler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accept(payload, Instant::now());
+        match done {
+            Ok(None) => Counters::bump(&self.counters.accepted),
+            Ok(Some(group)) => match Message::decode(&group.data) {
+                Ok(msg @ Message::Snap { generation, .. }) if generation == header.generation => {
+                    Counters::bump(&self.counters.accepted);
+                    self.inbox.push_lane(msg);
+                }
+                Ok(Message::Snap { .. }) => self.counters.drop_for(Refuse::WrongGeneration),
+                Ok(_) => self.counters.drop_for(Refuse::Unexpected),
+                Err(_) => self.counters.drop_for(Refuse::Malformed),
+            },
+            Err(_) => self.counters.drop_for(Refuse::Malformed),
+        }
+    }
+
+    /// Fragment reassembly counters, including expiry.
+    pub(crate) fn assembly_stats(&self) -> AssemblerStats {
+        self.assembler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats()
+    }
+
+    /// Acknowledge the state at (`epoch`, `tick`) of `generation` to the
+    /// host. Unreliable like everything on the lane: the caller repeats
+    /// it with each newer tick.
+    pub(crate) fn send_ack(&self, generation: u64, epoch: u8, tick: u64) -> bool {
+        if self.stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.out
+            .push_tagged(LaneTag::Ack, generation, encode_ack(epoch, tick));
+        true
     }
 
     fn send_loop(&self, socket: &UdpSocket) {

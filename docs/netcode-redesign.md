@@ -666,3 +666,95 @@ budget spread over frames (a deep replay runs in one frame, bounded by
 `MAX_REPLAY_STEPS`); presentation smoothing of the replay shift (NETPLAY-07);
 contact (NETPLAY-05); gameplay-reaction dedup (NETPLAY-08); wire carry of
 the full vehicle continuation state; retail-city cost.
+
+## Snapshot fragmentation and ACKed baselines (NETPLAY-06C, #1869)
+
+Code: `mm2_net::frag` (pure, clock-injected) wired into the datagram lane in
+`rt.rs`/`lobby.rs`. Evidence level reached: **code checks and synthetic
+integration** (unit tests, loopback lane tests, a seeded loss simulation).
+No WAN, retail-data or rendered level.
+
+### What exists
+
+- **Fragments** (`LaneTag::Fragment`): `tick u64 | group u8 | groups u8 |
+  index u8 | count u8` (12 B) then data, so a fragment carries
+  `MAX_PAYLOAD - 12 = 1156` data bytes inside the 1200 B datagram budget
+  (32 B lane header included). Bounds: 8 groups per tick, 8 fragments per
+  group, 4 incomplete ticks in flight, 8 ticks of lag.
+- **Groups are the dependency boundary.** The transport never cuts inside a
+  group; `HostCtl::send_snap_groups(player, generation, tick, &[Snap..])`
+  lets the producer put the owner's car and its contacts in one group and an
+  unrelated part of the world in another. The client delivers each group as
+  a `Snap` the moment *its* fragments are whole, so a lost world fragment
+  cannot withhold the owner correction (`a_lost_fragment_withholds_only_its_own_group`,
+  `snapshot_groups_arrive_independently_and_the_client_acks_a_baseline`).
+  `broadcast`/`send_to` of an over-budget `Snap` now fragments it as one
+  group instead of falling back to TCP (`oversize_tcp` stays 0 for `Snap`).
+- **Expiry never blocks newer ticks.** An assembly older than 250 ms
+  (`FRAGMENT_TTL`) is dropped; a newer tick evicts the oldest incomplete
+  one; stale, duplicate, malformed and inconsistent fragments are refused
+  and counted. `Client::lane_assembly()` reports `expired`, `evicted`,
+  refusals and the longest completed assembly.
+- **ACKed baselines** (`LaneTag::Ack`, `epoch u8 | tick u64`, generation in
+  the lane header): `BaselineSender::encode` sends a delta only against a
+  baseline that is acknowledged, still held, in the same (generation, epoch)
+  scope and at most `REFRESH_TICKS` (60, one second) behind; otherwise a full
+  state, which is also the refresh on a missing baseline.
+  `BaselineReceiver::apply` rejects a delta whose base it does not hold
+  (never received, evicted, other epoch/generation) with `MissingBase` and
+  stores nothing; the caller acks only after a successful apply. Eight
+  baselines are held per side and the acknowledged one outlives newer
+  unacknowledged ones. `Client::lane_ack` sends the ack; `Host::lane_ack`
+  reports the newest per seat (an ack for another generation is refused at
+  the door as `wrong_generation`).
+- **Lossless deltas.** `delta_encode` is a byte-run diff, so a continuation
+  field (velocity, accumulator, `input_ack`) is reproduced exactly; there is
+  no field list that could omit one. The simulation asserts byte equality of
+  every reconstructed state.
+
+### Measured (`cargo test -p mm2_net eight_seat -- --nocapture`)
+
+60 Hz, 3600 ticks, seeded; eight seats as group 0 = the owner's car (one
+`Snap` entry) and group 1 = the other seven. Loss hits every fragment and
+every ack independently; an ack returns after 4 ticks. Sizes are the real
+`Message::Snap` encoding.
+
+- Serialized continuation size: full owner group **138 B** (1 fragment);
+  delta payload **~72 B/tick** on average (about 52 %; only pose, velocity,
+  rotation, rpm and counters move). Full world group of seven cars **840 B**
+  (1 fragment), ~394 B/tick as deltas. With a 64-impact collision burst the
+  world group is **4296 B = 4 fragments**, ~2.36 kB/tick as deltas (impacts
+  are fresh events each tick, so they do not delta; the simulation keeps the
+  group length constant, which a real burst does not).
+- Fragments per correction: owner **1**; whole tick **2** quiet, **3.6**
+  with the burst.
+
+Complete usable corrections per second (owner group / world group / whole
+tick), quiet world:
+
+| loss | owner Hz | world Hz | whole-tick Hz |
+|---|---|---|---|
+| 0 % | 60.0 | 60.0 | 60.0 |
+| 1 % | 59.3 | 59.3 | 58.6 |
+| 5 % | 57.0 | 56.8 | 53.9 |
+| 10 % | 54.1 | 53.7 | 48.3 |
+| 20 % | 48.1 | 48.0 | 38.5 |
+
+With the 64-impact burst (world group 4 fragments): owner 60.0 / 59.5 /
+57.1 / 54.0 / 48.0 Hz, world 60.0 / 58.1 / 52.5 / 45.9 / 34.0 Hz, whole tick
+60.0 / 57.6 / 49.9 / 41.2 / 27.1 Hz for 0 / 1 / 5 / 10 / 20 % loss. The
+owner correction tracks `1 - loss` independently of the world's size; the
+whole tick decays with fragment count. Baseline, fragment and ack loss are
+all in the model; a delta was refused for a missing base once in the 20 %
+quiet run (never applied wrongly), because the sender only deltas against
+acknowledged baselines.
+
+### Not done / open
+
+- The app does not yet produce grouped or delta snapshots: `mm2_app`
+  still broadcasts one `Snap`, which now fragments as a single group. Choosing
+  the owner/contact grouping and engaging `BaselineSender` per seat belongs
+  with the send-cadence and prioritisation work (NETPLAY-06D) and the app
+  correction path (NETPLAY-04).
+- The simulation has no jitter or reordering beyond the fixed ack RTT, and
+  loopback tests prove the code, not WAN behaviour.

@@ -278,15 +278,10 @@ fn input_windows_and_snaps_ride_the_lane_and_not_tcp_twice() {
     assert_eq!(host.lane_counts().sent, sent + 1);
 }
 
-#[test]
-fn a_snap_over_the_datagram_budget_stays_on_tcp() {
-    let host = host();
-    let mut lane = lane_client(&host, "alice");
-    let generation = start_session(&host, &mut [&mut lane]);
-    eventually("the lane", || host.lane_established(lane.player_id()));
-    let big = Message::Snap {
+fn big_snap(generation: u64, tick: u64) -> Message {
+    Message::Snap {
         generation,
-        tick: 5,
+        tick,
         entries: vec![SnapEntry::default(); crate::MAX_PLAYERS as usize],
         trailers: Vec::new(),
         impacts: vec![
@@ -302,7 +297,32 @@ fn a_snap_over_the_datagram_budget_stays_on_tcp() {
             crate::MAX_SNAP_IMPACTS as usize
         ],
         race: None,
-    };
+    }
+}
+
+fn snap_of(generation: u64, tick: u64, player: u16, n: usize) -> Message {
+    Message::Snap {
+        generation,
+        tick,
+        entries: (0..n)
+            .map(|i| SnapEntry {
+                player: player + i as u16,
+                ..SnapEntry::default()
+            })
+            .collect(),
+        trailers: Vec::new(),
+        impacts: Vec::new(),
+        race: None,
+    }
+}
+
+#[test]
+fn a_snap_over_the_datagram_budget_is_fragmented_over_the_lane() {
+    let host = host();
+    let mut lane = lane_client(&host, "alice");
+    let generation = start_session(&host, &mut [&mut lane]);
+    eventually("the lane", || host.lane_established(lane.player_id()));
+    let big = big_snap(generation, 5);
     assert!(
         big.encode().unwrap().len() > crate::MAX_PAYLOAD,
         "the fixture must exceed one datagram"
@@ -310,12 +330,77 @@ fn a_snap_over_the_datagram_budget_stays_on_tcp() {
     let sent = host.lane_counts().sent;
     host.ctl().broadcast(&big).unwrap();
     loop {
-        if matches!(lane.recv().unwrap(), Message::Snap { tick: 5, .. }) {
+        if let Message::Snap {
+            tick: 5, entries, ..
+        } = lane.recv().unwrap()
+        {
+            assert_eq!(entries.len(), crate::MAX_PLAYERS as usize);
             break;
         }
     }
-    assert_eq!(host.lane_counts().sent, sent, "no datagram was sent");
-    assert_eq!(host.lane_counts().oversize_tcp, 1);
+    assert!(host.lane_counts().sent > sent + 1, "several datagrams");
+    assert_eq!(host.lane_counts().oversize_tcp, 0, "TCP was not used");
+    let st = lane.lane_assembly().unwrap();
+    assert_eq!(
+        (st.groups_completed, st.ticks_completed, st.expired),
+        (1, 1, 0)
+    );
+}
+
+#[test]
+fn snapshot_groups_arrive_independently_and_the_client_acks_a_baseline() {
+    let host = host();
+    let mut lane = lane_client(&host, "alice");
+    let generation = start_session(&host, &mut [&mut lane]);
+    let id = lane.player_id();
+    eventually("the lane", || host.lane_established(id));
+    // A group that is not a Snap of the tick is refused before the wire.
+    assert!(
+        host.ctl()
+            .send_snap_groups(id, generation, 9, &[snap_of(generation, 8, 1, 1)])
+            .is_err()
+    );
+    let groups = [snap_of(generation, 9, 1, 1), snap_of(generation, 9, 2, 7)];
+    assert!(
+        host.ctl()
+            .send_snap_groups(id, generation, 9, &groups)
+            .unwrap()
+    );
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        if let Message::Snap {
+            tick: 9, entries, ..
+        } = lane.recv().unwrap()
+        {
+            seen.push(entries.len());
+        }
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, [1, 7]);
+    // An unlaned seat reports false rather than sending.
+    assert!(
+        !host
+            .ctl()
+            .send_snap_groups(999, generation, 9, &groups)
+            .unwrap()
+    );
+
+    // The ack travels the lane; a stale one never moves it back.
+    assert_eq!(host.lane_ack(id), None);
+    assert!(lane.lane_ack(generation, 2, 9));
+    eventually("the ack", || host.lane_ack(id).is_some());
+    let ack = host.lane_ack(id).unwrap();
+    assert_eq!((ack.generation, ack.epoch, ack.tick), (generation, 2, 9));
+    assert!(lane.lane_ack(generation, 2, 4));
+    assert!(lane.lane_ack(generation, 2, 12));
+    eventually("the newer ack", || host.lane_ack(id).unwrap().tick == 12);
+    assert_eq!(host.lane_counts().wrong_generation, 0);
+    // An ack naming another generation is refused at the door.
+    assert!(lane.lane_ack(generation + 5, 2, 99));
+    eventually("the wrong-generation ack to be counted", || {
+        host.lane_counts().wrong_generation == 1
+    });
+    assert_eq!(host.lane_ack(id).unwrap().tick, 12);
 }
 
 #[test]

@@ -780,6 +780,11 @@ impl Host {
         self.lane.established_out(id).map(|o| o.stats())
     }
 
+    /// [`HostCtl::lane_ack`], from the `Host` itself.
+    pub fn lane_ack(&self, id: u16) -> Option<crate::LaneAck> {
+        self.lane.latest_ack(id)
+    }
+
     /// The data-plane mailbox every admitted peer's `Input` frames and
     /// `ResetRequest`s land in — the host-side consumer's view of the
     /// session data plane (F25-A/F25-B). Latest-wins per roster slot;
@@ -917,22 +922,31 @@ impl HostCtl {
     /// goes to every seat whose lane is established through its bounded
     /// nonblocking queue — no socket or `Writer` is touched on the
     /// calling thread — and over TCP only to the seats without one. A
-    /// `Snap` over the datagram budget stays on TCP for everyone
-    /// (fragmentation is a later task).
+    /// `Snap` over the datagram budget is fragmented as one group
+    /// (NETPLAY-06C, [`crate::frag`]) and reassembled whole by the
+    /// client; [`send_snap_groups`](Self::send_snap_groups) lets the
+    /// producer draw the group boundaries.
     pub fn broadcast(&self, msg: &Message) -> Result<(), NetError> {
         let bytes = msg.encode()?;
-        if let Message::Snap { generation, .. } = msg {
-            if bytes.len() > crate::rt::MAX_PAYLOAD {
-                self.lane.counters().note_oversize_tcp();
-            } else {
-                let outs = self.lane.established_outs();
-                if !outs.is_empty() {
-                    let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
-                    for (_, out) in outs {
-                        out.push_data(*generation, bytes.clone());
+        if let Message::Snap {
+            generation, tick, ..
+        } = msg
+        {
+            let outs = self.lane.established_outs();
+            if !outs.is_empty() {
+                let frags = if bytes.len() > crate::rt::MAX_PAYLOAD {
+                    Some(crate::frag::split(*tick, &[&bytes]).map_err(oversize_snap)?)
+                } else {
+                    None
+                };
+                let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
+                for (_, out) in outs {
+                    match &frags {
+                        Some(f) => out.push_fragments(*generation, f.clone()),
+                        None => out.push_data(*generation, bytes.clone()),
                     }
-                    return self.send(LoopMsg::BroadcastExcept(msg.clone(), ids));
                 }
+                return self.send(LoopMsg::BroadcastExcept(msg.clone(), ids));
             }
         }
         self.send(LoopMsg::Broadcast(msg.clone()))
@@ -947,15 +961,67 @@ impl HostCtl {
     /// lane like [`broadcast`](Self::broadcast) does.
     pub fn send_to(&self, player_id: u16, msg: &Message) -> Result<(), NetError> {
         let bytes = msg.encode()?;
-        if let Message::Snap { generation, .. } = msg {
+        if let Message::Snap {
+            generation, tick, ..
+        } = msg
+            && let Some(out) = self.lane.established_out(player_id)
+        {
             if bytes.len() > crate::rt::MAX_PAYLOAD {
-                self.lane.counters().note_oversize_tcp();
-            } else if let Some(out) = self.lane.established_out(player_id) {
+                let f = crate::frag::split(*tick, &[&bytes]).map_err(oversize_snap)?;
+                out.push_fragments(*generation, f);
+            } else {
                 out.push_data(*generation, bytes);
-                return Ok(());
             }
+            return Ok(());
         }
         self.send(LoopMsg::SendTo(player_id, msg.clone()))
+    }
+
+    /// Send one tick's `Snap` to `player_id` as independently deliverable
+    /// **groups** over the datagram lane (NETPLAY-06C): each message is
+    /// a complete `Snap` for the same `generation` and `tick`, and the
+    /// client receives each the moment all of *its* fragments arrive, so
+    /// losing a fragment of one group never withholds another. The
+    /// producer draws the boundaries along physical dependency — e.g. the
+    /// owner's car and its contacts in one group, an unrelated part of
+    /// the world in another — because only it knows what may be applied
+    /// without the rest. Returns `Ok(false)` when the seat has no
+    /// established lane (nothing is sent; use [`send_to`](Self::send_to)).
+    pub fn send_snap_groups(
+        &self,
+        player_id: u16,
+        generation: u64,
+        tick: u64,
+        groups: &[Message],
+    ) -> Result<bool, NetError> {
+        let mut encoded = Vec::with_capacity(groups.len());
+        for g in groups {
+            match g {
+                Message::Snap {
+                    generation: gg,
+                    tick: t,
+                    ..
+                } if *gg == generation && *t == tick => encoded.push(g.encode()?),
+                _ => {
+                    return Err(NetError::Unexpected(
+                        "snapshot group must be a Snap of the tick",
+                    ));
+                }
+            }
+        }
+        let Some(out) = self.lane.established_out(player_id) else {
+            return Ok(false);
+        };
+        let slices: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+        let frags = crate::frag::split(tick, &slices).map_err(oversize_snap)?;
+        out.push_fragments(generation, frags);
+        Ok(true)
+    }
+
+    /// The newest baseline acknowledgement `player_id`'s client sent on
+    /// its lane (NETPLAY-06C), for a [`BaselineSender`](crate::BaselineSender).
+    pub fn lane_ack(&self, player_id: u16) -> Option<crate::LaneAck> {
+        self.lane.latest_ack(player_id)
     }
 
     /// [`Host::lane_counts`], from any thread.
@@ -992,6 +1058,10 @@ impl Drop for Client {
             self.conn.shutdown_both();
         }
     }
+}
+
+fn oversize_snap(_: crate::SplitError) -> NetError {
+    NetError::Unexpected("snapshot group exceeds the fragment budget")
 }
 
 /// A client's datagram lane plus the merged receive queue it feeds.
@@ -1147,6 +1217,18 @@ impl Client {
         } else {
             Transport::Tcp
         }
+    }
+
+    /// Fragment reassembly counters, expiry included (NETPLAY-06C).
+    pub fn lane_assembly(&self) -> Option<crate::AssemblerStats> {
+        self.lane.as_ref().map(|l| l.lane.0.assembly_stats())
+    }
+
+    /// [`ClientCtl::lane_ack`] from the `Client` itself.
+    pub fn lane_ack(&self, generation: u64, epoch: u8, tick: u64) -> bool {
+        self.lane
+            .as_ref()
+            .is_some_and(|l| l.lane.0.send_ack(generation, epoch, tick))
     }
 
     /// The lane's counters (accepted datagrams and every kind of drop);
@@ -1385,6 +1467,17 @@ impl ClientCtl {
     /// The lane's counters; `None` on a TCP-only client.
     pub fn lane_counts(&self) -> Option<LaneCounts> {
         self.lane.as_ref().map(|l| l.counts())
+    }
+
+    /// Acknowledge the state at (`epoch`, `tick`) of `generation` to the
+    /// host over the lane (NETPLAY-06C) after applying it; the host only
+    /// ever deltas against an acknowledged baseline. `false` on a
+    /// TCP-only client or a closed lane. Unreliable: repeat it with each
+    /// newer tick.
+    pub fn lane_ack(&self, generation: u64, epoch: u8, tick: u64) -> bool {
+        self.lane
+            .as_ref()
+            .is_some_and(|l| l.send_ack(generation, epoch, tick))
     }
 
     /// The lane's outbound queue bounds, age and drop counters; `None` on

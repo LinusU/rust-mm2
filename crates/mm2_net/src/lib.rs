@@ -54,6 +54,7 @@
 
 mod cmdbuf;
 mod conn;
+mod frag;
 mod frame;
 mod impair;
 mod impair_udp;
@@ -74,6 +75,12 @@ pub use conn::{
     Conn, HANDSHAKE_TIMEOUT, Writer, accept_hello, accept_hello_within, hello, listen_loopback,
     send_hello, send_hello_within,
 };
+pub use frag::{
+    Assembler, AssemblerStats, BASELINE_CAP, BaselineReceiver, BaselineSender, Completed,
+    FRAG_DATA, FRAG_HEADER, FRAGMENT_TTL, FragRefuse, MAX_ASSEMBLIES, MAX_FRAGMENTS, MAX_GROUPS,
+    Plan, REFRESH_TICKS, SplitError, StateError, delta_apply, delta_encode,
+    split as split_fragments,
+};
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
 pub use impair_udp::{UdpImpair, UdpImpairProxy, UdpStats};
@@ -92,9 +99,9 @@ pub use proto::{
     SnapTrailer, TickCommand, VehiclePick,
 };
 pub use rt::{
-    HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneCounts, LaneQueue, LaneTag, MAGIC,
-    MAX_DATAGRAM, MAX_PAYLOAD, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow, decode_datagram,
-    encode_datagram,
+    HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
+    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, QUEUE_CAP, QueueStats, SEQ_WINDOW, SeqWindow,
+    decode_datagram, encode_datagram,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire
