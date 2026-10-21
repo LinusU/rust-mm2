@@ -145,6 +145,11 @@ impl CommandHistory {
         }
     }
 
+    /// The newest seq handed out (0 = none yet).
+    pub fn last_seq(&self) -> u64 {
+        self.next_seq.saturating_sub(1)
+    }
+
     /// Highest acknowledged seq (0 = none).
     pub fn acked(&self) -> u64 {
         self.acked
@@ -408,7 +413,7 @@ pub fn tick_command(input: &VehicleInput, human: Option<&HumanDriver>) -> TickCo
 
 /// The local car's settled controls, driver options and reset epoch.
 type LocalCar = (
-    &'static VehicleInput,
+    &'static mut VehicleInput,
     Option<&'static HumanDriver>,
     Option<&'static ResetEpoch>,
 );
@@ -420,7 +425,7 @@ pub fn capture_and_send(
     link: Option<Res<LobbyLink>>,
     session: Res<Session>,
     mut stream: ResMut<CommandStream>,
-    local: Query<LocalCar, With<PlayerVehicle>>,
+    mut local: Query<LocalCar, With<PlayerVehicle>>,
 ) {
     if !session.is_playing() {
         return;
@@ -428,7 +433,7 @@ pub fn capture_and_send(
     if link.as_ref().is_some_and(|l| l.closed || l.leaving()) {
         return;
     }
-    let Ok((input, human, epoch)) = local.single() else {
+    let Ok((mut input, human, epoch)) = local.single_mut() else {
         return;
     };
     if stream.history.generation() != session.wire_generation() {
@@ -439,11 +444,13 @@ pub fn capture_and_send(
     {
         stream.handoff = Some(Handoff::for_link(link));
     }
-    let seq = stream.history.push(
-        session.tick(),
-        epoch.map_or(0, |e| e.0),
-        tick_command(input, human),
-    );
+    let command = tick_command(&input, human);
+    // Prediction consumes exactly what the host and any replay will: the
+    // quantized command, not the unquantized controls it came from.
+    *input = crate::netdrive::decode_tick_command(&command);
+    let seq = stream
+        .history
+        .push(session.tick(), epoch.map_or(0, |e| e.0), command);
     if !seq.is_multiple_of(SEND_INTERVAL_TICKS) {
         return;
     }
@@ -461,6 +468,7 @@ pub fn capture_and_send(
 
 /// Register the stream behind the [`NetplayTimeline`] selector.
 pub fn add_systems(app: &mut App) {
+    crate::netpredict::add_systems(app);
     app.init_resource::<CommandStream>().add_systems(
         FixedUpdate,
         capture_and_send

@@ -528,6 +528,10 @@ pub struct RemoteSnaps {
     own_settle: SettleWatch,
     /// The own seat's moving-drift count ([`DriftWatch`]).
     own_drift: DriftWatch,
+    /// The own seat's staged host state for the fixed-tick prediction
+    /// replay (NETPLAY-04, [`crate::netpredict`]); only filled behind the
+    /// [`NetplayTimeline`] selector.
+    own_stage: crate::netpredict::OwnStage,
     /// Per-seat repair ledger: the (generation, snap tick) of the
     /// newest `damage` byte `>0 → 0` transition the apply pass
     /// performed — the wire's repair signal. A pending impact row
@@ -863,6 +867,11 @@ fn race_order_key(generation: u64, row: &SnapRace) -> Option<(u64, u8, u64)> {
 }
 
 impl RemoteSnaps {
+    /// The own seat's staged host state (read by the fixed schedule).
+    pub fn own_stage_mut(&mut self) -> &mut crate::netpredict::OwnStage {
+        &mut self.own_stage
+    }
+
     /// Replicated impact rows still waiting for `apply_snapshots`
     /// (bounded by `MAX_PENDING_IMPACTS`); the perf soak samples it.
     pub fn pending_impacts(&self) -> usize {
@@ -1033,6 +1042,7 @@ impl RemoteSnaps {
         self.pending.clear();
         self.own_settle = SettleWatch::default();
         self.own_drift = DriftWatch::default();
+        self.own_stage.clear();
         self.repaired.clear();
         self.seen.clear();
         self.seen_order.clear();
@@ -3278,6 +3288,9 @@ pub fn apply_snapshots(
     mut mirror: RaceMirror,
     mut report: ResMut<NetDriveReport>,
 ) {
+    // The selector decides, per run, whether the own seat follows the
+    // host through the prediction replay or the legacy pulls.
+    snaps.own_stage.enabled = impact_io.timeline.as_ref().is_some_and(|t| t.enabled);
     // Push-time stale drops fold into the report every run — a stale
     // frame counts even on a run with nothing staged, so this cannot
     // ride inside `apply_snap_frame`'s early return.
@@ -3731,18 +3744,40 @@ fn apply_snap_frame(
             // `VehicleState`/`VehicleInput` is already the truth here.
             if player.control == PlayerControl::Local {
                 let asserted_vel = Vec3::from(entry.vel);
-                let settled = !authority_reset
+                let replaying = snaps.own_stage.enabled;
+                let settled = !replaying
+                    && !authority_reset
                     && snaps.own_settle.observe(
                         pos.0,
                         vel.0.length(),
                         to_pos,
                         asserted_vel.length(),
                     );
-                let drift = if authority_reset || settled {
+                let drift = if authority_reset || settled || replaying {
                     Drift::None
                 } else {
                     snaps.own_drift.observe(pos.0, to_pos)
                 };
+                if replaying {
+                    // Fixed-tick prediction (NETPLAY-04): a routine
+                    // snapshot is compared with the like-time recorded
+                    // state and replayed from the fixed schedule; only an
+                    // authority reset moves the car outright.
+                    if authority_reset {
+                        snaps.own_stage.assertion = None;
+                        snaps.own_stage.reset = true;
+                    } else {
+                        snaps.own_stage.assertion = Some(crate::netpredict::OwnAssertion {
+                            generation: snap.generation,
+                            server_tick: snap.tick,
+                            ack: entry.input_ack,
+                            pos: to_pos,
+                            rot: to_rot,
+                            vel: Vec3::from(entry.vel),
+                            ang: Vec3::from(entry.angvel),
+                        });
+                    }
+                }
                 if drift != Drift::None || settled || authority_reset {
                     // One record per correction of the predicted seat:
                     // the process tests print them when a leg fails, so a
@@ -4022,6 +4057,9 @@ pub struct ImpactIo<'w, 's> {
     cursor: Local<'s, bevy::ecs::message::MessageCursor<ImpactEvent>>,
     recent: Local<'s, Vec<LocalContact>>,
     seats: Query<'w, 's, (&'static NetPlayer, &'static ObjectIdentity)>,
+    /// The fixed-tick timeline selector (NETPLAY-04 rides here for the
+    /// same parameter-cap reason).
+    timeline: Option<Res<'w, NetplayTimeline>>,
 }
 
 impl ImpactIo<'_, '_> {

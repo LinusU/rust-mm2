@@ -55,6 +55,7 @@ pub mod netdrive;
 pub mod netlead;
 pub mod netpace;
 pub mod netplay_timeline;
+pub mod netpredict;
 pub mod netprobe;
 pub mod neural;
 pub mod object_sound;
