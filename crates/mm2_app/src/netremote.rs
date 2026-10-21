@@ -27,6 +27,8 @@
 //! `hold` ticks of age and then fades the analog controls linearly to
 //! neutral over `fade` ticks.
 
+use std::collections::BTreeMap;
+
 use mm2_net::{MAX_REMOTE_RUN, RemoteCommands, TickCommand};
 
 /// How a missing tick is filled.
@@ -77,31 +79,44 @@ pub const NEUTRAL: TickCommand = TickCommand {
     forced_gear: None,
 };
 
-/// Per-seat predictor. Holds only the policy; every input comes from the
-/// store, so it has no state to drift from it.
-#[derive(Debug, Clone, Copy)]
+/// Predictor. Holds the policy and, per seat, the last command it consumed:
+/// [`RemoteCommands::consume`] drops a tick once it is consumed, so without
+/// this a missing tick right after an authoritative one would find nothing
+/// to repeat and fall to neutral.
+#[derive(Debug, Clone)]
 pub struct RemotePredictor {
     /// The fill policy for missing ticks.
     pub policy: Policy,
+    consumed: BTreeMap<u16, (u64, TickCommand)>,
 }
 
 impl RemotePredictor {
     /// A predictor using `policy`.
     pub fn new(policy: Policy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            consumed: BTreeMap::new(),
+        }
     }
 
     /// The controls for `player` on authoritative tick `tick`. Consumes the
     /// tick's command from `store` when present; otherwise extrapolates
     /// from the newest stored command at or before `tick`.
-    pub fn command_for(&self, store: &mut RemoteCommands, player: u16, tick: u64) -> Predicted {
+    pub fn command_for(&mut self, store: &mut RemoteCommands, player: u16, tick: u64) -> Predicted {
         if let Some(c) = store.consume(player, tick) {
+            self.consumed.insert(player, (tick, c.command));
             return Predicted {
                 command: c.command,
                 basis: Basis::Authoritative,
             };
         }
-        match newest_at_or_before(store, player, tick) {
+        let stored = newest_at_or_before(store, player, tick);
+        let remembered = self
+            .consumed
+            .get(&player)
+            .copied()
+            .filter(|(t, _)| *t < tick);
+        match stored.into_iter().chain(remembered).max_by_key(|(t, _)| *t) {
             Some((at, command)) => Predicted {
                 command: extrapolate(self.policy, command, tick - at),
                 basis: Basis::Predicted { age: tick - at },
@@ -198,12 +213,12 @@ mod tests {
     fn a_present_tick_is_returned_unaltered_and_consumed_once() {
         for policy in [Policy::HoldLast, AGE_AWARE] {
             let mut s = store_with(5, &[cmd(200, -100), cmd(10, 3)]);
-            let p = RemotePredictor::new(policy);
+            let mut p = RemotePredictor::new(policy);
             let first = p.command_for(&mut s, 3, 5);
             assert_eq!(first.command, cmd(200, -100));
             assert_eq!(first.basis, Basis::Authoritative);
-            // The same tick again is not a second consumption: the store
-            // has nothing left at or before it.
+            // The same tick again is not a second consumption, and is not
+            // answered from the past either.
             assert_eq!(p.command_for(&mut s, 3, 5).basis, Basis::Neutral);
             assert_eq!(s.stats(3).unwrap().consumed, 1);
         }
@@ -212,7 +227,7 @@ mod tests {
     #[test]
     fn hold_last_repeats_the_newest_command_at_any_age() {
         let mut s = store_with(5, &[cmd(200, -100)]);
-        let p = RemotePredictor::new(Policy::HoldLast);
+        let mut p = RemotePredictor::new(Policy::HoldLast);
         for tick in [6, 10, 50] {
             let got = p.command_for(&mut s, 3, tick);
             assert_eq!(got.command, cmd(200, -100));
@@ -223,7 +238,7 @@ mod tests {
     #[test]
     fn age_aware_holds_then_fades_to_neutral_without_inventing_anything() {
         let mut s = store_with(5, &[cmd(200, -100)]);
-        let p = RemotePredictor::new(AGE_AWARE);
+        let mut p = RemotePredictor::new(AGE_AWARE);
         assert_eq!(p.command_for(&mut s, 3, 7).command, cmd(200, -100));
         let mid = p.command_for(&mut s, 3, 12).command; // age 7: 5 of 10 left
         assert_eq!((mid.throttle, mid.brake, mid.steer), (100, 20, -50));
@@ -236,6 +251,19 @@ mod tests {
             let c = p.command_for(&mut s, 3, tick).command;
             assert!(c.throttle <= 200 && c.brake <= 40 && c.steer.unsigned_abs() <= 100);
             assert_eq!(c.handbrake, 0);
+        }
+    }
+
+    #[test]
+    fn a_missing_tick_after_a_consumed_one_repeats_it() {
+        for policy in [Policy::HoldLast, AGE_AWARE] {
+            let mut s = store_with(5, &[cmd(200, -100)]);
+            let mut p = RemotePredictor::new(policy);
+            assert_eq!(p.command_for(&mut s, 3, 5).basis, Basis::Authoritative);
+            let next = p.command_for(&mut s, 3, 6);
+            assert_eq!(next.command, cmd(200, -100));
+            assert_eq!(next.basis, Basis::Predicted { age: 1 });
+            assert_eq!(s.stats(3).unwrap().consumed, 1);
         }
     }
 

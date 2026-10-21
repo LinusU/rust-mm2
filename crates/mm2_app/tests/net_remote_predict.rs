@@ -179,7 +179,7 @@ fn delayed(
     let (mut app, car) = world();
     let mut store = RemoteCommands::new();
     store.set_generation(Some(1));
-    let predictor = RemotePredictor::new(policy);
+    let mut predictor = RemotePredictor::new(policy);
     let mut err = Error::default();
     for t in 1..=s.ticks {
         // A stall: nothing newer than `cut` arrives, and only the first
