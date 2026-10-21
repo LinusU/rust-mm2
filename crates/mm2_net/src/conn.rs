@@ -9,6 +9,9 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use crate::NetError;
@@ -273,6 +276,113 @@ impl Writer {
     /// Forcibly close the socket — a blocked `recv` on the peer's reader
     /// thread (or our own) wakes with an error. Used for host teardown.
     pub fn disconnect(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Frames one [`PeerWriter`] queues before it refuses more. 256 frames
+/// is over four seconds of 60 Hz snapshots: a peer that far behind is
+/// stalled, and refusing is the bounded answer (the caller reaps it).
+/// A designed bound.
+pub const PEER_QUEUE_CAP: usize = 256;
+
+/// A [`Writer`] behind a bounded queue and its own thread (NETPLAY-06E-4).
+///
+/// [`send`](Self::send) encodes the message and hands the frame to the
+/// thread: it never touches the socket, so a peer that stopped reading
+/// cannot stall the caller — the game thread for a client, the host loop
+/// (and so every *other* peer) for a seat. Frames go out in the order
+/// they were queued.
+///
+/// A peer that cannot keep up is bounded rather than waited on: a full
+/// queue or a failed socket write makes this and every later `send`
+/// return `Err`, and a failed write also closes the socket, so the
+/// caller's existing "failed send = lost peer" discipline applies
+/// unchanged. Handshake-time writes stay blocking on the plain
+/// [`Writer`]; wrap it only once the handshake is done.
+#[derive(Debug)]
+pub struct PeerWriter {
+    tx: Option<mpsc::SyncSender<Vec<u8>>>,
+    failed: Arc<AtomicBool>,
+    /// Set by the thread when it exits, drained or failed.
+    done: Arc<AtomicBool>,
+    stream: TcpStream,
+}
+
+impl PeerWriter {
+    /// Take over `writer`'s socket and start its writer thread. The
+    /// thread ends when the `PeerWriter` is dropped (after flushing what
+    /// is queued) or the socket fails.
+    pub fn spawn(writer: Writer) -> io::Result<Self> {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PEER_QUEUE_CAP);
+        let failed = Arc::new(AtomicBool::new(false));
+        let stream = writer.stream.try_clone()?;
+        let flag = Arc::clone(&failed);
+        let done = Arc::new(AtomicBool::new(false));
+        let exited = Arc::clone(&done);
+        let mut out = writer.stream;
+        thread::Builder::new()
+            .name("mm2-peer-writer".into())
+            .spawn(move || {
+                while let Ok(frame) = rx.recv() {
+                    if write_frame(&mut out, &frame).is_err() {
+                        flag.store(true, Ordering::Release);
+                        // Wake the reader on this socket: the peer is gone.
+                        let _ = out.shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
+                }
+                exited.store(true, Ordering::Release);
+            })?;
+        Ok(Self {
+            tx: Some(tx),
+            failed,
+            done,
+            stream,
+        })
+    }
+
+    /// Queue one protocol message. `Err` when the peer is dead, its
+    /// queue is full, or the message does not encode.
+    pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
+        self.send_frame(msg.encode()?)
+    }
+
+    pub(crate) fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), NetError> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        }
+        let Some(tx) = &self.tx else {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        };
+        match tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "peer send queue full").into())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
+            }
+        }
+    }
+
+    /// Stop accepting frames; the thread drains what is queued and exits.
+    /// Pair with [`is_drained`](Self::is_drained) and
+    /// [`disconnect`](Self::disconnect) for an orderly close.
+    pub fn close_send(&mut self) {
+        self.tx = None;
+    }
+
+    /// Whether the writer thread has written everything queued (or
+    /// failed) and exited. Only meaningful after [`close_send`](Self::close_send).
+    pub fn is_drained(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Forcibly close the socket: a write parked in the thread and a
+    /// blocked `recv` on the peer's reader both wake with an error.
+    pub fn disconnect(&mut self) {
+        self.tx = None;
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
@@ -578,5 +688,70 @@ mod tests {
         let (peer_conn, _) = listener.accept().unwrap();
         assert!(conn.peer_addr().ip().is_loopback());
         assert!(peer_conn.peer_addr().unwrap().ip().is_loopback());
+    }
+
+    /// A connected loopback pair: the accepted side wrapped in a
+    /// `PeerWriter`, plus the raw client end.
+    fn peer_pair() -> (PeerWriter, TcpStream) {
+        let listener = listen_loopback().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let far = TcpStream::connect(addr).unwrap();
+        let conn = Conn::accept(&listener).unwrap();
+        (PeerWriter::spawn(conn.writer().unwrap()).unwrap(), far)
+    }
+
+    /// NETPLAY-06E-4: a peer that never reads parks the writer thread
+    /// mid-write. Sends keep returning promptly, the bounded queue then
+    /// refuses (so the caller can reap the peer), and nothing waits on
+    /// the socket.
+    #[test]
+    fn a_send_to_a_stalled_peer_returns_promptly_and_is_bounded() {
+        let (mut writer, _far) = peer_pair();
+        let big = vec![0u8; 200 * 1024];
+        let start = std::time::Instant::now();
+        let mut refused_at = None;
+        for n in 0..PEER_QUEUE_CAP * 4 {
+            if writer.send_frame(big.clone()).is_err() {
+                refused_at = Some(n);
+                break;
+            }
+        }
+        let n = refused_at.expect("an unread peer never filled its bounded queue");
+        assert!(n >= PEER_QUEUE_CAP, "refused after only {n} frames");
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "sends to a stalled peer took {:?}",
+            start.elapsed()
+        );
+        // Still refused, and `disconnect` frees the parked thread.
+        assert!(writer.send(&Message::Accept).is_err());
+        writer.disconnect();
+    }
+
+    /// Queued frames reach the peer whole and in order.
+    #[test]
+    fn queued_sends_arrive_in_order() {
+        let (mut writer, far) = peer_pair();
+        for id in 1..=20u16 {
+            writer.send(&Message::Welcome { player_id: id }).unwrap();
+        }
+        let mut far = Conn::from_stream(far).unwrap();
+        far.set_timeout(Some(TIMEOUT)).unwrap();
+        for id in 1..=20u16 {
+            assert_eq!(far.recv().unwrap(), Message::Welcome { player_id: id });
+        }
+    }
+
+    /// A socket that fails under the writer thread makes later sends
+    /// `Err` instead of queueing into the void.
+    #[test]
+    fn a_dead_socket_fails_later_sends() {
+        let (mut writer, far) = peer_pair();
+        drop(far);
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        while writer.send(&Message::Accept).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "send never failed");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }

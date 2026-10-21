@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use crate::NetError;
 use crate::cmdbuf::{Consumed, SeatBuffer, SeatStats};
-use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
+use crate::conn::{Conn, HANDSHAKE_TIMEOUT, PeerWriter, listen_loopback, recv_hello_within};
 use crate::proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode,
     RosterEntry, SessionAdvertisement, TickCommand, VehiclePick,
@@ -80,6 +80,11 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// a peer that stops reading stalls a broadcast for this long, then is
 /// dropped as `Lost` instead of blocking the loop forever.
 const WRITE_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
+
+/// How long host teardown waits, in total, for peers' queued frames to
+/// leave before closing their sockets. A designed bound: a stalled peer
+/// costs teardown this much once, not once per peer.
+const TEARDOWN_FLUSH: Duration = Duration::from_secs(1);
 
 /// How often the host loop sends every rostered peer a
 /// [`Message::Keepalive`] (F24-AC04), so an idle lobby is never silent
@@ -1573,9 +1578,19 @@ impl Client {
     /// installs [`WRITE_TIMEOUT`] — socket options are shared, so the
     /// bound then also covers this `Client`'s own sends: a peer that
     /// stops reading bounds a send rather than stalling it forever.
+    ///
+    /// Sends through the handle are queued to a writer thread
+    /// (NETPLAY-06E-4): they never wait on the socket, and a peer so far
+    /// behind that its bounded queue fills gets `Err` from every later
+    /// send. They are ordered among themselves but not against the
+    /// `Client`'s own blocking `send`/`leave`, so a caller that needs an
+    /// order sends both through the handle.
     pub fn ctl(&self) -> Result<ClientCtl, NetError> {
         let writer = self.conn.writer()?;
         writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        // Queued and sent from the writer thread: a send from the game
+        // thread never waits on the socket (NETPLAY-06E-4).
+        let writer = PeerWriter::spawn(writer)?;
         Ok(ClientCtl {
             writer: Arc::new(Mutex::new(writer)),
             lane: self.lane.as_ref().map(|l| l.lane.0.clone()),
@@ -1590,7 +1605,7 @@ impl Client {
 /// `Malformed`.
 #[derive(Debug, Clone)]
 pub struct ClientCtl {
-    writer: Arc<Mutex<Writer>>,
+    writer: Arc<Mutex<PeerWriter>>,
     lane: Option<Arc<ClientLane>>,
 }
 
@@ -1818,7 +1833,7 @@ struct Slot {
     pick: Option<VehiclePick>,
     /// The TCP peer's IP — what the seat's UDP lane must come from.
     peer: IpAddr,
-    writer: Writer,
+    writer: PeerWriter,
 }
 
 /// Run the accept loop on its own thread until `stop` is set. The
@@ -2081,6 +2096,12 @@ fn run(
                 // sends bounded so a peer that stops reading is dropped
                 // rather than freezing the broadcast.
                 let _ = writer.set_write_timeout(Some(WRITE_TIMEOUT));
+                // Handshake writes above stayed blocking; from here every
+                // send to the seat is queued so one peer that stops
+                // reading cannot hold up the others.
+                let Ok(writer) = PeerWriter::spawn(writer) else {
+                    continue;
+                };
                 players.insert(
                     id,
                     Slot {
@@ -2362,6 +2383,15 @@ fn run(
     // sends into the dead channel just fail), drop the input mailbox and
     // stop the accept thread, which sees the flag within one
     // `ACCEPT_POLL`.
+    // Frames still queued (a final `Cancel`) get one shared bounded
+    // chance to leave before the sockets close under them.
+    for slot in players.values_mut() {
+        slot.writer.close_send();
+    }
+    let flush_by = Instant::now() + TEARDOWN_FLUSH;
+    while players.values().any(|slot| !slot.writer.is_drained()) && Instant::now() < flush_by {
+        thread::sleep(Duration::from_millis(2));
+    }
     for slot in players.values_mut() {
         slot.writer.disconnect();
     }
@@ -2419,7 +2449,7 @@ fn remove_player(
     events: &Sender<HostEvent>,
     inputs: &RemoteInputs,
 ) -> bool {
-    let Some(slot) = players.remove(&id) else {
+    let Some(mut slot) = players.remove(&id) else {
         return false;
     };
     slot.writer.disconnect();
@@ -2917,7 +2947,7 @@ mod tests {
                     ready: false,
                     pick: None,
                     peer: conn.peer_addr().ip(),
-                    writer: conn.writer().unwrap(),
+                    writer: PeerWriter::spawn(conn.writer().unwrap()).unwrap(),
                 },
             );
         }
@@ -2954,6 +2984,59 @@ mod tests {
         peer.set_read_timeout(Some(WAIT)).unwrap();
         let mut buf = [0u8; 8];
         assert_eq!(peer.read(&mut buf).unwrap(), 0);
+    }
+
+    /// NETPLAY-06E-4: a seat whose peer stopped reading does not hold
+    /// up the others. Its parked writer fills its bounded queue, the
+    /// next broadcast reaps it `Lost`, and the healthy seat still gets
+    /// the message — all without the host loop waiting on a socket.
+    #[test]
+    fn a_stalled_seat_is_reaped_without_delaying_the_others() {
+        fn seat(id: u16) -> (Slot, TcpStream) {
+            let listener = listen_loopback().unwrap();
+            let far = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let conn = Conn::accept(&listener).unwrap();
+            let slot = Slot {
+                driver: format!("p{id}"),
+                build: "b".to_string(),
+                ready: false,
+                pick: None,
+                peer: conn.peer_addr().ip(),
+                writer: PeerWriter::spawn(conn.writer().unwrap()).unwrap(),
+            };
+            (slot, far)
+        }
+        let (stalled, _stalled_far) = seat(1);
+        let (healthy, healthy_far) = seat(2);
+        let mut players = BTreeMap::from([(1, stalled), (2, healthy)]);
+        let big = vec![0u8; 200 * 1024];
+        while players
+            .get_mut(&1)
+            .unwrap()
+            .writer
+            .send_frame(big.clone())
+            .is_ok()
+        {}
+        let (events, rx) = mpsc::channel();
+        let inputs = RemoteInputs::default();
+
+        let start = Instant::now();
+        let all_delivered = broadcast(&mut players, &Message::Accept, &events, &inputs);
+        assert!(start.elapsed() < WAIT, "broadcast waited on a socket");
+
+        assert!(!all_delivered);
+        assert_eq!(players.keys().copied().collect::<Vec<_>>(), [2]);
+        match rx.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Lost,
+                ..
+            }) => {}
+            other => panic!("expected the stalled seat Lost, got {other:?}"),
+        }
+        let mut far = Conn::from_stream(healthy_far).unwrap();
+        far.set_timeout(Some(WAIT)).unwrap();
+        assert_eq!(far.recv().unwrap(), Message::Accept);
     }
 
     /// The iteration-010 review's config-validation defect: a
@@ -4563,8 +4646,9 @@ mod tests {
         ctl.send_input(drive_input(9)).unwrap();
         ctl.send_input(drive_input(10)).unwrap();
         // The ReadyChanged event lands after the reader thread absorbed
-        // all three inputs — socket order is the happens-before.
-        alice.set_ready(true).unwrap();
+        // all three inputs — queue order is the happens-before, so the
+        // ready flag goes through the same handle.
+        ctl.set_ready(true).unwrap();
         match host.recv_timeout(WAIT) {
             Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
             other => panic!("expected ReadyChanged, got {other:?}"),
@@ -4756,8 +4840,10 @@ mod tests {
         host.recv_timeout(WAIT).unwrap(); // Joined
         recv_roster(&mut alice, 1);
 
-        alice.ctl().unwrap().request_reset(3).unwrap();
-        alice.leave().unwrap();
+        let ctl = alice.ctl().unwrap();
+        ctl.request_reset(3).unwrap();
+        // Same handle as the ask, so the `Leave` cannot overtake it.
+        ctl.leave().unwrap();
         match host.recv_timeout(WAIT) {
             Ok(HostEvent::Left {
                 id: 1,

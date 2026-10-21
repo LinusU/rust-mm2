@@ -85,8 +85,8 @@ pub use cmdbuf::{
     Source,
 };
 pub use conn::{
-    Conn, HANDSHAKE_TIMEOUT, Writer, accept_hello, accept_hello_within, hello, listen_loopback,
-    send_hello, send_hello_within,
+    Conn, HANDSHAKE_TIMEOUT, PEER_QUEUE_CAP, PeerWriter, Writer, accept_hello, accept_hello_within,
+    hello, listen_loopback, send_hello, send_hello_within,
 };
 pub use frag::{
     Assembler, AssemblerStats, BASELINE_CAP, BaselineReceiver, BaselineSender, Completed,
