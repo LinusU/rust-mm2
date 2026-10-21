@@ -1240,3 +1240,35 @@ and the first impact event are each lost on purpose from connection start
 under 15 % loss/duplication/reorder and arrive exactly once; a reset ask
 behind another message class is still absorbed; a full window falls back to
 TCP with every message delivered once. No retail data, no rendered capture.
+
+## World-actor history for contact replay (NETPLAY-05C, #1891)
+
+A replay used to restore cars and dynamic props and then run against
+whatever the rest of the scene looked like *now*. Three things differ
+between the replay window and today, and each has a rule
+(`mm2_vehicle::physics_world`, `replay::EntryGate`):
+
+| Actor | Body type kept | Rule during the window |
+|---|---|---|
+| Kinematic traffic / movers | `Kinematic`, never made dynamic | `WorldCapture::movers` records pose and velocity per tick. Before replayed step `S[t] -> S[t+1]` the mover is set to the pose of `S[t]` and the velocity of `S[t+1]` (a `FixedUpdate` driver writes the velocity before the step that integrates it, so the post-step capture holds the velocity that step used). After the last step it sits at its last recorded state. The traffic system itself never runs in a replay. |
+| Dynamic props / bangers | `Dynamic` | Restored from `S[from]` as before. A prop **spawned inside the window** (in `RestoreReport::uncaptured`) gets `RigidBodyDisabled` for the replay, is enabled at the first tick the history holds it and posed as recorded there (`ReplayReport::entered`, `Some(tick)`); one in no captured tick stays out for the whole window and rejoins where it is. |
+| Despawned since `from` | n/a | Cannot be restored: reported in `RestoreReport::missing`, the replay runs without it. A contact with it inside the window is not reproduced; the host's next snapshot corrects the residue. |
+| Repurposed in place (broken banger, recycled traffic car) | n/a | `ActorIncarnation` differs: `Retired`, the replay refuses (03E). Movers and entrants with a changed incarnation are not written through. |
+| Static scenery | `Static` | Not recorded: thousands of colliders the session does not change. A static collider added or broken at runtime is **not tracked** (a broken banger is repurposed, so it is caught by the incarnation rule). |
+
+Speculative contact: the prediction's impulse on a prop lives in the
+abandoned future, which the restore overwrites with `S[from]`; only the
+replay applies the impulse again, so it lands once
+(`a_prop_that_spawned_in_the_window_enters_at_its_tick` compares the prop
+with the live record). Wire captures carry no movers (`movers: None`) and
+never gate kinematic bodies. Damage, Cops & Robbers rules and impact
+events stay with the host and NETPLAY-08.
+
+Evidence level: synthetic integration on the production `VehiclePlugin`
+step (`crates/mm2_vehicle/tests/world_actors.rs`): a kinematic mover that
+crosses the car's path and stops mid-window (replay with history matches
+the live record to 1e-3 m / 1e-2 m/s; the same replay with the mover
+history stripped diverges by more than 5 cm), a prop that spawns and is
+pushed inside the window, and a prop that despawns. Not covered: the
+client's traffic copies (`worldtraffic::apply_traffic`) in a real session,
+and wiring `RigidBodyDisabled` entrants against the app's own systems.

@@ -31,7 +31,8 @@ use crate::capture::{EpochRef, RestoreError, VehicleCapture, capture_vehicle, re
 use crate::lifetime::{Hitch, LifetimeIssue, capture_hitches, check_lifetimes, incarnation};
 use crate::vehicle::Vehicle;
 
-/// A dynamic body that is not a vehicle (a prop).
+/// A body that is not a vehicle: a dynamic prop, or (in
+/// [`WorldCapture::movers`]) a kinematic mover such as a traffic car.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodyState {
     pub position: Vec3,
@@ -64,6 +65,11 @@ impl PairState {
 pub struct WorldCapture {
     pub vehicles: Vec<(Entity, VehicleCapture)>,
     pub bodies: Vec<(Entity, BodyState)>,
+    /// Kinematic non-vehicle bodies (traffic, movers): pose and velocity at
+    /// the tick, so a replay can put them where they were rather than
+    /// against today's scene (NETPLAY-05C). `None` when the capture did not
+    /// record them (a wire snapshot, which only carries cars and props).
+    pub movers: Option<Vec<(Entity, BodyState)>>,
     pub pairs: Vec<((Entity, Entity), PairState)>,
     /// Session generation the capture was stamped with.
     pub generation: u32,
@@ -80,8 +86,10 @@ pub struct WorldCapture {
 pub struct RestoreReport {
     /// Captured bodies that no longer exist (despawned since the capture).
     pub missing: Vec<Entity>,
-    /// Dynamic bodies that exist now but were not captured (spawned since).
-    /// Left as they are; their contacts are invalidated.
+    /// Dynamic (and, when the capture recorded movers, kinematic) bodies
+    /// that exist now but were not captured (spawned since). Left as they
+    /// are; their contacts are invalidated. [`crate::replay::replay_from`]
+    /// keeps them out of the world until their entry tick.
     pub uncaptured: Vec<Entity>,
     /// Contact pairs whose captured manifolds were put back.
     pub pairs_restored: usize,
@@ -131,21 +139,24 @@ fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> Wor
         Option<&SleepTimer>,
     )>();
     let mut vehicles = Vec::new();
+    let mut movers = Vec::new();
     for (e, body, is_vehicle, p, r, lv, av, sleeping, timer) in q.iter(world) {
         if is_vehicle {
             vehicles.push(e);
-        } else if matches!(body, RigidBody::Dynamic) {
-            out.bodies.push((
-                e,
-                BodyState {
-                    position: p.map_or(Vec3::ZERO, |p| p.0),
-                    rotation: r.map_or(Quat::IDENTITY, |r| r.0),
-                    linear_velocity: lv.map_or(Vec3::ZERO, |v| v.0),
-                    angular_velocity: av.map_or(Vec3::ZERO, |v| v.0),
-                    sleeping,
-                    sleep_timer: timer.map_or(0.0, |t| t.0),
-                },
-            ));
+        } else if matches!(body, RigidBody::Dynamic | RigidBody::Kinematic) {
+            let state = BodyState {
+                position: p.map_or(Vec3::ZERO, |p| p.0),
+                rotation: r.map_or(Quat::IDENTITY, |r| r.0),
+                linear_velocity: lv.map_or(Vec3::ZERO, |v| v.0),
+                angular_velocity: av.map_or(Vec3::ZERO, |v| v.0),
+                sleeping,
+                sleep_timer: timer.map_or(0.0, |t| t.0),
+            };
+            if matches!(body, RigidBody::Dynamic) {
+                out.bodies.push((e, state));
+            } else if contacts {
+                movers.push((e, state));
+            }
         }
     }
     for e in vehicles {
@@ -156,11 +167,14 @@ fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> Wor
     // Query order is not stable across worlds; entity order is.
     out.vehicles.sort_by_key(|(e, _)| *e);
     out.bodies.sort_by_key(|(e, _)| *e);
+    movers.sort_by_key(|(e, _)| *e);
+    out.movers = contacts.then_some(movers);
     out.incarnations = out
         .vehicles
         .iter()
         .map(|(e, _)| *e)
         .chain(out.bodies.iter().map(|(e, _)| *e))
+        .chain(out.movers.iter().flatten().map(|(e, _)| *e))
         .map(|e| (e, incarnation(world, e)))
         .collect();
     out.incarnations.sort();
@@ -188,7 +202,7 @@ fn capture_world_with(world: &mut World, epoch: EpochRef, contacts: bool) -> Wor
     out
 }
 
-fn write_pose(ent: &mut EntityWorldMut, s: &BodyState) {
+pub(crate) fn write_pose(ent: &mut EntityWorldMut, s: &BodyState) {
     if let Some(mut p) = ent.get_mut::<Position>() {
         p.set_if_neq(Position(s.position));
     }
@@ -276,6 +290,37 @@ pub(crate) fn finish_sleep_restore(
     }
 }
 
+/// Every vehicle, prop and mover id a capture names.
+pub(crate) fn captured_actors(capture: &WorldCapture) -> std::collections::HashSet<Entity> {
+    capture
+        .vehicles
+        .iter()
+        .map(|(e, _)| *e)
+        .chain(capture.bodies.iter().map(|(e, _)| *e))
+        .chain(capture.movers.iter().flatten().map(|(e, _)| *e))
+        .collect()
+}
+
+/// Put the kinematic movers of `capture` back where they were. A mover
+/// that no longer exists goes to `missing`; one whose entity was repurposed
+/// (`retired`) is not written through.
+pub(crate) fn restore_movers(
+    world: &mut World,
+    capture: &WorldCapture,
+    missing: &mut Vec<Entity>,
+    retired: &std::collections::HashSet<Entity>,
+) {
+    for (e, s) in capture.movers.iter().flatten() {
+        if retired.contains(e) {
+            continue;
+        }
+        match world.get_entity_mut(*e) {
+            Ok(mut ent) => write_pose(&mut ent, s),
+            Err(_) => missing.push(*e),
+        }
+    }
+}
+
 /// Zero everything a warm start would carry into the next solve.
 fn cold_start(pair: &mut ContactPair) {
     pair.recycling_cache = None;
@@ -354,6 +399,7 @@ pub fn restore_world(world: &mut World, capture: &WorldCapture) -> RestoreReport
             wake.push(*e);
         }
     }
+    restore_movers(world, capture, &mut report.missing, &retired);
     // Wake before sleeping so a shared island ends up as captured.
     for e in wake {
         let _ = WakeBody(e).apply(world);
@@ -371,15 +417,18 @@ pub fn restore_world(world: &mut World, capture: &WorldCapture) -> RestoreReport
             report.sleep_deferred.push(e);
         }
     }
-    let known: std::collections::HashSet<Entity> = capture
-        .vehicles
-        .iter()
-        .map(|(e, _)| *e)
-        .chain(capture.bodies.iter().map(|(e, _)| *e))
-        .collect();
+    let known = captured_actors(capture);
     let mut q = world.query_filtered::<Entity, With<RigidBody>>();
     for e in q.iter(world).collect::<Vec<_>>() {
-        if !known.contains(&e) && matches!(world.get::<RigidBody>(e), Some(RigidBody::Dynamic)) {
+        if known.contains(&e) {
+            continue;
+        }
+        let new = match world.get::<RigidBody>(e) {
+            Some(RigidBody::Dynamic) => true,
+            Some(RigidBody::Kinematic) => capture.movers.is_some(),
+            _ => false,
+        };
+        if new {
             report.uncaptured.push(e);
         }
     }

@@ -55,8 +55,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::capture::{RestoreError, VehicleCapture, restore_vehicle};
-use crate::lifetime::{LifetimeIssue, check_lifetimes};
-use crate::physics_world::{RestoreReport, WorldCapture, restore_world};
+use crate::lifetime::{LifetimeIssue, check_lifetimes, incarnation};
+use crate::physics_world::{RestoreReport, WorldCapture, restore_world, write_pose};
 use crate::vehicle::VehicleInput;
 
 /// Most ticks one replay may run: 2 s at the production 60 Hz step. A
@@ -226,6 +226,11 @@ pub struct ReplayReport {
     pub from_tick: u64,
     pub steps: usize,
     pub restore: RestoreReport,
+    /// Actors that did not exist at `from_tick` but do now (spawned inside
+    /// the window): kept out of the world until the tick they first appear
+    /// in the history, with that tick. `None`: not in any captured tick of
+    /// the window, so absent for the whole replay.
+    pub entered: Vec<(Entity, Option<u64>)>,
     /// Quarantined messages the replayed ticks wrote and that were
     /// discarded, summed over every message type and every tick.
     pub suppressed_messages: usize,
@@ -373,9 +378,12 @@ pub fn replay_from(
         world.insert_resource(q);
     }
 
+    let mut gate = EntryGate::new(world, &restore.uncaptured);
+
     let mut suppressed = 0;
     for (i, step) in steps.iter().enumerate() {
         world.resource_mut::<ReplayContext>().step = i + 1;
+        gate.advance(world, history, from_tick + i as u64, true);
         for (entity, input) in &step.inputs {
             if let Some(mut slot) = world.get_mut::<VehicleInput>(*entity) {
                 *slot = *input;
@@ -386,6 +394,12 @@ pub fn replay_from(
         // The next tick sees only its own writes.
         suppressed += clear_scratch(world, &stashes);
     }
+
+    // End of the window: movers and late entrants sit at their last
+    // historical pose, and whoever never appeared in the history joins the
+    // world again where it is.
+    gate.advance(world, history, from_tick + steps.len() as u64, false);
+    let entered = gate.finish(world);
 
     // Put the live messages back, dropping the scratch.
     suppressed += finish_quarantine(world, stashes);
@@ -402,8 +416,127 @@ pub fn replay_from(
         from_tick,
         steps: steps.len(),
         restore,
+        entered,
         suppressed_messages: suppressed,
     })
+}
+
+/// World-actor history over one replay window (NETPLAY-05C).
+///
+/// The restore puts every actor of `S[from]` back; this keeps the rest of
+/// the scene on the recorded timeline instead of today's:
+///
+/// - **Kinematic movers** (traffic, scripted movers) are driven by systems
+///   the replay does not run, so before each replayed tick `S[t] -> S[t+1]`
+///   they are set to the pose of `S[t]` and the velocity of `S[t+1]`: a
+///   driver writes the velocity before the step that integrates it, so the
+///   post-step capture holds the velocity that step used.
+/// - **Entrants**, actors spawned after `from`, are disabled
+///   ([`RigidBodyDisabled`]) so the replayed cars cannot hit a body that did
+///   not exist yet, and enabled at the first tick the history has them,
+///   posed as recorded. One that appears in no captured tick stays out for
+///   the whole window and rejoins where it is.
+/// - **Exits** (despawned since) cannot be restored; the restore reports
+///   them in `missing` and the replay runs without them.
+/// - **Repurposed** entities are `Retired` and make the replay refuse
+///   before this runs ([`crate::lifetime`]).
+///
+/// Static scenery is not recorded (thousands of colliders that the session
+/// never changes); a runtime static collider is not tracked.
+struct EntryGate {
+    /// Disabled by us, with the tick each first appeared.
+    waiting: Vec<Entity>,
+    entered: Vec<(Entity, u64)>,
+}
+
+impl EntryGate {
+    fn new(world: &mut World, uncaptured: &[Entity]) -> Self {
+        let mut waiting = Vec::new();
+        for &e in uncaptured {
+            if let Ok(mut ent) = world.get_entity_mut(e)
+                && !ent.contains::<RigidBodyDisabled>()
+            {
+                ent.insert(RigidBodyDisabled);
+                waiting.push(e);
+            }
+        }
+        Self {
+            waiting,
+            entered: Vec::new(),
+        }
+    }
+
+    /// Set the world to what the history says at `tick`, before the step
+    /// that starts from it (`before_step`: movers take the velocity of the
+    /// next tick), or at the end of the window. A tick the ring no longer
+    /// holds changes nothing.
+    fn advance(&mut self, world: &mut World, history: &HistoryRing, tick: u64, before_step: bool) {
+        let Some(capture) = history.get(tick) else {
+            return;
+        };
+        let next = history.get(tick + 1).filter(|_| before_step);
+        for (e, state) in capture.movers.iter().flatten() {
+            let same_actor = capture
+                .incarnations
+                .iter()
+                .any(|(c, i)| c == e && *i == incarnation(world, *e));
+            let Ok(mut ent) = world.get_entity_mut(*e) else {
+                continue;
+            };
+            if !same_actor {
+                continue;
+            }
+            let mut state = state.clone();
+            if let Some((_, n)) = next.and_then(|n| n.movers.iter().flatten().find(|(c, _)| c == e))
+            {
+                state.linear_velocity = n.linear_velocity;
+                state.angular_velocity = n.angular_velocity;
+            }
+            write_pose(&mut ent, &state);
+        }
+        let mut still = Vec::new();
+        for e in std::mem::take(&mut self.waiting) {
+            let state = capture
+                .bodies
+                .iter()
+                .chain(capture.movers.iter().flatten())
+                .find(|(c, _)| *c == e)
+                .map(|(_, s)| s);
+            let same_actor = capture
+                .incarnations
+                .iter()
+                .find(|(c, _)| *c == e)
+                .is_some_and(|(_, i)| *i == incarnation(world, e));
+            match (state, same_actor, world.get_entity_mut(e)) {
+                (Some(s), true, Ok(mut ent)) => {
+                    ent.remove::<RigidBodyDisabled>();
+                    write_pose(&mut ent, s);
+                    self.entered.push((e, tick));
+                }
+                (_, _, Ok(_)) => still.push(e),
+                // Despawned during the replay: nothing to enable.
+                _ => {}
+            }
+        }
+        self.waiting = still;
+    }
+
+    /// Enable whatever never appeared; report every entrant.
+    fn finish(self, world: &mut World) -> Vec<(Entity, Option<u64>)> {
+        let mut out: Vec<(Entity, Option<u64>)> = self
+            .entered
+            .into_iter()
+            .map(|(e, t)| (e, Some(t)))
+            .collect();
+        for e in self.waiting {
+            if let Ok(mut ent) = world.get_entity_mut(e) {
+                ent.remove::<RigidBodyDisabled>();
+                out.push((e, None));
+            }
+        }
+        out.sort();
+        out
+    }
 }
 
 /// The generic `Time` `FixedMain` hands `FixedPostUpdate`: the fixed
