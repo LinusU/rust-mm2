@@ -64,6 +64,16 @@ pub const SEQ_WINDOW: u64 = 64;
 /// connection result is [`NetError::LaneTimeout`].
 pub const LANE_ECHO_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// A probe and its echo are padded to the largest datagram either side
+/// ever sends, so the establishing round trip proves the path carries
+/// [`MAX_DATAGRAM`] bytes both ways. A path whose effective MTU is lower
+/// (a tunnel, a filtering middlebox) would otherwise establish on tiny
+/// probes and then silently lose every full-size `Snap`; padded, it is a
+/// [`NetError::LaneTimeout`] at join, naming the cause.
+fn probe_padding() -> Vec<u8> {
+    vec![0; MAX_PAYLOAD]
+}
+
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// Socket read timeout and queue wait: how often a lane thread notices
 /// its stop flag.
@@ -550,7 +560,7 @@ fn ingest(
             seat.out.queue.push(OutItem {
                 tag: LaneTag::Probe,
                 generation: 0,
-                payload: Vec::new(),
+                payload: probe_padding(),
             });
             Verdict::Accepted
         }
@@ -939,7 +949,7 @@ impl ClientLane {
             }
             if now >= next_probe {
                 let header = lane.header(LaneTag::Probe, 0);
-                flush(&socket, host, &header, &[], &lane.counters);
+                flush(&socket, host, &header, &probe_padding(), &lane.counters);
                 next_probe = now + PROBE_INTERVAL;
             }
             match socket.recv_from(&mut buf) {

@@ -33,7 +33,12 @@
 //!   per-direction recipe of delay, jitter, loss, duplication and
 //!   reorder while [`LinkStats`](impair::LinkStats) counts what the
 //!   recipe actually did.
-//!
+//! - [`impair_udp`] — the same recipe idea at the datagram boundary
+//!   (NETPLAY-06B): a [`UdpImpairProxy`](impair_udp::UdpImpairProxy)
+//!   relays the lane's UDP datagrams on a virtual clock with loss, burst
+//!   loss, reorder, duplication, delay, an effective-MTU limit and a
+//!   black hole, per direction, with per-direction and per-tag counters.
+//!   [`impair`] is the legacy TCP-frame proxy.
 //! - [`rt`] — the UDP datagram lane (NETPLAY-06A): `InputWindow` and
 //!   `Snap` ride sequenced unreliable datagrams beside the TCP control
 //!   connection, authenticated per seat (token, source address,
@@ -51,10 +56,13 @@ mod cmdbuf;
 mod conn;
 mod frame;
 mod impair;
+mod impair_udp;
 mod lobby;
 mod proto;
 mod rt;
 
+#[cfg(test)]
+mod lane_impair_tests;
 #[cfg(test)]
 mod lane_tests;
 
@@ -68,10 +76,11 @@ pub use conn::{
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
+pub use impair_udp::{UdpImpair, UdpImpairProxy, UdpStats};
 pub use lobby::{
     Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST, INPUT_RATE_HZ,
-    KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LateJoin, LeaveCause, PickValidator, RemoteInputs,
-    StampedInput, Transport,
+    KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LaneRoute, LateJoin, LeaveCause, PickValidator,
+    RemoteInputs, StampedInput, Transport,
 };
 pub use proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_INPUT_WINDOW, MAX_PLAYERS, MAX_SESSION_PARAMS,
@@ -123,9 +132,11 @@ pub enum NetError {
     /// is not.
     #[error(
         "no UDP lane echo from {host} within {waited:?}: the host's UDP port {} is blocked or \
-         unreachable — allow inbound UDP on that port (host firewall / router port forward) and \
-         see docs/multiplayer-reachability.md",
-        .host.port()
+         unreachable — allow inbound UDP on that port (host firewall / router port forward), \
+         or the path's MTU is below the {} bytes a lane datagram needs (tunnel / VPN); see \
+         docs/multiplayer-reachability.md",
+        .host.port(),
+        crate::rt::MAX_DATAGRAM
     )]
     LaneTimeout {
         /// The host's UDP endpoint that stayed silent.

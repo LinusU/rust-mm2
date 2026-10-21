@@ -15,14 +15,14 @@ use crate::{
     QUEUE_CAP, SessionAdvertisement, hello,
 };
 
-const FP: u64 = 0xaaaa;
-const WAIT: Duration = Duration::from_secs(5);
+pub(crate) const FP: u64 = 0xaaaa;
+pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
-fn host() -> Host {
+pub(crate) fn host() -> Host {
     Host::listen_loopback(&HostConfig::new(FP)).unwrap()
 }
 
-fn hello_for(driver: &str) -> crate::Hello {
+pub(crate) fn hello_for(driver: &str) -> crate::Hello {
     hello("lane-test".to_string(), driver.to_string(), FP)
 }
 
@@ -32,7 +32,7 @@ fn lane_client(host: &Host, driver: &str) -> Client {
     c
 }
 
-fn cmd(n: u8) -> TickCommand {
+pub(crate) fn cmd(n: u8) -> TickCommand {
     TickCommand {
         throttle: n,
         brake: 0,
@@ -43,7 +43,7 @@ fn cmd(n: u8) -> TickCommand {
     }
 }
 
-fn snap(generation: u64, tick: u64) -> Message {
+pub(crate) fn snap(generation: u64, tick: u64) -> Message {
     Message::Snap {
         generation,
         tick,
@@ -55,7 +55,7 @@ fn snap(generation: u64, tick: u64) -> Message {
 }
 
 /// Poll `cond` until it holds or [`WAIT`] passes.
-fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+pub(crate) fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !cond() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -64,7 +64,7 @@ fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
 }
 
 /// Start a session on `host` for the already-joined `clients`.
-fn start_session(host: &Host, clients: &mut [&mut Client]) -> u64 {
+pub(crate) fn start_session(host: &Host, clients: &mut [&mut Client]) -> u64 {
     host.set_session(SessionAdvertisement {
         summary: "lane".to_string(),
         params: Vec::new(),

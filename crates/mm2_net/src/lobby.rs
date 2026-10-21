@@ -1015,6 +1015,18 @@ pub enum Transport {
     Lane,
 }
 
+/// Where a lane client sends its datagrams when a relay sits on the path
+/// (see [`Client::join_lane_routed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneRoute {
+    /// The relay's client-facing address: every datagram goes here, and
+    /// the host's echoes are accepted only from it.
+    pub dial: SocketAddr,
+    /// The port the host is told to expect datagrams from — the relay's
+    /// host-facing socket.
+    pub advertise_port: u16,
+}
+
 impl Client {
     /// Connect to `addr`, run the handshake and read the host's
     /// `Welcome` carrying this client's roster slot. `Accept` was only
@@ -1065,13 +1077,29 @@ impl Client {
         hello: &Hello,
         echo_timeout: Duration,
     ) -> Result<Self, NetError> {
+        Self::join_lane_routed(addr, hello, echo_timeout, None)
+    }
+
+    /// [`Client::join_lane_within`] with the datagram path steered through
+    /// a relay: the client sends its datagrams to `route.dial` instead of
+    /// the host's granted lane port, and tells the host to expect them from
+    /// `route.advertise_port`. A harness seam for the datagram-boundary
+    /// impairment proxy (`UdpImpairProxy`), which cannot sit in front of
+    /// the host otherwise because the host authenticates the source
+    /// address. `None` is the ordinary direct path.
+    pub fn join_lane_routed(
+        addr: SocketAddr,
+        hello: &Hello,
+        echo_timeout: Duration,
+        route: Option<LaneRoute>,
+    ) -> Result<Self, NetError> {
         let (mut conn, player_id) = Self::join_tcp(addr, hello)?;
         // The UDP socket binds the IP the host sees this connection from,
         // so the host's source-address check holds on multi-homed hosts.
         let socket = UdpSocket::bind(SocketAddr::new(conn.local_addr()?.ip(), 0))?;
         conn.set_timeout(Some(HANDSHAKE_TIMEOUT))?;
         conn.send(&Message::LaneBind {
-            port: socket.local_addr()?.port(),
+            port: route.map_or(socket.local_addr()?.port(), |r| r.advertise_port),
         })?;
         // The host's `Session`/`Roster` may arrive before the grant; keep
         // them for `recv` rather than losing the lobby snapshot.
@@ -1089,7 +1117,7 @@ impl Client {
         let inbox = Inbox::new();
         let lane = ClientLane::establish(
             socket,
-            SocketAddr::new(addr.ip(), lane_port),
+            route.map_or(SocketAddr::new(addr.ip(), lane_port), |r| r.dial),
             player_id,
             token,
             inbox.clone(),

@@ -194,6 +194,25 @@ in), so the tests drive it on a synthetic clock.
   `initial_lead_ticks` (the RTT seed) is still unused: the client has no RTT
   measurement to give it; feedback alone steers.
 
+## Datagram-boundary impairment (06B, `mm2_net` `lane_impair_tests`)
+
+The 02E matrix below impairs *frames of a TCP stream* (`ImpairProxy`, now
+labelled legacy). The real lane is checked at the datagram boundary by
+`UdpImpairProxy`: a seeded UDP relay on a virtual clock with per-direction
+loss, burst loss (`drop_next`), reorder, duplication, delay, an effective
+MTU and a black hole, and per-direction / per-lane-tag counters. Each test
+runs in lockstep (barriers on counters, never sleeps), so a seed replays.
+Cells: snapshot and ack progress under 25% loss/duplication/reorder plus
+10-50 ms delay both ways; a 90-snapshot return burst; duplicates refused
+by the replay window; pairwise reorder; command recovery per
+*distinct transmission* (a command survives iff one datagram carrying it
+does, so copies packed into one lost datagram count once: with the
+production cadence, a window every 2 ticks of 8, a 3-datagram burst costs
+nothing and a 4-datagram burst expires exactly the 2 commands only those
+windows carried, finalized as a gap with a substitute); and an MTU below
+1200 bytes failing the join with `LaneTimeout` naming the MTU. Loopback
+only, no real-Internet claim.
+
 ## Impairment matrix (02E, `mm2_app` `tests/net_matrix.rs`)
 
 Loopback only, through the seeded `ImpairProxy`; **no real-Internet claim**.

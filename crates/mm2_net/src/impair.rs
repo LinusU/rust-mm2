@@ -1,5 +1,12 @@
 //! A deterministic network-impairment harness (F25-B, spec req 6).
 //!
+//! **Legacy, TCP frame level.** This proxy drops, reorders and duplicates
+//! whole *frames of a TCP stream*; it models what a datagram transport
+//! would do, not what the wire does. Real-time traffic now rides the UDP
+//! lane, and its impairment tests belong at the datagram boundary — see
+//! [`crate::impair_udp`]. The tests below (module `legacy_tcp_frame_tests`)
+//! stay as coverage of the control stream and the pre-lane data plane.
+//!
 //! The transport is ordered reliable TCP, so real loss, duplication and
 //! reorder cannot occur on the wire — but the protocol is meant to
 //! survive them (stale `Snap` ticks drop, the input mailbox is
@@ -59,7 +66,7 @@ const HOLD_CAP: Duration = Duration::from_millis(100);
 /// recipe behind a fast sender accumulates releases faster than they
 /// emit; the cap drops the excess rather than queueing unboundedly —
 /// `LinkStats::overflowed` counts them so a capped run shows it.
-const MAX_QUEUED: usize = 4096;
+pub(crate) const MAX_QUEUED: usize = 4096;
 
 /// The writer loop's maximum sleep quantum — short enough that a
 /// `set()` retune or a shutdown lands promptly even with nothing due.
@@ -137,7 +144,7 @@ pub struct LinkStats {
 }
 
 impl LinkStats {
-    fn absorb(&mut self, other: &LinkStats) {
+    pub(crate) fn absorb(&mut self, other: &LinkStats) {
         self.frames_in += other.frames_in;
         self.frames_out += other.frames_out;
         self.bytes_in += other.bytes_in;
@@ -212,7 +219,7 @@ impl Ord for Queued {
 
 /// One direction's pending-release queue, deferral slot, draw state and
 /// counters for a single relayed connection.
-struct Lane {
+pub(crate) struct Lane {
     rng: Rng,
     heap: BinaryHeap<Queued>,
     /// A reorder-deferred frame and the deadline it emits at even if no
@@ -220,7 +227,7 @@ struct Lane {
     held: Option<(Vec<u8>, Instant)>,
     order: u64,
     cap: usize,
-    stats: LinkStats,
+    pub(crate) stats: LinkStats,
     /// Frames read and written per message tag (first payload byte), for
     /// [`ImpairProxy::tagged`].
     tags: TagCounts,
@@ -237,7 +244,7 @@ impl Default for TagCounts {
 }
 
 impl Lane {
-    fn new(seed: u64, cap: usize) -> Self {
+    pub(crate) fn new(seed: u64, cap: usize) -> Self {
         Self {
             rng: Rng(seed),
             heap: BinaryHeap::new(),
@@ -263,7 +270,7 @@ impl Lane {
     }
 
     /// Count one inbound frame and drop it outright (a tag drop).
-    fn drop_frame(&mut self, payload: &[u8]) {
+    pub(crate) fn drop_frame(&mut self, payload: &[u8]) {
         self.stats.frames_in += 1;
         self.stats.bytes_in += payload.len() as u64;
         self.stats.dropped += 1;
@@ -271,7 +278,7 @@ impl Lane {
 
     /// Classify one inbound frame at `now` under `params` — queue it,
     /// hold it for a swap, duplicate it or drop it.
-    fn offer(&mut self, params: &Impair, now: Instant, payload: Vec<u8>) {
+    pub(crate) fn offer(&mut self, params: &Impair, now: Instant, payload: Vec<u8>) {
         self.stats.frames_in += 1;
         self.stats.bytes_in += payload.len() as u64;
         // A deferred frame's successor arrived: the swap completes —
@@ -313,7 +320,7 @@ impl Lane {
     /// Append every frame whose release has come due to `out`, in
     /// release order. A held frame whose deadline passed joins the due
     /// set — a stalled stream must not hold it forever.
-    fn collect_due(&mut self, now: Instant, out: &mut Vec<Vec<u8>>) {
+    pub(crate) fn collect_due(&mut self, now: Instant, out: &mut Vec<Vec<u8>>) {
         if let Some((_, deadline)) = &self.held
             && *deadline <= now
         {
@@ -329,7 +336,7 @@ impl Lane {
 
     /// When the next pending frame becomes due — the writer loop's
     /// sleep bound.
-    fn next_due(&self) -> Option<Instant> {
+    pub(crate) fn next_due(&self) -> Option<Instant> {
         self.heap
             .peek()
             .map(|q| q.release)
@@ -341,7 +348,7 @@ impl Lane {
     /// End of stream: everything still pending emits immediately, in
     /// release order — a close must not strand the tail of a clean
     /// stream (a `Leave` behind a delay still owes the peer its FIN).
-    fn finish(&mut self, out: &mut Vec<Vec<u8>>) {
+    pub(crate) fn finish(&mut self, out: &mut Vec<Vec<u8>>) {
         if let Some((payload, release)) = self.held.take() {
             self.push(release, payload);
         }
@@ -830,7 +837,7 @@ fn spawn_lane(
 }
 
 #[cfg(test)]
-mod tests {
+mod legacy_tcp_frame_tests {
     use super::*;
     use crate::conn::listen_loopback;
     use crate::proto::DriveInput;

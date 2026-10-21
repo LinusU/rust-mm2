@@ -33,6 +33,12 @@ in with real results.
   inbound UDP on that port` rather than carrying on over TCP: a TCP-only
   data plane (`Client::join`, `Transport::Tcp`) is not equivalent
   quality (head-of-line blocking) and is never presented as such.
+- **Path MTU:** the establishing probe and its echo are padded to the
+  largest lane datagram (1200 bytes, `MAX_DATAGRAM`), so a path that
+  cannot carry that — a VPN or tunnel with a small MTU, a filtering
+  middlebox — fails the join with the same `no UDP lane echo` error
+  (which names the MTU) instead of establishing and then silently losing
+  every full-size `Snap`. Loopback proof: `lane_impair_tests`.
 - **Evidence level:** loopback tests (`crates/mm2_net/src/lane_tests.rs`)
   prove the code path only. They say nothing about whether UDP crosses a
   real LAN, router or the Internet; that stays an OWNER measurement
