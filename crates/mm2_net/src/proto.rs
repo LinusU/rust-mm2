@@ -96,7 +96,11 @@
 /// v31: the session advertisement's `params` carry the host's Cops &
 /// Robbers lobby bot count (`cnr_bots`); a v30 peer would drop it and
 /// show, validate and start a different roster than the host chose.
-pub const PROTOCOL_VERSION: u16 = 31;
+/// v32: a host's lobby bots ride the snapshot stream under player ids
+/// from [`FIRST_RESERVED_PLAYER_ID`] up, which a client sets copies down
+/// for; a v31 client would show the bots' match standings with no car
+/// behind them.
+pub const PROTOCOL_VERSION: u16 = 32;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -106,6 +110,14 @@ pub const MAX_STRING: usize = 256;
 /// players total. The wire keeps the bound so a hostile roster payload
 /// cannot claim an unbounded crowd.
 pub const MAX_PLAYERS: u8 = 8;
+
+/// First `u16` player id the lobby never mints to a human. Wire ids
+/// mint upward from 1 and wrap back to 1 below this bound, so the ids
+/// from here up belong to participants the host itself owns (Cops &
+/// Robbers lobby bots): a long-lived host can never hand a joining
+/// human an id a bot already answers to. Designed bound, not an
+/// original rule.
+pub const FIRST_RESERVED_PLAYER_ID: u16 = 1000;
 
 const TAG_HELLO: u8 = 0x01;
 const TAG_ACCEPT: u8 = 0x02;
@@ -3053,15 +3065,15 @@ mod tests {
     }
 
     #[test]
-    fn v31_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 31);
-        for protocol in [30, 32] {
+    fn v32_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 32);
+        for protocol in [31, 33] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("31"), "{why}");
+            assert!(why.contains("32"), "{why}");
         }
     }
 }

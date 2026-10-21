@@ -55,8 +55,8 @@ use crate::NetError;
 use crate::cmdbuf::{Consumed, SeatBuffer, SeatStats};
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
 use crate::proto::{
-    DriveInput, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry,
-    SessionAdvertisement, TickCommand, VehiclePick,
+    DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode,
+    RosterEntry, SessionAdvertisement, TickCommand, VehiclePick,
 };
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
@@ -1675,11 +1675,17 @@ fn run(
 }
 
 /// Mint the lowest-unused-slot id: monotonic until wraparound, never 0,
-/// never an occupied slot. Terminates because the roster is bounded.
+/// never an occupied slot, never in the host-owned range from
+/// [`FIRST_RESERVED_PLAYER_ID`] up. Terminates because the roster is
+/// bounded.
 fn alloc_id(players: &BTreeMap<u16, Slot>, next_id: &mut u16) -> u16 {
     loop {
         let id = *next_id;
-        *next_id = next_id.wrapping_add(1).max(1);
+        *next_id = if id + 1 >= FIRST_RESERVED_PLAYER_ID {
+            1
+        } else {
+            id + 1
+        };
         if !players.contains_key(&id) {
             return id;
         }
@@ -1999,6 +2005,22 @@ mod tests {
             other => panic!("expected a Lost Left, got {other:?}"),
         }
         assert_eq!(recv_roster(&mut alice, 1).len(), 1);
+    }
+
+    #[test]
+    fn minted_ids_wrap_before_the_host_owned_range() {
+        let players = BTreeMap::new();
+        let mut next = FIRST_RESERVED_PLAYER_ID - 2;
+        let minted: Vec<u16> = (0..4).map(|_| alloc_id(&players, &mut next)).collect();
+        assert_eq!(
+            minted,
+            vec![
+                FIRST_RESERVED_PLAYER_ID - 2,
+                FIRST_RESERVED_PLAYER_ID - 1,
+                1,
+                2
+            ]
+        );
     }
 
     #[test]
