@@ -319,9 +319,6 @@ pub(crate) struct PeerMail {
 }
 
 impl PeerMail {
-    /// The body of [`RemoteInputs::store_window_at`], on an already-held
-    /// mailbox lock so the UDP lane can authenticate and absorb a datagram
-    /// atomically with respect to a seat's removal.
     /// Record `id`'s reset ask under the mailbox lock — the TCP path and
     /// the lane's reliable channel (NETPLAY-06E-3) share it, so a request
     /// delivered by both is one newest-wins slot.
@@ -333,6 +330,9 @@ impl PeerMail {
         *slot = (*slot).max(generation);
     }
 
+    /// The body of [`RemoteInputs::store_window_at`], on an already-held
+    /// mailbox lock so the UDP lane can authenticate and absorb a datagram
+    /// atomically with respect to a seat's removal.
     pub(crate) fn absorb_window(
         &mut self,
         id: u16,
