@@ -602,3 +602,67 @@ Open, not claimed:
 - The loaded-city profile uses a synthetic world, not the retail city.
 - Release builds and non-Apple/Linux platforms are unmeasured.
 - Wiring the ring and replay into the client correction path is NETPLAY-04.
+
+## Own-car prediction history and replay (NETPLAY-04, #1765)
+
+`mm2_app::netpredict`, behind the one `NetplayTimeline` selector
+(`--netplay-timeline` / `MM2_NETPLAY_TIMELINE=1`). With the selector off the
+legacy `DriftWatch`/`SettleWatch` path is unchanged and still the default;
+NETPLAY-09 enables the new path and then deletes them.
+
+- **Alignment is the ack, not a tick.** `record_prediction` (`FixedLast`)
+  stores `capture_world` after every command under that command's `seq`.
+  A snapshot's own-seat `input_ack` names the last command inside the host
+  state, so host `S[server_tick]` and the client state recorded for
+  `seq == input_ack` are the same instant. No present-versus-past compare.
+- **Prediction consumes the quantized command.** `netcmd::capture_and_send`
+  writes `decode_tick_command(command)` back into `VehicleInput`, so
+  prediction, host and replay run on identical numbers.
+- **Correction.** `reconcile_own` (`FixedFirst`, exclusive) takes the newest
+  staged assertion (`RemoteSnaps` is latest-wins, so a burst is coalesced to
+  one comparison and one replay), compares position/orientation/linear and
+  angular velocity (tolerances in `netpredict`, designed values), and on a
+  difference restores the recorded world with the host body state put in,
+  replays `ack+1..=newest` one fixed step at a time through
+  `mm2_vehicle::replay::replay_from`, and rewrites the recorded history with
+  the re-simulated states. Acked commands are trimmed after use and never
+  replayed twice. Remote replicas are put back where they were (they are
+  driven by the snapshot lerp, contact between predicted cars is NETPLAY-05).
+- **Not routine "resets".** Each non-routine case has its own counter:
+  `Skip::{NoAck,Seen,Future,PreReset,Corrupt,OtherGeneration}` leave the car
+  alone; `RecoveryCause::{HistoryExhausted,TooDeep,CommandGap,ReplayRefused}`
+  adopt the host body state (marked `Teleported`) and restart the history;
+  an authority reset (new reset epoch) clears the history and sets a floor
+  so the pre-reset commands are never compared or replayed.
+- **Headless.** `smoke.rs` now carries the selector in `RunBudget`, registers
+  `netcmd`/`netpace`, and wall-paces a selected headless run: the timeline
+  aligns on a real 60 Hz tick, so a fast-forwarding host is outside its
+  contract. This means `baseline_unequal_frame_pacing` (host without
+  `--paced`) is wall-paced under the selector and no longer measures a
+  fast-forwarding host; a genuine render-rate mismatch scenario is open.
+- `net_baseline` now passes `--netplay-timeline` to all three processes, and
+  the `Driver::Route` exemption from the dev-world speed bar is removed.
+
+Evidence (synthetic integration, `cargo test -p mm2_app --lib netpredict`):
+agreeing snapshot is a no-op; a divergent state at ack 8 replayed through 22
+pending turn/brake commands equals an independent twin world run live from
+the same host state (1e-3 m) and the rewritten history then matches; duplicate
+and older acks skip; NaN/future/zero/other-generation skip; reset floor;
+exhausted history and a missing command take named recoveries.
+
+Evidence (original-process level, headless, loopback, `net_baseline`
+`unequal-pacing`, 40 s, two clients, dev-world): alice 0 corrections > 0.25 m,
+cumulative 1.29 m/min, 0 yaw flips, peak 30 m/s; bob 0, 0.46 m/min, 0, 33 m/s
+(before: 18/min over 0.25 m, 1332 and 1228 m/min, snaps of 50-100 m).
+The clients logged ~600 small replays each in 40 s; the correction *count*
+is therefore high but the size is tiny (total translation above). The cause
+of the steady sub-metre replays (the wire carries only the body, so wheel
+and drivetrain continuation comes from the client's own recorded state) is
+not yet isolated.
+
+Open, not claimed: 0/50/100/150 ms RTT runs with mismatched frame pacing
+(AC4) — no impairment proxy in the process harness; the correction-work
+budget spread over frames (a deep replay runs in one frame, bounded by
+`MAX_REPLAY_STEPS`); presentation smoothing of the replay shift (NETPLAY-07);
+contact (NETPLAY-05); gameplay-reaction dedup (NETPLAY-08); wire carry of
+the full vehicle continuation state; retail-city cost.
