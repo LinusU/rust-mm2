@@ -9,6 +9,7 @@ mod net_check;
 mod net_cnr_bot_replication;
 mod net_cnr_lobby_bots;
 mod net_commands;
+mod net_contact;
 mod net_drive;
 mod net_edge;
 mod net_focus_handoff;

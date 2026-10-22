@@ -298,7 +298,7 @@ const LIVE_BOUND: Duration = Duration::from_secs(300);
 /// session has begun and the data plane is carrying state, so an
 /// impairment armed now bites only data-plane frames (`Start` is a
 /// one-shot verb with no retransmit).
-fn until_live(client: &Proc) -> String {
+pub(crate) fn until_live(client: &Proc) -> String {
     client.until_within("event=snap_applied first=true", LIVE_BOUND)
 }
 
@@ -2874,7 +2874,7 @@ fn a_driven_collision_replicates_across_three_processes() {
 }
 
 /// Every `seats=<id>:<x>,<z>/…` cell of a record, by wire seat.
-fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
+pub(crate) fn seat_poses(rec: &str) -> Vec<(u16, f64, f64)> {
     field(rec, "seats")
         .split('/')
         .map(|cell| {
