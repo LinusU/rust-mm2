@@ -309,12 +309,15 @@ struct Report {
     /// and `[client][car]`. A car shoved from rest shows how hard.
     peak_speed: [[f32; 2]; 2],
     replay_ms: Vec<f64>,
+    /// The first tick, car and field where the live client body is not
+    /// bit-identical to the host's (None: never).
+    first_diff: Option<(u64, usize, &'static str)>,
 }
 
 impl Report {
     fn line(&self) -> String {
         format!(
-            "hit h{:?} c{:?} starts {:?} imp h{:?} c{:?} corr {:.2}/{:.2} n{} rep{} rec{} settle {:?} peak {:.2}/{:.2} final {:.2}/{:.2} vgap {:.2}/{:.2} peak_v host {:.1}/{:.1} client {:.1}/{:.1} replay_ms {:.2}",
+            "hit h{:?} c{:?} starts {:?} imp h{:?} c{:?} corr {:.2}/{:.2} n{} rep{} rec{} settle {:?} peak {:.2}/{:.2} final {:.2}/{:.2} vgap {:.2}/{:.2} peak_v host {:.1}/{:.1} client {:.1}/{:.1} replay_ms {:.2} first_diff {:?}",
             self.host_hit,
             self.client_hit,
             self.starts,
@@ -337,6 +340,7 @@ impl Report {
             self.peak_speed[1][0],
             self.peak_speed[1][1],
             self.replay_ms.iter().sum::<f64>() / self.replay_ms.len().max(1) as f64,
+            self.first_diff,
         )
     }
 }
@@ -455,6 +459,26 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
 
         // Compare with the reference at the same tick.
         let now = [body(&app, a), body(&app, b)];
+        if r.first_diff.is_none() {
+            for i in 0..2 {
+                let (h, c) = (&host[ti][i], &now[i]);
+                let field = if h.position != c.position {
+                    Some("position")
+                } else if h.rotation != c.rotation {
+                    Some("rotation")
+                } else if h.linear_velocity != c.linear_velocity {
+                    Some("linear_velocity")
+                } else if h.angular_velocity != c.angular_velocity {
+                    Some("angular_velocity")
+                } else {
+                    None
+                };
+                if let Some(f) = field {
+                    r.first_diff = Some((t, i, f));
+                    break;
+                }
+            }
+        }
         for i in 0..2 {
             let hv = v(&host[ti][i]);
             let cv = v(&now[i]);
@@ -533,26 +557,24 @@ fn lag(r: &Report, i: usize) -> Option<i64> {
     Some(r.client_hit[i]? as i64 - r.host_hit[i]? as i64)
 }
 
-/// Delay 0 is the uninterrupted reference: the client is the host, its
-/// cars stay on the reference, and every contact lands on the same tick.
-/// The two worlds are separate simulations and contact solving is not
-/// bit-reproducible across machines (CI replayed in the brush and the
-/// turn-in cases), so a tolerance replay is allowed; the state must agree.
+/// Delay 0 is the uninterrupted reference: the client is the host, no
+/// replay happens, and every contact lands on the same tick once.
 #[test]
 fn a_zero_delay_client_is_the_reference_in_every_contact() {
     let fwd = forward();
     for s in &all_scenarios() {
         let host = host_run(s, fwd);
         let r = run(s, cfg(0), &host, fwd);
+        assert_eq!(r.replays, 0, "{}: nothing to correct: {}", s.name, r.line());
         assert!(
-            r.peak_error.iter().chain(&r.final_error).all(|&e| e < 0.05),
+            r.peak_error == [0.0; 2] && r.final_error == [0.0; 2],
             "{}: {}",
             s.name,
             r.line()
         );
-        assert!(r.final_speed_gap.iter().all(|&e| e < 0.05), "{}", s.name);
         assert_eq!(r.client_hit, r.host_hit, "{}", s.name);
         assert_eq!(r.client_impulses, r.host_impulses, "{}", s.name);
+        assert_eq!(r.starts[0], r.starts[1], "{}", s.name);
     }
 }
 
