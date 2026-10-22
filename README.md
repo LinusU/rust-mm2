@@ -168,6 +168,20 @@ joined match shows the same screen to the host and every client but
 offers only `Back to lobby` (the lobby's `Start` begins the next match).
 There is no commentary yet.
 
+Cops & Robbers can field AI bots as extra seats: `--cnr-bots N` (0..=15)
+beside you in a one-seat match, or `bots=N` in the host's lobby (the
+host's stdin word `session bots=2`) for a hosted match. Hosted bots are driven by the host alone and reach every client
+as ordinary non-owned cars on the snapshot stream, under reserved player
+ids (1000 and up); they appear in the roster, HUD, scoreboard, minimap
+and results like any other seat, and take the gold by the same contact
+rule a human's car plays under. They are a designed enhancement, not a
+retail feature (original-rules ledger CNR-15). The multi-process check is
+`cargo test -p mm2_app --test network net_cnr_bots_mp` (needs
+`MM2_RETAIL`): a headless retail `sf` host with two bots and one client
+must print identical seats, teams, scores, gold holder, verdict and bot
+positions (`cnr=` / `cbots=` in the smoke record), and a rematch fields
+the bots again. The LAN/Internet play-test is the owner's (#1240/#1249).
+
 Driver profiles live in the OS user-data directory (never the install):
 `--profile <id|name>` binds one, `--new-profile <name>` creates and binds
 one (`--sandbox` makes it a dev identity ineligible for progression,

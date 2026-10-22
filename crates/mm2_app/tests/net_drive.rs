@@ -2023,7 +2023,7 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
 /// own or its replica, seated per side (F27-B, v21). The match cells
 /// are absent once the session is gone: a host `quit` back to its
 /// lobby prints only the counters.
-fn cnr_cell(line: &str, prefix: &str) -> Option<u64> {
+pub(crate) fn cnr_cell(line: &str, prefix: &str) -> Option<u64> {
     field(line, "cnr")
         .split(',')
         .find_map(|c| c.strip_prefix(prefix))

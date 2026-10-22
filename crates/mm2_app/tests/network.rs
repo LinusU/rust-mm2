@@ -7,6 +7,7 @@ mod net_app;
 mod net_baseline;
 mod net_check;
 mod net_cnr_bot_replication;
+mod net_cnr_bots_mp;
 mod net_cnr_lobby_bots;
 mod net_commands;
 mod net_contact;
