@@ -1536,8 +1536,18 @@ data): a copy retired (`COPY_TTL_TICKS`) or recycled under another id inside
 the window beyond `missing`/incarnation handling already in 05C; the rows
 landing between the compared tick and `now` are not re-applied (the copy's
 history is the client's own, so a late row corrects the copy from the next
-row on, not retroactively); prop contact through `worldprops::apply_props` is
-the same entrant path but has no app-level test here.
+row on, not retroactively).
+
+Prop contact (#1931): `a_replay_meets_the_prop_as_it_was_recorded` stamps a
+dormant banger placement the way the city stamp does, lands `Active` rows
+through the production `worldprops::apply_props` (and `drive_prop_lerp`) and
+puts the prop in the car's path at a tick inside the window (an entrant: it
+turns kinematic and loses its sensor); a last row throws it clear before the
+end. Replay vs twin 0.0000 m, `Replayed`; with the mover history stripped the
+car ends 5.05 m away (exactly where it ends with no prop at all, so the
+control cannot pass by the prop never mattering). Settled (static) props are
+not movers and are not covered by this scene. Evidence level: synthetic
+integration, no sockets, no retail data.
 
 ## Fixed recovery deadline (NETPLAY-05B-4, #1934)
 

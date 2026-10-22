@@ -22,14 +22,16 @@
 //! classes, rows pushed in-process; no sockets and no retail data).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_app::netdrive::RemoteSnaps;
 use mm2_app::netpredict::{Outcome, OwnAssertion, OwnPrediction, Request, reconcile};
+use mm2_app::worldprops::{PROP_ACTIVE, apply_props, drive_prop_lerp};
 use mm2_app::worldtraffic::{CAR_LANE, TrafficReplica};
 use mm2_game::{PlayerVehicle, Session, SessionPhase};
-use mm2_net::SnapCar;
+use mm2_net::{SNAP_NO_FRAGMENT, SnapCar, SnapProp};
 use mm2_vehicle::VehicleInput;
 use mm2_vehicle::capture::EpochRef;
 use mm2_vehicle::physics_world::{WorldCapture, capture_world};
@@ -115,8 +117,21 @@ impl Track {
 /// does not exist.
 type Script<'a> = &'a dyn Fn(u64) -> Option<(Vec3, Vec3)>;
 
+/// What the host says about the props at a tick: `(site, phase, pose)`.
+type PropRows = dyn Fn(u64) -> Vec<(u32, u8, Vec3)>;
+
+/// Stamped prop placements and the rows about them, pushed every second tick
+/// like the traffic.
+#[derive(Clone)]
+struct Props {
+    /// Home positions of the placements the city stamp minted, in order.
+    sites: Vec<Vec3>,
+    rows: Rc<PropRows>,
+}
+
 struct Scene {
     app: App,
+    props: Option<Props>,
     own: Entity,
     wire: u64,
     digest: u64,
@@ -126,13 +141,64 @@ struct Scene {
 
 impl Scene {
     fn new(strip: bool) -> Self {
+        Self::with(strip, None)
+    }
+
+    /// Stamp one banger placement the way `city::spawn_banger_prop` does:
+    /// the shared bundle and the next `BangerSite` ordinal, dormant.
+    fn stamp_prop(app: &mut App, pos: Vec3) {
+        let (object, role, site, owner) = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            (
+                session.mint_object_id(),
+                session.authority_role(),
+                session.mint_banger_site(),
+                mm2_game::SessionEntity(session.generation()),
+            )
+        };
+        let def = mm2_game::BangerDefinition {
+            name: "prop".into(),
+            mass: 40.0,
+            friction: 0.9,
+            elasticity: 0.5,
+            impulse_limit2: 100.0,
+            size: [0.5, 0.5, 0.5],
+            cg: [0.0, 0.0, 0.0],
+            num_parts: 0,
+            audio_id: 0,
+        };
+        app.world_mut()
+            .spawn(mm2_app::banger::banger_bundle(
+                mm2_game::Banger::new(def),
+                object,
+                role,
+                owner,
+                Collider::cuboid(1.0, 1.0, 1.0),
+                Transform::from_translation(pos),
+                format!("prop-{}", site.0),
+            ))
+            .insert((site, Position(pos), Rotation(Quat::IDENTITY)));
+    }
+
+    fn with(strip: bool, props: Option<Props>) -> Self {
         let install = city_install();
         let mut app = client_app(install.path());
         app.insert_resource(Time::<Fixed>::from_hz(60.0));
+        if props.is_some() {
+            app.add_systems(Update, (apply_props, drive_prop_lerp));
+        }
         assert!(run_until(&mut app, 12, |a| phase_is(
             a,
             SessionPhase::Playing
         )));
+        // Stamped once the session owns its generation; the next update
+        // lets `apply_props` note the sites into the local table.
+        if let Some(props) = &props {
+            for site in &props.sites {
+                Self::stamp_prop(&mut app, *site);
+            }
+            app.update();
+        }
         app.world_mut().spawn((
             RigidBody::Static,
             Collider::cuboid(4000.0, 1.0, 4000.0),
@@ -163,6 +229,7 @@ impl Scene {
             .add_systems(FixedLast, record);
         Self {
             app,
+            props,
             own,
             wire,
             digest,
@@ -196,6 +263,28 @@ impl Scene {
                 .resource_mut::<RemoteSnaps>()
                 .push_traffic(self.wire, self.n, self.digest, vec![row]);
         }
+        if let Some(props) = &self.props
+            && self.n.is_multiple_of(2)
+        {
+            let rows: Vec<SnapProp> = (props.rows)(self.n)
+                .into_iter()
+                .map(|(site, phase, pos)| SnapProp {
+                    site,
+                    fragment: SNAP_NO_FRAGMENT,
+                    phase,
+                    pos: pos.to_array(),
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                })
+                .collect();
+            if !rows.is_empty() {
+                let snaps = self.app.world_mut().resource_mut::<RemoteSnaps>();
+                let table = snaps.props().local_table();
+                self.app
+                    .world_mut()
+                    .resource_mut::<RemoteSnaps>()
+                    .push_props(self.wire, self.n, table, rows);
+            }
+        }
         self.app.update();
         assert_eq!(
             self.app.world().resource::<Seq>().0,
@@ -227,7 +316,16 @@ impl Scene {
         )
     }
 
+    /// The actor under test: the traffic copy, or the first stamped prop.
     fn copy(&mut self) -> Option<Entity> {
+        if self.props.is_some() {
+            return self
+                .app
+                .world_mut()
+                .query_filtered::<Entity, With<mm2_game::BangerSite>>()
+                .iter(self.app.world())
+                .next();
+        }
         copies(&mut self.app).first().map(|c| c.3)
     }
 }
@@ -250,7 +348,11 @@ fn track() -> Track {
 /// Run a twin to `NOW` with the nudge at `ACK`; its assertion is its own-car
 /// state right after the nudge, and its final state is the reference.
 fn twin(script: Script, by: Vec3) -> (OwnAssertion, Vec3) {
-    let mut s = Scene::new(false);
+    twin_in(None, script, by)
+}
+
+fn twin_in(props: Option<Props>, script: Script, by: Vec3) -> (OwnAssertion, Vec3) {
+    let mut s = Scene::with(false, props);
     s.run(ACK, script, Some((ACK, by)));
     let (pos, rot, vel, ang) = s.own_state();
     let a = OwnAssertion {
@@ -277,7 +379,11 @@ struct Replayed {
 }
 
 fn client(script: Script, a: &OwnAssertion, strip: bool) -> Replayed {
-    let mut s = Scene::new(strip);
+    client_in(None, script, a, strip)
+}
+
+fn client_in(props: Option<Props>, script: Script, a: &OwnAssertion, strip: bool) -> Replayed {
+    let mut s = Scene::with(strip, props);
     s.run(NOW, script, None);
     let commands: Vec<(u64, VehicleInput)> = (ACK + 1..=NOW).map(|q| (q, drive())).collect();
     let copy = s.copy();
@@ -409,4 +515,66 @@ fn a_copy_that_appears_behind_the_car_is_not_hit_by_the_replay() {
     eprintln!("replay vs twin: {err:.4} m ({:?})", ok.outcome);
     assert!(err < 0.05, "replay vs twin: {err}");
     assert!(ok.copy_at_end.is_some_and(|p| p.distance(spot) < 0.5));
+}
+
+/// A stamped prop in the car's path. Dormant at its home until the host's
+/// first `Active` row (inside the replay window, so an entrant: the body
+/// turns kinematic and loses its sensor), where the car runs into it; a
+/// last row, a few ticks before the end, throws it clear of the path. A
+/// replay that held the prop at its latest pose all along would miss it.
+fn prop_scene(t: &Track) -> Props {
+    let (fwd, anchor) = (t.fwd(), t.at(ANCHOR));
+    let home = anchor + fwd * 40.0 + Vec3::Y * 0.5;
+    let ahead = t.at(MEETS + 10) + fwd * 1.5;
+    let in_path = Vec3::new(ahead.x, 0.5, ahead.z);
+    let clear = in_path + fwd.cross(Vec3::Y) * 6.0;
+    let (first, thrown) = (ACK + 10, NOW - 4);
+    Props {
+        sites: vec![home],
+        rows: Rc::new(move |n| match n {
+            n if n >= thrown => vec![(0, PROP_ACTIVE, clear)],
+            n if n >= first => vec![(0, PROP_ACTIVE, in_path)],
+            _ => Vec::new(),
+        }),
+    }
+}
+
+/// Prop contact through the production `apply_props`: the replay meets the
+/// prop as it was recorded (activation and the throw inside the window);
+/// stripped of the mover history it does not.
+#[test]
+fn a_replay_meets_the_prop_as_it_was_recorded() {
+    let t = track();
+    let by = nudge(&t);
+    let none = |_: u64| None;
+    let props = prop_scene(&t);
+    let (a, reference) = twin_in(Some(props.clone()), &none, by);
+    let (_, plain) = twin_in(Some(props.clone()), &none, Vec3::ZERO);
+    eprintln!(
+        "nudge changes the end by {:.3} m",
+        reference.distance(plain)
+    );
+
+    let (_, bare) = twin_in(None, &none, by);
+    let mattered = reference.distance(bare);
+    eprintln!("prop changes the end by {mattered:.3} m");
+    assert!(mattered > 0.5, "control: the prop must change the outcome");
+    let ok = client_in(Some(props.clone()), &none, &a, false);
+    replayed_ok(&ok);
+    assert!(ok.entrant, "the prop turned active after the compared tick");
+    assert!(ok.copy_in_ring, "and the recorder holds it afterwards");
+    let err = ok.own.distance(reference);
+    eprintln!("with history: {err:.4} m ({:?})", ok.outcome);
+
+    let stripped = client_in(Some(props), &none, &a, true);
+    let err_stripped = stripped.own.distance(reference);
+    eprintln!(
+        "history stripped: {err_stripped:.4} m ({:?})",
+        stripped.outcome
+    );
+    assert!(err < 0.05, "replay vs twin: {err}");
+    assert!(
+        err_stripped > err + 0.05,
+        "control: {err_stripped} vs {err}"
+    );
 }
