@@ -1487,11 +1487,63 @@ state grows linearly with bodies; the wire is unchanged by trailers in this
 harness (the 8-seat `Snap` / `RemoteCommands` figures are in the 05B
 section: 110.6 kB/s together without 06D cadence).
 
-Not covered: a replay's frame-time cost under the real frame loop (a 20 ms
-block at 8 rigs is above one 16.7 ms frame; Bevy then runs extra fixed steps
-to catch up, which was not measured here), contact-heavy replays at 8 seats,
-and the real transport. Evidence level: synthetic integration on the
+Not covered here: a replay's frame-time cost under the frame loop and
+contact-heavy replays at 8 seats (NETPLAY-05I, below), and the real transport. Evidence level: synthetic integration on the
 production step.
+
+## Replay under the frame loop and under contact (NETPLAY-05I, #1932)
+
+`multi_tests::replay_cost_in_a_frame_loop_and_under_contact` (`cargo test -p
+mm2_app --lib replay_cost_in -- --nocapture`) measures one maximum replay (120
+steps, every remote body corrected and replayed, no trailers) at 2, 4 and 8
+seats, then at 8 seats in a contact-heavy scene (a stopped car between two
+head-on drivers, a car pinned on a wall with a driver on its tail, a
+three-car chain shunt; 6 touching pairs at the measured peak). Three runs, dev
+profile (`[optimized + debuginfo]`), a machine at load average ~16, so
+indicative only:
+
+| Seats | Physics tick (median) | One maximum replay | Fixed steps the frame loop adds |
+|---|---|---|---|
+| 2 | 0.18 ms | 9.7-10.5 ms | 0 |
+| 4 | 0.18 ms | 10.5-10.7 ms | 0 |
+| 8 | 0.19 ms | 11.9-12.3 ms | 0 |
+| 8, contact | 0.20-0.21 ms | 12.1-15.1 ms | 0 |
+
+Replay cost is mostly a per-step overhead of the world (restore, history,
+all bodies), not the solver: contact adds ~3 ms to 8 seats. The trailer rigs
+of 05G (19.5 ms at 8 seats) are the costlier case, and the largest measured
+overall.
+
+**The frame loop is a model, not a window.** The test cannot open a
+window, so Bevy's fixed-step catch-up is replayed in code from the measured
+costs (`catch_up`: `Time<Virtual>` advances by the previous frame's wall time,
+clamped at 250 ms; the accumulator pays out whole 16.7 ms ticks; the replay
+lands in the first step of one frame; render cost is not included, so every
+figure is a lower bound):
+
+| Replay block | Extra steps in the next frame | Frames until back to 1 step | Worst frame |
+|---|---|---|---|
+| 10-12 ms | 0 | 0 | 16.7 ms |
+| 20 ms (05G's 8 rigs) | 0 | 0 | 20 ms |
+| 40 ms | 1 | 2 | 40 ms |
+| 60 ms | 2 | 2 | 60 ms |
+| 120 ms | 6 | 2 | 120 ms |
+| 250 ms | 14 | 2 | 250 ms |
+
+Findings. (1) Every measured replay, including the 05G 8-rig trailer case,
+lands as one frame at most a few ms over budget with no extra step. (2)
+Catch-up never spirals: with a physics tick of 0.2-1.3 ms the extra steps
+cost far less than the tick they pay for, so the loop is back to one step per
+frame two frames after any block up to the 250 ms clamp. (3) Local input is
+unaffected, as 05G showed: the live command is written in `FixedUpdate`
+after the replay for every step, including the extra ones, so the cost is a
+longer frame (an input sampled once per frame is at most one frame's wall
+time old on its step), not a lost or replaced command. (4) No budgeting or
+spreading is needed at the measured sizes; a replay only becomes a visible
+hitch (above ~35 ms) at a per-step cost five times the measured one.
+Not measured: render cost in the same frame, a real window loop, the real
+transport, and a release build (cheaper). Evidence level: synthetic
+integration plus a catch-up model.
 
 ## Traffic copies in the predicted replay (NETPLAY-05H, #1915)
 

@@ -966,3 +966,232 @@ fn eight_rigs_cost_one_bounded_replay() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// NETPLAY-05I: the replay under a frame loop, and under contact.
+// ---------------------------------------------------------------------
+
+const DT_MS: f64 = 1000.0 / 60.0;
+
+/// What Bevy's fixed-step catch-up does when one frame carries a replay of
+/// `replay_ms`: the virtual clock advances by the previous frame's wall time
+/// (`Time<Virtual>` clamps it at 250 ms), the accumulator pays out whole
+/// ticks, each costing `tick_ms`, and the frame is paced to vsync. Returns
+/// `(extra steps in the worst frame, frames until the loop is back to one
+/// step per frame, worst frame wall time, worst age in ms of the input a
+/// step used)`. A model fed with measured costs, not a window; render cost
+/// is not in it, so it is a lower bound.
+fn catch_up(replay_ms: f64, tick_ms: f64) -> (u32, u32, f64, f64) {
+    let mut acc = 0.0f64;
+    let mut prev_wall = DT_MS;
+    let (mut extra, mut worst_wall, mut worst_age) = (0u32, DT_MS, 0.0f64);
+    let mut recovered_at = None;
+    for frame in 0..120u32 {
+        acc += prev_wall.min(250.0);
+        let mut steps = 0u32;
+        let mut work = 0.0;
+        while acc >= DT_MS {
+            acc -= DT_MS;
+            // The replay lands in `FixedFirst` of the frame's first step.
+            if frame == 10 && steps == 0 {
+                work += replay_ms;
+            }
+            work += tick_ms;
+            steps += 1;
+        }
+        let wall = work.max(DT_MS);
+        // Input is sampled once per frame, before its first step; the last
+        // step of the frame ran `work` ms of wall time after that.
+        worst_age = worst_age.max(wall);
+        if frame >= 10 {
+            if steps > 1 {
+                extra = extra.max(steps - 1);
+            } else if frame > 10 && recovered_at.is_none() && extra > 0 {
+                recovered_at = Some(frame - 10);
+            }
+        }
+        worst_wall = worst_wall.max(wall);
+        prev_wall = wall;
+    }
+    (extra, recovered_at.unwrap_or(0), worst_wall, worst_age)
+}
+
+/// Eight seats of a contact-heavy scene: a stationary car between two
+/// head-on drivers (three-car pileup), a car pinned against a wall with a
+/// driver pushing its tail, and a three-car chain shunt.
+fn contact_heavy(fwd: Vec3) -> Scene {
+    let back = Quat::from_rotation_y(std::f32::consts::PI);
+    let go = |_: u64| q(1.0, 0.0, 0.0);
+    let idle = |_: u64| q(0.0, 0.0, 0.0);
+    Scene {
+        name: "8 seats: pileup, wall pin, chain shunt",
+        cars: vec![
+            // Pileup (own car first): B between A and C.
+            (at(fwd, -40.0, 0.0), Quat::IDENTITY),
+            (at(fwd, 0.0, 0.0), Quat::IDENTITY),
+            (at(fwd, 40.0, 0.5), back),
+            // Wall pin.
+            (at(fwd, 20.0, 60.0), Quat::IDENTITY),
+            (at(fwd, 45.0, 60.0), Quat::IDENTITY),
+            // Chain shunt into a stopped car.
+            (at(fwd, -40.0, -60.0), Quat::IDENTITY),
+            (at(fwd, -20.0, -60.0), Quat::IDENTITY),
+            (at(fwd, 0.0, -60.0), Quat::IDENTITY),
+        ],
+        wall: Some((at(fwd, 70.0, 60.0), Quat::from_rotation_arc(Vec3::Z, fwd))),
+        drivers: vec![
+            Box::new(go),
+            Box::new(idle),
+            Box::new(go),
+            Box::new(go),
+            Box::new(|_| q(0.6, 0.0, 0.0)),
+            Box::new(go),
+            Box::new(go),
+            Box::new(idle),
+        ],
+        ticks: 0,
+        resets: Vec::new(),
+    }
+}
+
+/// Replays at 2, 4 and 8 seats, as one maximum replay, and the same eight
+/// seats in contact; the frame loop's response to each cost is modelled
+/// from the measured numbers. Prints the table that goes into the doc.
+#[test]
+fn replay_cost_in_a_frame_loop_and_under_contact() {
+    let fwd = forward();
+    let side = Vec3::Y.cross(fwd);
+    let mut rows = Vec::new();
+    for (label, n, scene) in [
+        ("2 seats, apart", 2usize, None),
+        ("4 seats, apart", 4, None),
+        ("8 seats, apart", 8, None),
+        ("8 seats, contact", 8, Some(contact_heavy(fwd))),
+    ] {
+        let mut app = world();
+        let cars: Vec<Entity> = match &scene {
+            Some(s) => spawn(&mut app, s),
+            None => {
+                let cars: Vec<Entity> = (0..n)
+                    .map(|i| spawn_car(&mut app, side * (12.0 * i as f32) + Vec3::Y * 1.2, false))
+                    .collect();
+                for (i, e) in cars.iter().enumerate().skip(1) {
+                    app.world_mut().entity_mut(*e).insert(PredictedRemoteBody {
+                        wire: PLAYER + i as u16,
+                        visual: Entity::PLACEHOLDER,
+                        epoch: 0,
+                    });
+                }
+                app.update();
+                cars
+            }
+        };
+        let drive = |i: usize, t: u64| match &scene {
+            Some(s) => (s.drivers[i])(t),
+            None => q(0.8, 0.0, 0.0),
+        };
+        let mut pred = OwnPrediction::default();
+        pred.restart(GEN);
+        // The contact scene runs long enough for every pair to meet.
+        let total = MAX_REPLAY_STEPS as u64 + if scene.is_some() { 240 } else { 60 };
+        let mut ticks = Vec::new();
+        let mut touching = 0;
+        for t in 1..=total {
+            for (i, c) in cars.iter().enumerate() {
+                *app.world_mut().get_mut::<VehicleInput>(*c).unwrap() = input(&drive(i, t));
+            }
+            let started = Instant::now();
+            app.update();
+            ticks.push(started.elapsed().as_secs_f64() * 1e3);
+            pred.ring.record(t, capture_world(app.world_mut(), EPOCH));
+            {
+                let g = app.world().resource::<ContactGraph>();
+                touching = touching.max(g.iter_active_touching().count());
+            }
+        }
+        ticks.sort_by(f64::total_cmp);
+        let tick_ms = ticks[ticks.len() / 2];
+        let tick_max = ticks[ticks.len() - 1];
+
+        let newest = total;
+        let ack = newest - MAX_REPLAY_STEPS as u64;
+        let past = pred.ring.get(ack).unwrap().clone();
+        let state = |e: Entity, shift: f32| {
+            let (pos, rot, vel, ang) = own_body(&past, e).unwrap();
+            RemoteAssertion {
+                wire: PLAYER,
+                epoch: 0,
+                pos: pos + Vec3::X * shift,
+                rot,
+                vel,
+                ang,
+            }
+        };
+        let (pos, rot, vel, ang) = own_body(&past, cars[0]).unwrap();
+        let own = OwnAssertion {
+            generation: GEN,
+            server_tick: ack,
+            ack,
+            pos: pos + Vec3::X * 0.5,
+            rot,
+            vel,
+            ang,
+        };
+        let cmds: Vec<(u64, VehicleInput)> = (ack + 1..=newest)
+            .map(|k| (k, input(&drive(0, k))))
+            .collect();
+        let remotes: Vec<RemoteDrive> = (1..n)
+            .map(|i| RemoteDrive {
+                body: cars[i],
+                assertion: Some(state(cars[i], 0.5)),
+                commands: Some((ack + 1..=newest).map(|k| input(&drive(i, k))).collect()),
+            })
+            .collect();
+        let started = Instant::now();
+        let out = reconcile(
+            app.world_mut(),
+            &mut pred,
+            &Request {
+                own: cars[0],
+                assertion: &own,
+                newest,
+                commands: &cmds,
+                remotes: &remotes,
+                trailers: &[],
+                epoch: EPOCH,
+            },
+        );
+        let replay_ms = started.elapsed().as_secs_f64() * 1e3;
+        let Outcome::Replayed { steps, .. } = out else {
+            panic!("{label}: {out:?}");
+        };
+        assert_eq!(steps, MAX_REPLAY_STEPS);
+        let (extra, drain, wall, age) = catch_up(replay_ms, tick_ms);
+        println!(
+            "{label}: tick median {tick_ms:.2} ms (max {tick_max:.2}), touching pairs {touching}, replay {replay_ms:.1} ms; frame loop: +{extra} steps, {drain} frames to drain, worst frame {wall:.1} ms, worst input age {age:.1} ms"
+        );
+        if scene.is_some() {
+            assert!(touching > 0, "{label}: the scene never touched");
+        }
+        rows.push((label, replay_ms));
+    }
+    // Sanity only (the machine is shared): a replay is bounded work, not an
+    // unbounded one, even under contact.
+    for (label, ms) in rows {
+        assert!(ms < 2000.0, "{label}: replay took {ms} ms");
+    }
+
+    // The frame loop's answer to a block of any size, from the measured tick
+    // cost (0.2 ms bare, ~1.3 ms under the dev profile with contact):
+    // catch-up always drains, within a few frames, and never past the clamp.
+    for tick in [0.25, 1.3] {
+        for replay in [10.0, 20.0, 40.0, 60.0, 120.0, 250.0] {
+            let (extra, drain, wall, age) = catch_up(replay, tick);
+            println!(
+                "model, tick {tick} ms, replay {replay} ms: +{extra} steps, {drain} frames to drain, worst frame {wall:.1} ms, worst input age {age:.1} ms"
+            );
+            assert!(drain <= 3, "replay {replay} ms never drained");
+            assert!(extra as f64 <= (replay + tick) / DT_MS, "{extra}");
+        }
+    }
+}
