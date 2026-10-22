@@ -309,9 +309,9 @@ struct Report {
     /// and `[client][car]`. A car shoved from rest shows how hard.
     peak_speed: [[f32; 2]; 2],
     replay_ms: Vec<f64>,
-    /// The first tick, car and field where the live client body is not
-    /// bit-identical to the host's (None: never).
-    first_diff: Option<(u64, usize, &'static str)>,
+    /// The first tick, car and field where the client's live step (before
+    /// any correction) is not bit-identical to the host's (None: never).
+    first_diff: Option<String>,
 }
 
 impl Report {
@@ -388,6 +388,36 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
             *app.world_mut().get_mut::<VehicleInput>(b).unwrap() = input(&got.command);
         }
         app.update();
+        // The live step, before any correction touches it.
+        let live = [body(&app, a), body(&app, b)];
+        if r.first_diff.is_none() {
+            for i in 0..2 {
+                let (h, c) = (&host[ti][i], &live[i]);
+                let field = if h.position != c.position {
+                    Some(("position", h.position.to_vec(), c.position.to_vec()))
+                } else if h.rotation != c.rotation {
+                    Some(("rotation", h.rotation.to_vec(), c.rotation.to_vec()))
+                } else if h.linear_velocity != c.linear_velocity {
+                    Some((
+                        "linear_velocity",
+                        h.linear_velocity.to_vec(),
+                        c.linear_velocity.to_vec(),
+                    ))
+                } else if h.angular_velocity != c.angular_velocity {
+                    Some((
+                        "angular_velocity",
+                        h.angular_velocity.to_vec(),
+                        c.angular_velocity.to_vec(),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((f, hv, cv)) = field {
+                    r.first_diff = Some(format!("tick {t} car {i} {f} host {hv:?} client {cv:?}"));
+                    break;
+                }
+            }
+        }
         let cap = capture_world(app.world_mut(), EPOCH);
         pred.ring.record(t, cap);
 
@@ -459,26 +489,6 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
 
         // Compare with the reference at the same tick.
         let now = [body(&app, a), body(&app, b)];
-        if r.first_diff.is_none() {
-            for i in 0..2 {
-                let (h, c) = (&host[ti][i], &now[i]);
-                let field = if h.position != c.position {
-                    Some("position")
-                } else if h.rotation != c.rotation {
-                    Some("rotation")
-                } else if h.linear_velocity != c.linear_velocity {
-                    Some("linear_velocity")
-                } else if h.angular_velocity != c.angular_velocity {
-                    Some("angular_velocity")
-                } else {
-                    None
-                };
-                if let Some(f) = field {
-                    r.first_diff = Some((t, i, f));
-                    break;
-                }
-            }
-        }
         for i in 0..2 {
             let hv = v(&host[ti][i]);
             let cv = v(&now[i]);
