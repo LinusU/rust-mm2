@@ -1790,13 +1790,13 @@ impl ClientCtl {
             // Alongside the TCP copy, not instead of it (NETPLAY-06E-2c).
             reliable_lobby_send(lane, &Message::Leave);
         }
-        // The Leave is the last frame: queue it, then wait (bounded) for
-        // the writer thread to put it on the wire — a process that exits
-        // right after this call would otherwise take the thread, and the
-        // Quit, with it — and half-close so the host reads a clean FIN.
+        // Queue it, then wait (bounded) for the writer thread to put it
+        // on the wire: a process that exits right after this call would
+        // otherwise take the thread, and the Quit, with it. The writer
+        // stays open so a caller can repeat the Leave.
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.send(&Message::Leave)?;
-        if writer.flush_and_close_send(TEARDOWN_FLUSH) {
+        if writer.flush(TEARDOWN_FLUSH) {
             Ok(())
         } else {
             Err(io::Error::new(io::ErrorKind::TimedOut, "Leave was not flushed").into())

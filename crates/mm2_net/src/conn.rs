@@ -9,7 +9,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -306,6 +306,9 @@ pub struct PeerWriter {
     failed: Arc<AtomicBool>,
     /// Set by the thread when it exits, drained or failed.
     done: Arc<AtomicBool>,
+    /// Frames handed to the thread, and frames it has written.
+    queued: u64,
+    written: Arc<AtomicU64>,
     stream: TcpStream,
 }
 
@@ -320,6 +323,8 @@ impl PeerWriter {
         let flag = Arc::clone(&failed);
         let done = Arc::new(AtomicBool::new(false));
         let exited = Arc::clone(&done);
+        let written = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&written);
         let mut out = writer.stream;
         thread::Builder::new()
             .name("mm2-peer-writer".into())
@@ -331,6 +336,7 @@ impl PeerWriter {
                         let _ = out.shutdown(std::net::Shutdown::Both);
                         break;
                     }
+                    count.fetch_add(1, Ordering::Release);
                 }
                 exited.store(true, Ordering::Release);
             })?;
@@ -338,6 +344,8 @@ impl PeerWriter {
             tx: Some(tx),
             failed,
             done,
+            queued: 0,
+            written,
             stream,
         })
     }
@@ -356,7 +364,10 @@ impl PeerWriter {
             return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
         };
         match tx.try_send(frame) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.queued += 1;
+                Ok(())
+            }
             Err(mpsc::TrySendError::Full(_)) => {
                 Err(io::Error::new(io::ErrorKind::WouldBlock, "peer send queue full").into())
             }
@@ -379,23 +390,25 @@ impl PeerWriter {
         self.done.load(Ordering::Acquire)
     }
 
-    /// Stop accepting frames, give the thread up to `deadline` to write
-    /// what is queued, then half-close the send side so the peer reads
-    /// the frames and a clean FIN. Returns whether everything was
-    /// written: `false` when the deadline passed or the socket failed.
-    /// The bound keeps a stalled peer from hanging an exit; the read
-    /// side is left open for the caller to drain.
-    pub fn flush_and_close_send(&mut self, deadline: Duration) -> bool {
-        self.close_send();
+    /// Wait up to `deadline` for the thread to write everything queued
+    /// so far. Returns whether it did: `false` when the deadline passed
+    /// or the socket failed. The writer stays open for further sends —
+    /// a caller that repeats a one-shot message keeps its channel. The
+    /// bound keeps a stalled peer from hanging an exit.
+    pub fn flush(&self, deadline: Duration) -> bool {
         let by = std::time::Instant::now() + deadline;
-        while !self.is_drained() && std::time::Instant::now() < by {
+        loop {
+            if self.failed.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.written.load(Ordering::Acquire) >= self.queued {
+                return true;
+            }
+            if std::time::Instant::now() >= by {
+                return false;
+            }
             thread::sleep(Duration::from_millis(1));
         }
-        let flushed = self.is_drained() && !self.failed.load(Ordering::Acquire);
-        if flushed {
-            let _ = self.stream.shutdown(std::net::Shutdown::Write);
-        }
-        flushed
     }
 
     /// Forcibly close the socket: a write parked in the thread and a
@@ -709,38 +722,41 @@ mod tests {
         assert!(peer_conn.peer_addr().unwrap().ip().is_loopback());
     }
 
-    /// A frame queued right before `flush_and_close_send` reaches the
-    /// peer, followed by a clean end of stream.
+    /// A frame queued right before `flush` reaches the
+    /// peer, and the writer stays usable.
     #[test]
-    fn flush_and_close_send_delivers_the_queued_frames() {
-        use std::io::Read;
+    fn flush_delivers_the_queued_frames() {
         let (mut writer, mut far) = peer_pair();
         far.set_read_timeout(Some(TIMEOUT)).unwrap();
         for _ in 0..50 {
             writer.send(&Message::Leave).unwrap();
         }
-        assert!(writer.flush_and_close_send(Duration::from_secs(5)));
+        assert!(writer.flush(Duration::from_secs(5)));
         for _ in 0..50 {
             assert_eq!(
                 Message::decode(&read_frame(&mut far).unwrap()).unwrap(),
                 Message::Leave
             );
         }
-        let mut rest = Vec::new();
-        far.read_to_end(&mut rest).unwrap();
-        assert!(rest.is_empty());
+        // Still open: a later send goes out too.
+        writer.send(&Message::Accept).unwrap();
+        assert!(writer.flush(Duration::from_secs(5)));
+        assert_eq!(
+            Message::decode(&read_frame(&mut far).unwrap()).unwrap(),
+            Message::Accept
+        );
     }
 
     /// A stalled peer bounds the flush instead of hanging it.
     #[test]
-    fn flush_and_close_send_gives_up_on_a_stalled_peer() {
+    fn flush_gives_up_on_a_stalled_peer() {
         let (mut writer, _far) = peer_pair();
         let big = vec![0u8; 200 * 1024];
         for _ in 0..64 {
             let _ = writer.send_frame(big.clone());
         }
         let start = std::time::Instant::now();
-        assert!(!writer.flush_and_close_send(Duration::from_millis(100)));
+        assert!(!writer.flush(Duration::from_millis(100)));
         assert!(start.elapsed() < TIMEOUT);
         writer.disconnect();
     }
