@@ -239,6 +239,11 @@ struct Cfg {
     loss: f64,
     /// Report every seat at epoch 0, as before the epoch was tracked.
     ignore_epochs: bool,
+    /// Car `.0` (>= 1) does not exist on the client until its tick `.1`: a
+    /// seat that re-enters after the compared tick. It spawns where the
+    /// host had it `snap_delay` ticks earlier, the newest pose a client
+    /// can have seen.
+    enters: Option<(usize, u64)>,
 }
 
 impl Cfg {
@@ -248,6 +253,7 @@ impl Cfg {
             cmd_delay: vec![delay; remotes],
             loss: 0.0,
             ignore_epochs: false,
+            enters: None,
         }
     }
 }
@@ -303,7 +309,11 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
     let n = s.cars.len();
     assert_eq!(cfg.cmd_delay.len(), n - 1);
     let mut app = world();
-    let cars = spawn(&mut app, s);
+    let mut cars = spawn(&mut app, s);
+    if let Some((i, _)) = cfg.enters {
+        app.world_mut().despawn(cars[i]);
+        cars[i] = Entity::PLACEHOLDER;
+    }
     let mut pred = OwnPrediction::default();
     pred.restart(GEN);
     let mut store = RemoteCommands::new();
@@ -324,6 +334,24 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
     let mut prev_client: Vec<Option<Vec3>> = vec![None; n];
     for t in 1..=s.ticks {
         let ti = t as usize - 1;
+        if let Some((i, at_tick)) = cfg.enters
+            && t == at_tick
+        {
+            let h = &host[(t.saturating_sub(cfg.snap_delay).max(1) - 1) as usize][i];
+            let (pos, rot) = (p(h), Quat::from_array(h.rotation));
+            let e = spawn_car(&mut app, pos, false);
+            app.world_mut().entity_mut(e).insert((
+                Rotation(rot),
+                Transform::from_translation(pos).with_rotation(rot),
+                PredictedRemoteBody {
+                    wire: PLAYER + i as u16,
+                    visual: Entity::PLACEHOLDER,
+                    epoch: 0,
+                },
+            ));
+            cars[i] = e;
+        }
+        let here = |i: usize| cars[i] != Entity::PLACEHOLDER;
         *app.world_mut().get_mut::<VehicleInput>(cars[0]).unwrap() = input(&(s.drivers[0])(t));
         for i in 1..n {
             let d = cfg.cmd_delay[i - 1];
@@ -332,6 +360,9 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
             }
             let got = predictor.command_for(&mut store, PLAYER + i as u16, t);
             applied[i].push(got.command);
+            if !here(i) {
+                continue;
+            }
             *app.world_mut().get_mut::<VehicleInput>(cars[i]).unwrap() = input(&got.command);
         }
         app.update();
@@ -355,6 +386,7 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
                 .map(|k| (k, input(&(s.drivers[0])(k))))
                 .collect();
             let drives: Vec<RemoteDrive> = (1..n)
+                .filter(|&i| here(i))
                 .map(|i| RemoteDrive {
                     body: cars[i],
                     assertion: Some(RemoteAssertion {
@@ -406,6 +438,9 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
 
         let mut off = false;
         for i in 0..n {
+            if !here(i) {
+                continue;
+            }
             let now = body(&app, cars[i]);
             let (hv, cv) = (v(&host[ti][i]), v(&now));
             if let Some(pv) = prev_host[i]
@@ -503,6 +538,7 @@ fn unequal_seat_delays_and_lost_snapshots_still_converge() {
         cmd_delay: vec![3, 24],
         loss: 0.3,
         ignore_epochs: false,
+        enters: None,
     };
     let r = run(&s, &cfg, &host);
     println!("unequal delays + 30% loss, {}: {}", s.name, r.line());
@@ -653,6 +689,7 @@ fn a_remote_reset_survives_lost_snapshots() {
             cmd_delay: vec![12],
             loss: seed_loss,
             ignore_epochs: false,
+            enters: None,
         };
         let r = run(&s, &cfg, &host);
         println!("epochs tracked, loss {seed_loss}: {}", r.line());
@@ -678,6 +715,62 @@ fn the_reset_scene_without_epochs_is_measured_for_comparison() {
         cfg.ignore_epochs = true;
         let r = run(&s, &cfg, &host);
         println!("epochs ignored, delay {d}: {}", r.line());
+    }
+}
+
+/// B drives off the side of the road and re-enters (a re-joining or
+/// respawned seat) at tick 100, 20 ticks before it drifts into A. The
+/// client has not seen the seat before, so the body spawns at the pose the
+/// client last had of it and carries no history for the compared tick.
+#[test]
+fn a_seat_that_enters_after_the_compared_tick_is_seeded_from_the_host() {
+    let fwd = forward();
+    let s = side_swipe(fwd);
+    let host = host_run(&s);
+    for d in [0u64, 3, 12, 30] {
+        let mut cfg = Cfg::even(d, 1);
+        cfg.enters = Some((1, 100));
+        let r = run(&s, &cfg, &host);
+        println!("re-entry at 100, delay {d}: {}", r.line());
+        assert_eq!(r.recoveries, 0, "delay {d}: {}", r.line());
+        assert!(r.peak_lift < 0.5, "delay {d}: {}", r.line());
+        assert!(
+            r.peak_error.iter().all(|&e| e < 0.5),
+            "the entrant must not sit at its spawn pose, delay {d}: {}",
+            r.line()
+        );
+        assert_eq!(
+            r.client_impulses,
+            r.host_impulses,
+            "delay {d}: {}",
+            r.line()
+        );
+    }
+}
+
+/// Lost snapshots only delay the first seed: the entrant is placed by the
+/// first snapshot that arrives, whichever tick that is.
+#[test]
+fn a_re_entering_seat_survives_lost_snapshots() {
+    let fwd = forward();
+    let s = side_swipe(fwd);
+    let host = host_run(&s);
+    for loss in [0.3, 0.6] {
+        let cfg = Cfg {
+            snap_delay: 12,
+            cmd_delay: vec![12],
+            loss,
+            ignore_epochs: false,
+            enters: Some((1, 100)),
+        };
+        let r = run(&s, &cfg, &host);
+        println!("re-entry, loss {loss}: {}", r.line());
+        assert_eq!(r.recoveries, 0, "loss {loss}: {}", r.line());
+        assert!(
+            r.final_error.iter().all(|&e| e < 0.5),
+            "loss {loss}: {}",
+            r.line()
+        );
     }
 }
 

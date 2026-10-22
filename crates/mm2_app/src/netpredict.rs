@@ -588,6 +588,11 @@ fn classify_and_run(
     // A seat the host reset since the body's history was recorded is a
     // teleport inside it: replay even when the poses happen to be close.
     remote_diverged |= resets.iter().any(|b| in_capture(past, *b));
+    // A seat that spawned after the compared tick has no recorded past to
+    // compare: it sits at its spawn pose. Seed it from the host's state so
+    // the replay steps it, and force the replay even if the own car agrees.
+    let entrants = entrants(past, req);
+    remote_diverged |= !entrants.is_empty();
     let complete_state = partners_complete(past, req);
     if remote_diverged {
         // Only a usable complete state starts the clock; the contact tick
@@ -620,7 +625,7 @@ fn classify_and_run(
         && req
             .remotes
             .iter()
-            .filter(|r| in_capture(past, r.body))
+            .filter(|r| in_capture(past, r.body) || entrants.contains(&r.body))
             .all(|r| r.commands.as_ref().is_some_and(|c| c.len() == depth));
     if !complete {
         adopt(world, req);
@@ -640,7 +645,25 @@ fn classify_and_run(
         req,
         (pos_error, rot_error),
         (remote_error, remote_diverged),
+        &entrants,
     )
+}
+
+/// Remote contact bodies that spawned after the compared tick (absent from
+/// `past`) and have the host's state for it plus a command for every
+/// replayed step. One without commands stays out, as before: the replay
+/// cannot step it, and forcing a recovery for it would be worse.
+fn entrants(past: &WorldCapture, req: &Request<'_>) -> Vec<Entity> {
+    let depth = req.commands.len();
+    req.remotes
+        .iter()
+        .filter(|r| {
+            r.assertion.is_some()
+                && !in_capture(past, r.body)
+                && r.commands.as_ref().is_some_and(|c| c.len() == depth)
+        })
+        .map(|r| r.body)
+        .collect()
 }
 
 /// Every contact body and trailer in the recorded world has its host row
@@ -745,9 +768,11 @@ fn replay(
     req: &Request<'_>,
     (pos_error, rot_error): (f32, f32),
     (remote_error, remote_diverged): (f32, bool),
+    entrants: &[Entity],
 ) -> Outcome {
     let a = req.assertion;
     let mut corrected = pred.ring.get(a.ack).expect("checked by the caller").clone();
+    seed_entrants(world, req, entrants, &mut corrected);
     if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == req.own) {
         vc.body.position = a.pos.to_array();
         vc.body.rotation = a.rot.to_array();
@@ -865,6 +890,39 @@ fn replay(
         remote_error,
         remote_diverged,
     }
+}
+
+/// Put each entrant into the corrected capture, with its vehicle state as
+/// it is now (a freshly spawned car) and the host's body state of the
+/// compared tick, so the restore places it there and the replay steps it.
+fn seed_entrants(
+    world: &mut World,
+    req: &Request<'_>,
+    entrants: &[Entity],
+    corrected: &mut WorldCapture,
+) {
+    if entrants.is_empty() {
+        return;
+    }
+    let now = capture_world(world, req.epoch);
+    for r in req.remotes.iter().filter(|r| entrants.contains(&r.body)) {
+        let (Some(a), Some((_, vc))) =
+            (r.assertion, now.vehicles.iter().find(|(e, _)| *e == r.body))
+        else {
+            continue;
+        };
+        let mut vc = vc.clone();
+        vc.body.position = a.pos.to_array();
+        vc.body.rotation = a.rot.to_array();
+        vc.body.linear_velocity = a.vel.to_array();
+        vc.body.angular_velocity = a.ang.to_array();
+        corrected.vehicles.push((r.body, vc));
+        if let Some(inc) = now.incarnations.iter().find(|(e, _)| *e == r.body) {
+            corrected.incarnations.push(*inc);
+        }
+    }
+    corrected.vehicles.sort_by_key(|(e, _)| *e);
+    corrected.incarnations.sort();
 }
 
 fn own_entity(world: &mut World) -> Option<(Entity, u8)> {

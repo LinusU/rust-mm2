@@ -1438,10 +1438,30 @@ pending-until-consumed rule, not a different trajectory in this scene.
 Not covered (evidence level: synthetic integration on the production step):
 the real transport with the impairment proxies; the vehicle crate's
 `lifetime::ResetEpoch` / `SessionEpoch` components are still not wired in the
-app (captures are stamped with the own car's `EpochRef` only); a contact body
-that spawns after the compared tick keeps the pose it was spawned at until
-its first in-ring assertion (a re-entering seat). The latter is the remaining
-"desynchronized re-entry" piece.
+app (captures are stamped with the own car's `EpochRef` only, and the
+`PredictedRemoteBody::epoch` carries the seat's reset epoch instead, which is
+what reconcile needs).
+
+### Re-entering seats (NETPLAY-05E, #1933)
+
+A contact body that spawns after the compared tick is not in the recorded
+world, so it used to sit at its spawn pose, disabled during the replay and
+re-enabled where it was: a stale body (up to 7 m off at a 30-tick delay in
+`side_swipe`, with a spurious client impulse) until the first assertion whose
+tick the history held. Reconcile now *seeds* such an entrant: when the
+snapshot has its row and the feed has a command for every replayed step, its
+current vehicle state is put into the corrected capture with the host's body
+state of the compared tick, the replay is forced even if the own car agrees,
+and the body is stepped on its commands with the rest. An entrant without
+commands is left as before (no recovery is forced for it); trailers are not
+seeded.
+
+Test: `multi_tests::a_seat_that_enters_after_the_compared_tick_is_seeded_from_the_host`
+(car 1 does not exist on the client until tick 100, spawning at the pose the
+client last had; delays 0/3/12/30: 0 recoveries, entrant peak error 0.07 m at
+delay 30, client impulses equal the host's) and `a_re_entering_seat_survives_lost_snapshots`
+(30 %/60 % loss). Evidence level: synthetic integration; not the real
+transport.
 
 ## Local input under a maximum replay, and the cost to eight rigs (NETPLAY-05G, #1914)
 
