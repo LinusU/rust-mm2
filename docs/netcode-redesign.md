@@ -1406,7 +1406,7 @@ block at 8 rigs is above one 16.7 ms frame; Bevy then runs extra fixed steps
 to catch up, which was not measured here), contact-heavy replays at 8 seats,
 and the real transport. Evidence level: synthetic integration on the
 production step.
-=======
+
 ## Traffic copies in the predicted replay (NETPLAY-05H, #1915)
 
 05C tested world-actor history on `mm2_vehicle`'s step alone. In the app the
@@ -1452,4 +1452,3 @@ landing between the compared tick and `now` are not re-applied (the copy's
 history is the client's own, so a late row corrects the copy from the next
 row on, not retroactively); prop contact through `worldprops::apply_props` is
 the same entrant path but has no app-level test here.
->>>>>>> 01a81d36 (Test traffic-copy contact in a predicted replay through apply_traffic)
