@@ -65,6 +65,11 @@ impl Rig {
             Client::join_lane_routed(host.addr(), &hello_for("alice"), WAIT, Some(proxy.route()))
                 .unwrap();
         client.set_timeout(Some(WAIT)).unwrap();
+        // `Start` rides the reliable channel (NETPLAY-06E-2b): a manual
+        // clock keeps its repeats out of the datagram counts these tests
+        // fix exactly.
+        host.use_manual_reliable_clock();
+        client.use_manual_reliable_clock();
         let generation = start_session(&host, &mut [&mut client]);
         let inputs = host.remote_inputs();
         inputs.set_running_generation(Some(generation));
@@ -79,6 +84,19 @@ impl Rig {
             generation,
         };
         rig.settle(STEP);
+        if recipe.is_none() {
+            // Let the `Start`, the rosters and their acknowledgements cross the clean
+            // relay, so the tests count only what they send themselves.
+            for _ in 0..50 {
+                if rig.host.reliable_stats(id).unwrap().sender.in_flight == 0 {
+                    break;
+                }
+                rig.host.advance_reliable_clock(STEP);
+                rig.client.advance_reliable_clock(STEP);
+                rig.settle(STEP);
+            }
+            assert_eq!(rig.host.reliable_stats(id).unwrap().sender.in_flight, 0);
+        }
         rig
     }
 

@@ -2226,6 +2226,7 @@ fn run(
                     {
                         broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                     } else if players.contains_key(&id) {
+                        queue_lifecycle(&lane, [id], &msg);
                         // The newcomer's own `Start` is as one-shot as the
                         // original broadcast was, and it may join long
                         // after that start's window closed — re-arm the
@@ -2411,6 +2412,7 @@ fn run(
                         if !broadcast(&mut players, &msg, &events, &inputs) {
                             broadcast_roster(&mut players, &events, &inputs, Some(&lane));
                         }
+                        queue_lifecycle(&lane, players.keys().copied(), &msg);
                         // Re-send `Start` until every peer is in the
                         // session or the window elapses (F31-B.4 /
                         // #1489). A new session supersedes any pending
@@ -2426,12 +2428,9 @@ fn run(
                 if let Phase::InSession { generation, .. } = phase {
                     phase = Phase::Lobby;
                     lane.set_generation(0);
-                    broadcast(
-                        &mut players,
-                        &Message::Cancel { generation },
-                        &events,
-                        &inputs,
-                    );
+                    let cancel = Message::Cancel { generation };
+                    broadcast(&mut players, &cancel, &events, &inputs);
+                    queue_lifecycle(&lane, players.keys().copied(), &cancel);
                     // Back in the lobby a fresh start wants fresh
                     // consent — readiness resets (designed); picks stay.
                     for slot in players.values_mut() {
@@ -2582,6 +2581,25 @@ fn broadcast_except(
 /// departed peer. Each pass removes at least one player, so the resend
 /// loop terminates.
 ///
+/// Queue a session `Start` or `Cancel` on each seat's reliable channel at
+/// the lobby scope (NETPLAY-06E-2b), in addition to the TCP copy. Lobby
+/// scope because the lane generation changes under these messages (`Start`
+/// raises it, `Cancel` clears it): generation 0 is always admitted, so a
+/// repeat or an ack never races the change, and the channel's order puts a
+/// `Cancel` after its `Start`. A body over one datagram is not fragmented:
+/// it rides TCP and the bounded resend window alone. A TCP-only seat, a
+/// full window or a dead channel is skipped and counted in its
+/// `ReliableStats`.
+fn queue_lifecycle(lane: &HostLane, seats: impl IntoIterator<Item = u16>, msg: &Message) {
+    let Ok(body) = msg.encode() else { return };
+    if body.len() > crate::rt::MAX_RELIABLE_BODY {
+        return;
+    }
+    for id in seats {
+        let _ = lane.send_reliable(id, crate::rt::LOBBY_SCOPE, &body);
+    }
+}
+
 /// With a `lane` (a roster *change*, NETPLAY-06E-2a) the final snapshot is
 /// also queued on every rostered seat's reliable channel at the lobby
 /// scope, so a lane client learns of a join or a removal even when the

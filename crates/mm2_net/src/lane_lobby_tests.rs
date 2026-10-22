@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::lane_impair_tests::{STEP, TICK_PACE};
+use crate::lane_tests::start_session;
 use crate::lane_tests::{WAIT, eventually, hello_for, host};
 use crate::{Client, Host, Impair, LinkDir, Message, RosterEntry, UdpImpair, UdpImpairProxy};
 
@@ -234,4 +235,99 @@ fn ready_and_ready_again_survive_a_lost_datagram_and_apply_once_in_order() {
     assert_eq!(flags(&events), vec![true, false, true]);
     assert!(rig.client.reliable_stats().unwrap().sender.retransmits >= 1);
     assert_eq!(rig.client.reliable_stats().unwrap().sender.in_flight, 0);
+}
+
+/// Every `Start`/`Cancel` generation the client returns until the inbox
+/// and the control stream have gone quiet, in the order returned.
+fn drain_lifecycle(client: &mut Client) -> Vec<(&'static str, u64)> {
+    client
+        .set_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Ok(msg) = client.recv() {
+        match msg {
+            Message::Start { generation, .. } => seen.push(("start", generation)),
+            Message::Cancel { generation } => seen.push(("cancel", generation)),
+            _ => {}
+        }
+    }
+    client.set_timeout(Some(WAIT)).unwrap();
+    seen
+}
+
+#[test]
+fn start_and_cancel_survive_a_lost_datagram_and_apply_once_in_order() {
+    let mut rig = LobbyRig::new(26, 0.15);
+    // Readiness and the pick are roster changes: let them settle so the
+    // datagram dropped next is the `Start` itself.
+    let started = start_session_dropping_first(&mut rig);
+    let before = rig.client_delivered();
+    assert!(rig.host.reliable_stats(rig.id).unwrap().sender.retransmits >= 1);
+
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    rig.host.cancel().unwrap();
+    // `Cancel`, then the roster it changed: both ride the channel.
+    rig.pump("the cancel", || rig.client_delivered() >= before + 2);
+    rig.quiesce(40);
+    assert_eq!(rig.client_delivered(), before + 2, "applied exactly once");
+    let host = rig.host.reliable_stats(rig.id).unwrap();
+    assert_eq!(host.sender.in_flight, 0);
+
+    // The TCP copy and its resend name the same generations, and the app
+    // ignores a repeat; what matters is that `Start` is never behind its
+    // `Cancel`.
+    let seen = drain_lifecycle(&mut rig.client);
+    assert_eq!(seen.first(), Some(&("start", started)));
+    let cancel = seen.iter().position(|m| m.0 == "cancel").unwrap();
+    assert!(seen[..cancel].iter().all(|m| m.0 == "start"), "{seen:?}");
+}
+
+fn start_session_dropping_first(rig: &mut LobbyRig) -> u64 {
+    rig.host
+        .set_session(crate::SessionAdvertisement {
+            summary: "lane".to_string(),
+            params: Vec::new(),
+        })
+        .unwrap();
+    rig.client.set_vehicle("", 0).unwrap();
+    rig.client.set_ready(true).unwrap();
+    // The ready roster reaches the client reliably, and the pick's.
+    rig.pump("the roster changes", || rig.client_delivered() >= 1);
+    rig.quiesce(60);
+    assert_eq!(rig.host.reliable_stats(rig.id).unwrap().sender.in_flight, 0);
+    let settled = rig.client_delivered();
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    let generation = start_session(&rig.host, &mut []);
+    rig.pump("the start", || rig.client_delivered() > settled);
+    rig.quiesce(40);
+    assert_eq!(rig.client_delivered(), settled + 1, "applied exactly once");
+    generation
+}
+
+#[test]
+fn an_oversize_start_is_not_fragmented_and_still_reaches_the_client_over_tcp() {
+    let mut rig = LobbyRig::new(27, 0.0);
+    rig.host
+        .set_session(crate::SessionAdvertisement {
+            summary: "big".to_string(),
+            params: vec![7; crate::MAX_SESSION_PARAMS],
+        })
+        .unwrap();
+    rig.client.set_vehicle("", 0).unwrap();
+    rig.client.set_ready(true).unwrap();
+    rig.pump("the roster changes", || rig.client_delivered() >= 1);
+    rig.quiesce(60);
+    let settled = rig.client_delivered();
+    let generation = loop {
+        rig.host.start(crate::LateJoin::Open).unwrap();
+        if let Ok(crate::HostEvent::Started { generation }) =
+            rig.host.recv_timeout(Duration::from_millis(500))
+        {
+            break generation;
+        }
+    };
+    rig.quiesce(40);
+    assert_eq!(rig.client_delivered(), settled, "nothing rode the channel");
+    let seen = drain_lifecycle(&mut rig.client);
+    assert_eq!(seen.first(), Some(&("start", generation)), "{seen:?}");
 }

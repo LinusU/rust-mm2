@@ -1184,11 +1184,16 @@ const REL_INBOX_CAP: usize = 64;
 
 /// Whether a reliably delivered body is a host event the client's inbox
 /// owns (everything else stays for `recv_reliable`). A lobby `Roster`
-/// (NETPLAY-06E-2a) is one: `Client::recv` returns it.
+/// (NETPLAY-06E-2a) and the session `Start`/`Cancel` (2b) are too:
+/// `Client::recv` returns them.
 fn is_host_event(body: &[u8]) -> bool {
     matches!(
         Message::decode(body),
-        Ok(Message::Cnr { .. } | Message::Impacts { .. } | Message::Roster { .. })
+        Ok(Message::Cnr { .. }
+            | Message::Impacts { .. }
+            | Message::Roster { .. }
+            | Message::Start { .. }
+            | Message::Cancel { .. })
     )
 }
 

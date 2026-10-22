@@ -232,11 +232,21 @@ fn input_windows_and_snaps_ride_the_lane_and_not_tcp_twice() {
     let mut lane = lane_client(&host, "alice");
     let mut tcp = Client::join(host.addr(), &hello_for("bob")).unwrap();
     tcp.set_timeout(Some(WAIT)).unwrap();
+    // `Start` rides the reliable channel (NETPLAY-06E-2b): a manual clock
+    // keeps its repeats out of the datagram counts asserted below.
+    host.use_manual_reliable_clock();
+    lane.use_manual_reliable_clock();
     let generation = start_session(&host, &mut [&mut lane, &mut tcp]);
     let inputs = host.remote_inputs();
     inputs.set_running_generation(Some(generation));
     let id = lane.player_id();
     eventually("the lane", || host.lane_established(id));
+    // The client's acknowledgements of that `Start` and the rosters.
+    eventually("the start's ack", || {
+        host.advance_reliable_clock(Duration::from_millis(16));
+        lane.advance_reliable_clock(Duration::from_millis(16));
+        host.reliable_stats(id).unwrap().sender.in_flight == 0
+    });
 
     // Client -> host: the window arrives through the lane.
     let ctl = lane.ctl().unwrap();

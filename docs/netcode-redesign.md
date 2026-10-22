@@ -1089,8 +1089,38 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   nothing. Tests (`lane_lobby_tests`): a reliable-only `Leave` after a lost
   first datagram yields one `Left{Quit}` for two copies; three `set_ready`
   flags after a lost first datagram arrive once each, in order.
-- Open: Start/Cancel (2b); retiring the TCP `Leave` and its app retry; the
+- Open: retiring the TCP `Leave` and its app retry; the
   vehicle pick still rides TCP only.
+
+### Start and Cancel (NETPLAY-06E-2b, #1904)
+
+- **Carried**: `Start` (the broadcast, and the unicast to a late joiner) and
+  `Cancel` are queued on every seat's reliable channel (`queue_lifecycle`)
+  *at the lobby scope* (generation 0), beside the TCP copy. The lane
+  generation changes under them (`Start` raises it, `Cancel` clears it), and
+  generation 0 is always admitted, so neither a repeat nor an ack races that
+  change. The channel is ordered and exactly-once, so a `Cancel` is never
+  applied before its `Start`. The client lane returns both through
+  `Client::recv` (`is_host_event`).
+- **Apply once, stale ignored**: the channel delivers each message exactly
+  once (`receiver.delivered`, asserted). The TCP copy and its resend window
+  still hand `Client::recv` repeats of the same generation; the app keeps
+  ignoring a `Start` or `Cancel` whose generation it has already applied
+  or never entered, as before (`Client::recv` itself does not filter, so
+  the resend tests can still observe the repeats, and a generation-0
+  `Start` still reaches the app to be refused).
+- **Size, decided**: a `Start` body can exceed `MAX_RELIABLE_BODY` (the
+  session blob is bounded by `MAX_SESSION_PARAMS`, 4096 bytes). It is
+  **not fragmented and there is no digest-plus-fetch**: an oversize `Start`
+  rides TCP and the bounded `LIFECYCLE_RESEND_WINDOW` alone. Fragmenting
+  the reliable channel is the follow-up that would let TCP retire.
+- **Kept**: `LIFECYCLE_RESEND_WINDOW`, the Keepalive lifecycle state and
+  the TCP copy — a seat whose lane never establishes (UDP blocked) and the
+  oversize `Start` still depend on them. Nothing is removed yet.
+- **Tests** (`lane_lobby_tests`): with a datagram dropped, `Start` and then
+  `Cancel` are each delivered on the channel exactly once
+  (`receiver.delivered`) and returned once, `Start` first; an oversize
+  `Start` leaves the channel untouched and reaches the client over TCP.
 
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 
