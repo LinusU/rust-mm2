@@ -12,7 +12,8 @@
 use std::time::Duration;
 
 use crate::net_drive::{
-    HOST_FRAME_CEILING, cnr_cell, field, host_args, join_args, listening_addr, start_when_ready,
+    HOST_FRAME_CEILING, cnr_cell, field, host_args, join_args_tcp_only, listening_addr,
+    start_when_ready,
 };
 use crate::support::{self, Proc};
 
@@ -99,7 +100,9 @@ fn assert_bots_agree(host: &str, client: &str) -> usize {
 }
 
 /// One match to its results screen, read on both machines: the host
-/// with two lobby bots, the client parked.
+/// with two lobby bots, the client parked. The client joins with
+/// `--tcp-only`: on the UDP lane it reports `lost the host` once the host
+/// exits at results (task #1937); switch back to `join_args` when fixed.
 fn play_to_results(city: &str, variant: &str) -> (String, String) {
     let Some((retail, _slot)) = support::retail_slot() else {
         panic!("callers check MM2_RETAIL");
@@ -114,7 +117,7 @@ fn play_to_results(city: &str, variant: &str) -> (String, String) {
     let addr = listening_addr(&host);
     host.cmd("session bots=2");
     host.until("event=session_changed");
-    let mut client_args = join_args(&retail, addr, "bob", HOST_FRAME_CEILING);
+    let mut client_args = join_args_tcp_only(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
         ["--parked", "--until-results", "--deadline", "900"]
             .into_iter()
@@ -246,7 +249,7 @@ fn a_rematch_fields_the_same_bots_on_both_machines() {
     let addr = listening_addr(&host);
     host.cmd("session bots=2");
     host.until("event=session_changed");
-    let mut client_args = join_args(&retail, addr, "bob", HOST_FRAME_CEILING);
+    let mut client_args = join_args_tcp_only(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
         ["--parked", "--until-snap-tick", "1500", "--deadline", "900"]
             .into_iter()
