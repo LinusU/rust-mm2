@@ -1153,7 +1153,8 @@ impl HostCtl {
     /// Send `msg` to every client, each at most once, riding the reliable
     /// channel for every seat whose lane is established (NETPLAY-06E-3)
     /// and the control stream for the rest — a TCP-only seat, a body over
-    /// [`MAX_RELIABLE_MESSAGE`](crate::MAX_RELIABLE_MESSAGE), and any seat whose channel refuses it (full or dead)
+    /// [`MAX_RELIABLE_MESSAGE`](crate::MAX_RELIABLE_MESSAGE), and any seat
+    /// whose channel refuses it (full or dead)
     /// fall back to TCP, counted in the returned [`ReliableFanout`], so a
     /// refusal never drops the message. `generation` is the session the
     /// lane authenticates it under. The receiver dedups (`Cnr` by
@@ -1186,7 +1187,9 @@ impl HostCtl {
     /// numbered and repeated until acknowledged, delivered exactly once
     /// and in order, at most
     /// [`MAX_RELIABLE_MESSAGE`](crate::MAX_RELIABLE_MESSAGE) bytes (split
-    /// across datagrams when over [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)). Takes no `Writer` lock and touches no socket; a full window,
+    /// across datagrams when over
+    /// [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)). Takes no `Writer`
+    /// lock and touches no socket; a full window,
     /// an oversize body or a dead channel is an `Err`, counted in
     /// [`Host::reliable_stats`].
     pub fn reliable_send(

@@ -135,7 +135,7 @@ impl ReliableClock {
 /// header. A longer message is split into pieces (see the `reliable`
 /// module) up to [`MAX_RELIABLE_MESSAGE`].
 pub const MAX_RELIABLE_BODY: usize = MAX_PAYLOAD - crate::reliable::DATA_HEADER;
-/// Largest reliable message: [`MAX_FRAGMENTS`](crate::MAX_RELIABLE_PIECES)
+/// Largest reliable message: [`MAX_RELIABLE_PIECES`](crate::MAX_RELIABLE_PIECES)
 /// pieces.
 pub const MAX_RELIABLE_MESSAGE: usize = MAX_RELIABLE_BODY * crate::reliable::MAX_RELIABLE_PIECES;
 /// TCP messages the client's merged inbox holds before the TCP reader
