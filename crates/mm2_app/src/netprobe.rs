@@ -118,6 +118,10 @@ pub enum ContactScript {
     /// Charge the nearest car and keep the throttle down through the
     /// contact, never parking (a push).
     Push,
+    /// Hold the heading of +X (toward the dev world's east perimeter
+    /// wall) and keep the throttle down through whatever stops it: the
+    /// car that ends up pinned against the wall.
+    Wall,
 }
 
 impl ContactScript {
@@ -128,8 +132,9 @@ impl ContactScript {
             "brake" => Ok(Self::Brake),
             "swipe" => Ok(Self::Swipe),
             "push" => Ok(Self::Push),
+            "wall" => Ok(Self::Wall),
             _ => Err(format!(
-                "unknown contact script {s:?} (evade, brake, swipe, push)"
+                "unknown contact script {s:?} (evade, brake, swipe, push, wall)"
             )),
         }
     }
@@ -141,6 +146,7 @@ impl ContactScript {
             Self::Brake => "brake",
             Self::Swipe => "swipe",
             Self::Push => "push",
+            Self::Wall => "wall",
         }
     }
 }
@@ -662,7 +668,7 @@ mod tests {
 
     #[test]
     fn contact_scripts_parse_and_round_trip() {
-        for name in ["evade", "brake", "swipe", "push"] {
+        for name in ["evade", "brake", "swipe", "push", "wall"] {
             assert_eq!(ContactScript::parse(name).unwrap().as_str(), name);
         }
         assert!(ContactScript::parse("ram").is_err());

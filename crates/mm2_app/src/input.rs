@@ -548,6 +548,11 @@ const SWIPE_OFFSET: f32 = 0.4;
 /// holds its line.
 const SWIPE_ALONGSIDE: (f32, f32) = (8.0, 1.0);
 
+/// Distance (m) down +X of itself a wall runner aims at, on the z = 0 line:
+/// far enough to be a heading rather than a pursuit, near enough that the
+/// runner is steered back onto the line after the spawn jostle.
+const WALL_AIM: f32 = 40.0;
+
 /// [`contact_drive`]'s per-session memory.
 #[derive(Debug, Default)]
 pub struct ContactState {
@@ -561,7 +566,8 @@ pub struct ContactState {
 }
 
 /// One frame of the evade / brake / swipe laws. `bearing` and `range`
-/// are to the nearest other car (none when there is none). `Push` is
+/// are to the nearest other car (none when there is none; a wall runner's
+/// are to its aim point). `Push` is
 /// [`ram_input`]'s and handled by [`contact_drive`].
 pub fn contact_input(
     script: ContactScript,
@@ -629,6 +635,11 @@ pub fn contact_input(
                 ..default()
             }
         }
+        ContactScript::Wall => VehicleInput {
+            throttle: if speed > RAM_SPEED { 0.0 } else { 1.0 },
+            steering: bearing.map_or(0.0, |b| (b * RAM_STEER_GAIN).clamp(-1.0, 1.0)),
+            ..default()
+        },
         ContactScript::Push => unreachable!("Push is ram_input's law"),
     }
 }
@@ -677,6 +688,12 @@ pub fn contact_drive(
         } else {
             let fwd = at.rotation() * Vec3::NEG_Z;
             let yaw = (-fwd.x).atan2(-fwd.z);
+            // A wall runner steers at a point down the z = 0 line, not at a car.
+            let target = if drive.0 == ContactScript::Wall {
+                Some(Vec3::new(from.x + WALL_AIM, from.y, 0.0))
+            } else {
+                target
+            };
             let bearing = target.map(|to| mm2_game::relative_bearing(yaw, from, to));
             let range = target.map(|to| from.distance(to));
             contact_input(drive.0, &mut state, speed, bearing, range)
@@ -1154,5 +1171,17 @@ mod contact_tests {
         assert!((aim.steering - (0.6 - SWIPE_OFFSET) * RAM_STEER_GAIN).abs() < 1e-6);
         let along = law(ContactScript::Swipe, &mut s, 5.0, Some(1.3), Some(5.0));
         assert_eq!(along.steering, 0.0);
+    }
+
+    #[test]
+    fn a_wall_runner_steers_at_its_heading_and_never_lifts_for_a_stop() {
+        let mut s = ContactState::default();
+        let off = law(ContactScript::Wall, &mut s, 5.0, Some(0.2), None);
+        assert!((off.steering - 0.2 * RAM_STEER_GAIN).abs() < 1e-6);
+        // Pinned (speed 0): still on the throttle, not parked.
+        let pinned = law(ContactScript::Wall, &mut s, 0.0, Some(0.0), None);
+        assert_eq!((pinned.throttle, pinned.handbrake), (1.0, 0.0));
+        let fast = law(ContactScript::Wall, &mut s, 12.0, Some(0.0), None);
+        assert_eq!(fast.throttle, 0.0);
     }
 }

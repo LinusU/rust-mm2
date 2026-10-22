@@ -34,10 +34,18 @@
 //! null = missed) and only the parked seats' agreement is bounded; the
 //! push guarantees the hit and is bounded on every seat.
 //!
-//! Not covered, and filed as a follow-up rather than claimed: the
-//! authored-scene cases (pin against a wall, three-car pileup), which need
-//! a scene with a wall and a third moving car, and the ambiguous
-//! high-latency report.
+//! NETPLAY-05F-3 adds the scene cases. `--net-contact wall` sends a car
+//! east down the dev world's z = 0 line to its 1 m thick, 4 m high
+//! perimeter wall at x = 200 and keeps the throttle down, so it ends
+//! pinned. The grid seats stand on that line (x = 0, 4, 8), so the wall
+//! pileup runs bob and alice as two wall runners nose-to-tail and the host
+//! ramming the rear one: bob is pinned between the wall and alice, alice
+//! between bob and the host, and all three cars are moving at the first
+//! contact. The same pileup and the sustained push are repeated on the
+//! `HIGH_LATENCY` links (250 ms and 400 ms each way) and reported next to
+//! the ordinary ones. Not covered: a pin against an authored city wall (no
+//! retail data here) and a pin against the dev world's scattered barriers,
+//! which are 1 m tall and can be climbed.
 //!
 //! Evidence level: real OS processes over loopback, seeded lossy proxies,
 //! headless, synthetic dev world. Nothing here says anything about a real
@@ -102,11 +110,19 @@ struct Case {
     /// legitimately avoid the contact; that outcome is reported, not
     /// failed.
     contact_certain: bool,
+    /// One-way delay (ms) of alice's and bob's links.
+    delays: [u64; 2],
 }
 
 const HOST: usize = 0;
 const ALICE: usize = 1;
 const BOB: usize = 2;
+
+/// The links every case but the high-latency ones runs on.
+const UNEQUAL: [u64; 2] = [25, 90];
+/// The ambiguous high-latency links: a transcontinental path (250 ms each
+/// way) and a poor mobile one (400 ms each way), 0.5 s and 0.8 s round trips.
+const HIGH_LATENCY: [u64; 2] = [250, 400];
 
 const fn case(name: &'static str, roles: [Role; 3], actor: usize, contact_certain: bool) -> Case {
     Case {
@@ -114,7 +130,13 @@ const fn case(name: &'static str, roles: [Role; 3], actor: usize, contact_certai
         roles,
         actor,
         contact_certain,
+        delays: UNEQUAL,
     }
+}
+
+const fn slow(mut c: Case) -> Case {
+    c.delays = HIGH_LATENCY;
+    c
 }
 
 /// One client's link: the same recipe family with a different delay and
@@ -199,7 +221,7 @@ fn run(case: Case, dir: &std::path::Path) -> Run {
         &common(host_args(install.path(), HOST_FRAME_CEILING), "host", HOST),
     );
     let addr = listening_addr(&host);
-    // Asymmetric paths: alice 25 ms each way, bob 90 ms, own seeds.
+    // Asymmetric paths (alice faster than bob), own seeds.
     let proxy_alice = ImpairProxy::loopback_seeded(addr, 0xC0A1).unwrap();
     let proxy_bob = ImpairProxy::loopback_seeded(addr, 0xB0B2).unwrap();
 
@@ -228,7 +250,7 @@ fn run(case: Case, dir: &std::path::Path) -> Run {
     // `Start` rides Down: let the clean lane deliver it, then arm.
     until_live(&alice);
     until_live(&bob);
-    for (proxy, ms) in [(&proxy_alice, 25), (&proxy_bob, 90)] {
+    for (proxy, ms) in [(&proxy_alice, case.delays[0]), (&proxy_bob, case.delays[1])] {
         proxy.set(LinkDir::Up, link(ms));
         proxy.set(LinkDir::Down, link(ms));
     }
@@ -312,8 +334,10 @@ fn contact_case(case: Case) {
             "{}: the pursuer never hit anything",
             case.name
         );
+        // (A case with no parked seat has nobody to displace: the scripted
+        // victims are checked by the convergence bound below.)
         assert!(
-            moved.iter().any(|(_, m)| m.is_some()),
+            moved.is_empty() || moved.iter().any(|(_, m)| m.is_some()),
             "{}: no parked seat was ever displaced: {moved:?}",
             case.name
         );
@@ -375,12 +399,15 @@ fn contact_case(case: Case) {
                 "role": format!("{:?}", case.roles[i]),
                 "first_motion_tick": if case.roles[i] == Role::Parked { first_motion(t) } else { None },
                 "correction_peak_m_after_contact": correction_peak(t, from),
+                // Where the seat's own process last saw it: the pinned
+                // order against the wall (x = 200) in the pileup.
+                "final_xz": t.last().map(|s| [s.pos[0], s.pos[2]]),
             })
         })
         .collect();
     let report = json!({
         "case": case.name,
-        "transport": "TCP data plane via per-client seeded ImpairProxy (alice 25 ms, bob 90 ms each way, 2 % loss/dup/reorder), three mm2 processes",
+        "transport": format!("TCP data plane via per-client seeded ImpairProxy (alice {} ms, bob {} ms each way, 2 % loss/dup/reorder), three mm2 processes", case.delays[0], case.delays[1]),
         "pursuer_seat": seats[rammer],
         "pursuer_contact_tick": contact,
         "contact_certain": case.contact_certain,
@@ -478,4 +505,44 @@ fn a_sustained_push_is_measured_on_unequal_links() {
         ALICE,
         true,
     ));
+}
+
+// Scene cases (NETPLAY-05F-3).
+
+#[test]
+fn a_three_car_pileup_against_a_wall_is_measured_on_unequal_links() {
+    contact_case(case(
+        "wall-pileup",
+        [
+            Role::Script("push"),
+            Role::Script("wall"),
+            Role::Script("wall"),
+        ],
+        HOST,
+        true,
+    ));
+}
+
+#[test]
+fn a_three_car_pileup_against_a_wall_is_measured_on_high_latency_links() {
+    contact_case(slow(case(
+        "wall-pileup-high-latency",
+        [
+            Role::Script("push"),
+            Role::Script("wall"),
+            Role::Script("wall"),
+        ],
+        HOST,
+        true,
+    )));
+}
+
+#[test]
+fn a_sustained_push_is_measured_on_high_latency_links() {
+    contact_case(slow(case(
+        "push-alice-pushes-high-latency",
+        [Role::Parked, Role::Script("push"), Role::Parked],
+        ALICE,
+        true,
+    )));
 }
