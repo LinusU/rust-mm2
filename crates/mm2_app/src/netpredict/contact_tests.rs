@@ -420,6 +420,7 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
         }
         let cap = capture_world(app.world_mut(), EPOCH);
         pred.ring.record(t, cap);
+        pred.log_contacts(app.world(), t);
 
         let snap_at = t.checked_sub(cfg.delay).filter(|&x| x >= 1);
         if let (Some(tt), true) = (snap_at, cfg.reconcile)
@@ -713,9 +714,9 @@ fn a_missed_predicted_contact_is_corrected() {
             assert!(r.settle[i].is_none_or(|n| n <= 2 * d), "d{d}: {}", r.line());
         }
         assert!(r.max_correction[0] >= last.1, "d{d}");
-        // Found here: a contact the client only learns of by replay is
-        // quarantined, so the live world raises none (`starts` [2, 0] at
-        // d12/d30). See docs/netcode-redesign.md, NETPLAY-05A-5.
+        // A contact the client only learns of by replay is raised in the
+        // live world once, when the replay finds it (#1902).
+        assert_eq!(r.starts[0], r.starts[1], "d{d}: {}", r.line());
         assert!(
             r.final_error.iter().all(|&e| e < 0.05),
             "d{d}: {}",

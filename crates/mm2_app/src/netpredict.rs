@@ -55,7 +55,10 @@
 //! An authority reset (new reset epoch) clears the history instead; the
 //! commands issued before it are never replayed across it.
 
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+use std::collections::VecDeque;
+
+use avian3d::prelude::{AngularVelocity, CollisionStart, LinearVelocity, Position, Rotation};
+use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, Session};
 use mm2_vehicle::capture::EpochRef;
@@ -261,6 +264,28 @@ pub struct OwnPrediction {
     /// Remote seat resets (a newer epoch than the body's history) that a
     /// consumed assertion folded into the history.
     pub remote_resets: u64,
+    /// Contact starts the live world raised, as `(seq of the step, body
+    /// pair)`, oldest first: what a replay's contacts are compared with.
+    contacts: VecDeque<(u64, ContactPair)>,
+    contact_cursor: MessageCursor<CollisionStart>,
+    /// Contact starts a replay was the first to discover, raised in the
+    /// live world by [`reconcile`] (their damage, sparks and audio).
+    pub contacts_surfaced: u64,
+}
+
+/// Ticks a replayed contact start may differ from the raised one and still
+/// be the same contact. Designed, not original: in the missed-contact runs
+/// of `docs/netcode-redesign.md` (delay 30) the replayed start moves 2-4
+/// ticks earlier with each newer snapshot while the car converges, and 1
+/// tick later from a replay that starts just before the contact.
+const CONTACT_JITTER_TICKS: u64 = 4;
+
+/// The two bodies of a contact, in a fixed order.
+type ContactPair = (Entity, Entity);
+
+fn contact_pair(m: &CollisionStart) -> Option<ContactPair> {
+    let (a, b) = (m.body1?, m.body2?);
+    Some(if a < b { (a, b) } else { (b, a) })
 }
 
 impl Default for OwnPrediction {
@@ -289,6 +314,9 @@ impl Default for OwnPrediction {
             recovered_deadline: 0,
             stale_remote: 0,
             remote_resets: 0,
+            contacts: VecDeque::new(),
+            contact_cursor: MessageCursor::default(),
+            contacts_surfaced: 0,
         }
     }
 }
@@ -311,8 +339,75 @@ impl OwnPrediction {
         self.ring.record(seq, capture);
     }
 
+    /// Note the contact starts the live world raised since the last call,
+    /// under the `seq` of the step that raised them. The `record_prediction`
+    /// system calls it each fixed tick, after the physics step.
+    pub fn log_contacts(&mut self, world: &World, seq: u64) {
+        let Some(messages) = world.get_resource::<Messages<CollisionStart>>() else {
+            return;
+        };
+        for pair in self.contact_cursor.read(messages).filter_map(contact_pair) {
+            self.contacts.push_back((seq, pair));
+        }
+        if let Some(oldest) = self.ring.oldest() {
+            while self.contacts.front().is_some_and(|(s, _)| *s < oldest) {
+                self.contacts.pop_front();
+            }
+        }
+    }
+
+    /// Match the contact starts a replay of `seqs` (the commands
+    /// `ack+1..=newest`) found against the ones already raised, and return
+    /// the ones the live world had not raised. `born` is the replay's
+    /// `(step, start)` list.
+    ///
+    /// A replayed start cancels one raised start of the same body pair that
+    /// is not yet behind the ack and lies within [`CONTACT_JITTER_TICKS`];
+    /// the raised start then takes the earlier of the two ticks, because a
+    /// contact the client found late is found earlier by each newer
+    /// snapshot. A start at or before the ack is host-verified history: a
+    /// later start of the same pair is a new contact (a bounce), not that
+    /// one again. A raised start the replay no longer finds stays raised,
+    /// it already played.
+    fn new_contacts(
+        &mut self,
+        ack: u64,
+        seqs: &[u64],
+        born: &[(usize, CollisionStart)],
+    ) -> Vec<CollisionStart> {
+        let mut out = Vec::new();
+        let mut matched: Vec<usize> = Vec::new();
+        for (step, m) in born {
+            let (Some(pair), Some(&tick)) = (contact_pair(m), seqs.get(*step)) else {
+                continue;
+            };
+            let near = self
+                .contacts
+                .iter()
+                .enumerate()
+                .filter(|(i, (t, p))| {
+                    *p == pair
+                        && *t > ack
+                        && t.abs_diff(tick) <= CONTACT_JITTER_TICKS
+                        && !matched.contains(i)
+                })
+                .min_by_key(|(_, (t, _))| t.abs_diff(tick))
+                .map(|(i, _)| i);
+            if let Some(i) = near {
+                matched.push(i);
+                self.contacts[i].0 = self.contacts[i].0.min(tick);
+            } else {
+                out.push(*m);
+                self.contacts.push_back((tick, pair));
+                matched.push(self.contacts.len() - 1);
+            }
+        }
+        out
+    }
+
     fn restart(&mut self, generation: u64) {
         self.generation = generation;
+        self.contacts.clear();
         self.ring.clear();
         self.last_ack = 0;
         self.floor = 0;
@@ -873,6 +968,19 @@ fn replay(
     }
     pred.ring = history;
     put_back(world, &remotes);
+    // Contacts only the replay found: raise them in the live world now,
+    // once. The quarantine swallowed them where they were born.
+    if let Ok(report) = &result {
+        let found = pred.new_contacts(a.ack, &seqs, &report.collision_starts);
+        pred.contacts_surfaced += found.len() as u64;
+        if let Some(mut live) = world.get_resource_mut::<Messages<CollisionStart>>() {
+            for m in found {
+                live.write(m);
+            }
+            // Already in the ledger: `log_contacts` must not note them again.
+            pred.contact_cursor.read(&live).for_each(drop);
+        }
+    }
     pred.ring.record(a.ack, corrected);
     for (seq, capture) in staged {
         pred.ring.record(seq, capture);
@@ -966,6 +1074,7 @@ pub fn record_prediction(world: &mut World) {
     if seq != 0 && pred.ring.newest().is_none_or(|n| seq > n) {
         let capture = capture_world(world, epoch);
         pred.record(seq, capture);
+        pred.log_contacts(world, seq);
     }
     world.insert_resource(pred);
 }

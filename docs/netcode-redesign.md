@@ -1162,11 +1162,27 @@ kinematic copy (1.17x), ending 13 m from the reference. The 10.5 vs 5.7 m/s
 slot, with a lighter push); this synthetic pair reproduces the direction,
 not that ratio.
 
-**Finding (not fixed here).** A contact the client discovers only through a
-replay (the missed-contact runs at delay 12/30) raises *no* live contact
-start: `ReplayQuarantine` swallows the replayed `CollisionStart`, so damage,
-sparks and audio for it never fire on the client, while the car velocity
-does change. Filed as a follow-up.
+**Contacts a replay discovers (#1902).** `ReplayQuarantine` swallows the
+`CollisionStart`s a replay raises, so a contact the client only learns of
+through a replay (the missed-contact runs at delay 12/30) used to raise no
+live contact start: damage, sparks and audio never fired though the car
+velocity changed. `ReplayReport::collision_starts` now returns the replayed
+starts (a pair already touching in the restored capture is dropped from step
+0: the restore does not carry its started-touching flag, so the first step
+announced it again). `OwnPrediction` keeps a ledger of the starts the live
+world raised (`log_contacts`, from `record_prediction`) and matches each
+replayed start against it: the same body pair, not yet behind the ack and
+within 4 ticks (`CONTACT_JITTER_TICKS`, designed: the replayed start moves
+2-4 ticks per snapshot while the car converges) is the same contact and only
+pulls the ledger tick earlier; anything else is written once into the live
+`Messages<CollisionStart>` by `reconcile` (`contacts_surfaced`). A start the
+replay no longer finds stays raised (it played). The raised event is the
+replay's, so it fires when the replay finds it, not at the host's tick. The
+contact tests now assert contact starts equal the host's in the missed-contact
+scenario at every delay (including the host's second start 2 ticks after the
+first, at delay 30). The false-contact scenario at delay 30 still raises a
+start the host never had (the client really did touch live); that is the
+prediction error, not a replay artefact, and is not corrected here.
 
 **Cost for two cars** (dev profile, Apple Silicon, one run, load not
 recorded; treat milliseconds as machine-dependent):
@@ -1186,7 +1202,7 @@ frames, before the 06D cadence reduces both.
 
 Evidence level: synthetic integration on the production step. No retail
 data, no sockets, no rendered capture. Open: acceptance-level evidence over
-the real transport with a second process, and the quarantine finding.
+the real transport with a second process.
 
 ## NETPLAY-05A integration status (#1889)
 

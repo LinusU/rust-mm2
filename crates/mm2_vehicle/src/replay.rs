@@ -234,6 +234,13 @@ pub struct ReplayReport {
     /// Quarantined messages the replayed ticks wrote and that were
     /// discarded, summed over every message type and every tick.
     pub suppressed_messages: usize,
+    /// The [`CollisionStart`]s the replayed ticks raised, as `(step, start)`
+    /// with `step` 0-based (step `i` produced `S[from_tick + i + 1]`). They
+    /// were quarantined, so the live world never saw them; a caller that
+    /// knows which contacts it already raised decides which of these to
+    /// surface (NETPLAY-05, `netpredict`). Empty when `CollisionStart` is
+    /// not in the [`ReplayQuarantine`].
+    pub collision_starts: Vec<(usize, CollisionStart)>,
 }
 
 /// A bounded ring of local-history [`WorldCapture`]s keyed by server
@@ -412,6 +419,10 @@ pub fn replay_from_observed(
     let mut gate = EntryGate::new(world, &restore.uncaptured);
 
     let mut suppressed = 0;
+    let mut collision_starts = Vec::new();
+    let collect_starts = stashes
+        .iter()
+        .any(|(i, _)| quarantined_name(world, *i) == std::any::type_name::<CollisionStart>());
     for (i, step) in steps.iter().enumerate() {
         world.resource_mut::<ReplayContext>().step = i + 1;
         gate.advance(world, history, from_tick + i as u64, true);
@@ -422,6 +433,20 @@ pub fn replay_from_observed(
         }
         set_fixed_step_time(world, step_dt);
         world.run_schedule(FixedPostUpdate);
+        if collect_starts {
+            let scratch = world.resource::<Messages<CollisionStart>>();
+            collision_starts.extend(
+                scratch
+                    .get_cursor()
+                    .read(scratch)
+                    // The restore does not carry a pair's started-touching
+                    // flag: a pair already touching at `from_tick` is
+                    // announced again by the first step. That is not a new
+                    // contact.
+                    .filter(|m| i > 0 || !touching_at_start(capture, m))
+                    .map(|m| (i, *m)),
+            );
+        }
         // The next tick sees only its own writes.
         suppressed += clear_scratch(world, &stashes);
         observe(world, i);
@@ -450,6 +475,7 @@ pub fn replay_from_observed(
         restore,
         entered,
         suppressed_messages: suppressed,
+        collision_starts,
     })
 }
 
@@ -592,6 +618,21 @@ fn clear_scratch(world: &mut World, stashes: &[(usize, Stash)]) -> usize {
         .sum();
     world.insert_resource(q);
     dropped
+}
+
+/// Whether `start`'s collider pair held a touching manifold in `capture`.
+fn touching_at_start(capture: &WorldCapture, start: &CollisionStart) -> bool {
+    capture.pairs.iter().any(|((a, b), state)| {
+        state.touching()
+            && ((*a, *b) == (start.collider1, start.collider2)
+                || (*a, *b) == (start.collider2, start.collider1))
+    })
+}
+
+fn quarantined_name(world: &World, index: usize) -> &'static str {
+    world
+        .get_resource::<ReplayQuarantine>()
+        .map_or("", |q| q.entries[index].name)
 }
 
 fn finish_quarantine(world: &mut World, stashes: Vec<(usize, Stash)>) -> usize {
