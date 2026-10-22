@@ -302,6 +302,9 @@ struct Outcome {
     reanchors: u32,
     refused: u32,
     why_stopped: &'static str,
+    /// Why A took no gold, when that is the map's doing and not the
+    /// driver's: see [`classify`].
+    unreachable: Option<&'static str>,
 }
 
 /// Two bots in `city` on `seed`: A starts ~60 m from the gold, B ~150 m. A is run until it delivers, sits [`GIVE_UP`] seconds inside a
@@ -323,8 +326,20 @@ fn run(retail: &std::path::Path, city: &str, seed: u64) -> Outcome {
         reanchors: 0,
         refused: 0,
         why_stopped: "budget",
+        unreachable: None,
     };
     let (mut still_at, mut still_since) = (pos(&app, a), 0u32);
+    // `MM2_TRACE=<city>:<seed>` prints A's progress every five seconds.
+    let trace = std::env::var("MM2_TRACE").is_ok_and(|t| t == format!("{city}:{seed}"));
+    if trace {
+        let graph = load_graph(&mount(retail), city).unwrap();
+        let (line, kind) =
+            mm2_app::cnr_bot_drive::plan_line(Some(&graph), pos(&app, a), gold, false);
+        eprintln!("  line {kind:?} of {} points; the last eight:", line.len());
+        for p in &line[line.len().saturating_sub(8)..] {
+            eprintln!("  line {:.0},{:.1},{:.0}", p.x, p.y, p.z);
+        }
+    }
     for tick in 0..HZ * BUDGET {
         app.update();
         for e in &app.world().resource::<Events>().0 {
@@ -342,6 +357,27 @@ fn run(retail: &std::path::Path, city: &str, seed: u64) -> Outcome {
                 }
                 _ => {}
             }
+        }
+        if trace && tick % (HZ * 5) == 0 {
+            let (p, g) = (
+                pos(&app, a),
+                app.world().resource::<CnrHost>().game.gold_position(),
+            );
+            let d = app.world().get::<CnrBotDriver>(a).unwrap();
+            eprintln!(
+                "  t={:>3}s A={:.0},{:.0},{:.0} B={:?} gold={g:?} flat={:.0} dy={:.1} kind={:?} left={:?} re={} ref={}",
+                tick / HZ,
+                p.x,
+                p.y,
+                p.z,
+                pos(&app, b).round(),
+                g.map(|g| (g.x - p.x).hypot(g.z - p.z)).unwrap_or(-1.0),
+                g.map(|g| g.y - p.y).unwrap_or(0.0),
+                d.line_kind(),
+                d.line_remaining(),
+                d.reanchors,
+                d.refused
+            );
         }
         if out.delivered.is_some() {
             out.why_stopped = "delivered";
@@ -367,13 +403,61 @@ fn run(retail: &std::path::Path, city: &str, seed: u64) -> Outcome {
             break;
         }
     }
-    let da = app.world().get::<CnrBotDriver>(a).unwrap();
-    let db = app.world().get::<CnrBotDriver>(b).unwrap();
+    out.unreachable = classify(&mut app, a, gold, &out);
+    let (da, db) = (
+        app.world().get::<CnrBotDriver>(a).unwrap(),
+        app.world().get::<CnrBotDriver>(b).unwrap(),
+    );
     out.streets = app.world().resource::<CnrBotBrain>().stats.streets;
     out.reanchors = da.reanchors + db.reanchors;
     out.refused = da.refused + db.refused;
     eprintln!("{city} seed {seed}: {out:?}");
     out
+}
+
+/// The policy for a bot that never took the gold (#1681). A bot is not
+/// asked to take what no car can: a run with no pickup by A is
+/// explained, and not a driver failure, when
+///
+/// - `"rival took it"`: B, on the same map, took the gold first;
+/// - `"unreachable level"`: the street graph has no way from A's level
+///   to the gold's ([`LineKind::Unreachable`]; the retail london site
+///   under a flyover, seed 12);
+/// - `"walled site"`: the gold is farther than the pickup radius from A,
+///   which stands at the end of the road line, with solid world between
+///   (a city-room wall: the retail sf site east of the elevated road,
+///   seeds 93 and 122).
+///
+/// Anything else with no pickup is a finding.
+fn classify(app: &mut App, a: Entity, gold: Vec3, out: &Outcome) -> Option<&'static str> {
+    if out.picked.is_some() {
+        return None;
+    }
+    if out.stolen {
+        return Some("rival took it");
+    }
+    let d = app.world().get::<CnrBotDriver>(a).unwrap();
+    if d.line_kind() == Some(mm2_app::cnr_bot_drive::LineKind::Unreachable) {
+        return Some("unreachable level");
+    }
+    let from = pos(app, a) + Vec3::Y * 1.5;
+    let to = gold + Vec3::Y * 1.5;
+    let (dir, reach) = (Dir3::new(to - from).ok()?, from.distance(to));
+    let blocked = app
+        .world_mut()
+        .run_system_once(move |sq: SpatialQuery, bodies: Query<&RigidBody>| {
+            sq.cast_ray_predicate(
+                from,
+                dir,
+                reach,
+                true,
+                &SpatialQueryFilter::default(),
+                &|e| bodies.get(e).is_ok_and(|b| b.is_static()),
+            )
+            .is_some()
+        })
+        .unwrap();
+    (reach > 5.0 && blocked).then_some("walled site")
 }
 
 /// Seconds of simulated time one run may take, and how long A may go
@@ -420,6 +504,12 @@ fn retail_bots_pick_up_deliver_and_pursue_in_each_city() {
             outcomes.len()
         );
         assert!(delivered > 0, "{city}: no seed delivered: {outcomes:?}");
+        for (seed, o) in &outcomes {
+            assert!(
+                o.picked.is_some() || o.delivered.is_some() || o.unreachable.is_some(),
+                "{city} seed {seed}: A never took the gold and nothing on the map explains it: {o:?}"
+            );
+        }
         assert!(
             pursued > 0,
             "{city}: no pursuer closed on a carrier: {outcomes:?}"

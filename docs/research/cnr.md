@@ -532,3 +532,47 @@ is set when B takes *loose* gold, not a steal; it is not evidence here. The two
 seeds are pinned and must reproduce; a change to physics, the graph or the
 driver that moves them means re-running the hunt. Evidence level:
 original-content validation; no rendering, no play-test.
+
+## No-pickup seeds and sites on another level (#1681) — designed, not original
+
+Diagnosed with `MM2_TRACE=<city>:<seed>` on `cnr_bot_drive_retail` (A's
+position every 5 s, the planned line's last points, and a ray from the
+road to the gold). Three distinct causes, none of them the policy:
+
+1. **The router chose a lane on the wrong level.** The pickup is a 3D
+   sphere (`pickup_radius`, 5 m), but `route_candidates` accepts every goal
+   lane within 12 m of the nearest *3D* snap and takes the shortest, with
+   no penalty for the goal's snap distance. sf seed 93: the gold is 22.5 m
+   up on the elevated road; the lower road at 13.9 m was 3D-nearer and
+   shorter, so the bot arrived 8 m under the gold and circled. Fix:
+   `NavGraph::route_candidates_at_level` / `drive_line_at_level` take
+   as goal entries the lanes within `GOAL_LEVEL` (3 m) of the goal's
+   height when there are any; the bot uses it. Races and police keep the
+   old behaviour.
+2. **No street connects the bot's level to the gold's.** london seed 12:
+   the gold is 10.7 m below the road the bot starts on, on an underpass
+   the graph does not join to it. The old fallback — a straight line —
+   had the bot circle over the site for ever. Policy
+   (`LineKind::Unreachable`): when the router reports `Unreachable` and
+   the objective is more than `UNREACHABLE_DY` (6 m) above or below the
+   car, the bot stands (handbrake) and asks again every `FAILED_WAIT`
+   frames, so it drives off again when the objective moves (a thief
+   carrying the gold) or the match changes it. Counted in
+   `BotStats::unreachable`.
+3. **The site is walled off from the road.** sf seeds 93 and 122 draw the
+   same gold site (-182, 22.5, 527): the elevated road passes 13 m west of
+   it and a `city-room433-collider` wall stands between. `lane_seeds`'
+   "on a lane" measure (15 m horizontal, 3 m vertical) admits it; a car
+   on the road is never within 5 m. The bot ends its line at the wall and
+   its bounded re-anchors and replans run out. Classified, not fixed: the
+   data's site needs a way over the wall that no authored road has.
+
+The rest of the original report (sf seeds 4 and 10, london 12's first
+leg) were runs where the *other* bot took the gold first (`stolen:
+true`): the harness starts B 150 m out and the race is real. The retail
+test now classifies every run without a pickup by A (`rival took it`,
+`unreachable level`, `walled site`) and fails on any it cannot explain.
+Measured after: sf 6 of 9 delivered (3 more explained: seeds 10, 35 a
+rival; 93, 122 walled — seed 4 delivered after recovering the gold from
+B); london 4 of 9 delivered, seed 12 unreachable level, seeds 92, 98, 162
+a rival, seed 122 picked up and lost to a steal.
