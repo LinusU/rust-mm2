@@ -170,3 +170,68 @@ fn a_roster_change_and_a_removal_reach_the_lane_client_reliably_and_apply_once()
     let host = rig.host.reliable_stats(rig.id).unwrap();
     assert_eq!((host.sender.acked, host.sender.in_flight), (2, 0));
 }
+
+fn host_events(rig: &LobbyRig) -> Vec<crate::HostEvent> {
+    std::iter::from_fn(|| rig.host.try_recv().ok()).collect()
+}
+
+/// NETPLAY-06E-2c: the reliable copy alone (the TCP `Leave` is never sent)
+/// reaps the seat though its first datagram is lost, and a second copy of
+/// the same `Leave` is a no-op.
+#[test]
+fn a_leave_on_the_reliable_channel_reaps_the_seat_once_after_a_lost_datagram() {
+    let rig = LobbyRig::new(24, 0.15);
+    let mut events = host_events(&rig);
+    let leave = Message::Leave.encode().unwrap();
+    rig.proxy.drop_next(LinkDir::Up, 1);
+    rig.client.reliable_send(0, &leave).unwrap();
+    rig.client.reliable_send(0, &leave).unwrap();
+    rig.pump("the seat to be reaped", || {
+        events.extend(host_events(&rig));
+        events
+            .iter()
+            .any(|e| matches!(e, crate::HostEvent::Left { .. }))
+    });
+    rig.quiesce(40);
+    events.extend(host_events(&rig));
+    let left: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            crate::HostEvent::Left { id, cause, .. } => Some((*id, *cause)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(left, vec![(rig.id, crate::LeaveCause::Quit)]);
+    assert!(rig.client.reliable_stats().unwrap().sender.retransmits >= 1);
+}
+
+/// NETPLAY-06E-2c: ready / ready-again (the rematch intent) ride the
+/// reliable channel alone on a lane client; the first datagram is lost,
+/// both flags apply once and in order.
+#[test]
+fn ready_and_ready_again_survive_a_lost_datagram_and_apply_once_in_order() {
+    let mut rig = LobbyRig::new(25, 0.15);
+    let mut events = host_events(&rig);
+    rig.proxy.drop_next(LinkDir::Up, 1);
+    rig.client.set_ready(true).unwrap();
+    rig.client.set_ready(false).unwrap();
+    rig.client.set_ready(true).unwrap();
+    let flags = |events: &[crate::HostEvent]| -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                crate::HostEvent::ReadyChanged { ready, .. } => Some(*ready),
+                _ => None,
+            })
+            .collect()
+    };
+    rig.pump("all three flags", || {
+        events.extend(host_events(&rig));
+        flags(&events).len() >= 3
+    });
+    rig.quiesce(40);
+    events.extend(host_events(&rig));
+    assert_eq!(flags(&events), vec![true, false, true]);
+    assert!(rig.client.reliable_stats().unwrap().sender.retransmits >= 1);
+    assert_eq!(rig.client.reliable_stats().unwrap().sender.in_flight, 0);
+}

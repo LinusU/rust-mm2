@@ -86,6 +86,10 @@ const WRITE_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
 /// costs teardown this much once, not once per peer.
 const TEARDOWN_FLUSH: Duration = Duration::from_secs(1);
 
+/// How often the lobby loop looks for reliably delivered `Leave`/`SetReady`
+/// while no channel message wakes it (designed: a human-scale latency bound).
+const INTENT_POLL: Duration = Duration::from_millis(50);
+
 /// How often the host loop sends every rostered peer a
 /// [`Message::Keepalive`] (F24-AC04), so an idle lobby is never silent
 /// for longer than this. Designed, not recovered from the original.
@@ -321,9 +325,23 @@ pub(crate) struct PeerMail {
     /// `InputWindow` frames absorbed per seat, accepted or not — the count
     /// a harness waits on to know a delivered frame reached the mailbox.
     windows: BTreeMap<u16, u64>,
+    /// NETPLAY-06E-2c: `Leave`/`SetReady` the reliable channel delivered,
+    /// in arrival order, for the lobby loop ([`RemoteInputs::take_intent`]).
+    intents: VecDeque<(u16, Message)>,
 }
 
+/// Bound on [`PeerMail::intents`]: the channel's own windows bound what
+/// can arrive between two loop passes; this is the backstop.
+const MAX_LOBBY_INTENTS: usize = 64;
+
 impl PeerMail {
+    /// Queue a reliably delivered lobby intent for the loop.
+    pub(crate) fn absorb_lobby_intent(&mut self, id: u16, msg: Message) {
+        if self.intents.len() < MAX_LOBBY_INTENTS {
+            self.intents.push_back((id, msg));
+        }
+    }
+
     /// Record `id`'s reset ask under the mailbox lock — the TCP path and
     /// the lane's reliable channel (NETPLAY-06E-3) share it, so a request
     /// delivered by both is one newest-wins slot.
@@ -566,7 +584,14 @@ impl RemoteInputs {
         mail.seats.remove(&id);
         mail.window_gens.remove(&id);
         mail.windows.remove(&id);
+        mail.intents.retain(|(seat, _)| *seat != id);
         mail.lane.remove(id);
+    }
+
+    /// The oldest reliably delivered `Leave`/`SetReady` not yet handled.
+    fn take_intent(&self) -> Option<(u16, Message)> {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.intents.pop_front()
     }
 
     /// Tell the mailbox which session generation the host is simulating
@@ -1446,7 +1471,13 @@ impl Client {
     /// Toggle this client's readiness flag; the host rebroadcasts the
     /// roster to everyone.
     pub fn set_ready(&mut self, ready: bool) -> Result<(), NetError> {
-        self.conn.send(&Message::SetReady { ready })
+        let msg = Message::SetReady { ready };
+        if let Some(link) = &self.lane
+            && reliable_lobby_send(&link.lane.0, &msg)
+        {
+            return Ok(());
+        }
+        self.conn.send(&msg)
     }
 
     /// Set this client's vehicle pick. The host checks it against the
@@ -1481,6 +1512,11 @@ impl Client {
         // (EINVAL) on a socket whose write half is shut and whose peer
         // has closed — setting it after the half-close races that close.
         self.conn.set_read_timeout(Some(LEAVE_DRAIN_TIMEOUT))?;
+        if let Some(link) = &self.lane {
+            // The reliable copy (NETPLAY-06E-2c) survives a lost datagram;
+            // the TCP copy below stays and the host reaps the seat once.
+            reliable_lobby_send(&link.lane.0, &Message::Leave);
+        }
         self.conn.send(&Message::Leave)?;
         self.conn.shutdown_write();
         if let Some(link) = &self.lane {
@@ -1609,6 +1645,14 @@ pub struct ClientCtl {
     lane: Option<Arc<ClientLane>>,
 }
 
+/// Queue a lobby-scope message on the lane's reliable channel
+/// (NETPLAY-06E-2c); `false` when the channel refused it (full window,
+/// dead channel) and the caller must use the control stream.
+fn reliable_lobby_send(lane: &ClientLane, msg: &Message) -> bool {
+    msg.encode()
+        .is_ok_and(|body| lane.send_reliable(crate::rt::LOBBY_SCOPE, &body).is_ok())
+}
+
 impl ClientCtl {
     fn send(&self, msg: &Message) -> Result<(), NetError> {
         // A poisoned mutex only means a send panicked mid-write — the
@@ -1620,7 +1664,16 @@ impl ClientCtl {
 
     /// [`Client::set_ready`], from any thread.
     pub fn set_ready(&self, ready: bool) -> Result<(), NetError> {
-        self.send(&Message::SetReady { ready })
+        let msg = Message::SetReady { ready };
+        // NETPLAY-06E-2c: with a lane the flag rides the reliable channel
+        // alone (in order with the other reliable lobby intents, so a stale
+        // copy never lands after a newer one); a refusal falls back to TCP.
+        if let Some(lane) = &self.lane
+            && reliable_lobby_send(lane, &msg)
+        {
+            return Ok(());
+        }
+        self.send(&msg)
     }
 
     /// [`Client::set_vehicle`], from any thread.
@@ -1733,6 +1786,10 @@ impl ClientCtl {
     /// cannot drain, so the owner finishes the close by reading the
     /// socket to its end (or dropping the client).
     pub fn leave(&self) -> Result<(), NetError> {
+        if let Some(lane) = &self.lane {
+            // Alongside the TCP copy, not instead of it (NETPLAY-06E-2c).
+            reliable_lobby_send(lane, &Message::Leave);
+        }
         self.send(&Message::Leave)
     }
 }
@@ -1925,86 +1982,107 @@ fn run(
     loop {
         // Wake for the next keepalive even when no message arrives.
         let wait = KEEPALIVE_INTERVAL.saturating_sub(last_sent.elapsed());
-        let msg = match rx.recv_timeout(wait) {
-            Ok(msg) => msg,
-            Err(RecvTimeoutError::Timeout) => {
-                last_sent = Instant::now();
-                // The roster rides every keepalive tick too: a removal's
-                // one-shot broadcast can be lost on a lossy link, and a
-                // survivor would keep the departed peer's seat until the
-                // next membership change. Resending the (idempotent,
-                // newest-wins) snapshot bounds that to one tick. A failed
-                // keepalive write needs no extra pass: `broadcast_roster`
-                // below reports the corrected roster either way.
-                let running = matches!(phase, Phase::InSession { .. });
-                broadcast(
-                    &mut players,
-                    &Message::Keepalive {
-                        generation,
-                        running,
-                    },
-                    &events,
-                    &inputs,
-                );
-                // The lobby's advertised next session is as one-shot as
-                // a removal: a client that missed the host's edit would
-                // keep (and be started on) the stale ad. Newest-wins and
-                // idempotent on the client, so the lobby repeats it each
-                // tick; a running session's peers are not re-told (the
-                // ad that *started* it is theirs already).
-                if matches!(phase, Phase::Lobby)
-                    && let Some(ad) = &session
-                {
-                    broadcast(
-                        &mut players,
-                        &Message::Session(ad.clone()),
-                        &events,
-                        &inputs,
-                    );
+        // NETPLAY-06E-2c: a `Leave`/`SetReady` the reliable channel
+        // delivered is handled exactly like the TCP copy (a second copy
+        // of either is a no-op: the seat is gone / the flag is set), in
+        // delivery order ahead of the next channel message. The lane
+        // thread cannot wake this loop, so the wait is cut to a short
+        // poll while the keepalive clock keeps its own deadline.
+        let msg = if let Some((id, msg)) = inputs.take_intent() {
+            match msg {
+                Message::Leave => LoopMsg::PeerGone {
+                    id,
+                    cause: LeaveCause::Quit,
+                },
+                msg => LoopMsg::PeerMessage { id, msg },
+            }
+        } else {
+            match rx.recv_timeout(wait.min(INTENT_POLL)) {
+                Err(RecvTimeoutError::Timeout) if last_sent.elapsed() < KEEPALIVE_INTERVAL => {
+                    continue;
                 }
-                // F31-B.4 / #1489: the one-shot lifecycle frames repeat
-                // too, bounded rather than forever — a receiver ignores a
-                // repeat (its generation only climbs). A `Start` stops
-                // once every peer has shown it entered the session.
-                let now = Instant::now();
-                if let Phase::InSession {
-                    generation: g,
-                    session: started,
-                    ..
-                } = &phase
-                {
-                    match start_resend {
-                        Some((rg, until)) if rg == *g && now < until => {
-                            if players.keys().all(|id| inputs.entered(*id, *g)) {
-                                start_resend = None;
-                            } else {
-                                let msg = Message::Start {
-                                    generation: *g,
-                                    session: started.clone(),
-                                    host_pick: config.host_pick.clone(),
-                                };
-                                broadcast(&mut players, &msg, &events, &inputs);
-                            }
-                        }
-                        Some(_) => start_resend = None,
-                        None => {}
-                    }
-                } else if let Some((rg, until)) = cancel_resend {
-                    if now < until {
+                other => match other {
+                    Ok(msg) => msg,
+                    Err(RecvTimeoutError::Timeout) => {
+                        last_sent = Instant::now();
+                        // The roster rides every keepalive tick too: a removal's
+                        // one-shot broadcast can be lost on a lossy link, and a
+                        // survivor would keep the departed peer's seat until the
+                        // next membership change. Resending the (idempotent,
+                        // newest-wins) snapshot bounds that to one tick. A failed
+                        // keepalive write needs no extra pass: `broadcast_roster`
+                        // below reports the corrected roster either way.
+                        let running = matches!(phase, Phase::InSession { .. });
                         broadcast(
                             &mut players,
-                            &Message::Cancel { generation: rg },
+                            &Message::Keepalive {
+                                generation,
+                                running,
+                            },
                             &events,
                             &inputs,
                         );
-                    } else {
-                        cancel_resend = None;
+                        // The lobby's advertised next session is as one-shot as
+                        // a removal: a client that missed the host's edit would
+                        // keep (and be started on) the stale ad. Newest-wins and
+                        // idempotent on the client, so the lobby repeats it each
+                        // tick; a running session's peers are not re-told (the
+                        // ad that *started* it is theirs already).
+                        if matches!(phase, Phase::Lobby)
+                            && let Some(ad) = &session
+                        {
+                            broadcast(
+                                &mut players,
+                                &Message::Session(ad.clone()),
+                                &events,
+                                &inputs,
+                            );
+                        }
+                        // F31-B.4 / #1489: the one-shot lifecycle frames repeat
+                        // too, bounded rather than forever — a receiver ignores a
+                        // repeat (its generation only climbs). A `Start` stops
+                        // once every peer has shown it entered the session.
+                        let now = Instant::now();
+                        if let Phase::InSession {
+                            generation: g,
+                            session: started,
+                            ..
+                        } = &phase
+                        {
+                            match start_resend {
+                                Some((rg, until)) if rg == *g && now < until => {
+                                    if players.keys().all(|id| inputs.entered(*id, *g)) {
+                                        start_resend = None;
+                                    } else {
+                                        let msg = Message::Start {
+                                            generation: *g,
+                                            session: started.clone(),
+                                            host_pick: config.host_pick.clone(),
+                                        };
+                                        broadcast(&mut players, &msg, &events, &inputs);
+                                    }
+                                }
+                                Some(_) => start_resend = None,
+                                None => {}
+                            }
+                        } else if let Some((rg, until)) = cancel_resend {
+                            if now < until {
+                                broadcast(
+                                    &mut players,
+                                    &Message::Cancel { generation: rg },
+                                    &events,
+                                    &inputs,
+                                );
+                            } else {
+                                cancel_resend = None;
+                            }
+                        }
+                        broadcast_roster(&mut players, &events, &inputs, None);
+                        continue;
                     }
-                }
-                broadcast_roster(&mut players, &events, &inputs, None);
-                continue;
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
             }
-            Err(RecvTimeoutError::Disconnected) => break,
         };
         match msg {
             LoopMsg::Shutdown => break,

@@ -1075,7 +1075,22 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   first datagram lost from connection start, a stale nonzero generation
   refused, and a join roster (first datagram lost) plus a removal
   delivered exactly once each (`receiver.delivered`).
-- Open: Start/Cancel (2b), Leave and rematch (2c); retiring the TCP copy.
+- **Leave and ready (NETPLAY-06E-2c, #1905)**: a lane client queues its
+  `Leave` on the reliable channel at generation 0 *and* still sends the TCP
+  `Leave` (the half-close handshake, and the app's repeat until the host's
+  close, stay until the reliable path is proven in play). `set_ready` (the
+  rematch / ready-again intent) rides the reliable channel alone, falling
+  back to TCP only when the channel refuses it, so reliable copies stay in
+  order and a stale flag cannot land after a newer one. The host takes
+  `Leave`/`SetReady` off the front of a seat's delivered queue into the
+  mailbox's intent queue (`PeerMail::intents`, purged with the seat); the
+  lobby loop polls it every 50 ms (`INTENT_POLL`) and handles each exactly
+  like the TCP copy: `remove_player` reaps a seat once, a repeat finds
+  nothing. Tests (`lane_lobby_tests`): a reliable-only `Leave` after a lost
+  first datagram yields one `Left{Quit}` for two copies; three `set_ready`
+  flags after a lost first datagram arrive once each, in order.
+- Open: Start/Cancel (2b); retiring the TCP `Leave` and its app retry; the
+  vehicle pick still rides TCP only.
 
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 

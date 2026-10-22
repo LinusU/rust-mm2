@@ -302,9 +302,11 @@ fn a_black_hole_is_bounded_and_counted() {
 #[test]
 fn a_full_window_and_an_oversize_body_are_refused_not_dropped() {
     let rig = rig(41, 0.0);
+    // Two bytes: a lone byte can be a bare `Leave` tag, which the lane
+    // takes for itself (NETPLAY-06E-2c).
     for i in 0..RELIABLE_WINDOW {
         rig.client
-            .reliable_send(rig.generation, &[i as u8])
+            .reliable_send(rig.generation, &[0xEE, i as u8])
             .unwrap();
     }
     assert_eq!(
@@ -321,7 +323,7 @@ fn a_full_window_and_an_oversize_body_are_refused_not_dropped() {
         got.extend(std::iter::from_fn(|| rig.host.reliable_recv()).map(|(_, m)| m));
         got.len() == RELIABLE_WINDOW
     });
-    let expect: Vec<Vec<u8>> = (0..RELIABLE_WINDOW).map(|i| vec![i as u8]).collect();
+    let expect: Vec<Vec<u8>> = (0..RELIABLE_WINDOW).map(|i| vec![0xEE, i as u8]).collect();
     assert_eq!(got, expect);
     let s = rig.client.reliable_stats().unwrap().sender;
     assert_eq!((s.refused_full, s.refused_large), (1, 1));

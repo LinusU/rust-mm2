@@ -796,27 +796,33 @@ enum Verdict {
     Dropped(Refuse),
 }
 
-/// Reset asks the reliable channel delivered, in order, into the
-/// mailbox's newest-wins slot (NETPLAY-06E-3). Only the front of the
-/// delivered queue is looked at: any other message class stays queued for
-/// [`HostLane::recv_reliable`], and the asks behind it follow once that is
-/// consumed (it calls this again).
+/// Host-owned classes the reliable channel delivered, taken off the front
+/// of the seat's queue in order: reset asks go into the mailbox's
+/// newest-wins slot (NETPLAY-06E-3), a lobby `Leave`/`SetReady`
+/// (NETPLAY-06E-2c) into the mailbox's intent queue for the lobby loop.
+/// Only the front of the delivered queue is looked at: any other message
+/// class stays queued for [`HostLane::recv_reliable`], and what is behind
+/// it follows once that is consumed (it calls this again).
 fn absorb_reliable_resets(mail: &mut PeerMail, id: u16) {
     let Some(seat) = mail.lane.seats.get_mut(&id) else {
         return;
     };
-    let mut asks = Vec::new();
-    while let Some(body) = seat
-        .rel
-        .receiver
-        .pop_if(|b| matches!(Message::decode(b), Ok(Message::ResetRequest { .. })))
-    {
-        if let Ok(Message::ResetRequest { generation }) = Message::decode(&body) {
-            asks.push(generation);
+    let mut taken = Vec::new();
+    while let Some(body) = seat.rel.receiver.pop_if(|b| {
+        matches!(
+            Message::decode(b),
+            Ok(Message::ResetRequest { .. } | Message::Leave | Message::SetReady { .. })
+        )
+    }) {
+        if let Ok(msg) = Message::decode(&body) {
+            taken.push(msg);
         }
     }
-    for generation in asks {
-        mail.absorb_reset(id, generation);
+    for msg in taken {
+        match msg {
+            Message::ResetRequest { generation } => mail.absorb_reset(id, generation),
+            other => mail.absorb_lobby_intent(id, other),
+        }
     }
 }
 

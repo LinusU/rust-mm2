@@ -72,7 +72,10 @@ pub(crate) fn start_session(host: &Host, clients: &mut [&mut Client]) -> u64 {
     .unwrap();
     for c in clients.iter_mut() {
         c.set_vehicle("", 0).unwrap();
-        c.set_ready(true).unwrap();
+        // Over the control stream, not `set_ready`: that rides the reliable
+        // channel on a lane client (NETPLAY-06E-2c), and the reliable-channel
+        // tests count exactly the messages they send.
+        c.send(&Message::SetReady { ready: true }).unwrap();
     }
     let deadline = Instant::now() + WAIT;
     loop {
