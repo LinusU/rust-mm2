@@ -680,3 +680,289 @@ fn the_reset_scene_without_epochs_is_measured_for_comparison() {
         println!("epochs ignored, delay {d}: {}", r.line());
     }
 }
+
+// ---------------------------------------------------------------------
+// NETPLAY-05G: the local step is never what a replay spends.
+// ---------------------------------------------------------------------
+
+/// The own driver of the responsiveness runs: throttle, then a hard turn
+/// at [`TURN_AT`].
+const TURN_AT: u64 = 170;
+
+fn own_driver(t: u64) -> TickCommand {
+    q(0.8, 0.0, if t >= TURN_AT { 0.5 } else { 0.0 })
+}
+
+#[derive(Default)]
+struct Pace {
+    /// The own car's body after each tick's step, index `t - 1`.
+    bodies: Vec<Body>,
+    outcomes: Vec<Outcome>,
+    /// Wall time of the reconcile that ran before each step (0 if none).
+    reconcile_ms: Vec<f64>,
+    /// Wall time of each step.
+    step_ms: Vec<f64>,
+}
+
+/// One client in the production order of a fixed tick: `reconcile` between
+/// steps (`FixedFirst`), then the live input is written (`FixedUpdate`'s
+/// `apply_player_input`), then the step, then the history records it
+/// (`FixedLast`). From tick `after` on, every tick gets a host assertion
+/// for `newest - depth`, `offset` metres off the recorded state so that the
+/// replay is forced every time.
+fn paced(depth: Option<u64>, after: u64, offset: f32) -> Pace {
+    let mut app = world();
+    let car = spawn_car(&mut app, Vec3::Y * 1.2, false);
+    app.update();
+    let mut pred = OwnPrediction::default();
+    pred.restart(GEN);
+    let mut out = Pace::default();
+    for t in 1..=TURN_AT + 20 {
+        let started = Instant::now();
+        let mut ran = false;
+        if let Some(d) = depth
+            && t > after
+            && t > d
+        {
+            let newest = t - 1;
+            // The assertion is the recorded state at the ack, moved.
+            let ack = newest - d;
+            let past = pred.ring.get(ack).map(|c| own_body(c, car));
+            let (pos, rot, vel, ang) = match past {
+                Some(Some(s)) => s,
+                // Evicted from the history (depth past MAX_HISTORY): the
+                // host still asserts a state; any will do.
+                _ => (Vec3::Y, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+            };
+            let assertion = OwnAssertion {
+                generation: GEN,
+                server_tick: ack,
+                ack,
+                pos: pos + Vec3::X * offset,
+                rot,
+                vel,
+                ang,
+            };
+            let cmds: Vec<(u64, VehicleInput)> = (ack + 1..=newest)
+                .map(|k| (k, input(&own_driver(k))))
+                .collect();
+            let outcome = reconcile(
+                app.world_mut(),
+                &mut pred,
+                &Request {
+                    own: car,
+                    assertion: &assertion,
+                    newest,
+                    commands: &cmds,
+                    remotes: &[],
+                    trailers: &[],
+                    epoch: EPOCH,
+                },
+            );
+            out.outcomes.push(outcome);
+            ran = true;
+        }
+        out.reconcile_ms.push(if ran {
+            started.elapsed().as_secs_f64() * 1e3
+        } else {
+            0.0
+        });
+
+        let live = input(&own_driver(t));
+        *app.world_mut().get_mut::<VehicleInput>(car).unwrap() = live;
+        let stepped = Instant::now();
+        app.update();
+        out.step_ms.push(stepped.elapsed().as_secs_f64() * 1e3);
+        // The step ran on this tick's command, not one the replay left.
+        let used = app.world().get::<VehicleInput>(car).unwrap();
+        assert_eq!(
+            (used.throttle, used.steering),
+            (live.throttle, live.steering),
+            "tick {t}"
+        );
+        pred.ring.record(t, capture_world(app.world_mut(), EPOCH));
+        out.bodies.push(body(&app, car));
+    }
+    out
+}
+
+fn yaw_rate(b: &Body) -> f32 {
+    b.angular_velocity[1]
+}
+
+/// The own car answers a steering change on the very step that carries it,
+/// as strongly after a replay of any depth, including the depths that end in
+/// a named recovery, as with no replay at all. The replay is synchronous
+/// between two steps: it can take frame time, it cannot move the input.
+#[test]
+fn the_local_step_answers_input_at_every_replay_depth() {
+    let base = paced(None, 0, 0.0);
+    let turn = TURN_AT as usize - 1;
+    let want = yaw_rate(&base.bodies[turn]) - yaw_rate(&base.bodies[turn - 1]);
+    assert!(want.abs() > 0.01, "the control run did not turn: {want}");
+    println!("no replay: yaw-rate response to the turn {want:.4} rad/s");
+
+    for depth in [
+        0u64,
+        1,
+        30,
+        MAX_REPLAY_STEPS as u64,
+        MAX_REPLAY_STEPS as u64 + 10,
+    ] {
+        // Replays on every tick from 125 on, including the turn's.
+        let p = paced(Some(depth), 125, 0.5);
+        let got = yaw_rate(&p.bodies[turn]) - yaw_rate(&p.bodies[turn - 1]);
+        let replays = p
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Replayed { .. }))
+            .count();
+        let recoveries = p
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Recovered(_)))
+            .count();
+        let worst = |v: &[f64]| v.iter().cloned().fold(0.0, f64::max);
+        println!(
+            "depth {depth}: {replays} replays, {recoveries} recoveries; turn response {got:.4} rad/s; reconcile max {:.1} ms, step max {:.2} ms (no replay: step max {:.2} ms)",
+            worst(&p.reconcile_ms),
+            worst(&p.step_ms),
+            worst(&base.step_ms),
+        );
+        if depth <= MAX_REPLAY_STEPS as u64 {
+            assert!(replays > 0 && recoveries == 0, "depth {depth}");
+        } else {
+            assert!(recoveries > 0, "depth {depth}: {:?}", p.outcomes.last());
+        }
+        assert!(
+            got.signum() == want.signum() && (got - want).abs() <= want.abs() * 0.25,
+            "depth {depth}: response {got} against {want} with no replay"
+        );
+    }
+}
+
+/// Eight seats, each a car with a jointed trailer, 120 ticks apart from the
+/// host: what one maximum replay costs, and what the rest of the tick costs.
+#[test]
+fn eight_rigs_cost_one_bounded_replay() {
+    let fwd = forward();
+    let side = Vec3::Y.cross(fwd);
+    for n in [2usize, 4, 8] {
+        let mut app = world();
+        let mut cars = Vec::new();
+        let mut trailers = Vec::new();
+        for i in 0..n {
+            // Side by side, 12 m apart, all driving the same way: no
+            // contact, so the cost is the bodies', not the solver's.
+            let at = side * (12.0 * i as f32) + Vec3::Y * 1.2;
+            let (c, t, _) = super::trailer_tests::spawn_rig(&mut app, at, -fwd);
+            cars.push(c);
+            trailers.push(t);
+        }
+        for (i, c) in cars.iter().enumerate().skip(1) {
+            app.world_mut().entity_mut(*c).insert(PredictedRemoteBody {
+                wire: PLAYER + i as u16,
+                visual: Entity::PLACEHOLDER,
+                epoch: 0,
+            });
+        }
+        app.update();
+        let mut pred = OwnPrediction::default();
+        pred.restart(GEN);
+        let drive = |i: usize, t: u64| {
+            q(
+                0.8,
+                0.0,
+                if i.is_multiple_of(2) { 0.02 } else { -0.02 } * (t % 7) as f32 / 7.0,
+            )
+        };
+        let total = MAX_REPLAY_STEPS as u64 + 10;
+        let mut ticks = Vec::new();
+        for t in 1..=total {
+            for (i, c) in cars.iter().enumerate() {
+                *app.world_mut().get_mut::<VehicleInput>(*c).unwrap() = input(&drive(i, t));
+            }
+            let started = Instant::now();
+            app.update();
+            ticks.push(started.elapsed().as_secs_f64() * 1e3);
+            pred.ring.record(t, capture_world(app.world_mut(), EPOCH));
+        }
+        ticks.sort_by(f64::total_cmp);
+        let tick_ms = ticks[ticks.len() / 2];
+        let started = Instant::now();
+        for _ in 0..50 {
+            std::hint::black_box(capture_world(app.world_mut(), EPOCH));
+        }
+        let capture_ms = started.elapsed().as_secs_f64() * 1e3 / 50.0;
+
+        let newest = total;
+        let ack = newest - MAX_REPLAY_STEPS as u64;
+        let past = pred.ring.get(ack).unwrap().clone();
+        let state = |e: Entity, shift: f32| {
+            let (pos, rot, vel, ang) = own_body(&past, e).unwrap();
+            RemoteAssertion {
+                wire: PLAYER,
+                epoch: 0,
+                pos: pos + Vec3::X * shift,
+                rot,
+                vel,
+                ang,
+            }
+        };
+        let (pos, rot, vel, ang) = own_body(&past, cars[0]).unwrap();
+        let own = OwnAssertion {
+            generation: GEN,
+            server_tick: ack,
+            ack,
+            pos: pos + Vec3::X * 0.5,
+            rot,
+            vel,
+            ang,
+        };
+        let cmds: Vec<(u64, VehicleInput)> = (ack + 1..=newest)
+            .map(|k| (k, input(&drive(0, k))))
+            .collect();
+        let remotes: Vec<RemoteDrive> = (1..n)
+            .map(|i| RemoteDrive {
+                body: cars[i],
+                assertion: Some(state(cars[i], 0.5)),
+                commands: Some((ack + 1..=newest).map(|k| input(&drive(i, k))).collect()),
+            })
+            .collect();
+        let rigs: Vec<TrailerDrive> = (0..n)
+            .map(|i| TrailerDrive {
+                body: trailers[i],
+                towing: cars[i],
+                assertion: Some(state(trailers[i], 0.5)),
+            })
+            .collect();
+        let started = Instant::now();
+        let out = reconcile(
+            app.world_mut(),
+            &mut pred,
+            &Request {
+                own: cars[0],
+                assertion: &own,
+                newest,
+                commands: &cmds,
+                remotes: &remotes,
+                trailers: &rigs,
+                epoch: EPOCH,
+            },
+        );
+        let replay_ms = started.elapsed().as_secs_f64() * 1e3;
+        let Outcome::Replayed { steps, .. } = out else {
+            panic!("{n} rigs: {out:?}");
+        };
+        assert_eq!(steps, MAX_REPLAY_STEPS);
+        let bytes: usize =
+            past.vehicles.len() * std::mem::size_of::<mm2_vehicle::capture::VehicleCapture>();
+        println!(
+            "{n} rigs ({} bodies): tick {tick_ms:.2} ms, capture {capture_ms:.3} ms, ring of {} captures ~{} kB, max replay ({steps} steps) {replay_ms:.1} ms = {:.1} ticks of frame time",
+            2 * n,
+            MAX_REPLAY_STEPS + 1,
+            bytes * (MAX_REPLAY_STEPS + 1) / 1000,
+            replay_ms / (1000.0 / 60.0),
+        );
+    }
+}

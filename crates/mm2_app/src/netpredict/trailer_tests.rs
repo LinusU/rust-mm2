@@ -32,7 +32,7 @@ const TICKS: u64 = 420;
 /// A car with a jointed trailer behind it, `back` being the world
 /// direction away from where the car drives. Returns `(car, trailer,
 /// joint)`.
-fn spawn_rig(app: &mut App, at: Vec3, back: Vec3) -> (Entity, Entity, Entity) {
+pub(super) fn spawn_rig(app: &mut App, at: Vec3, back: Vec3) -> (Entity, Entity, Entity) {
     let car = spawn_car(app, at, false);
     let rest_offset = back * (CAR_HITCH + TRAILER_HITCH);
     let pos = at + rest_offset;

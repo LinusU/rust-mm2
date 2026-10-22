@@ -1354,3 +1354,53 @@ app (captures are stamped with the own car's `EpochRef` only); a contact body
 that spawns after the compared tick keeps the pose it was spawned at until
 its first in-ring assertion (a re-entering seat). The latter is the remaining
 "desynchronized re-entry" piece.
+
+## Local input under a maximum replay, and the cost to eight rigs (NETPLAY-05G, #1914)
+
+**Where the replay sits.** `reconcile_own` runs in `FixedFirst`, between two
+fixed steps. The live input is written afterwards, in `FixedUpdate`
+(`input::apply_player_input`, then `netcmd::capture_and_send`, which also
+quantizes it for the step), and the step follows. The replay writes stored
+commands into `VehicleInput` while it runs, but every tick's live write
+lands after it, so the step of the tick that carries a replay uses that
+tick's own command: the replay cannot delay or replace the local input, at
+any depth. What it spends is wall time before the step, as one block (it is
+neither spread across frames nor budgeted per frame: the bound is
+`MAX_REPLAY_STEPS`, past which the named recovery adopts the host state at no
+replay cost).
+
+Test (`multi_tests::the_local_step_answers_input_at_every_replay_depth`, `cargo
+test -p mm2_app --lib multi_tests -- --nocapture`): the client runs in the
+production order (reconcile, write input, step, record) and from tick 125
+every tick gets a host state half a metre off, so a replay runs on every
+tick, including the one that carries a steering change. At replay depths
+0, 1, 30 and 120 (65 replays each, no recoveries) and at 130 (past the
+history: `Recovered`), the input the step used is the live one on every tick
+and the car's yaw-rate response to the steering change is -0.0286 rad/s
+(-0.0283 at 130) against -0.0286 with no replay at all. The step itself
+measures the same with and without a replay before it (max 1.7 ms against
+1.8 ms, dev profile); the replay's own wall time is 0.1 / 2.5 / 12.3 ms at
+depth 1 / 30 / 120.
+
+**Cost to eight seats with trailers** (`multi_tests::eight_rigs_cost_one_bounded_replay`;
+every seat a car with a jointed trailer, no contact; dev profile, one run on a
+loaded machine, indicative only):
+
+| Rigs (bodies) | Physics tick | `capture_world` | History ring (121 captures) | One maximum replay (120 steps) |
+|---|---|---|---|---|
+| 2 (4) | 0.19 ms | 0.004 ms | ~267 kB | 12.4 ms (0.7 ticks) |
+| 4 (8) | 0.21 ms | 0.005 ms | ~534 kB | 15.1 ms (0.9 ticks) |
+| 8 (16) | 0.24 ms | 0.007 ms | ~1068 kB | 19.5 ms (1.2 ticks) |
+
+The ring figure is `VehicleCapture` size (552 B) times bodies times 121; it
+is an upper-bound estimate of the vehicle state, not a measured heap size.
+CPU grows roughly linearly in bodies and is bounded by `MAX_REPLAY_STEPS`;
+state grows linearly with bodies; the wire is unchanged by trailers in this
+harness (the 8-seat `Snap` / `RemoteCommands` figures are in the 05B
+section: 110.6 kB/s together without 06D cadence).
+
+Not covered: a replay's frame-time cost under the real frame loop (a 20 ms
+block at 8 rigs is above one 16.7 ms frame; Bevy then runs extra fixed steps
+to catch up, which was not measured here), contact-heavy replays at 8 seats,
+and the real transport. Evidence level: synthetic integration on the
+production step.
