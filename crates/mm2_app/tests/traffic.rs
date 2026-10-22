@@ -4468,3 +4468,5 @@ fn a_remote_client_renders_the_authored_signal_heads() {
         "road 1's head stands at its authored origin"
     );
 }
+
+mod contact;

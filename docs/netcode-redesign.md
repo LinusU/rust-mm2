@@ -1269,9 +1269,11 @@ step (`crates/mm2_vehicle/tests/world_actors.rs`): a kinematic mover that
 crosses the car's path and stops mid-window (replay with history matches
 the live record to 1e-3 m / 1e-2 m/s; the same replay with the mover
 history stripped diverges by more than 5 cm), a prop that spawns and is
-pushed inside the window, and a prop that despawns. Not covered: the
-client's traffic copies (`worldtraffic::apply_traffic`) in a real session,
-and wiring `RigidBodyDisabled` entrants against the app's own systems.
+pushed inside the window, and a prop that despawns. Not covered
+there: the client's traffic copies (`worldtraffic::apply_traffic`) in a
+session, and `RigidBodyDisabled` entrants against the app's own systems;
+NETPLAY-05H (below) covers both and found that `netpredict` was not using
+the history at all.
 
 ## Trailer rigs in the predicted replay (NETPLAY-05D, #1911)
 
@@ -1404,3 +1406,50 @@ block at 8 rigs is above one 16.7 ms frame; Bevy then runs extra fixed steps
 to catch up, which was not measured here), contact-heavy replays at 8 seats,
 and the real transport. Evidence level: synthetic integration on the
 production step.
+=======
+## Traffic copies in the predicted replay (NETPLAY-05H, #1915)
+
+05C tested world-actor history on `mm2_vehicle`'s step alone. In the app the
+mover is a `TrafficCopy`: a kinematic body that `apply_traffic` spawns and
+poses from `Traffic` rows in `Update`, after the fixed step that
+`record_prediction` captured in `FixedLast`. Driving that path showed a
+defect: `netpredict::replay` called `replay_from` once per command against
+a **two-entry scratch ring** (the corrected boundary and the previous
+replayed tick). The movers' and entrants' recorded timeline lives in the
+permanent ring, which that call never saw, so every step restored the copy to
+the state of the step before and left it on its velocity: the copy's later
+appearance, stop or turn was ignored, and an actor spawned after the compared
+tick was enabled on step 1 instead of at its entry tick (a car that had
+already passed the spot hit it: 18.7 m end error against the reference).
+
+Fix: the whole window is one `replay_from_observed` call (`replay_from` plus
+an `observe(world, i)` hook after each step, used to capture the tick for the
+rewritten history). The permanent ring is taken out, its entry at the
+compared tick is overwritten with the host-corrected boundary
+(`HistoryRing::replace`, every other entry stays), and it is rewritten with
+the replayed captures only when the replay succeeded; any refusal still
+clears it and adopts the host state. Nothing about handling, restitution or
+collision layers changed.
+
+Tests (`tests/traffic/contact.rs`, `cargo test -p mm2_app --test app
+contact:: -- --nocapture`): a `Remote` city client on the synthetic install,
+the player vehicle as the own car, rows pushed into `RemoteSnaps` and landed
+by the production `apply_traffic`, history recorded in `FixedLast`. A twin
+client gets the same rows on the same ticks and a 0.3 m sideways nudge of the
+own car at the compared tick (the host knowing something the client did not);
+its state after the nudge is the assertion, and the client reconciles with
+`netpredict::reconcile` and is compared with the twin 100 ticks later.
+
+| Scene | Replay vs twin | Control |
+|---|---|---|
+| Oncoming copy appears in the window (entrant), changes velocity, stops 5 ticks before the end; the car hits it | 0.0000 m, `Replayed` | mover history stripped from the ring: 2.31 m |
+| Copy appears after the compared tick on a spot the car already passed | 0.0000 m, `Replayed`, no body left disabled | copy present from the start of the window: 20.58 m |
+
+Not covered (evidence level: synthetic integration, no sockets, no retail
+data): a copy retired (`COPY_TTL_TICKS`) or recycled under another id inside
+the window beyond `missing`/incarnation handling already in 05C; the rows
+landing between the compared tick and `now` are not re-applied (the copy's
+history is the client's own, so a late row corrects the copy from the next
+row on, not retroactively); prop contact through `worldprops::apply_props` is
+the same entrant path but has no app-level test here.
+>>>>>>> 01a81d36 (Test traffic-copy contact in a predicted replay through apply_traffic)
