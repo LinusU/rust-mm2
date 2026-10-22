@@ -25,11 +25,19 @@
 //! moves it to the datagram lane), so a deadline here would pin the
 //! legacy snapshot-pull behaviour rather than the redesign.
 //!
-//! Not covered, and filed as follow-ups rather than claimed: false
-//! predicted and missed contact (the opponent evading or turning in need a
-//! scripted input the headless drivers lack), rear-end with sudden
-//! braking, side swipe, pin against a wall and the three-car pileup (need
-//! authored scenes), and the ambiguous high-latency report.
+//! NETPLAY-05F-2 adds the cases that need the *other* car to act, through
+//! `--net-contact <script>` (`evade`, `brake`, `swipe`, `push`; keyed on
+//! the ticks since play began and the nearest car): a dodged predicted
+//! contact on each link, a rear-end with sudden braking, a side swipe and
+//! a sustained push. A scripted dodge, brake or swipe may legitimately
+//! miss, so whether the contact happened is reported (`pursuer_contact_tick`
+//! null = missed) and only the parked seats' agreement is bounded; the
+//! push guarantees the hit and is bounded on every seat.
+//!
+//! Not covered, and filed as a follow-up rather than claimed: the
+//! authored-scene cases (pin against a wall, three-car pileup), which need
+//! a scene with a wall and a third moving car, and the ambiguous
+//! high-latency report.
 //!
 //! Evidence level: real OS processes over loopback, seeded lossy proxies,
 //! headless, synthetic dev world. Nothing here says anything about a real
@@ -62,20 +70,50 @@ const MOVED_MS: f64 = 0.5;
 /// Ticks skipped at the start of a trace: the spawn landing jostles.
 const SETTLE_SKIP: usize = 120;
 
+/// What one seat does for the case.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rammer {
-    Host,
-    Alice,
-    Bob,
+enum Role {
+    /// Holds the handbrake (`--parked`).
+    Parked,
+    /// Pursues the nearest car (`--ram`).
+    Ram,
+    /// A scripted contact role (`--net-contact <script>`).
+    Script(&'static str),
 }
 
-impl Rammer {
-    fn name(self) -> &'static str {
+impl Role {
+    fn flags(self) -> Vec<String> {
         match self {
-            Rammer::Host => "host-rams",
-            Rammer::Alice => "alice-rams",
-            Rammer::Bob => "bob-rams",
+            Role::Parked => vec!["--parked".into()],
+            Role::Ram => vec!["--ram".into()],
+            Role::Script(s) => vec!["--net-contact".into(), s.into()],
         }
+    }
+}
+
+/// One contact case: a role per seat (host, alice, bob).
+#[derive(Clone, Copy, Debug)]
+struct Case {
+    name: &'static str,
+    roles: [Role; 3],
+    /// The seat whose own trace is read for the contact (the pursuer).
+    actor: usize,
+    /// Whether the scripted behaviour guarantees a hit. A dodge may
+    /// legitimately avoid the contact; that outcome is reported, not
+    /// failed.
+    contact_certain: bool,
+}
+
+const HOST: usize = 0;
+const ALICE: usize = 1;
+const BOB: usize = 2;
+
+const fn case(name: &'static str, roles: [Role; 3], actor: usize, contact_certain: bool) -> Case {
+    Case {
+        name,
+        roles,
+        actor,
+        contact_certain,
     }
 }
 
@@ -139,14 +177,13 @@ fn correction_peak(samples: &[Sample], from: u64) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn run(case: Rammer, dir: &std::path::Path) -> Run {
+fn run(case: Case, dir: &std::path::Path) -> Run {
     let install = tempfile::tempdir().unwrap();
-    let trace = |who: &str| -> PathBuf { dir.join(format!("{}-{who}.jsonl", case.name())) };
-    let role = |me: Rammer| if me == case { "--ram" } else { "--parked" };
-    let common = |mut flags: Vec<String>, who: &str, me: Rammer| {
+    let trace = |who: &str| -> PathBuf { dir.join(format!("{}-{who}.jsonl", case.name)) };
+    let common = |mut flags: Vec<String>, who: &str, me: usize| {
+        flags.extend(case.roles[me].flags());
         flags.extend(
             [
-                role(me),
                 "--paced",
                 "--netplay-timeline",
                 "--net-trace",
@@ -159,11 +196,7 @@ fn run(case: Rammer, dir: &std::path::Path) -> Run {
 
     let mut host = Proc::spawn(
         MM2_EXE,
-        &common(
-            host_args(install.path(), HOST_FRAME_CEILING),
-            "host",
-            Rammer::Host,
-        ),
+        &common(host_args(install.path(), HOST_FRAME_CEILING), "host", HOST),
     );
     let addr = listening_addr(&host);
     // Asymmetric paths: alice 25 ms each way, bob 90 ms, own seeds.
@@ -171,7 +204,7 @@ fn run(case: Rammer, dir: &std::path::Path) -> Run {
     let proxy_bob = ImpairProxy::loopback_seeded(addr, 0xB0B2).unwrap();
 
     let settle_tick = SETTLE_SECS * mm2_game::RACE_TICK_HZ as u64;
-    let client = |who: &str, me: Rammer, via: &ImpairProxy| {
+    let client = |who: &str, me: usize, via: &ImpairProxy| {
         let mut flags = common(
             join_args(install.path(), via.addr(), who, HOST_FRAME_CEILING),
             who,
@@ -186,9 +219,9 @@ fn run(case: Rammer, dir: &std::path::Path) -> Run {
         flags.extend(["--deadline".to_string(), DEADLINE.as_secs().to_string()]);
         flags
     };
-    let alice = Proc::spawn(MM2_EXE, &client("alice", Rammer::Alice, &proxy_alice));
+    let alice = Proc::spawn(MM2_EXE, &client("alice", ALICE, &proxy_alice));
     host.until_within("ready=true", STEP);
-    let bob = Proc::spawn(MM2_EXE, &client("bob", Rammer::Bob, &proxy_bob));
+    let bob = Proc::spawn(MM2_EXE, &client("bob", BOB, &proxy_bob));
     host.until_within("ready=true", STEP);
     host.cmd("start");
     host.until_within("event=started generation=1", STEP);
@@ -252,35 +285,40 @@ fn report_dir() -> PathBuf {
     dir
 }
 
-fn contact_case(case: Rammer) {
+fn contact_case(case: Case) {
     let dir = report_dir();
     let run = run(case, &dir);
     let seats = ["host", "alice", "bob"];
-    let rammer = match case {
-        Rammer::Host => 0,
-        Rammer::Alice => 1,
-        Rammer::Bob => 2,
-    };
+    let rammer = case.actor;
     for (who, t) in seats.iter().zip(&run.traces) {
         assert!(t.len() > 600, "{who}: only {} trace samples", t.len());
     }
 
-    // The ram happened, as the rammer itself saw it.
-    let contact = rammer_contact(&run.traces[rammer])
-        .unwrap_or_else(|| panic!("{}: the rammer never hit anything", case.name()));
-    // Another process's own car (a parked seat) was displaced by it.
+    // The contact, as the pursuer itself saw it. A scripted dodge or
+    // swipe may legitimately miss: that is a reported outcome, not a
+    // failure.
+    let contact = rammer_contact(&run.traces[rammer]);
+    // A parked seat displaced by it (scripted seats move on their own).
     let moved: Vec<(&str, Option<u64>)> = seats
         .iter()
         .zip(&run.traces)
         .enumerate()
-        .filter(|(i, _)| *i != rammer)
+        .filter(|(i, _)| *i != rammer && case.roles[*i] == Role::Parked)
         .map(|(_, (who, t))| (*who, first_motion(t)))
         .collect();
-    assert!(
-        moved.iter().any(|(_, m)| m.is_some()),
-        "{}: no parked seat was ever displaced: {moved:?}",
-        case.name()
-    );
+    if case.contact_certain {
+        assert!(
+            contact.is_some(),
+            "{}: the pursuer never hit anything",
+            case.name
+        );
+        assert!(
+            moved.iter().any(|(_, m)| m.is_some()),
+            "{}: no parked seat was ever displaced: {moved:?}",
+            case.name
+        );
+    }
+    let from = contact.unwrap_or(SETTLE_SKIP as u64);
 
     // Convergence once at rest: every seat both clients hold agrees.
     let (alice, bob) = (&run.records[0], &run.records[1]);
@@ -288,6 +326,11 @@ fn contact_case(case: Rammer) {
     assert_eq!(bob_seats.len(), 3, "{bob}");
     let mut compared = 0;
     let mut worst = (0, 0.0_f64);
+    // The worst seat that is *meant* to be at rest: a scripted car that
+    // is still driving when the clients stop (a dodge that never parks)
+    // differs by the link's lag, not by a reconciliation failure, so it
+    // is reported but not bounded unless the case guarantees the contact.
+    let mut worst_bounded = (0, 0.0_f64);
     for (id, x, z) in seat_poses(alice) {
         let (_, bx, bz) = bob_seats
             .iter()
@@ -296,6 +339,11 @@ fn contact_case(case: Rammer) {
         let apart = ((x - bx).powi(2) + (z - bz).powi(2)).sqrt();
         if apart > worst.1 {
             worst = (id, apart);
+        }
+        let bounded =
+            case.contact_certain || case.roles.get(usize::from(id)) == Some(&Role::Parked);
+        if bounded && apart > worst_bounded.1 {
+            worst_bounded = (id, apart);
         }
         compared += 1;
     }
@@ -306,13 +354,13 @@ fn contact_case(case: Rammer) {
     // snapshot pull only partly reconciles them: measured at 1.2 m and
     // 3.9 m in two runs. That is exactly what NETPLAY-05 exists to fix, so
     // it is reported, and only a car in another part of the map fails.
-    let bound = if case == Rammer::Host { 1.0 } else { 10.0 };
+    let bound = if rammer == HOST { 1.0 } else { 10.0 };
     assert!(
-        worst.1 < bound,
+        worst_bounded.1 < bound,
         "{}: seat {} diverged by {:.2} m:\n {alice}\n {bob}",
-        case.name(),
-        worst.0,
-        worst.1
+        case.name,
+        worst_bounded.0,
+        worst_bounded.1
     );
 
     let per_seat: Vec<Value> = seats
@@ -324,22 +372,25 @@ fn contact_case(case: Rammer) {
                 "seat": who,
                 // The rammer is moving by design: only a parked seat's
                 // first motion is a displacement.
-                "first_motion_tick": if i == rammer { None } else { first_motion(t) },
-                "correction_peak_m_after_contact": correction_peak(t, contact),
+                "role": format!("{:?}", case.roles[i]),
+                "first_motion_tick": if case.roles[i] == Role::Parked { first_motion(t) } else { None },
+                "correction_peak_m_after_contact": correction_peak(t, from),
             })
         })
         .collect();
     let report = json!({
-        "case": case.name(),
+        "case": case.name,
         "transport": "TCP data plane via per-client seeded ImpairProxy (alice 25 ms, bob 90 ms each way, 2 % loss/dup/reorder), three mm2 processes",
-        "rammer_contact_tick": contact,
+        "pursuer_seat": seats[rammer],
+        "pursuer_contact_tick": contact,
+        "contact_certain": case.contact_certain,
         "max_client_pose_divergence_m": {"seat": worst.0, "metres": worst.1},
         "seats": per_seat,
         "not_asserted": "timings are reported for NETPLAY-05 deadlines; the app does not yet send RemoteCommands or use the datagram lane",
     });
     eprintln!("{report:#}");
     std::fs::write(
-        dir.join(format!("{}.json", case.name())),
+        dir.join(format!("{}.json", case.name)),
         serde_json::to_string_pretty(&report).unwrap(),
     )
     .unwrap();
@@ -347,15 +398,84 @@ fn contact_case(case: Rammer) {
 
 #[test]
 fn a_client_ramming_a_client_is_measured_on_unequal_links() {
-    contact_case(Rammer::Alice);
+    contact_case(case(
+        "alice-rams",
+        [Role::Parked, Role::Ram, Role::Parked],
+        ALICE,
+        true,
+    ));
 }
 
 #[test]
 fn the_roles_exchanged_are_measured_on_unequal_links() {
-    contact_case(Rammer::Bob);
+    contact_case(case(
+        "bob-rams",
+        [Role::Parked, Role::Parked, Role::Ram],
+        BOB,
+        true,
+    ));
 }
 
 #[test]
 fn the_host_in_the_contact_converges_on_unequal_links() {
-    contact_case(Rammer::Host);
+    contact_case(case(
+        "host-rams",
+        [Role::Ram, Role::Parked, Role::Parked],
+        HOST,
+        true,
+    ));
+}
+
+// Cases that need the other car to act. The pursuer is a client in each,
+// so both links (25 ms and 90 ms) carry the contact; the roles are
+// exchanged for the dodge to put the evader on the slow link too.
+
+#[test]
+fn a_dodged_contact_is_measured_with_the_evader_on_the_fast_link() {
+    contact_case(case(
+        "evade-alice-evades",
+        [Role::Parked, Role::Script("evade"), Role::Ram],
+        BOB,
+        false,
+    ));
+}
+
+#[test]
+fn a_dodged_contact_is_measured_with_the_evader_on_the_slow_link() {
+    contact_case(case(
+        "evade-bob-evades",
+        [Role::Parked, Role::Ram, Role::Script("evade")],
+        ALICE,
+        false,
+    ));
+}
+
+#[test]
+fn a_rear_end_with_sudden_braking_is_measured_on_unequal_links() {
+    contact_case(case(
+        "brake-bob-brakes",
+        [Role::Parked, Role::Ram, Role::Script("brake")],
+        ALICE,
+        false,
+    ));
+}
+
+#[test]
+fn a_side_swipe_is_measured_on_unequal_links() {
+    contact_case(case(
+        "swipe-bob-swipes",
+        [Role::Parked, Role::Parked, Role::Script("swipe")],
+        BOB,
+        false,
+    ));
+}
+
+#[test]
+fn a_sustained_push_is_measured_on_unequal_links() {
+    contact_case(case(
+        "push-alice-pushes",
+        [Role::Parked, Role::Script("push"), Role::Parked],
+        ALICE,
+        true,
+    ));
 }
