@@ -1342,7 +1342,7 @@ like a remote body:
 The predicted client's kinematic trailer copies (`RemoteTrailer`, wire-driven,
 no joint) are not partners. So today only the **own** rig's trailer is a real
 body in the client's physics; a remote car's trailer is not simulated in the
-replay, and a contact with it is not predicted (follow-up #1916).
+replay, and a contact with it is not predicted (done in #1916, below).
 
 Tests (`netpredict/trailer_tests.rs`, `cargo test -p mm2_app --lib
 trailer_tests -- --nocapture`): car 1 rear-ends the trailer of car 0 (host
@@ -1358,6 +1358,38 @@ host state.
 Evidence level: synthetic integration on the production step. Not covered:
 the real transport, a trailer on a retail car, trailer attach by a *new*
 tractor mid-session.
+
+## A real trailer for predicted remote cars (NETPLAY-05E trailer, #1916)
+
+Under the `NetplayTimeline` selector `spawn_remote` now gives each
+`PredictedRemoteBody` that tows a trailer a second trailer, built by
+`spawn_contact_trailer`: a dynamic body from the same `vehicle_bundle` the
+host uses, hitched to the **contact body** (not the visual) by the same
+`SphericalJoint` limits and `JointCollisionDisabled` as
+`car_visual::spawn_trailer`. It is marked `PredictedRemoteTrailer { wire,
+visual }` and carries no model.
+
+| Entity | Role |
+|---|---|
+| Kinematic trailer copy (`RemoteTrailer`) | Delayed visual, driven by `Snap.trailers` through `RemoteLerp`; loses its collider so the rig has one. |
+| Contact trailer (`PredictedRemoteTrailer`) | Dynamic collider, replayed with its tractor. `netpredict::trailer_drives` finds it through `Trailer::towing` = the `PredictedRemoteBody`, and pairs it with the staged row for that body's wire id (`OwnStage::trailers` already stages every row). |
+
+`apply_snapshots` ignores the contact trailer (no `RemoteTrailer`, and its
+`towing` is not the own seat), `sweep_remote_bodies` despawns it with its
+visual (so a leave or pick change removes it, joint included), and the
+trailer census does not count it. `HitchChanged` on a remote reseat is the
+existing `ReplayRefused` recovery (`a_hitch_change_inside_the_window_...`).
+Bot copies and sessions without the selector keep the kinematic copy alone.
+
+Tests: `netpredict/trailer_tests.rs` `remote rig` cases (the own car
+rear-ends a remote car's trailer, production `trailer_drives`, zero-delay
+host reference): zero delay matches to 0.00 m; delay 3-30 ticks: 0
+recoveries, final error 0.00 m, hitch gap 0.014 m, peak error 0.09 m at delay
+30. `netdrive` test `a_contact_trailer_is_jointed_to_the_contact_body` checks
+the spawned layout and the sweep. The remote's commands in that scene are
+constant, so hold-last predicts them exactly and replays only start at delay
+30; a varying remote driver is not covered. Evidence level: synthetic
+integration; not run against a retail trailer car or the real transport.
 
 ## Reset epochs of remote cars in predicted contact (NETPLAY-05E, #1912)
 

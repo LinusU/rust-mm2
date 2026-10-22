@@ -399,3 +399,214 @@ fn a_hitch_change_inside_the_window_is_a_named_recovery_for_the_whole_rig() {
     assert_eq!(pos(b), p(&h[1]));
     assert!(pred.ring.is_empty());
 }
+
+// ---- NETPLAY-05E: the trailer of a *remote* car ----------------------------
+
+/// The remote car (wire `PLAYER + 1`, a [`PredictedRemoteBody`]) tows the
+/// rig; the own car (wire `PLAYER`) rear-ends its trailer. This is the
+/// layout `netdrive::spawn_contact_trailer` builds on a predicted client:
+/// the trailer is a real body hitched to the remote contact body, found by
+/// the production [`trailer_drives`] through the body's wire id.
+fn remote_scene() -> Rig {
+    let mut s = scene();
+    let wire = PLAYER + 1;
+    s.app
+        .world_mut()
+        .entity_mut(s.cars[0])
+        .insert(PredictedRemoteBody {
+            wire,
+            visual: Entity::PLACEHOLDER,
+            epoch: 0,
+        });
+    // Car 0 is the remote rig, car 1 the own car behind it.
+    s
+}
+
+fn remote_frame(now: u64) -> Message {
+    let first = now.saturating_sub(15).max(1);
+    Message::RemoteCommands {
+        generation: 1,
+        tick: now,
+        seats: vec![RemoteSeat {
+            player: PLAYER + 1,
+            epoch: 0,
+            first_tick: first,
+            commands: (first..=now)
+                .map(|t| RemoteCommand {
+                    command: driver(0, t),
+                    source: Source::Command,
+                })
+                .collect(),
+        }],
+    }
+}
+
+/// The client run of [`remote_scene`]: the own car drives the true commands
+/// and the remote rig's tractor a delayed hold-last guess, corrected from
+/// host snapshots `delay` ticks late. Returns the report and how many
+/// trailer drives the production discovery found per reconcile.
+fn run_remote(delay: u64, host: &[[Body; 3]]) -> (Report, usize) {
+    let mut s = remote_scene();
+    let [remote, own] = s.cars;
+    let mut pred = OwnPrediction::default();
+    pred.restart(GEN);
+    let mut store = RemoteCommands::new();
+    store.set_generation(Some(1));
+    let mut predictor = RemotePredictor::new(Policy::HoldLast);
+    let mut applied: Vec<TickCommand> = vec![q(0.0, 0.0, 0.0)];
+    let mut r = Report::default();
+    let mut found = usize::MAX;
+    let mut prev_host = None::<Vec3>;
+    let mut prev_client = None::<Vec3>;
+    let back = -forward();
+    for t in 1..=TICKS {
+        let ti = t as usize - 1;
+        *s.app.world_mut().get_mut::<VehicleInput>(own).unwrap() = input(&driver(1, t));
+        if t > delay {
+            assert!(store.absorb(&remote_frame(t - delay)));
+        }
+        let got = predictor.command_for(&mut store, PLAYER + 1, t);
+        applied.push(got.command);
+        *s.app.world_mut().get_mut::<VehicleInput>(remote).unwrap() = input(&got.command);
+        mirror_brakes(&mut s.app, remote, s.trailer);
+        s.app.update();
+        pred.ring.record(t, capture_world(s.app.world_mut(), EPOCH));
+
+        if let Some(tt) = t.checked_sub(delay).filter(|&x| x >= 1) {
+            // Host bodies are `[remote, own, trailer]`.
+            let h = &host[tt as usize - 1];
+            let own_a = OwnAssertion {
+                generation: GEN,
+                server_tick: tt,
+                ack: tt,
+                pos: p(&h[1]),
+                rot: Quat::from_array(h[1].rotation),
+                vel: v(&h[1]),
+                ang: Vec3::from(h[1].angular_velocity),
+            };
+            let cmds: Vec<(u64, VehicleInput)> =
+                (tt + 1..=t).map(|k| (k, input(&driver(1, k)))).collect();
+            let drives = [RemoteDrive {
+                body: remote,
+                assertion: Some(assertion(PLAYER + 1, &h[0])),
+                commands: Some(
+                    (tt + 1..=t)
+                        .map(|k| {
+                            input(&if k + delay <= t {
+                                driver(0, k)
+                            } else {
+                                applied[k as usize]
+                            })
+                        })
+                        .collect(),
+                ),
+            }];
+            // The staged `Snap.trailers` row is keyed by the towing seat.
+            let rows = [assertion(PLAYER + 1, &h[2])];
+            let trailers = trailer_drives(s.app.world_mut(), own, Some(PLAYER), &rows);
+            found = trailers.len();
+            let out = reconcile(
+                s.app.world_mut(),
+                &mut pred,
+                &Request {
+                    own,
+                    assertion: &own_a,
+                    newest: t,
+                    commands: &cmds,
+                    remotes: &drives,
+                    trailers: &trailers,
+                    epoch: EPOCH,
+                },
+            );
+            if let Outcome::Replayed { steps, .. } = out {
+                r.deepest = r.deepest.max(steps);
+            }
+        }
+
+        let bodies = [
+            body(&s.app, remote),
+            body(&s.app, own),
+            body(&s.app, s.trailer),
+        ];
+        for i in 0..3 {
+            let err = p(&bodies[i]).distance(p(&host[ti][i]));
+            r.peak[i] = r.peak[i].max(err);
+            r.last[i] = err;
+        }
+        let (hv, cv) = (v(&host[ti][2]), v(&bodies[2]));
+        if let Some(pv) = prev_host
+            && (hv - pv).length() > IMPULSE
+        {
+            r.host_trailer_impulses += 1;
+        }
+        if let Some(pv) = prev_client
+            && (cv - pv).length() > IMPULSE
+        {
+            r.client_trailer_impulses += 1;
+        }
+        prev_host = Some(hv);
+        prev_client = Some(cv);
+        let anchor = |b: &Body, local: Vec3| p(b) + Quat::from_array(b.rotation) * local;
+        r.peak_hitch_gap = r.peak_hitch_gap.max(
+            anchor(&bodies[0], back * CAR_HITCH)
+                .distance(anchor(&bodies[2], -back * TRAILER_HITCH)),
+        );
+    }
+    r.replays = pred.replays;
+    r.recoveries = pred.recoveries;
+    (r, found)
+}
+
+/// `[remote, own, trailer]` on the true commands with no delay.
+fn remote_host_run() -> Vec<[Body; 3]> {
+    host_run()
+}
+
+/// With no delay the client is the reference, and the production discovery
+/// finds the remote car's real trailer.
+#[test]
+fn a_zero_delay_client_follows_the_reference_through_a_remote_trailer_contact() {
+    let host = remote_host_run();
+    let (r, found) = run_remote(0, &host);
+    println!("remote rig, zero delay: {r:?}");
+    assert_eq!(found, 1, "{r:?}");
+    assert!(r.host_trailer_impulses > 0, "{r:?}");
+    assert!(r.peak.iter().all(|&e| e < 0.1), "{r:?}");
+    assert_eq!(r.recoveries, 0, "{r:?}");
+}
+
+/// Under delay the own car's contact with the remote car's trailer replays
+/// with the rig: every body converges to the host's, the hitch never
+/// stretches and no recovery path is needed.
+#[test]
+fn a_delayed_contact_with_a_remote_trailer_converges_with_the_rig_in_the_replay() {
+    let host = remote_host_run();
+    for delay in [3u64, 6, 12, 30] {
+        let (r, found) = run_remote(delay, &host);
+        println!("remote rig, delay {delay}: {r:?}");
+        assert_eq!(found, 1, "delay {delay}: {r:?}");
+        assert!(r.deepest <= MAX_REPLAY_STEPS, "{r:?}");
+        assert_eq!(r.recoveries, 0, "delay {delay}: {r:?}");
+        assert!(r.last.iter().all(|&e| e < 0.5), "delay {delay}: {r:?}");
+        assert!(r.peak_hitch_gap < 0.5, "delay {delay}: {r:?}");
+    }
+}
+
+/// The kinematic trailer copy (`RemoteTrailer`) is presentation: the
+/// discovery skips it and keeps only the real jointed body.
+#[test]
+fn the_kinematic_trailer_copy_is_not_a_replay_partner() {
+    let mut s = remote_scene();
+    let visual = s.app.world_mut().spawn(()).id();
+    s.app.world_mut().spawn((
+        Trailer {
+            towing: visual,
+            rest_offset: Vec3::ZERO,
+        },
+        RemoteTrailer { owner: PLAYER + 1 },
+    ));
+    let found = trailer_drives(s.app.world_mut(), s.cars[1], Some(PLAYER), &[]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].body, s.trailer);
+    assert_eq!(found[0].towing, s.cars[0]);
+}

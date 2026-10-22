@@ -130,8 +130,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
-    AngularVelocity, Collider, LinearVelocity, Position, RigidBody, Rotation,
-    TransformInterpolation,
+    AngularVelocity, Collider, JointCollisionDisabled, LinearVelocity, Position, RigidBody,
+    Rotation, SphericalJoint, TransformInterpolation,
 };
 use bevy::prelude::*;
 use mm2_game::{
@@ -453,6 +453,19 @@ pub struct PredictedRemoteBody {
     /// an assertion carrying the new epoch has been consumed; until then
     /// the body's recorded past is from before the seat's last reset.
     pub epoch: u8,
+}
+
+/// The real jointed trailer of a [`PredictedRemoteBody`] (NETPLAY-05E): a
+/// dynamic body the replay steps with its tractor. `visual` is the
+/// kinematic [`RemoteTrailer`] copy that wears the model and follows the
+/// delayed wire rows; this body has no mesh. Swept with its visual
+/// ([`sweep_remote_bodies`]).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PredictedRemoteTrailer {
+    /// The towing seat's wire id.
+    pub wire: u16,
+    /// The kinematic trailer copy this body shadows.
+    pub visual: Entity,
 }
 
 /// Blend state on a `Predicted` remote copy: the pose it displayed when
@@ -1884,7 +1897,8 @@ fn desired_remotes(lobby: &LobbyState, self_wire: u16) -> BTreeMap<u16, VehicleP
 }
 
 /// The trailer census query: whether each live trailer is a remote copy.
-type TrailerCensus<'w, 's> = Query<'w, 's, Has<RemoteTrailer>, With<car_visual::Trailer>>;
+type TrailerCensus<'w, 's> =
+    Query<'w, 's, Has<RemoteTrailer>, (With<car_visual::Trailer>, Without<PredictedRemoteTrailer>)>;
 
 /// Keep the world matching the lobby's remote roster: spawn a
 /// participant entity per picked remote seat (host's included, on
@@ -2154,6 +2168,7 @@ fn spawn_remote(
             .entity(vehicle)
             .insert(crate::cnr_bots::CnrBot { index });
     }
+    let mut contact_body = None;
     if predicted {
         // A client never simulates a remote car's truth: kinematic —
         // it collides as the host says it is, and `RemoteLerp` blends
@@ -2186,7 +2201,9 @@ fn spawn_remote(
         // the legacy kinematic copy.
         if dynamic && bot.is_none() {
             commands.entity(vehicle).remove::<Collider>();
-            spawn_contact_body(commands, &cfg, wire, vehicle, pos, yaw, owner);
+            contact_body = Some(spawn_contact_body(
+                commands, &cfg, wire, vehicle, pos, yaw, owner,
+            ));
         }
     }
     // F25-A.4: the authority resolves a remote driver's world outcomes
@@ -2316,6 +2333,14 @@ fn spawn_remote(
             let te = spawn_trailer_copy(
                 commands, session, trailer, pick, wire, vehicle, pos, yaw, owner, role,
             );
+            // NETPLAY-05E: the car's contact body tows a real jointed
+            // trailer, so a contact with the rig's trailer is predicted
+            // and replayed. The copy stays the delayed visual and loses
+            // its collider, as the car copy does.
+            if let Some(body) = contact_body {
+                commands.entity(te).remove::<Collider>();
+                spawn_contact_trailer(commands, trailer, wire, body, te, pos, yaw, owner);
+            }
             let missing = car_visual::spawn_vehicle_model(
                 commands,
                 vfs,
@@ -2396,16 +2421,69 @@ fn spawn_contact_body(
         .id()
 }
 
+/// Spawn the real jointed trailer of a remote contact body (NETPLAY-05E):
+/// the dynamic body and hitch `SphericalJoint` `car_visual::spawn_trailer`
+/// gives a simulated rig, hitched to the seat's [`PredictedRemoteBody`]
+/// rather than its kinematic visual. It carries no model and no
+/// [`RemoteTrailer`] — the kinematic copy `visual` is the presentation
+/// and owns the wire row's pose blend — so `netpredict::trailer_drives`
+/// picks it up through its towing body's wire id.
+// Every argument is a distinct borrow `spawn_remote` already holds.
+#[allow(clippy::too_many_arguments)]
+fn spawn_contact_trailer(
+    commands: &mut Commands,
+    trailer: &mm2_content::TrailerDef,
+    wire: u16,
+    body: Entity,
+    visual: Entity,
+    pos: Vec3,
+    yaw: f32,
+    owner: SessionEntity,
+) {
+    let rest_offset = Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch);
+    let trot = Quat::from_rotation_y(yaw);
+    let te = commands
+        .spawn((
+            owner,
+            PredictedRemoteTrailer { wire, visual },
+            car_visual::Trailer {
+                towing: body,
+                rest_offset,
+            },
+            vehicle_bundle(&trailer.config),
+            Transform::from_translation(pos + trot * rest_offset).with_rotation(trot),
+        ))
+        .id();
+    commands.spawn((
+        owner,
+        // A child of the trailer so its despawn sweeps the joint.
+        ChildOf(te),
+        SphericalJoint::new(body, te)
+            .with_local_anchor1(Vec3::from(trailer.car_hitch))
+            .with_local_anchor2(Vec3::from(trailer.trailer_hitch))
+            .with_swing_limits(-0.6, 0.6)
+            .with_twist_limits(-0.15, 0.15),
+        JointCollisionDisabled,
+    ));
+}
+
 /// Despawn contact bodies whose visual is gone (a departed player or a
 /// changed pick despawns the visual in [`reconcile_remote_players`]).
 pub fn sweep_remote_bodies(
     mut commands: Commands,
     bodies: Query<(Entity, &PredictedRemoteBody)>,
+    trailers: Query<(Entity, &PredictedRemoteTrailer)>,
     visuals: Query<(), With<RemotePick>>,
 ) {
     for (body, link) in &bodies {
         if !visuals.contains(link.visual) {
             commands.entity(body).despawn();
+        }
+    }
+    // The contact trailers go with their visual too (NETPLAY-05E).
+    for (trailer, link) in &trailers {
+        if !visuals.contains(link.visual) {
+            commands.entity(trailer).despawn();
         }
     }
 }
@@ -5596,6 +5674,64 @@ mod tests {
         );
         assert_eq!(world.get::<SessionEntity>(te).unwrap().0, 7);
         assert!(world.get::<ObjectIdentity>(te).is_some());
+    }
+
+    /// NETPLAY-05E: a remote contact body tows a real dynamic trailer on
+    /// a joint, apart from the kinematic copy — it has no model, no
+    /// `RemoteTrailer` and no `NetPlayer`, so the wire rows still drive
+    /// only the copy, and `sweep_remote_bodies` takes it down with the
+    /// copy.
+    #[test]
+    fn a_contact_trailer_is_jointed_to_the_contact_body() {
+        let trailer = mm2_content::TrailerDef {
+            config: VehicleConfig {
+                trailer: true,
+                ..VehicleConfig::default()
+            },
+            model: mm2_content::VehicleModel::default(),
+            car_hitch: [0.0, 0.0, 1.9],
+            trailer_hitch: [0.0, 0.0, -2.4],
+            wheels: Vec::new(),
+        };
+        let mut world = World::new();
+        world.init_resource::<avian3d::prelude::JointGraph>();
+        let body = world.spawn_empty().id();
+        let visual = world
+            .spawn(RemotePick(VehiclePick {
+                vehicle: "vpsemi".into(),
+                paint: 0,
+            }))
+            .id();
+        {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_contact_trailer(
+                &mut commands,
+                &trailer,
+                3,
+                body,
+                visual,
+                Vec3::new(2.0, 0.6, -4.0),
+                0.5,
+                SessionEntity(7),
+            );
+            queue.apply(&mut world);
+        }
+        let mut q = world.query::<(Entity, &PredictedRemoteTrailer, &car_visual::Trailer)>();
+        let (te, link, rel) = q.single(&world).map(|(e, l, r)| (e, *l, r.towing)).unwrap();
+        assert_eq!((link.wire, link.visual, rel), (3, visual, body));
+        assert!(world.get::<RemoteTrailer>(te).is_none());
+        assert!(world.get::<RigidBody>(te).is_some_and(|b| b.is_dynamic()));
+        assert!(world.get::<Collider>(te).is_some());
+        let mut joints = world.query::<(&SphericalJoint, &ChildOf)>();
+        let (joint, parent) = joints.single(&world).unwrap();
+        assert_eq!((joint.body1, joint.body2, parent.parent()), (body, te, te));
+        // Swept with the visual.
+        world.run_system_once(sweep_remote_bodies).unwrap();
+        assert!(world.get_entity(te).is_ok());
+        world.despawn(visual);
+        world.run_system_once(sweep_remote_bodies).unwrap();
+        assert!(world.get_entity(te).is_err());
     }
 
     /// The own rig's tractor and trailer are one pair through the local
