@@ -20,7 +20,7 @@
 //!   recorded state; inside the tolerances nothing happens;
 //! * otherwise restores the recorded world with the host's body state put
 //!   in, replays the stored commands `ack+1..=newest` one fixed step at a
-//!   time through [`mm2_vehicle::replay::replay_from`], and writes each
+//!   time through [`mm2_vehicle::replay::replay_from_observed`], and writes each
 //!   re-simulated post-step state back into the history so the next
 //!   snapshot compares against the corrected past.
 //!
@@ -57,7 +57,7 @@ use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, Session};
 use mm2_vehicle::capture::EpochRef;
 use mm2_vehicle::physics_world::{WorldCapture, capture_world, restore_world};
-use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from};
+use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from_observed};
 use mm2_vehicle::{RemoteReplica, Teleported, VehicleInput};
 
 use crate::car_visual::Trailer;
@@ -275,6 +275,13 @@ impl OwnPrediction {
     /// The recorded command range `(oldest, newest)`.
     pub fn span(&self) -> Option<(u64, u64)> {
         Some((self.ring.oldest()?, self.ring.newest()?))
+    }
+
+    /// Record the world after the step driven by command `seq`, as the
+    /// `record_prediction` system does each fixed tick. Public so a test
+    /// that drives the app's own systems by hand can fill the history.
+    pub fn record(&mut self, seq: u64, capture: WorldCapture) {
+        self.ring.record(seq, capture);
     }
 
     fn restart(&mut self, generation: u64) {
@@ -682,13 +689,7 @@ fn replay(
     let before = present(world, req.own);
     let remotes = remote_poses(world);
 
-    // A two-deep scratch ring: replay_from reads the boundary it restores,
-    // and each step's result is recorded for the next. The permanent
-    // history is rewritten only when the whole replay succeeded.
-    let mut scratch = HistoryRing::new(2);
-    scratch.record(a.ack, corrected.clone());
     let mut staged: Vec<(u64, WorldCapture)> = Vec::with_capacity(req.commands.len());
-    let mut from = a.ack;
     if req.commands.is_empty() {
         // The host's state is for the newest tick: nothing to step, but
         // the corrected capture still has to reach the world (the own car
@@ -713,47 +714,63 @@ fn replay(
             remote_diverged,
         };
     }
-    for (i, (seq, input)) in req.commands.iter().enumerate() {
-        let mut inputs = vec![(req.own, *input)];
-        inputs.extend(req.remotes.iter().filter_map(|r| {
-            let command = r.commands.as_ref()?.get(i)?;
-            in_capture(&corrected, r.body).then_some((r.body, *command))
-        }));
-        // A trailer brakes with its tractor, the way the live
-        // `trailer_input` system copies it.
-        for t in req.trailers {
-            if !in_capture(&corrected, t.body) {
-                continue;
+    let steps: Vec<ReplayStep> = req
+        .commands
+        .iter()
+        .enumerate()
+        .map(|(i, (_, input))| {
+            let mut inputs = vec![(req.own, *input)];
+            inputs.extend(req.remotes.iter().filter_map(|r| {
+                let command = r.commands.as_ref()?.get(i)?;
+                in_capture(&corrected, r.body).then_some((r.body, *command))
+            }));
+            // A trailer brakes with its tractor, the way the live
+            // `trailer_input` system copies it.
+            for t in req.trailers {
+                if !in_capture(&corrected, t.body) {
+                    continue;
+                }
+                let tractor = if t.towing == req.own {
+                    Some(*input)
+                } else {
+                    inputs.iter().find(|(e, _)| *e == t.towing).map(|(_, c)| *c)
+                };
+                if let Some(c) = tractor {
+                    inputs.push((
+                        t.body,
+                        VehicleInput {
+                            brake: c.brake,
+                            handbrake: c.handbrake,
+                            ..VehicleInput::default()
+                        },
+                    ));
+                }
             }
-            let tractor = if t.towing == req.own {
-                Some(*input)
-            } else {
-                inputs.iter().find(|(e, _)| *e == t.towing).map(|(_, c)| *c)
-            };
-            if let Some(c) = tractor {
-                inputs.push((
-                    t.body,
-                    VehicleInput {
-                        brake: c.brake,
-                        handbrake: c.handbrake,
-                        ..VehicleInput::default()
-                    },
-                ));
-            }
-        }
-        let step = ReplayStep { inputs };
-        if replay_from(world, &scratch, from, std::slice::from_ref(&step)).is_err() {
-            put_back(world, &remotes);
-            adopt(world, req);
-            pred.ring.clear();
-            pred.floor = req.newest + 1;
-            return Outcome::Recovered(RecoveryCause::ReplayRefused);
-        }
-        let capture = capture_world(world, req.epoch);
-        scratch.record(*seq, capture.clone());
-        staged.push((*seq, capture));
-        from = *seq;
+            ReplayStep { inputs }
+        })
+        .collect();
+    // One replay over the whole window, against the recorded history with
+    // only the compared boundary corrected: the world actors (traffic
+    // copies, props that spawned or moved) follow what was recorded for
+    // every tick, not what they are doing now. Stepping one tick at a time
+    // against a two-entry ring left them no history past the first step.
+    // The permanent history is rewritten only when the whole replay
+    // succeeded; every refusal clears it.
+    let mut history = std::mem::take(&mut pred.ring);
+    history.replace(a.ack, corrected.clone());
+    let seqs: Vec<u64> = req.commands.iter().map(|(seq, _)| *seq).collect();
+    let epoch = req.epoch;
+    let result = replay_from_observed(world, &history, a.ack, &steps, &mut |world, i| {
+        staged.push((seqs[i], capture_world(world, epoch)));
+    });
+    if result.is_err() {
+        put_back(world, &remotes);
+        adopt(world, req);
+        pred.ring.clear();
+        pred.floor = req.newest + 1;
+        return Outcome::Recovered(RecoveryCause::ReplayRefused);
     }
+    pred.ring = history;
     put_back(world, &remotes);
     pred.ring.record(a.ack, corrected);
     for (seq, capture) in staged {
@@ -814,7 +831,7 @@ pub fn record_prediction(world: &mut World) {
     }
     if seq != 0 && pred.ring.newest().is_none_or(|n| seq > n) {
         let capture = capture_world(world, epoch);
-        pred.ring.record(seq, capture);
+        pred.record(seq, capture);
     }
     world.insert_resource(pred);
 }

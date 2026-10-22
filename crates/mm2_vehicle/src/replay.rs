@@ -277,6 +277,21 @@ impl HistoryRing {
         self.entries.push_back((tick, capture));
     }
 
+    /// Overwrite the capture held for exactly `tick`, leaving every other
+    /// entry (older and newer) in place. `false` when `tick` is not held.
+    /// A caller that corrects one boundary but still needs the rest of the
+    /// recorded timeline (the world actors' history) replays against the
+    /// ring like this and rewrites the future with [`Self::record`] after.
+    pub fn replace(&mut self, tick: u64, capture: WorldCapture) -> bool {
+        match self.entries.iter_mut().find(|(t, _)| *t == tick) {
+            Some((_, slot)) => {
+                *slot = capture;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The capture of exactly `tick`.
     pub fn get(&self, tick: u64) -> Option<&WorldCapture> {
         self.entries
@@ -320,6 +335,22 @@ pub fn replay_from(
     history: &HistoryRing,
     from_tick: u64,
     steps: &[ReplayStep],
+) -> Result<ReplayReport, ReplayError> {
+    replay_from_observed(world, history, from_tick, steps, &mut |_, _| {})
+}
+
+/// [`replay_from`] that calls `observe(world, i)` after step `i` (0-based)
+/// has run, while the replay is still active: the world is at
+/// `S[from_tick + i + 1]`, so a caller can capture each replayed tick. The
+/// whole window is one replay, so the world actors follow `history` across
+/// all of it (a caller that replayed one step at a time against a two-entry
+/// ring would give movers and entrants no history beyond that step).
+pub fn replay_from_observed(
+    world: &mut World,
+    history: &HistoryRing,
+    from_tick: u64,
+    steps: &[ReplayStep],
+    observe: &mut dyn FnMut(&mut World, usize),
 ) -> Result<ReplayReport, ReplayError> {
     if steps.is_empty() {
         return Err(ReplayError::NoSteps);
@@ -393,6 +424,7 @@ pub fn replay_from(
         world.run_schedule(FixedPostUpdate);
         // The next tick sees only its own writes.
         suppressed += clear_scratch(world, &stashes);
+        observe(world, i);
     }
 
     // End of the window: movers and late entrants sit at their last
