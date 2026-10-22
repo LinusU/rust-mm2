@@ -1655,6 +1655,50 @@ impl NavGraph {
         self.route_search(&plausible(&starts), &plausible(&goals), to, options)
     }
 
+    /// [`NavGraph::route_candidates`] for a goal that must be met on its
+    /// own level. A goal with a trigger of its own (gold to take) that
+    /// sits over or under a road is met only by a lane within
+    /// `goal_level` metres of its height: when any such lane lies within
+    /// the snap radius those are the goal's entries, even where a lane
+    /// on another level is nearer in 3D, since that one is a shorter way
+    /// to a place the car cannot pick the gold up from. With no lane at
+    /// its height the entries are as for `route_candidates`.
+    pub fn route_candidates_at_level(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        options: &RouteOptions,
+        goal_level: f32,
+    ) -> Result<Route, RouteError> {
+        let query = LaneQuery::vehicles(options.max_snap);
+        let starts = self.lane_hits(from, &query);
+        if starts.is_empty() {
+            return Err(RouteError::NoStartLane);
+        }
+        let goals = self.lane_hits(to, &query);
+        if goals.is_empty() {
+            return Err(RouteError::NoGoalLane);
+        }
+        let plausible = |hits: &[LaneHit]| -> Vec<LaneHit> {
+            let nearest = hits[0].distance;
+            hits.iter()
+                .filter(|h| h.distance <= nearest + ENTRY_TOLERANCE)
+                .cloned()
+                .collect()
+        };
+        let level: Vec<LaneHit> = goals
+            .iter()
+            .filter(|h| (h.point[1] - to[1]).abs() <= goal_level)
+            .cloned()
+            .collect();
+        let goals = if level.is_empty() {
+            plausible(&goals)
+        } else {
+            plausible(&level)
+        };
+        self.route_search(&plausible(&starts), &goals, to, options)
+    }
+
     /// The shared A* body behind [`NavGraph::route`] and
     /// [`NavGraph::route_candidates`]. Every distinct arc owning a
     /// `starts` lane is seeded at that lane's snap distance; the first
@@ -1981,9 +2025,29 @@ impl NavGraph {
         step: f32,
     ) -> Result<Vec<Vec3>, RouteError> {
         let route = self.route_candidates(from.into(), to.into(), options)?;
+        Ok(self.sample_line(&route, from, to, step))
+    }
+
+    /// [`NavGraph::drive_line`] to a goal that must be met on its own
+    /// level ([`NavGraph::route_candidates_at_level`]).
+    pub fn drive_line_at_level(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        options: &RouteOptions,
+        step: f32,
+        goal_level: f32,
+    ) -> Result<Vec<Vec3>, RouteError> {
+        let route = self.route_candidates_at_level(from.into(), to.into(), options, goal_level)?;
+        Ok(self.sample_line(&route, from, to, step))
+    }
+
+    /// `route` sampled every `step` metres between `from` and `to`, with
+    /// no two consecutive points within a metre.
+    fn sample_line(&self, route: &Route, from: Vec3, to: Vec3, step: f32) -> Vec<Vec3> {
         let mut line = vec![from];
         for p in self
-            .route_path(&route, step)
+            .route_path(route, step)
             .into_iter()
             .chain(std::iter::once(to))
         {
@@ -1991,7 +2055,7 @@ impl NavGraph {
                 line.push(p);
             }
         }
-        Ok(line)
+        line
     }
 
     /// Re-express a sparse authored driving line in road geometry the
