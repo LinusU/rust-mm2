@@ -419,6 +419,17 @@ impl Request<'_> {
     }
 }
 
+/// The angle (rad) between two rotations. Not `Quat::angle_between`, which
+/// is `2·acos(dot)` in f32: a unit quaternion whose squared length rounds
+/// to 1 - 6e-8 has a dot with itself that reads as ~7e-4 rad, so identical
+/// rotations could pass [`ROT_TOLERANCE`] on one machine and fail it on
+/// another and cause a replay of a world that agreed. The relative
+/// rotation's vector part, sin(θ/2), stays precise for tiny angles.
+fn rotation_error(a: Quat, b: Quat) -> f32 {
+    let d = a.inverse() * b;
+    2.0 * d.xyz().length().atan2(d.w.abs())
+}
+
 fn finite3(v: Vec3) -> bool {
     v.is_finite()
 }
@@ -568,7 +579,7 @@ fn classify_and_run(
         return Outcome::Recovered(RecoveryCause::ReplayRefused);
     };
     let pos_error = pos.distance(a.pos);
-    let rot_error = rot.angle_between(a.rot);
+    let rot_error = rotation_error(rot, a.rot);
     let own_agrees = pos_error <= POS_TOLERANCE
         && rot_error <= ROT_TOLERANCE
         && vel.distance(a.vel) <= VEL_TOLERANCE
@@ -661,7 +672,7 @@ fn compare_partners(past: &WorldCapture, req: &Request<'_>) -> (f32, bool) {
         let err = pos.distance(a.pos);
         worst = worst.max(err);
         diverged |= err > POS_TOLERANCE
-            || rot.angle_between(a.rot) > ROT_TOLERANCE
+            || rotation_error(rot, a.rot) > ROT_TOLERANCE
             || vel.distance(a.vel) > VEL_TOLERANCE
             || ang.distance(a.ang) > ANG_TOLERANCE;
     }
@@ -842,7 +853,7 @@ fn replay(
         pred.ring.record(seq, capture);
     }
     let (shift, turn) = match (before, present(world, req.own)) {
-        (Some((p0, r0)), Some((p1, r1))) => (p0.distance(p1), r0.angle_between(r1)),
+        (Some((p0, r0)), Some((p1, r1))) => (p0.distance(p1), rotation_error(r0, r1)),
         _ => (0.0, 0.0),
     };
     Outcome::Replayed {
@@ -1806,6 +1817,19 @@ mod tests {
         assert_eq!(out, Outcome::Recovered(RecoveryCause::HistoryExhausted));
         assert_eq!(pose(&app, remote).0, ra.pos);
         assert_eq!(pred.recovered_exhausted, 1);
+    }
+
+    /// A rotation compared with itself is no error, however its squared
+    /// length rounds; `Quat::angle_between` reads ~1e-3 rad for this one.
+    #[test]
+    fn an_identical_rotation_has_no_error_whatever_its_norm_rounding() {
+        let q = Quat::from_xyzw(0.0, 0.0, 0.0, 0.999_999_9);
+        assert!(q.angle_between(q) > ROT_TOLERANCE, "the premise");
+        assert!(rotation_error(q, q) < 1e-6);
+        let r = Quat::from_rotation_y(0.01);
+        assert!((rotation_error(Quat::IDENTITY, r) - 0.01).abs() < 1e-5);
+        assert!((rotation_error(r, Quat::IDENTITY) - 0.01).abs() < 1e-5);
+        assert!(rotation_error(r, -r) < 1e-6, "q and -q are one rotation");
     }
 }
 
