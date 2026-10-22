@@ -151,6 +151,9 @@ pub enum Driver {
     /// A reproducible input program (`--net-route`, NETPLAY-01) through
     /// the production `VehicleInput` path.
     Route(crate::netprobe::Route),
+    /// A scripted contact role (`--net-contact`, NETPLAY-05F-2): keyed
+    /// on the nearest car as well as the tick.
+    Contact(crate::netprobe::ContactScript),
 }
 
 impl Driver {
@@ -163,6 +166,7 @@ impl Driver {
             Self::Sequence => "sequence",
             Self::Ram => "ram",
             Self::Route(_) => "route",
+            Self::Contact(_) => "contact",
         }
     }
 }
@@ -786,6 +790,7 @@ fn add_lobby_client_systems(app: &mut App) {
                     .after(crate::input::vehicle_input)
                     .after(crate::input::parked_drive)
                     .after(crate::input::ram_drive)
+                    .after(crate::input::contact_drive)
                     .after(scripted::scripted_drive)
                     .after(crate::sequence::sequence_drive),
             ),
@@ -1321,6 +1326,12 @@ fn run_headless(
             crate::input::ram_drive
                 .run_if(resource_exists::<crate::input::RamDrive>)
                 .after(crate::input::vehicle_input),
+        )
+        .add_systems(
+            Update,
+            crate::input::contact_drive
+                .run_if(resource_exists::<crate::input::ContactDrive>)
+                .after(crate::input::vehicle_input),
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
@@ -1333,6 +1344,9 @@ fn run_headless(
     }
     if driver == Driver::Ram {
         app.insert_resource(crate::input::RamDrive);
+    }
+    if let Driver::Contact(script) = driver {
+        app.insert_resource(crate::input::ContactDrive(script));
     }
     if let Some(profile) = profile {
         app.insert_resource(profile);

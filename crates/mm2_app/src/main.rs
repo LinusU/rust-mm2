@@ -492,6 +492,12 @@ struct Cli {
     #[arg(long, value_name = "route", requires = "headless", value_parser = mm2_app::netprobe::Route::parse)]
     net_route: Option<mm2_app::netprobe::Route>,
 
+    /// Play a scripted contact role (`evade`, `brake`, `swipe`, `push`)
+    /// keyed on the nearest other car, against a `--ram` pursuer
+    /// (NETPLAY-05F-2 evidence driver).
+    #[arg(long, value_name = "script", requires = "headless", conflicts_with_all = ["net_route", "bot", "parked", "ram", "seq"], value_parser = mm2_app::netprobe::ContactScript::parse)]
+    net_contact: Option<mm2_app::netprobe::ContactScript>,
+
     /// Write the player car's per-update trajectory (JSONL) here.
     #[arg(long, value_name = "path", requires = "headless")]
     net_trace: Option<std::path::PathBuf>,
@@ -1505,6 +1511,8 @@ fn main() {
         }
         let driver = if let Some(route) = cli.net_route {
             smoke::Driver::Route(route)
+        } else if let Some(script) = cli.net_contact {
+            smoke::Driver::Contact(script)
         } else if cli.bot {
             smoke::Driver::Scripted
         } else if cli.parked {

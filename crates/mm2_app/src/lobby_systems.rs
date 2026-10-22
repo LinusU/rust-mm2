@@ -101,6 +101,7 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
                 .after(input::vehicle_input)
                 .after(input::parked_drive)
                 .after(input::ram_drive)
+                .after(input::contact_drive)
                 .after(scripted::scripted_drive)
                 .after(sequence::sequence_drive),
         )

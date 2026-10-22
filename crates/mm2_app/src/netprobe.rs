@@ -100,6 +100,51 @@ impl Route {
     }
 }
 
+/// A scripted contact role (`--net-contact`): unlike a [`Route`] it is
+/// keyed on the nearest other car as well as on the ticks since play
+/// began, so it can evade, brake in front of, swipe or push a neighbour
+/// wherever the grid put it. The laws live in `input::contact_input`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactScript {
+    /// Hold still until a car closes inside the trigger range, then
+    /// drive off hard away from it (a predicted contact that is dodged).
+    Evade,
+    /// Drive straight, then brake hard at a fixed tick and stop (the
+    /// lead car of a rear-end).
+    Brake,
+    /// Charge the nearest car aiming beside it, then run alongside (a
+    /// side swipe rather than a head-on).
+    Swipe,
+    /// Charge the nearest car and keep the throttle down through the
+    /// contact, never parking (a push).
+    Push,
+}
+
+impl ContactScript {
+    /// Parse a `--net-contact` value.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "evade" => Ok(Self::Evade),
+            "brake" => Ok(Self::Brake),
+            "swipe" => Ok(Self::Swipe),
+            "push" => Ok(Self::Push),
+            _ => Err(format!(
+                "unknown contact script {s:?} (evade, brake, swipe, push)"
+            )),
+        }
+    }
+
+    /// Stable name for the record.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Evade => "evade",
+            Self::Brake => "brake",
+            Self::Swipe => "swipe",
+            Self::Push => "push",
+        }
+    }
+}
+
 /// A scheduled whole-process stall: sleep `ms` after every `every`-th
 /// `Playing` update, so a peer sees a bounded input/snapshot gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,6 +658,14 @@ mod tests {
         assert_eq!(parse_trace(&text).unwrap().samples, t.samples);
         assert!(parse_trace("{\"f\":1}\n").is_err());
         assert!(parse_trace("not json\n").is_err());
+    }
+
+    #[test]
+    fn contact_scripts_parse_and_round_trip() {
+        for name in ["evade", "brake", "swipe", "push"] {
+            assert_eq!(ContactScript::parse(name).unwrap().as_str(), name);
+        }
+        assert!(ContactScript::parse("ram").is_err());
     }
 
     #[test]

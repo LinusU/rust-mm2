@@ -17,6 +17,7 @@ use crate::controls::{
     BrakeCarry, ControlSettings, DriveAction, MouseDrive, SLOTS, bound_keys, pad_button,
 };
 use crate::manual_gear::ManualGear;
+use crate::netprobe::ContactScript;
 use crate::pad_map::PadAction;
 use crate::session::{self, SessionControl, SpawnPoint};
 
@@ -528,6 +529,161 @@ pub fn ram_input(
     }
 }
 
+/// Presence enables the scripted contact driver: `--net-contact` inserts
+/// it, and [`contact_drive`] owns the player vehicle's [`VehicleInput`]
+/// while it exists.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct ContactDrive(pub ContactScript);
+
+/// Range (m) inside which an evading car stops waiting and drives off.
+const EVADE_TRIGGER: f32 = 25.0;
+/// Updates into play at which a braking car lifts off and brakes.
+const BRAKE_AT: u64 = 300;
+/// Pace (m/s) a braking car holds before [`BRAKE_AT`].
+const BRAKE_PACE: f32 = 8.0;
+/// Bearing (rad) a swiping car aims beside its target, on the side the
+/// target was first seen.
+const SWIPE_OFFSET: f32 = 0.4;
+/// Range (m) and bearing (rad) at which a swiping car is alongside and
+/// holds its line.
+const SWIPE_ALONGSIDE: (f32, f32) = (8.0, 1.0);
+
+/// [`contact_drive`]'s per-session memory.
+#[derive(Debug, Default)]
+pub struct ContactState {
+    /// Updates spent driving (the same clock `Route` uses).
+    ticks: u64,
+    /// The side latched on first sight of a target: +1 target to the
+    /// right of the nose, −1 to the left.
+    side: Option<f32>,
+    /// A pursuit has pulled its range past [`RAM_STANDOFF`].
+    opened: bool,
+}
+
+/// One frame of the evade / brake / swipe laws. `bearing` and `range`
+/// are to the nearest other car (none when there is none). `Push` is
+/// [`ram_input`]'s and handled by [`contact_drive`].
+pub fn contact_input(
+    script: ContactScript,
+    state: &mut ContactState,
+    speed: f32,
+    bearing: Option<f32>,
+    range: Option<f32>,
+) -> VehicleInput {
+    let hold = VehicleInput {
+        handbrake: 1.0,
+        ..default()
+    };
+    match script {
+        ContactScript::Evade => {
+            if state.side.is_none()
+                && let (Some(b), Some(r)) = (bearing, range)
+                && r < EVADE_TRIGGER
+            {
+                // Away from the threat; latched so the turn cannot flip.
+                state.side = Some(if b >= 0.0 { -1.0 } else { 1.0 });
+            }
+            match state.side {
+                Some(away) => VehicleInput {
+                    throttle: if speed > RAM_SPEED { 0.0 } else { 1.0 },
+                    steering: away,
+                    ..default()
+                },
+                None => hold,
+            }
+        }
+        ContactScript::Brake => {
+            if state.ticks < BRAKE_AT {
+                VehicleInput {
+                    throttle: if speed > BRAKE_PACE { 0.0 } else { 1.0 },
+                    ..default()
+                }
+            } else if speed > 1.0 {
+                VehicleInput {
+                    brake: 1.0,
+                    ..default()
+                }
+            } else {
+                // The pedal from rest is reverse: park instead.
+                hold
+            }
+        }
+        ContactScript::Swipe => {
+            let Some(b) = bearing else {
+                return VehicleInput {
+                    throttle: 1.0,
+                    ..default()
+                };
+            };
+            let side = *state.side.get_or_insert(if b >= 0.0 { 1.0 } else { -1.0 });
+            let alongside =
+                range.is_some_and(|r| r < SWIPE_ALONGSIDE.0) && b.abs() > SWIPE_ALONGSIDE.1;
+            let aim = b - side * SWIPE_OFFSET;
+            VehicleInput {
+                throttle: if speed > RAM_SPEED { 0.0 } else { 1.0 },
+                steering: if alongside {
+                    0.0
+                } else {
+                    (aim * RAM_STEER_GAIN).clamp(-1.0, 1.0)
+                },
+                ..default()
+            }
+        }
+        ContactScript::Push => unreachable!("Push is ram_input's law"),
+    }
+}
+
+/// The scripted contact driver (`--net-contact`): the role a neighbour
+/// plays against a `--ram` pursuer so the contact cases that need the
+/// *other* car to act (a dodge, a sudden brake, a swipe, a push) run
+/// through the production `VehicleInput` path. Gated like [`ram_drive`]
+/// on a live, unlocked session. An evidence driver, not a gameplay
+/// feature.
+pub fn contact_drive(
+    mut me: Query<(&GlobalTransform, &LinearVelocity, &mut VehicleInput), With<PlayerVehicle>>,
+    others: RamTargets,
+    drive: Res<ContactDrive>,
+    session: Res<Session>,
+    race: Option<Res<RaceState>>,
+    mut state: Local<ContactState>,
+) {
+    let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
+    if !session.is_playing() || race_locked {
+        *state = ContactState::default();
+        for (_, _, mut vi) in &mut me {
+            *vi = VehicleInput::default();
+        }
+        return;
+    }
+    state.ticks += 1;
+    for (at, vel, mut vi) in &mut me {
+        let from = at.translation();
+        let target = nearest_ram_target(from, &others).map(|(_, t)| t);
+        let speed = vel.length();
+        *vi = if drive.0 == ContactScript::Push {
+            if let Some(to) = target
+                && from.distance(to) > RAM_STANDOFF
+            {
+                state.opened = true;
+            }
+            ram_input(
+                at,
+                speed,
+                target,
+                RAM_TURN_SPEED,
+                state.opened,
+                RAM_STANDOFF,
+            )
+        } else {
+            let fwd = at.rotation() * Vec3::NEG_Z;
+            let yaw = (-fwd.x).atan2(-fwd.z);
+            let bearing = target.map(|to| mm2_game::relative_bearing(yaw, from, to));
+            let range = target.map(|to| from.distance(to));
+            contact_input(drive.0, &mut state, speed, bearing, range)
+        };
+    }
+}
+
 /// What [`vehicle_input`] reads and writes on the player car. The gearbox
 /// state and config are optional: a harness car without them still drives,
 /// it just cannot run a manual gearbox.
@@ -942,5 +1098,61 @@ mod steering_cadence_tests {
             sixty[23] > sixty[0] && sixty[23] < 1.0,
             "high-speed steering must still be ramping"
         );
+    }
+}
+
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+
+    fn law(
+        script: ContactScript,
+        s: &mut ContactState,
+        speed: f32,
+        b: Option<f32>,
+        r: Option<f32>,
+    ) -> VehicleInput {
+        contact_input(script, s, speed, b, r)
+    }
+
+    #[test]
+    fn an_evader_waits_then_turns_away_and_keeps_the_side() {
+        let mut s = ContactState::default();
+        let far = law(ContactScript::Evade, &mut s, 0.0, Some(0.5), Some(60.0));
+        assert_eq!((far.handbrake, far.throttle), (1.0, 0.0));
+        let near = law(ContactScript::Evade, &mut s, 0.0, Some(0.5), Some(20.0));
+        assert_eq!((near.steering, near.throttle), (-1.0, 1.0));
+        // The threat swinging across the nose does not flip the dodge.
+        let later = law(ContactScript::Evade, &mut s, 6.0, Some(-0.2), Some(10.0));
+        assert_eq!(later.steering, -1.0);
+    }
+
+    #[test]
+    fn a_braking_car_drives_then_brakes_then_parks() {
+        let mut s = ContactState::default();
+        assert_eq!(
+            law(ContactScript::Brake, &mut s, 0.0, None, None).throttle,
+            1.0
+        );
+        assert_eq!(
+            law(ContactScript::Brake, &mut s, 9.0, None, None).throttle,
+            0.0
+        );
+        s.ticks = BRAKE_AT;
+        assert_eq!(
+            law(ContactScript::Brake, &mut s, 8.0, None, None).brake,
+            1.0
+        );
+        let stopped = law(ContactScript::Brake, &mut s, 0.2, None, None);
+        assert_eq!((stopped.brake, stopped.handbrake), (0.0, 1.0));
+    }
+
+    #[test]
+    fn a_swiper_aims_beside_its_target_and_holds_alongside() {
+        let mut s = ContactState::default();
+        let aim = law(ContactScript::Swipe, &mut s, 5.0, Some(0.6), Some(20.0));
+        assert!((aim.steering - (0.6 - SWIPE_OFFSET) * RAM_STEER_GAIN).abs() < 1e-6);
+        let along = law(ContactScript::Swipe, &mut s, 5.0, Some(1.3), Some(5.0));
+        assert_eq!(along.steering, 0.0);
     }
 }
