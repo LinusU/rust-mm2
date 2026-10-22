@@ -53,7 +53,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::cnr_tactics::{CarPose, Objective, Planner, Snapshot, TacticsConfig};
 use mm2_game::{
-    DamageTier, NavGraph, Player, PlayerControl, PlayerId, RouteOptions, Session, VehicleDamage,
+    DamageTier, NavGraph, Player, PlayerControl, PlayerId, RouteError, RouteOptions, Session,
+    VehicleDamage,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState};
 use tracing::{info, warn};
@@ -69,6 +70,23 @@ use crate::opponents::{AMBIENT_SIZE, REANCHOR_DIST, reanchor_occupied, seat_rean
 
 /// Metres between samples of a street line.
 pub const ROUTE_STEP: f32 = 6.0;
+/// Metres of height within which a lane counts as a way in to the
+/// objective. The pickup and the markers are 3D triggers, so a lane on
+/// the level above or below (a flyover over an underpass site) leads a
+/// car to a place it cannot take or deliver from, however much shorter
+/// the way there is.
+pub const GOAL_LEVEL: f32 = 3.0;
+/// Metres of height between the car and an objective beyond which a
+/// failed street route is final. The pickup is a 5 m sphere, so within
+/// this a straight run at the objective may still take it; past it the
+/// objective is on another level the graph cannot reach from here (the
+/// retail london site under a flyover, whose underpass is not joined to
+/// the road above), and a straight line only has the bot circle under
+/// or over it. Such a bot stands, and asks the router again every
+/// [`FAILED_WAIT`] frames: it drives again once the objective moves to
+/// its level (a thief carrying the gold away) or is on a lane it can
+/// reach. A designed policy, not retail behaviour.
+pub const UNREACHABLE_DY: f32 = 6.0;
 /// Metres a line runs past its objective.
 pub const OVERSHOOT: f32 = 12.0;
 /// Distance (m, XZ) to the objective within which a bot aims straight
@@ -154,6 +172,9 @@ pub struct BotStats {
     pub straight: u64,
     /// Lines that were straight because the objective was near.
     pub direct: u64,
+    /// Plans refused because the objective is on a level the graph
+    /// cannot reach ([`LineKind::Unreachable`]).
+    pub unreachable: u64,
     /// Router queries that failed.
     pub failures: u64,
     /// Goal switches that replaced a line.
@@ -171,6 +192,10 @@ pub enum LineKind {
     Fallback,
     /// Straight, the objective being near and the way open.
     Direct,
+    /// None: the street graph has no way to an objective on another
+    /// level than the car's (see [`UNREACHABLE_DY`]); the line is a
+    /// stand-still at the car.
+    Unreachable,
 }
 
 /// What a bot is after, ignoring where it is: the objective's kind and
@@ -233,8 +258,13 @@ pub fn plan_line(
     let (mut line, kind) = if near_open {
         (vec![from, to], LineKind::Direct)
     } else {
-        match graph.map(|g| g.drive_line(from, to, &RouteOptions::default(), ROUTE_STEP)) {
+        match graph.map(|g| {
+            g.drive_line_at_level(from, to, &RouteOptions::default(), ROUTE_STEP, GOAL_LEVEL)
+        }) {
             Some(Ok(line)) if line.len() >= 2 => (line, LineKind::Street),
+            Some(Err(RouteError::Unreachable { .. })) if (to.y - from.y).abs() > UNREACHABLE_DY => {
+                return (vec![from], LineKind::Unreachable);
+            }
             _ => (vec![from, to], LineKind::Fallback),
         }
     };
@@ -493,6 +523,15 @@ pub fn cnr_bot_drive(
                     )
                 });
             let (line, kind) = plan_line(brain.graph.as_deref(), pos.0, target, near_open);
+            if kind == LineKind::Unreachable {
+                brain.stats.unreachable += 1;
+                d.fail_wait = FAILED_WAIT;
+                d.neural = None;
+                d.goal = None;
+                d.kind = Some(kind);
+                input.handbrake = 1.0;
+                continue;
+            }
             match kind {
                 LineKind::Street => brain.stats.streets += 1,
                 LineKind::Fallback => {
@@ -503,6 +542,7 @@ pub fn cnr_bot_drive(
                     }
                 }
                 LineKind::Direct => brain.stats.direct += 1,
+                LineKind::Unreachable => {} // stood above
             }
             if why == "goal switch" {
                 brain.stats.switches += 1;
@@ -522,6 +562,9 @@ pub fn cnr_bot_drive(
             }
         }
         let Some(neural) = d.neural.as_mut() else {
+            // Nothing to follow (an unreachable objective, or a failed
+            // plan waiting): stand.
+            input.handbrake = 1.0;
             continue;
         };
 
