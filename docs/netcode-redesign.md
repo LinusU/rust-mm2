@@ -1109,18 +1109,27 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   or never entered, as before (`Client::recv` itself does not filter, so
   the resend tests can still observe the repeats, and a generation-0
   `Start` still reaches the app to be refused).
-- **Size, decided**: a `Start` body can exceed `MAX_RELIABLE_BODY` (the
-  session blob is bounded by `MAX_SESSION_PARAMS`, 4096 bytes). It is
-  **not fragmented and there is no digest-plus-fetch**: an oversize `Start`
-  rides TCP and the bounded `LIFECYCLE_RESEND_WINDOW` alone. Fragmenting
-  the reliable channel is the follow-up that would let TCP retire.
+- **Size (#1930)**: a `Start` body can exceed `MAX_RELIABLE_BODY` (the
+  session blob is bounded by `MAX_SESSION_PARAMS`, 4096 bytes). The
+  channel now splits any message into at most `MAX_RELIABLE_PIECES` (8)
+  datagram-sized pieces, each its own id with a `more` byte in the data
+  header (`id u64 | more u8 | body`, protocol v37). Order and exactly-once
+  delivery do the reassembly: the receiver concatenates pieces in id order
+  and delivers the whole message once, so nothing above the channel sees a
+  piece. A message is accepted whole or refused whole (`Full` when its ids
+  do not all fit the window, `TooLarge` over `MAX_RELIABLE_MESSAGE`). A
+  run of `more` pieces that never terminates is counted `malformed` and
+  never delivered. Digest-plus-fetch was not needed.
 - **Kept**: `LIFECYCLE_RESEND_WINDOW`, the Keepalive lifecycle state and
-  the TCP copy — a seat whose lane never establishes (UDP blocked) and the
-  oversize `Start` still depend on them. Nothing is removed yet.
+  the TCP copy — a seat whose lane never establishes (UDP blocked) still
+  depends on them, and what a lane-down seat does instead is not decided
+  yet. Nothing is removed; every `Start` now also rides the channel.
 - **Tests** (`lane_lobby_tests`): with a datagram dropped, `Start` and then
   `Cancel` are each delivered on the channel exactly once
   (`receiver.delivered`) and returned once, `Start` first; an oversize
-  `Start` leaves the channel untouched and reaches the client over TCP.
+  `Start` (a 4096-byte blob, first datagram dropped) is delivered on the
+  channel once, whole; `reliable` unit tests cover reassembly across loss,
+  reorder and duplicates, atomic refusal and an unterminated run.
 
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 

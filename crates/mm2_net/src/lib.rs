@@ -119,14 +119,15 @@ pub use proto::{
     TickCommand, VehiclePick,
 };
 pub use reliable::{
-    ACK_LEN, DATA_HEADER, DELIVERED_CAP, MAX_ATTEMPTS, RETRY_BASE_MS, RETRY_CAP_MS, ReceiverStats,
-    ReliableChannel, ReliableReceiver, ReliableSender, ReliableStats, SendError, SenderStats,
-    WINDOW as RELIABLE_WINDOW,
+    ACK_LEN, DATA_HEADER, DELIVERED_CAP, MAX_ATTEMPTS, MAX_RELIABLE_PIECES, RETRY_BASE_MS,
+    RETRY_CAP_MS, ReceiverStats, ReliableChannel, ReliableReceiver, ReliableSender, ReliableStats,
+    SendError, SenderStats, WINDOW as RELIABLE_WINDOW,
 };
 pub use rt::{
     HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
-    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, MAX_RELIABLE_BODY, PaceStats, QUEUE_CAP, QueueStats,
-    ReliableSendError, SEQ_WINDOW, SeqWindow, decode_datagram, encode_datagram,
+    MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, MAX_RELIABLE_BODY, MAX_RELIABLE_MESSAGE, PaceStats,
+    QUEUE_CAP, QueueStats, ReliableSendError, SEQ_WINDOW, SeqWindow, decode_datagram,
+    encode_datagram,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

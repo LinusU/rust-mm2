@@ -115,8 +115,10 @@ use crate::cmdbuf::Source;
 /// lane datagram tags 5 and 6; a v34 peer would count them malformed and
 /// never acknowledge, so a reliable sender would give up on it. v36:
 /// `Impacts`, the standalone impact-row message (NETPLAY-06E-3) that
-/// rides the reliable channel; a v35 peer would reject the unknown tag.
-pub const PROTOCOL_VERSION: u16 = 36;
+/// rides the reliable channel; a v35 peer would reject the unknown tag. v37:
+/// the reliable data payload gained a `more` byte so one message can span
+/// several datagrams (#1930); a v36 peer would read it as body.
+pub const PROTOCOL_VERSION: u16 = 37;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -3413,7 +3415,7 @@ mod tests {
     }
 
     #[test]
-    fn v36_rejects_older_and_newer_protocol_versions() {
+    fn v37_rejects_older_and_newer_protocol_versions() {
         assert_eq!(PROTOCOL_VERSION, 36);
         for protocol in [35, 37] {
             let mut h = hello();

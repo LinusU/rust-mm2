@@ -315,7 +315,7 @@ fn a_full_window_and_an_oversize_body_are_refused_not_dropped() {
     );
     assert_eq!(
         rig.client
-            .reliable_send(rig.generation, &vec![0; crate::MAX_RELIABLE_BODY + 1]),
+            .reliable_send(rig.generation, &vec![0; crate::MAX_RELIABLE_MESSAGE + 1]),
         Err(ReliableSendError::Channel(SendError::TooLarge))
     );
     let mut got = Vec::new();

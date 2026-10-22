@@ -1153,7 +1153,7 @@ impl HostCtl {
     /// Send `msg` to every client, each at most once, riding the reliable
     /// channel for every seat whose lane is established (NETPLAY-06E-3)
     /// and the control stream for the rest — a TCP-only seat, a body over
-    /// one datagram, and any seat whose channel refuses it (full or dead)
+    /// [`MAX_RELIABLE_MESSAGE`](crate::MAX_RELIABLE_MESSAGE), and any seat whose channel refuses it (full or dead)
     /// fall back to TCP, counted in the returned [`ReliableFanout`], so a
     /// refusal never drops the message. `generation` is the session the
     /// lane authenticates it under. The receiver dedups (`Cnr` by
@@ -1167,7 +1167,7 @@ impl HostCtl {
         let bytes = msg.encode()?;
         let mut fanout = ReliableFanout::default();
         let mut by_reliable = Vec::new();
-        if bytes.len() <= crate::rt::MAX_RELIABLE_BODY {
+        if bytes.len() <= crate::rt::MAX_RELIABLE_MESSAGE {
             for (id, _) in self.lane.established_outs() {
                 match self.lane.send_reliable(id, generation, &bytes) {
                     Ok(()) => {
@@ -1184,8 +1184,9 @@ impl HostCtl {
 
     /// Send `body` to `player_id` on the reliable channel (NETPLAY-06E-1):
     /// numbered and repeated until acknowledged, delivered exactly once
-    /// and in order, at most [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)
-    /// bytes. Takes no `Writer` lock and touches no socket; a full window,
+    /// and in order, at most
+    /// [`MAX_RELIABLE_MESSAGE`](crate::MAX_RELIABLE_MESSAGE) bytes (split
+    /// across datagrams when over [`MAX_RELIABLE_BODY`](crate::MAX_RELIABLE_BODY)). Takes no `Writer` lock and touches no socket; a full window,
     /// an oversize body or a dead channel is an `Err`, counted in
     /// [`Host::reliable_stats`].
     pub fn reliable_send(
@@ -2591,15 +2592,12 @@ fn broadcast_except(
 /// scope because the lane generation changes under these messages (`Start`
 /// raises it, `Cancel` clears it): generation 0 is always admitted, so a
 /// repeat or an ack never races the change, and the channel's order puts a
-/// `Cancel` after its `Start`. A body over one datagram is not fragmented:
-/// it rides TCP and the bounded resend window alone. A TCP-only seat, a
-/// full window or a dead channel is skipped and counted in its
-/// `ReliableStats`.
+/// `Cancel` after its `Start`. A body over one datagram is split across
+/// several by the channel (an oversize `Start`, #1930) and applies once
+/// when whole. A TCP-only seat, a full window or a dead channel is skipped
+/// and counted in its `ReliableStats`.
 fn queue_lifecycle(lane: &HostLane, seats: impl IntoIterator<Item = u16>, msg: &Message) {
     let Ok(body) = msg.encode() else { return };
-    if body.len() > crate::rt::MAX_RELIABLE_BODY {
-        return;
-    }
     for id in seats {
         let _ = lane.send_reliable(id, crate::rt::LOBBY_SCOPE, &body);
     }

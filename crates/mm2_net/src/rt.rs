@@ -131,8 +131,13 @@ impl ReliableClock {
     }
 }
 
-/// Largest reliable message body: a datagram payload less the id.
+/// Largest reliable message piece: a datagram payload less the data
+/// header. A longer message is split into pieces (see the `reliable`
+/// module) up to [`MAX_RELIABLE_MESSAGE`].
 pub const MAX_RELIABLE_BODY: usize = MAX_PAYLOAD - crate::reliable::DATA_HEADER;
+/// Largest reliable message: [`MAX_FRAGMENTS`](crate::MAX_RELIABLE_PIECES)
+/// pieces.
+pub const MAX_RELIABLE_MESSAGE: usize = MAX_RELIABLE_BODY * crate::reliable::MAX_RELIABLE_PIECES;
 /// TCP messages the client's merged inbox holds before the TCP reader
 /// thread waits (backpressure on the reliable side only).
 const TCP_INBOX_CAP: usize = 1024;
@@ -882,8 +887,8 @@ fn ingest(
         },
         LaneTag::Fragment => Verdict::Dropped(Refuse::Unexpected),
         LaneTag::Reliable => match decode_data(payload) {
-            Some((id, body)) => {
-                let ack = seat.rel.receiver.on_data(id, body);
+            Some((id, more, body)) => {
+                let ack = seat.rel.receiver.on_data(id, more, body);
                 seat.out
                     .push_reliable(LaneTag::ReliableAck, h.generation, ack);
                 absorb_reliable_resets(mail, h.seat);
@@ -1047,13 +1052,15 @@ impl HostLane {
             .seats
             .get_mut(&id)
             .ok_or(ReliableSendError::NoLane)?;
-        let payload = seat
+        let payloads = seat
             .rel
             .sender
             .send(self.clock.now_ms(), generation, body)
             .map_err(ReliableSendError::Channel)?;
-        seat.out
-            .push_reliable(LaneTag::Reliable, generation, payload);
+        for payload in payloads {
+            seat.out
+                .push_reliable(LaneTag::Reliable, generation, payload);
+        }
         Ok(())
     }
 
@@ -1522,13 +1529,13 @@ impl ClientLane {
                 LaneTag::Fragment => self.on_fragment(&header, payload),
                 LaneTag::Ack => self.counters.drop_for(Refuse::Unexpected),
                 LaneTag::Reliable => match decode_data(payload) {
-                    Some((id, body)) => {
+                    Some((id, more, body)) => {
                         let ack = self
                             .rel
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .receiver
-                            .on_data(id, body);
+                            .on_data(id, more, body);
                         self.out
                             .push_reliable(LaneTag::ReliableAck, header.generation, ack);
                         Counters::bump(&self.counters.accepted);
@@ -1665,14 +1672,16 @@ impl ClientLane {
         if self.stop.load(Ordering::Relaxed) {
             return Err(ReliableSendError::NoLane);
         }
-        let payload = self
+        let payloads = self
             .rel
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .sender
             .send(self.clock.now_ms(), generation, body)?;
-        self.out
-            .push_reliable(LaneTag::Reliable, generation, payload);
+        for payload in payloads {
+            self.out
+                .push_reliable(LaneTag::Reliable, generation, payload);
+        }
         Ok(())
     }
 

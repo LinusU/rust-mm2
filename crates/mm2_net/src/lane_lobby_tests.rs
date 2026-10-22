@@ -304,9 +304,12 @@ fn start_session_dropping_first(rig: &mut LobbyRig) -> u64 {
     generation
 }
 
+/// #1930: a `Start` whose session blob is the largest the lobby accepts
+/// spans several datagrams; the first piece is lost on purpose, the
+/// channel repeats it, and the whole `Start` applies once on the channel.
 #[test]
-fn an_oversize_start_is_not_fragmented_and_still_reaches_the_client_over_tcp() {
-    let mut rig = LobbyRig::new(27, 0.0);
+fn an_oversize_start_survives_a_lost_datagram_on_the_channel_and_applies_once() {
+    let mut rig = LobbyRig::new(27, 0.15);
     rig.host
         .set_session(crate::SessionAdvertisement {
             summary: "big".to_string(),
@@ -317,7 +320,11 @@ fn an_oversize_start_is_not_fragmented_and_still_reaches_the_client_over_tcp() {
     rig.client.set_ready(true).unwrap();
     rig.pump("the roster changes", || rig.client_delivered() >= 1);
     rig.quiesce(60);
+    assert_eq!(rig.host.reliable_stats(rig.id).unwrap().sender.in_flight, 0);
     let settled = rig.client_delivered();
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    let queued = rig.host.reliable_stats(rig.id).unwrap().sender.queued;
+    // `start_session` would replace the advertised blob with an empty one.
     let generation = loop {
         rig.host.start(crate::LateJoin::Open).unwrap();
         if let Ok(crate::HostEvent::Started { generation }) =
@@ -326,8 +333,15 @@ fn an_oversize_start_is_not_fragmented_and_still_reaches_the_client_over_tcp() {
             break generation;
         }
     };
+    rig.pump("the start", || rig.client_delivered() > settled);
     rig.quiesce(40);
-    assert_eq!(rig.client_delivered(), settled, "nothing rode the channel");
+    assert_eq!(rig.client_delivered(), settled + 1, "applied exactly once");
+    let host = rig.host.reliable_stats(rig.id).unwrap();
+    assert!(
+        host.sender.queued >= queued + 4 && host.sender.retransmits >= 1,
+        "{host:?}"
+    );
+    assert_eq!(host.sender.in_flight, 0);
     let seen = drain_lifecycle(&mut rig.client);
     assert_eq!(seen.first(), Some(&("start", generation)), "{seen:?}");
 }

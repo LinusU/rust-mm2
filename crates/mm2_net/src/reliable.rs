@@ -35,7 +35,16 @@
 //! datagram, duplicates included, so a lost ack is repaired by the next
 //! retransmission.
 //!
-//! Wire payloads (little-endian): data `id u64 | body`, ack `cum u64 |
+//! **Fragmentation.** A message longer than one datagram's body is split
+//! into at most [`MAX_RELIABLE_PIECES`] pieces, each its own id: every piece but
+//! the last carries the `more` flag. The channel's order and exactly-once
+//! delivery do the reassembly: the receiver concatenates pieces as they
+//! arrive in id order and delivers the whole message once, so a lost
+//! piece is repeated like any lost message and nothing above the channel
+//! sees a fragment. A message is accepted whole or refused whole
+//! ([`SendError::Full`] when its pieces do not all fit the window).
+//!
+//! Wire payloads (little-endian): data `id u64 | more u8 | body`, ack `cum u64 |
 //! mask u32` where `cum` is the highest id delivered in order and bit `i`
 //! of `mask` says id `cum + 2 + i` is buffered (`cum + 1` is by definition
 //! the missing one).
@@ -57,7 +66,11 @@ pub const RETRY_BASE_MS: u64 = 100;
 /// Ceiling of the doubling retransmission delay, in milliseconds.
 pub const RETRY_CAP_MS: u64 = 800;
 /// Bytes of the data payload before the message body.
-pub const DATA_HEADER: usize = 8;
+pub const DATA_HEADER: usize = 9;
+/// Most pieces one message may be split into (designed: a 4096-byte
+/// session blob needs four; the cap keeps one message well inside
+/// [`WINDOW`]).
+pub const MAX_RELIABLE_PIECES: usize = 8;
 /// Bytes of an ack payload.
 pub const ACK_LEN: usize = 12;
 
@@ -67,8 +80,8 @@ pub enum SendError {
     /// [`WINDOW`] messages are already unacked.
     #[error("reliable channel full: {WINDOW} messages unacknowledged")]
     Full,
-    /// The body does not fit one datagram.
-    #[error("reliable message exceeds one datagram")]
+    /// The body needs more than [`MAX_RELIABLE_PIECES`] datagrams.
+    #[error("reliable message exceeds {MAX_RELIABLE_PIECES} datagrams")]
     TooLarge,
     /// The peer stopped acknowledging; the channel gave up.
     #[error("reliable channel dead: the peer stopped acknowledging")]
@@ -78,7 +91,8 @@ pub enum SendError {
 /// What the sending half has done.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SenderStats {
-    /// Messages accepted for sending.
+    /// Datagram-sized pieces accepted for sending (a message of one piece
+    /// counts once).
     pub queued: u64,
     /// Retransmissions emitted.
     pub retransmits: u64,
@@ -86,7 +100,7 @@ pub struct SenderStats {
     pub acked: u64,
     /// Sends refused because the window was full.
     pub refused_full: u64,
-    /// Sends refused because the body exceeds a datagram.
+    /// Sends refused because the body exceeds [`MAX_RELIABLE_PIECES`] datagrams.
     pub refused_large: u64,
     /// Sends refused because the channel is dead.
     pub refused_dead: u64,
@@ -132,6 +146,7 @@ pub struct ReliableStats {
 struct Pending {
     id: u64,
     generation: u64,
+    more: bool,
     body: Vec<u8>,
     attempts: u32,
     due: u64,
@@ -165,39 +180,59 @@ impl ReliableSender {
     }
 
     /// Accept `body` (to ride a datagram of `generation`) and return the
-    /// data payload for its first transmission, which the caller sends
-    /// now. Nonblocking: never waits, never allocates beyond the bounds.
-    pub fn send(&mut self, now: u64, generation: u64, body: &[u8]) -> Result<Vec<u8>, SendError> {
+    /// data payloads for its first transmission, which the caller sends
+    /// now: one per piece, in order. A body within `max_body` is one
+    /// piece. Nonblocking: never waits, never allocates beyond the bounds.
+    /// Atomic: on `Err` nothing was queued.
+    pub fn send(
+        &mut self,
+        now: u64,
+        generation: u64,
+        body: &[u8],
+    ) -> Result<Vec<Vec<u8>>, SendError> {
         if self.stats.dead {
             self.stats.refused_dead += 1;
             return Err(SendError::Dead);
         }
-        if body.len() > self.max_body {
+        let max = self.max_body.max(1);
+        let pieces = body.len().div_ceil(max).max(1);
+        if pieces > MAX_RELIABLE_PIECES {
             self.stats.refused_large += 1;
             return Err(SendError::TooLarge);
         }
         // The window is a span of ids, not a count: selectively acked ids
         // leave `pending`, but the receiver only buffers `WINDOW` ids past
-        // its delivered prefix, which the oldest unacked id bounds.
+        // its delivered prefix, which the oldest unacked id bounds. Every
+        // piece's id must fit.
         if self
             .pending
             .front()
-            .is_some_and(|oldest| self.next_id - oldest.id >= WINDOW as u64)
+            .is_some_and(|oldest| self.next_id + pieces as u64 - 1 - oldest.id >= WINDOW as u64)
         {
             self.stats.refused_full += 1;
             return Err(SendError::Full);
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.pending.push_back(Pending {
-            id,
-            generation,
-            body: body.to_vec(),
-            attempts: 1,
-            due: now.saturating_add(retry_delay(1)),
-        });
-        self.stats.queued += 1;
-        Ok(encode_data(id, body))
+        let mut out = Vec::with_capacity(pieces);
+        for (i, piece) in body
+            .chunks(max)
+            .chain(body.is_empty().then_some(&[][..]))
+            .enumerate()
+        {
+            let id = self.next_id;
+            self.next_id += 1;
+            let more = i + 1 < pieces;
+            self.pending.push_back(Pending {
+                id,
+                generation,
+                more,
+                body: piece.to_vec(),
+                attempts: 1,
+                due: now.saturating_add(retry_delay(1)),
+            });
+            self.stats.queued += 1;
+            out.push(encode_data(id, more, piece));
+        }
+        Ok(out)
     }
 
     /// Apply an acknowledgement: everything up to `cum` and the ids
@@ -243,7 +278,7 @@ impl ReliableSender {
                 p.attempts += 1;
                 p.due = now.saturating_add(retry_delay(p.attempts));
                 self.stats.retransmits += 1;
-                out.push((p.generation, encode_data(p.id, &p.body)));
+                out.push((p.generation, encode_data(p.id, p.more, &p.body)));
             }
         }
         out
@@ -267,7 +302,10 @@ impl ReliableSender {
 #[derive(Debug, Default)]
 pub struct ReliableReceiver {
     cum: u64,
-    buffered: BTreeMap<u64, Vec<u8>>,
+    buffered: BTreeMap<u64, (bool, Vec<u8>)>,
+    /// Pieces of the message being reassembled, and how many.
+    partial: Vec<u8>,
+    partial_pieces: usize,
     delivered: VecDeque<Vec<u8>>,
     stats: ReceiverStats,
 }
@@ -281,7 +319,7 @@ impl ReliableReceiver {
     /// Take in one data datagram and return the ack payload to send back
     /// (always, duplicates and refusals included: the ack is how a sender
     /// whose earlier ack was lost converges).
-    pub fn on_data(&mut self, id: u64, body: &[u8]) -> Vec<u8> {
+    pub fn on_data(&mut self, id: u64, more: bool, body: &[u8]) -> Vec<u8> {
         if id <= self.cum || self.buffered.contains_key(&id) {
             self.stats.duplicates += 1;
         } else if id - self.cum > WINDOW as u64 {
@@ -292,11 +330,25 @@ impl ReliableReceiver {
             if id != self.cum + 1 {
                 self.stats.reordered += 1;
             }
-            self.buffered.insert(id, body.to_vec());
-            while let Some(next) = self.buffered.remove(&(self.cum + 1)) {
+            self.buffered.insert(id, (more, body.to_vec()));
+            while let Some((more, piece)) = self.buffered.remove(&(self.cum + 1)) {
                 self.cum += 1;
-                self.delivered.push_back(next);
-                self.stats.delivered += 1;
+                self.partial.extend_from_slice(&piece);
+                self.partial_pieces += 1;
+                if more && self.partial_pieces < MAX_RELIABLE_PIECES {
+                    continue;
+                }
+                let whole = std::mem::take(&mut self.partial);
+                let pieces = std::mem::take(&mut self.partial_pieces);
+                if more {
+                    // A sender never exceeds MAX_RELIABLE_PIECES pieces: this
+                    // run is not a conforming message. Count, never
+                    // deliver half of it.
+                    self.stats.malformed += pieces as u64;
+                } else {
+                    self.delivered.push_back(whole);
+                    self.stats.delivered += 1;
+                }
             }
         }
         self.ack()
@@ -374,18 +426,24 @@ impl ReliableChannel {
     }
 }
 
-fn encode_data(id: u64, body: &[u8]) -> Vec<u8> {
+fn encode_data(id: u64, more: bool, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(DATA_HEADER + body.len());
     out.extend_from_slice(&id.to_le_bytes());
+    out.push(u8::from(more));
     out.extend_from_slice(body);
     out
 }
 
-/// Split a data payload into `(id, body)`; `None` when malformed (short,
-/// or id 0).
-pub fn decode_data(payload: &[u8]) -> Option<(u64, &[u8])> {
-    let id = u64::from_le_bytes(payload.get(..DATA_HEADER)?.try_into().ok()?);
-    (id != 0).then(|| (id, &payload[DATA_HEADER..]))
+/// Split a data payload into `(id, more, body)`; `None` when malformed
+/// (short, id 0 or a flag byte other than 0 and 1).
+pub fn decode_data(payload: &[u8]) -> Option<(u64, bool, &[u8])> {
+    let id = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
+    let more = match payload.get(8)? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    (id != 0).then(|| (id, more, &payload[DATA_HEADER..]))
 }
 
 fn encode_ack(cum: u64, mask: u32) -> Vec<u8> {
@@ -412,8 +470,8 @@ mod tests {
     use super::*;
 
     fn deliver(rx: &mut ReliableReceiver, tx: &mut ReliableSender, payload: &[u8]) {
-        let (id, body) = decode_data(payload).unwrap();
-        let ack = rx.on_data(id, body);
+        let (id, more, body) = decode_data(payload).unwrap();
+        let ack = rx.on_data(id, more, body);
         let (cum, mask) = decode_ack(&ack).unwrap();
         tx.on_ack(cum, mask);
     }
@@ -423,7 +481,7 @@ mod tests {
         let mut tx = ReliableSender::new(100);
         let mut rx = ReliableReceiver::new();
         for i in 0..5u8 {
-            let p = tx.send(0, 1, &[i]).unwrap();
+            let p = tx.send(0, 1, &[i]).unwrap().remove(0);
             deliver(&mut rx, &mut tx, &p);
         }
         let got: Vec<_> = std::iter::from_fn(|| rx.pop()).collect();
@@ -436,7 +494,9 @@ mod tests {
     fn reorder_and_duplicates_deliver_once_in_order() {
         let mut tx = ReliableSender::new(100);
         let mut rx = ReliableReceiver::new();
-        let p: Vec<_> = (0..4u8).map(|i| tx.send(0, 1, &[i]).unwrap()).collect();
+        let p: Vec<_> = (0..4u8)
+            .map(|i| tx.send(0, 1, &[i]).unwrap().remove(0))
+            .collect();
         for k in [2, 0, 2, 3, 1, 0, 1] {
             deliver(&mut rx, &mut tx, &p[k]);
         }
@@ -451,7 +511,9 @@ mod tests {
     fn selective_ack_stops_repeating_what_arrived() {
         let mut tx = ReliableSender::new(100);
         let mut rx = ReliableReceiver::new();
-        let p: Vec<_> = (0..3u8).map(|i| tx.send(0, 1, &[i]).unwrap()).collect();
+        let p: Vec<_> = (0..3u8)
+            .map(|i| tx.send(0, 1, &[i]).unwrap().remove(0))
+            .collect();
         // Message 1 is lost; 2 and 3 arrive.
         deliver(&mut rx, &mut tx, &p[1]);
         deliver(&mut rx, &mut tx, &p[2]);
@@ -496,7 +558,10 @@ mod tests {
             tx.send(0, 1, b"ab").unwrap();
         }
         assert_eq!(tx.send(0, 1, b"ab"), Err(SendError::Full));
-        assert_eq!(tx.send(0, 1, b"abcde"), Err(SendError::TooLarge));
+        assert_eq!(
+            tx.send(0, 1, &[0; 4 * MAX_RELIABLE_PIECES + 1]),
+            Err(SendError::TooLarge)
+        );
         let s = tx.stats();
         assert_eq!((s.refused_full, s.refused_large), (1, 1));
         tx.on_ack(1, 0);
@@ -506,7 +571,7 @@ mod tests {
     #[test]
     fn selectively_acked_ids_do_not_widen_the_window() {
         let mut tx = ReliableSender::new(10);
-        let first = tx.send(0, 1, b"0").unwrap();
+        let first = tx.send(0, 1, b"0").unwrap().remove(0);
         for _ in 1..WINDOW {
             tx.send(0, 1, b"x").unwrap();
         }
@@ -514,13 +579,13 @@ mod tests {
         // but the receiver cannot buffer past id 1 + WINDOW.
         let mut rx = ReliableReceiver::new();
         for id in 2..=WINDOW as u64 {
-            let (cum, mask) = decode_ack(&rx.on_data(id, b"x")).unwrap();
+            let (cum, mask) = decode_ack(&rx.on_data(id, false, b"x")).unwrap();
             tx.on_ack(cum, mask);
         }
         assert_eq!(tx.stats().in_flight, 1);
         assert_eq!(tx.send(0, 1, b"y"), Err(SendError::Full));
-        let (id, body) = decode_data(&first).unwrap();
-        let (cum, mask) = decode_ack(&rx.on_data(id, body)).unwrap();
+        let (id, more, body) = decode_data(&first).unwrap();
+        let (cum, mask) = decode_ack(&rx.on_data(id, more, body)).unwrap();
         tx.on_ack(cum, mask);
         assert!(tx.send(0, 1, b"y").is_ok());
     }
@@ -528,21 +593,21 @@ mod tests {
     #[test]
     fn receiver_refuses_beyond_window_and_backpressure() {
         let mut rx = ReliableReceiver::new();
-        rx.on_data(WINDOW as u64 + 1, b"far");
+        rx.on_data(WINDOW as u64 + 1, false, b"far");
         assert_eq!(rx.stats().out_of_window, 1);
         assert_eq!(rx.stats().delivered, 0);
         // Fill the delivered queue without popping.
         let mut id = 1;
         while rx.stats().pending < DELIVERED_CAP {
-            rx.on_data(id, b"m");
+            rx.on_data(id, false, b"m");
             id += 1;
         }
-        let ack = rx.on_data(id, b"m");
+        let ack = rx.on_data(id, false, b"m");
         assert_eq!(rx.stats().backpressure, 1);
         assert_eq!(decode_ack(&ack).unwrap().0, DELIVERED_CAP as u64);
         // Popping lets the retransmission through.
         rx.pop();
-        rx.on_data(id, b"m");
+        rx.on_data(id, false, b"m");
         assert_eq!(rx.stats().delivered, DELIVERED_CAP as u64 + 1);
     }
 
@@ -553,8 +618,58 @@ mod tests {
         tx.on_ack(5, 0);
         assert_eq!(tx.stats().bad_acks, 1);
         assert_eq!(tx.stats().in_flight, 1);
-        assert!(decode_data(&[0; 8]).is_none());
+        assert!(decode_data(&[0; 9]).is_none());
+        assert!(
+            decode_data(&[1, 0, 0, 0, 0, 0, 0, 0, 2]).is_none(),
+            "flag byte"
+        );
         assert!(decode_data(&[1; 3]).is_none());
         assert!(decode_ack(&[0; 11]).is_none());
+    }
+
+    #[test]
+    fn an_oversize_message_is_reassembled_once_across_loss_and_reorder() {
+        let mut tx = ReliableSender::new(10);
+        let mut rx = ReliableReceiver::new();
+        let body: Vec<u8> = (0..35u8).collect();
+        let pieces = tx.send(0, 1, &body).unwrap();
+        assert_eq!(pieces.len(), 4);
+        assert_eq!(tx.send(0, 1, b"next").unwrap().len(), 1);
+        // Piece 2 is lost on its first transmission; 4 arrives early and
+        // 1 twice. Nothing is delivered until the message is whole.
+        for k in [3, 0, 0, 2] {
+            deliver(&mut rx, &mut tx, &pieces[k]);
+        }
+        assert!(rx.pop().is_none());
+        let again = tx.poll(RETRY_BASE_MS);
+        assert!(again.iter().any(|(_, p)| decode_data(p).unwrap().0 == 2));
+        for (_, p) in again {
+            deliver(&mut rx, &mut tx, &p);
+        }
+        assert_eq!(rx.pop().as_deref(), Some(&body[..]));
+        assert_eq!(rx.pop().as_deref(), Some(&b"next"[..]), "order kept");
+        assert!(rx.pop().is_none(), "each whole message once");
+        assert_eq!(rx.stats().delivered, 2);
+    }
+
+    #[test]
+    fn a_message_is_accepted_whole_or_refused_whole() {
+        let mut tx = ReliableSender::new(4);
+        for _ in 0..WINDOW - 2 {
+            tx.send(0, 1, b"a").unwrap();
+        }
+        assert_eq!(tx.send(0, 1, &[0; 12]), Err(SendError::Full));
+        assert_eq!(tx.stats().in_flight, WINDOW - 2, "nothing was queued");
+        assert_eq!(tx.send(0, 1, &[0; 8]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_unterminated_run_is_never_delivered() {
+        let mut rx = ReliableReceiver::new();
+        for id in 1..=MAX_RELIABLE_PIECES as u64 {
+            rx.on_data(id, true, b"x");
+        }
+        assert!(rx.pop().is_none());
+        assert_eq!(rx.stats().malformed, MAX_RELIABLE_PIECES as u64);
     }
 }
