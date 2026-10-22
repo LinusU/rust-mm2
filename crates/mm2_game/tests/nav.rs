@@ -1833,3 +1833,36 @@ fn a_cop_flung_far_off_its_line_re_plans_from_where_it_is() {
         a.point
     );
 }
+
+#[test]
+fn route_candidates_at_level_enters_only_the_goals_own_level() {
+    // The stacked fixture. A goal 6 m up is within snap range of both
+    // roads and nearer the bridge lane; a car on the ground road still
+    // reaches it through the ground lane with `route_candidates`, but
+    // asked to meet the goal on its own level (bridge within 5 m) the
+    // only entry is the bridge lane.
+    let cg = [[0.0, 0.0, -20.0], [0.0, 0.0, 20.0]];
+    let cb = [[0.0, 10.0, -20.0], [0.0, 10.0, 20.0]];
+    let mk = |id: u16, c: &[[f32; 3]], room: u16| {
+        road(
+            id,
+            c,
+            vec![room],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            dead_end(),
+            dead_end(),
+        )
+    };
+    let g = NavGraph::build(&bai(vec![mk(0, &cg, 1), mk(1, &cb, 2)], Vec::new())).graph;
+    let opts = RouteOptions::default();
+    let (from, to) = ([0.0, 0.0, -10.0], [0.0, 6.0, 10.0]);
+    let plain = g.route_candidates(from, to, &opts).unwrap();
+    assert_eq!(g.arc(plain.steps[0]).road, 0);
+    let r = g.route_candidates_at_level(from, to, &opts, 5.0).unwrap();
+    assert_eq!(g.arc(r.steps[0]).road, 1);
+    assert_eq!(r.goal.lane.road, 1);
+    // With no lane at the goal's height the entries are the plain ones.
+    let r = g.route_candidates_at_level(from, to, &opts, 1.0).unwrap();
+    assert_eq!(g.arc(r.steps[0]).road, 0);
+}
