@@ -2029,8 +2029,23 @@ fn run_headless(
                             .iter()
                             .map(|s| format!("{}:{}", s.player.0, s.score))
                             .collect();
+                        // Who holds the gold (`gold=p<id>` carried, else
+                        // `rest`/`drop`) and each seat's side
+                        // (`sides=<id>:<side>/…`), so ownership and
+                        // teams compare across processes too.
+                        use mm2_game::gold::GoldState;
+                        let gold = match v.state {
+                            GoldState::Carried { by } => format!("p{}", by.0),
+                            GoldState::Resting { .. } => "rest".to_string(),
+                            GoldState::Dropped { .. } => "drop".to_string(),
+                        };
+                        let sides: Vec<String> = v
+                            .standings
+                            .iter()
+                            .map(|s| format!("{}:{:?}", s.player.0, s.side))
+                            .collect();
                         format!(
-                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}{winner},pts={}",
+                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}{winner},pts={},gold={gold},sides={}",
                             v.standings.len(),
                             on(Side::Solo),
                             on(Side::Robbers),
@@ -2038,7 +2053,8 @@ fn run_headless(
                             on(Side::Red),
                             on(Side::Blue),
                             u8::from(v.outcome.is_some()),
-                            scores.join("/")
+                            scores.join("/"),
+                            sides.join("/")
                         )
                     })
                     .unwrap_or_default();
@@ -2051,6 +2067,28 @@ fn run_headless(
             }
         }
     };
+    // Cops & Robbers bot poses at the seconds this process published
+    // (host) or applied (client): `cbots=<tick>:<id>@<x>:<z>/…;…`, one
+    // group per sampled second, so a host and a client compare on the
+    // ticks they share. Absent without bot seats on the wire.
+    let cbots_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .filter(|r| !r.bot_poses.is_empty())
+        .map(|r| {
+            let groups: Vec<String> = r
+                .bot_poses
+                .values()
+                .map(|(tick, bots)| {
+                    let bots: Vec<String> = bots
+                        .iter()
+                        .map(|(id, p)| format!("{id}@{:.1}:{:.1}", p[0], p[2]))
+                        .collect();
+                    format!("{tick}:{}", bots.join("/"))
+                })
+                .collect();
+            format!(" cbots={}", groups.join(";"))
+        })
+        .unwrap_or_default();
     // The local Cops & Robbers bot field's cost counters (CNRBOT-E):
     // `bots=<n>/streets<…>/straight<…>/direct<…>/fail<…>/switch<…>/
     // policy<…>` — lines planned (the replan bound), router failures and
@@ -3048,7 +3086,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{xwhl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{bots_detail}{extra}",
+            "updates={updates}{stop_detail} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{pol_detail}{lead_detail}{pur_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{peds_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{music_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{trl_detail}{xwhl_detail}{seats_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{cbots_detail}{bots_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

@@ -1093,6 +1093,49 @@ impl RemoteSnaps {
 #[derive(Resource, Default)]
 pub struct InputSeq(u64);
 
+/// One sampled snapshot's bot seats: its tick and `(wire id, position)`.
+pub type BotPoseSample = (u64, Vec<(u16, [f32; 3])>);
+
+/// Seconds of [`NetDriveReport::bot_poses`] kept.
+const BOT_POSE_KEEP: usize = 16;
+
+/// Session ticks per [`NetDriveReport::bot_poses`] sample.
+const BOT_POSE_TICKS: u64 = 60;
+
+impl NetDriveReport {
+    /// Note the bot seats of the snapshot at `tick` (`entries` is the
+    /// frame's rows; non-bot seats are skipped). Only the first frame
+    /// of each second is kept, so a host and a client on a clean link
+    /// sample the same ticks.
+    fn note_bot_poses<'a>(
+        &mut self,
+        generation: u64,
+        tick: u64,
+        entries: impl Iterator<Item = &'a SnapEntry>,
+    ) {
+        if self.bot_pose_generation != generation {
+            self.bot_pose_generation = generation;
+            self.bot_poses.clear();
+        }
+        let second = tick / BOT_POSE_TICKS;
+        if self.bot_poses.contains_key(&second) {
+            return;
+        }
+        let mut bots: Vec<(u16, [f32; 3])> = entries
+            .filter(|e| e.player >= crate::cnr_bots::NET_BOT_PLAYER_BASE)
+            .map(|e| (e.player, e.pos))
+            .collect();
+        if bots.is_empty() {
+            return;
+        }
+        bots.sort_by_key(|b| b.0);
+        self.bot_poses.insert(second, (tick, bots));
+        while self.bot_poses.len() > BOT_POSE_KEEP {
+            self.bot_poses.pop_first();
+        }
+    }
+}
+
 /// Data-plane counters for the headless record's `net=` evidence and
 /// the app-level tests: sent/applied inputs, sent/seen/applied
 /// snapshots, and remote spawn/despawn reconciliations.
@@ -1139,6 +1182,15 @@ pub struct NetDriveReport {
     pub own_drifts: u64,
     /// Highest `Snap` tick applied so far (continuity trace).
     pub last_snap_tick: Option<u64>,
+    /// Cops & Robbers bot poses, one sample per second of session time:
+    /// the first snapshot at or past each second, as `(tick, [(wire id,
+    /// position)])`. The host fills it from what it publishes, a client
+    /// from what it applies, so two processes' records compare on the
+    /// ticks they share ([`BOT_POSE_KEEP`] newest seconds kept).
+    pub bot_poses: BTreeMap<u64, BotPoseSample>,
+    /// The wire generation [`Self::bot_poses`] belongs to; a rematch's
+    /// ticks restart, so a new generation starts the samples over.
+    pub bot_pose_generation: u64,
     /// Driver reset requests this client sent on `R`/pad — the
     /// predicted-session form of the local reset key (F25-B).
     pub requests_sent: u64,
@@ -3294,6 +3346,11 @@ pub fn publish_snapshots(
         .iter()
         .filter(|e| e.surf_skid != SNAP_NO_SURFACE || e.surf_roll != SNAP_NO_SURFACE)
         .count() as u64;
+    let bot_rows: Vec<SnapEntry> = entries
+        .iter()
+        .filter(|e| e.player >= crate::cnr_bots::NET_BOT_PLAYER_BASE)
+        .copied()
+        .collect();
     if host
         .ctl()
         .broadcast(&Message::Snap {
@@ -3321,6 +3378,7 @@ pub fn publish_snapshots(
             pace.seats = Some(seats);
         }
         report.snaps_sent += 1;
+        report.note_bot_poses(wire_generation, session.tick(), bot_rows.iter());
         report.impacts_sent += sent_rows;
         report.surfaces_sent += sent_surfaces;
     }
@@ -3823,6 +3881,7 @@ fn apply_snap_frame(
         );
     }
     snaps.applied = Some((snap.generation, snap.tick));
+    report.note_bot_poses(snap.generation, snap.tick, snap.entries.iter());
     let now = time.elapsed_secs_f64();
     // The blend interval is the observed arrival gap, clamped so a
     // stalled stream doesn't smear a jump and a fast one doesn't snap.
