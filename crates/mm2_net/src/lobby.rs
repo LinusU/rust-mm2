@@ -2576,11 +2576,6 @@ fn broadcast_except(
     !removed
 }
 
-/// Send the complete roster to every player, rebuilt and resent after
-/// each removal — a survivor must never see a snapshot still listing a
-/// departed peer. Each pass removes at least one player, so the resend
-/// loop terminates.
-///
 /// Queue a session `Start` or `Cancel` on each seat's reliable channel at
 /// the lobby scope (NETPLAY-06E-2b), in addition to the TCP copy. Lobby
 /// scope because the lane generation changes under these messages (`Start`
@@ -2600,6 +2595,11 @@ fn queue_lifecycle(lane: &HostLane, seats: impl IntoIterator<Item = u16>, msg: &
     }
 }
 
+/// Send the complete roster to every player, rebuilt and resent after
+/// each removal — a survivor must never see a snapshot still listing a
+/// departed peer. Each pass removes at least one player, so the resend
+/// loop terminates.
+///
 /// With a `lane` (a roster *change*, NETPLAY-06E-2a) the final snapshot is
 /// also queued on every rostered seat's reliable channel at the lobby
 /// scope, so a lane client learns of a join or a removal even when the
