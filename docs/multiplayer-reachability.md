@@ -67,10 +67,16 @@ mm2-host --mm2-path "$MM2" --city sf --bind 0.0.0.0:27015
 # no city content needed:     --dev-world
 ```
 
-Read `listening=`, `fingerprint=` from its first line. `0.0.0.0` prints
-the wildcard; clients connect to the host's real LAN or public address.
+Read `listening=`, `lane_port=` (the **UDP** port the lane listens on —
+allow it inbound as well as the TCP port) and `fingerprint=` from its
+first line. `0.0.0.0` prints the wildcard; clients connect to the host's
+real LAN or public address.
 
-Headless client (prints `connected=`, `event=roster`, `event=started`):
+Headless client (prints `connected=`, `event=roster`, `event=started`;
+`connected=` carries `transport=lane` and the lane datagram counters. A
+blocked UDP path ends the join with `event=join_failed` and an
+`error: no UDP lane echo ... allow inbound UDP on that port` line on
+stderr; the windowed menu shows the same text):
 
 ```sh
 mm2-join --mm2-path "$MM2" --connect HOST_IP:27015 --driver alice --vehicle "" --ready
@@ -127,7 +133,7 @@ through a NAT between them. Run each row; record host and client output.
 ## Scope 3: Internet (owner fills in)
 
 Host behind a home router; client outside the NAT (mobile hotspot or a
-remote machine). The host needs a port-forward of **TCP 27015** to its
+remote machine). The host needs a port-forward of **TCP 27015 and the UDP `lane_port=`** to its
 LAN address, plus an OS firewall allowance. Record the router model,
 whether the ISP uses CGNAT (WAN address differs from the public address
 shown by a "what is my IP" site: forwarding cannot work), and IPv4/IPv6.

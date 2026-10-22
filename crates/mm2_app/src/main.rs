@@ -625,6 +625,14 @@ struct Cli {
     #[arg(long, requires = "join")]
     driver: Option<String>,
 
+    /// Join over TCP alone, without the UDP lane (NETPLAY-06A). **Lower
+    /// quality**: input and snapshots share the control stream and stall
+    /// behind one lost segment. Never chosen implicitly — without this
+    /// flag a blocked UDP path fails the join with a message naming the
+    /// port to open. Exists for runs through a TCP-only impairment proxy.
+    #[arg(long, requires = "join")]
+    tcp_only: bool,
+
     /// Mark ready as soon as the lobby admits us — with it the host's
     /// `start` can fire immediately — and again whenever the host
     /// closes a session, so the next round can start unattended.
@@ -1364,19 +1372,24 @@ fn main() {
             std::process::exit(2);
         }
         let hello = mm2_net::hello(smoke::COMMIT.to_string(), driver, fingerprint.hash);
-        let mut link =
-            match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
-                Ok(link) => link.keep_ready(cli.ready),
-                Err(e) => {
-                    // A refused or unreachable lobby is a named failure on the
-                    // process's own stdout too, so a script driving `mm2 --join`
-                    // sees the same `event=join_failed` record `mm2-join` writes
-                    // rather than having to scrape the log line.
-                    println!("event=join_failed reason={e:?}");
-                    error!(peer = %addr, error = %e, "join failed");
-                    std::process::exit(1);
-                }
-            };
+        let joined = if cli.tcp_only {
+            warn!("--tcp-only: joining without the UDP lane, lower quality");
+            net::LobbyLink::join_tcp_only(addr, &hello, has_mods, session_config.dev.clone())
+        } else {
+            net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone())
+        };
+        let mut link = match joined {
+            Ok(link) => link.keep_ready(cli.ready),
+            Err(e) => {
+                // A refused or unreachable lobby is a named failure on the
+                // process's own stdout too, so a script driving `mm2 --join`
+                // sees the same `event=join_failed` record `mm2-join` writes
+                // rather than having to scrape the log line.
+                println!("event=join_failed reason={e:?}");
+                error!(peer = %addr, error = %e, "join failed");
+                std::process::exit(1);
+            }
+        };
         // Offer our pick immediately — the roster should show what
         // we'll drive, and the host's catalog gate confirms it can
         // spawn. `--ready` opts into the start gate.
@@ -1455,8 +1468,9 @@ fn main() {
             }
         };
         println!(
-            "listening={} fingerprint={} seed={} session={:?}",
+            "listening={} lane_port={} fingerprint={} seed={} session={:?}",
             link.addr(),
+            link.lane_port(),
             fingerprint.display(),
             session_config.seed,
             link.summary()

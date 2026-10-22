@@ -59,7 +59,8 @@ use mm2_net::{Impair, ImpairProxy, LinkDir};
 use serde_json::{Value, json};
 
 use crate::net_drive::{
-    HOST_FRAME_CEILING, field, host_args, join_args, listening_addr, seat_poses, until_live,
+    HOST_FRAME_CEILING, field, host_args, join_args_tcp_only, listening_addr, seat_poses,
+    until_live,
 };
 use crate::support::Proc;
 
@@ -228,7 +229,7 @@ fn run(case: Case, dir: &std::path::Path) -> Run {
     let settle_tick = SETTLE_SECS * mm2_game::RACE_TICK_HZ as u64;
     let client = |who: &str, me: usize, via: &ImpairProxy| {
         let mut flags = common(
-            join_args(install.path(), via.addr(), who, HOST_FRAME_CEILING),
+            join_args_tcp_only(install.path(), via.addr(), who, HOST_FRAME_CEILING),
             who,
             me,
         );

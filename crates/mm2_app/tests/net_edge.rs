@@ -391,7 +391,7 @@ fn a_killed_host_closes_a_started_client() {
     );
 
     host.kill();
-    let closed = client.line();
+    let closed = client.until("event=closed");
     assert!(closed.starts_with("event=closed"), "{closed}");
     assert_eq!(client.wait_timeout(WAIT).code(), Some(1));
 }

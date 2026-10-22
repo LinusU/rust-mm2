@@ -10,7 +10,7 @@
 //! The printed record contract (which integration tests also drive):
 //!
 //! ```text
-//! listening=<addr> fingerprint=fnv1a64:<hex> seed=<n> session="<summary>"
+//! listening=<addr> lane_port=<udp port> fingerprint=fnv1a64:<hex> seed=<n> session="<summary>"
 //! event=joined id=<n> driver="<name>" build="<id>"
 //! event=left id=<n> driver="<name>" cause=quit|lost|malformed
 //! event=ready id=<n> ready=<bool>
@@ -285,8 +285,9 @@ fn main() {
         std::process::exit(2);
     }
     println!(
-        "listening={} fingerprint={} seed={seed} session={:?}",
+        "listening={} lane_port={} fingerprint={} seed={seed} session={:?}",
         host.addr(),
+        host.lane_port(),
         fingerprint.display(),
         ad.summary
     );

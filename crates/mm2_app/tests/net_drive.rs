@@ -80,6 +80,20 @@ pub(crate) fn join_args(
     ]
 }
 
+/// [`join_args`] with the explicit `--tcp-only` option, for a client that
+/// dials an [`ImpairProxy`]: the proxy carries TCP only (the datagram
+/// proxy is NETPLAY-06B), so the UDP lane would bypass the impairment.
+pub(crate) fn join_args_tcp_only(
+    install: &std::path::Path,
+    addr: SocketAddr,
+    driver: &str,
+    frames: u32,
+) -> Vec<String> {
+    let mut args = join_args(install, addr, driver, frames);
+    args.push("--tcp-only".into());
+    args
+}
+
 /// The `mm2 --host` `listening=` record — tracing log lines share
 /// stdout, so the record is scanned for rather than assumed first (the
 /// dedicated `mm2-host` prints no logs; the app does).
@@ -1378,11 +1392,11 @@ fn an_impaired_two_process_session_still_converges() {
 
     let alice = Proc::spawn(
         MM2_EXE,
-        &join_args(install.path(), proxy.addr(), "alice", 1600),
+        &join_args_tcp_only(install.path(), proxy.addr(), "alice", 1600),
     );
     let bob = Proc::spawn(
         MM2_EXE,
-        &join_args(install.path(), proxy.addr(), "bob", 1100),
+        &join_args_tcp_only(install.path(), proxy.addr(), "bob", 1100),
     );
     // `ready=true` echoing means every client→host verb already crossed;
     // arming Up now impairs only what flows next — `Input` frames.
@@ -1469,8 +1483,14 @@ fn run_matrix_cell(
     let addr = listening_addr(&host);
     let proxy = ImpairProxy::loopback_seeded(addr, 0xAC03).unwrap();
 
-    let alice = Proc::spawn(MM2_EXE, &join_args(install, proxy.addr(), "alice", 1400));
-    let bob = Proc::spawn(MM2_EXE, &join_args(install, proxy.addr(), "bob", 1000));
+    let alice = Proc::spawn(
+        MM2_EXE,
+        &join_args_tcp_only(install, proxy.addr(), "alice", 1400),
+    );
+    let bob = Proc::spawn(
+        MM2_EXE,
+        &join_args_tcp_only(install, proxy.addr(), "bob", 1000),
+    );
     start_when_ready(&mut host, 2);
     // `Start` rides Down: let the still-clean lane deliver it before
     // the snap stream earns its recipe — the same one-shot-verb
@@ -3668,11 +3688,11 @@ fn a_long_impaired_three_process_soak_stays_bounded_and_finite() {
     };
     let alice = Proc::spawn(
         MM2_EXE,
-        &join_args(install.path(), proxy.addr(), "alice", 70_000),
+        &join_args_tcp_only(install.path(), proxy.addr(), "alice", 70_000),
     );
     let bob = Proc::spawn(
         MM2_EXE,
-        &join_args(install.path(), proxy.addr(), "bob", 60_000),
+        &join_args_tcp_only(install.path(), proxy.addr(), "bob", 60_000),
     );
     start_when_ready(&mut host, 2);
     until_live(&alice);

@@ -53,7 +53,7 @@ use mm2_game::{
 use mm2_net::{
     Client, ClientCtl, Hello, Host, HostConfig, HostCtl, HostEvent, KEEPALIVE_INTERVAL, LateJoin,
     LeaveCause, MAX_PLAYERS, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement,
-    VehiclePick,
+    Transport, VehiclePick,
 };
 use serde::{Deserialize, Serialize};
 
@@ -367,6 +367,9 @@ pub struct LobbyLink {
     ctl: ClientCtl,
     /// Our roster slot — the `Welcome` id.
     player_id: u16,
+    /// How this link reaches the host: the UDP lane, or TCP alone when
+    /// [`LobbyLink::join_tcp_only`] was asked for explicitly.
+    transport: Transport,
     /// The host's advertised address — lobby UI/test display only.
     peer: SocketAddr,
     /// Our roster name.
@@ -438,17 +441,53 @@ pub struct LobbyLink {
 }
 
 impl LobbyLink {
-    /// Join the lobby at `addr`, then spawn the pump thread. The
-    /// handshake runs inside `Client::join` under its own bound
-    /// (`HANDSHAKE_TIMEOUT`), so a silent host cannot wedge the
-    /// caller past it.
+    /// Join the lobby at `addr` over the UDP lane (NETPLAY-06A), then
+    /// spawn the pump thread. The handshake runs inside
+    /// `Client::join_lane` under its own bounds (`HANDSHAKE_TIMEOUT`, the
+    /// lane echo deadline), so a silent host cannot wedge the caller past
+    /// them. A blocked UDP path is [`NetError::LaneTimeout`], whose
+    /// message names the port to open — there is no silent TCP fallback;
+    /// see [`LobbyLink::join_tcp_only`] for the explicit lower-quality
+    /// option.
     pub fn join(
         addr: SocketAddr,
         hello: &Hello,
         mods_active: bool,
         dev: DevOverrides,
     ) -> Result<Self, NetError> {
-        let client = Client::join(addr, hello)?;
+        Self::adopt(
+            Client::join_lane(addr, hello)?,
+            addr,
+            hello,
+            mods_active,
+            dev,
+        )
+    }
+
+    /// Join over TCP alone — no UDP lane, so `InputWindow`/`Snap` ride
+    /// the control stream. **Lower quality** (head-of-line blocking) and
+    /// never chosen implicitly: it exists for tests that route the link
+    /// through the TCP-only impairment proxy (which cannot carry UDP
+    /// until the datagram proxy of NETPLAY-06B lands). The link reports
+    /// [`Transport::Tcp`] from [`LobbyLink::transport`].
+    pub fn join_tcp_only(
+        addr: SocketAddr,
+        hello: &Hello,
+        mods_active: bool,
+        dev: DevOverrides,
+    ) -> Result<Self, NetError> {
+        warn!(%addr, "joining over TCP only: no UDP lane, lower quality");
+        Self::adopt(Client::join(addr, hello)?, addr, hello, mods_active, dev)
+    }
+
+    fn adopt(
+        client: Client,
+        addr: SocketAddr,
+        hello: &Hello,
+        mods_active: bool,
+        dev: DevOverrides,
+    ) -> Result<Self, NetError> {
+        let transport = client.transport();
         let player_id = client.player_id();
         let ctl = client.ctl()?;
         let (tx, rx) = mpsc::channel();
@@ -461,6 +500,7 @@ impl LobbyLink {
             events: Mutex::new(rx),
             ctl,
             player_id,
+            transport,
             peer: addr,
             driver: hello.driver.clone(),
             mods_active,
@@ -481,6 +521,17 @@ impl LobbyLink {
             intent_sent: None,
             entered_generation: None,
         })
+    }
+
+    /// The transport this link negotiated — [`Transport::Tcp`] only when
+    /// the caller chose [`LobbyLink::join_tcp_only`].
+    pub fn transport(&self) -> Transport {
+        self.transport
+    }
+
+    /// Lane datagram counters; `None` on a TCP-only link.
+    pub fn lane_counts(&self) -> Option<mm2_net::LaneCounts> {
+        self.ctl.lane_counts()
     }
 
     /// Ask the host to mark us ready (or not). The ask is remembered and
@@ -1739,6 +1790,15 @@ impl HostLink {
     /// The address peers dial — `127.0.0.1:<ephemeral>` by default.
     pub fn addr(&self) -> SocketAddr {
         self.host.lock().unwrap_or_else(|e| e.into_inner()).addr()
+    }
+
+    /// The UDP port the lane listens on — the port a firewall must admit
+    /// besides the TCP one.
+    pub fn lane_port(&self) -> u16 {
+        self.host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lane_port()
     }
 
     /// The host loop's control handle (`start`/`cancel`/`shutdown`).

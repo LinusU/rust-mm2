@@ -12,7 +12,7 @@
 //! The printed record contract:
 //!
 //! ```text
-//! connected=<addr> id=<n> driver="<name>" fingerprint=fnv1a64:<hex>
+//! connected=<addr> id=<n> driver="<name>" fingerprint=fnv1a64:<hex> transport=lane|tcp lane_sent=<n> lane_received=<n>
 //! session="<summary>"                              (each advertisement)
 //! event=roster players=<n> ready=<n>
 //! event=pick_refused reason="<text>"
@@ -53,7 +53,7 @@ use clap::Parser;
 use mm2_app::{net, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::fingerprint;
-use mm2_net::{Client, ClientCtl, MAX_STRING, Message, SessionAdvertisement, hello};
+use mm2_net::{Client, ClientCtl, MAX_STRING, Message, SessionAdvertisement, Transport, hello};
 
 /// Bound on the wait for the host's close after our `Leave` — the
 /// honest host disconnects a leaver promptly; this is the backstop for
@@ -194,7 +194,7 @@ fn main() {
         }
     };
 
-    let mut client = match Client::join(
+    let mut client = match Client::join_lane(
         cli.connect,
         &hello(
             smoke::COMMIT.to_string(),
@@ -205,15 +205,25 @@ fn main() {
         Ok(client) => client,
         Err(e) => {
             println!("event=join_failed reason={e:?}");
+            // `Debug` is a record for scripts; the operator needs the
+            // actionable text (a blocked lane names the UDP port).
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
+    let lane = client.lane_counts();
     println!(
-        "connected={} id={} driver={:?} fingerprint={}",
+        "connected={} id={} driver={:?} fingerprint={} transport={} lane_sent={} lane_received={}",
         cli.connect,
         client.player_id(),
         cli.driver,
         fingerprint.display(),
+        match client.transport() {
+            Transport::Lane => "lane",
+            Transport::Tcp => "tcp",
+        },
+        lane.map_or(0, |c| c.sent),
+        lane.map_or(0, |c| c.received),
     );
     let ctl = match client.ctl() {
         Ok(ctl) => ctl,

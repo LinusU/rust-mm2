@@ -650,7 +650,7 @@ fn a_dropped_start_and_cancel_are_recovered_by_the_hosts_repeat() {
     // Handshake clean, then only the lifecycle frames are impaired — the
     // ledger names the first `Start`/`Cancel` as the dropped one.
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1489).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -770,7 +770,7 @@ fn a_client_that_misses_every_cancel_copy_still_returns_to_the_lobby() {
     host.set_session(net::advertise(&dev_cruise()).unwrap())
         .unwrap();
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1612).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -980,7 +980,7 @@ fn a_dropped_leave_is_retried_until_the_host_reaps_the_seat() {
     // The peer dials the proxy, the proxy dials the host: the handshake
     // crosses the transparent lane and only the leave is impaired.
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1303).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -1067,7 +1067,7 @@ fn a_teardown_repeats_its_leave_until_the_host_closes() {
     // Same proxy seed as the retry leg: the handshake crosses clean, only
     // the goodbye is impaired.
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1308).unwrap();
-    let mut link = LobbyLink::join(
+    let mut link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -1144,7 +1144,7 @@ fn a_dropped_removal_roster_is_repaired_by_the_periodic_roster() {
     host.set_session(net::advertise(&dev_cruise()).unwrap())
         .unwrap();
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1307).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -2491,7 +2491,7 @@ fn a_zero_generation_start_is_refused() {
             other => panic!("expected the client's Leave, got {other:?}"),
         }
     });
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         addr,
         &hello("net-app-test".to_string(), "mallory".to_string(), fp),
         false,
@@ -6161,7 +6161,7 @@ fn an_unmatched_own_seat_impact_row_presents_once_over_a_lossy_link() {
     host.set_session(net::advertise(&dev_cruise()).unwrap())
         .unwrap();
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1532).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -7985,7 +7985,7 @@ fn run_matrix_cell(cell: &MatrixCell, seed: u64) {
     let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
     let proxy = ImpairProxy::loopback_seeded(link.addr(), seed).unwrap();
     let mut host = host_app(vfs, link);
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), cell.name.to_string(), fp),
         false,
@@ -8516,7 +8516,7 @@ fn run_race_results_cell(cell: &MatrixCell, seed: u64) {
         )
             .chain(),
     );
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), cell.name.to_string(), fp),
         false,
@@ -10928,23 +10928,35 @@ fn a_rematch_does_not_carry_the_last_rounds_broken_props_to_the_client() {
             }
         }
         assert!(ready, "the client never readied for round {expect_gen}");
-        host_app
-            .world()
-            .resource::<HostLink>()
-            .command_sender()
-            .send(HostCommand::Start)
-            .unwrap();
         // The previous round's config lingers at `Menu`, so wait on the
-        // phase, not on the config.
+        // phase, not on the config. The mirrored roster can still show
+        // the last round's ready while the host's own gate has reset it
+        // (the client's re-ready is in flight), which refuses a Start —
+        // so ask again until the gate opens.
         let mut loading = false;
-        for _ in 0..400 {
+        for i in 0..400 {
+            if i % 20 == 0 {
+                host_app
+                    .world()
+                    .resource::<HostLink>()
+                    .command_sender()
+                    .send(HostCommand::Start)
+                    .unwrap();
+            }
             step(host_app, client);
             if session_phase(host_app) == SessionPhase::Loading {
                 loading = true;
                 break;
             }
         }
-        assert!(loading, "round {expect_gen} never began on the host");
+        assert!(
+            loading,
+            "round {expect_gen} never began on the host: notice {:?} roster {:?}, gen {:?}, phase {:?}",
+            host_app.world().resource::<LobbyState>().notice,
+            host_app.world().resource::<LobbyState>().roster,
+            host_app.world().resource::<LobbyState>().generation,
+            session_phase(host_app)
+        );
         {
             let mut session = host_app.world_mut().resource_mut::<Session>();
             session.transition(SessionPhase::Ready).unwrap();
@@ -11423,7 +11435,7 @@ fn a_clients_replica_converges_on_the_hosts_match_through_loss_and_reordering() 
     let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
     let proxy = ImpairProxy::loopback_seeded(link.addr(), 23).unwrap();
     let mut host = host_app(host_vfs, link);
-    let client_link = LobbyLink::join(
+    let client_link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
@@ -12280,7 +12292,7 @@ fn impaired_pair(name: &str, seed: u64) -> (ImpairProxy, App, App) {
     let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
     let proxy = ImpairProxy::loopback_seeded(link.addr(), seed).unwrap();
     let mut host = host_app(vfs, link);
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), name.to_string(), fp),
         false,
@@ -13153,7 +13165,7 @@ fn a_multiplayer_journey_survives_a_lossy_link() {
         .enumerate()
         .map(|(i, name)| {
             let proxy = ImpairProxy::loopback_seeded(addr, 0xF31B + i as u64).unwrap();
-            let link = LobbyLink::join(
+            let link = LobbyLink::join_tcp_only(
                 proxy.addr(),
                 &hello("net-app-test".to_string(), name.to_string(), fp),
                 false,
@@ -13432,7 +13444,7 @@ fn a_keep_ready_client_that_missed_the_start_readies_after_that_rounds_cancel() 
     host.set_session(net::advertise(&dev_cruise()).unwrap())
         .unwrap();
     let proxy = ImpairProxy::loopback_seeded(host.addr(), 0x1511).unwrap();
-    let link = LobbyLink::join(
+    let link = LobbyLink::join_tcp_only(
         proxy.addr(),
         &hello("net-app-test".to_string(), "alice".to_string(), fp),
         false,
