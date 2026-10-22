@@ -49,6 +49,9 @@
 //! reset. The cases that cannot be replayed each take a distinct, counted
 //! path ([`RecoveryCause`]) that adopts the host body state outright, and
 //! snapshots that cannot be compared are skipped with a [`Skip`] reason.
+//! A contact body that keeps disagreeing with the host is replayed only
+//! for [`RECOVERY_DEADLINE_TICKS`] host ticks, counted from the first
+//! usable complete state ([`RecoveryCause::DeadlineExceeded`]).
 //! An authority reset (new reset epoch) clears the history instead; the
 //! commands issued before it are never replayed across it.
 
@@ -68,6 +71,16 @@ use crate::netdrive::{
 };
 use crate::netplay_timeline::NetplayTimeline;
 use crate::netremote::RemoteFeed;
+
+/// Host ticks a contact divergence may keep being replayed before the host
+/// state is adopted outright (NETPLAY-05B-4). Designed, not original: the
+/// clock starts at the first *usable complete* authoritative state (see
+/// [`OwnPrediction::deadline_start`]), so a late or dropped snapshot delays
+/// the start instead of eating the budget. One second covers the
+/// 30-tick-delay contact tests of `docs/netcode-redesign.md`, which
+/// converge in 30-41 ticks, with margin; a body still disagreeing after it
+/// is not going to be corrected by yet another replay.
+pub const RECOVERY_DEADLINE_TICKS: u64 = 60;
 
 /// Position difference (m) below which a replayed snapshot is "the same
 /// state". Designed: the two simulations run the same step on the same
@@ -172,6 +185,10 @@ pub enum RecoveryCause {
     CommandGap,
     /// `replay_from` refused (stale lifetimes, missing history, restore).
     ReplayRefused,
+    /// A contact body still disagreed with the host
+    /// [`RECOVERY_DEADLINE_TICKS`] host ticks after the first usable
+    /// complete state that showed it.
+    DeadlineExceeded,
 }
 
 /// One reconciliation's outcome, for rendering and the statistics.
@@ -211,6 +228,13 @@ pub struct OwnPrediction {
     last_ack: u64,
     /// First `seq` the history may be compared at (set by a reset).
     floor: u64,
+    /// Host tick of the first usable complete authoritative state in which
+    /// a contact body disagreed with the prediction. Usable means compared
+    /// (not skipped); complete means every contact body and trailer in the
+    /// recorded world has its host row. `None` until such a state arrives,
+    /// and again after a complete state that agrees, a recovery, a reset
+    /// or a new generation.
+    deadline_start: Option<u64>,
     /// The most recent outcome.
     pub last: Option<Outcome>,
     pub compared: u64,
@@ -230,6 +254,7 @@ pub struct OwnPrediction {
     pub recovered_too_deep: u64,
     pub recovered_gap: u64,
     pub recovered_refused: u64,
+    pub recovered_deadline: u64,
     /// Remote assertions dropped because their reset epoch is older than
     /// the contact body's.
     pub stale_remote: u64,
@@ -245,6 +270,7 @@ impl Default for OwnPrediction {
             ring: HistoryRing::default(),
             last_ack: 0,
             floor: 0,
+            deadline_start: None,
             last: None,
             compared: 0,
             matched: 0,
@@ -260,6 +286,7 @@ impl Default for OwnPrediction {
             recovered_too_deep: 0,
             recovered_gap: 0,
             recovered_refused: 0,
+            recovered_deadline: 0,
             stale_remote: 0,
             remote_resets: 0,
         }
@@ -289,6 +316,12 @@ impl OwnPrediction {
         self.ring.clear();
         self.last_ack = 0;
         self.floor = 0;
+        self.deadline_start = None;
+    }
+
+    /// Host tick the recovery deadline started at, if it is running.
+    pub fn deadline_start(&self) -> Option<u64> {
+        self.deadline_start
     }
 }
 
@@ -486,7 +519,9 @@ pub fn reconcile(world: &mut World, pred: &mut OwnPrediction, req: &Request<'_>)
                 RecoveryCause::TooDeep => pred.recovered_too_deep += 1,
                 RecoveryCause::CommandGap => pred.recovered_gap += 1,
                 RecoveryCause::ReplayRefused => pred.recovered_refused += 1,
+                RecoveryCause::DeadlineExceeded => pred.recovered_deadline += 1,
             }
+            pred.deadline_start = None;
             pred.last_ack = a.ack;
         }
         Outcome::Reset => {}
@@ -542,6 +577,25 @@ fn classify_and_run(
     // A seat the host reset since the body's history was recorded is a
     // teleport inside it: replay even when the poses happen to be close.
     remote_diverged |= resets.iter().any(|b| in_capture(past, *b));
+    let complete_state = partners_complete(past, req);
+    if remote_diverged {
+        // Only a usable complete state starts the clock; the contact tick
+        // and a partial snapshot never do.
+        if complete_state && pred.deadline_start.is_none() {
+            pred.deadline_start = Some(a.server_tick);
+        }
+        if pred
+            .deadline_start
+            .is_some_and(|t| a.server_tick.saturating_sub(t) >= RECOVERY_DEADLINE_TICKS)
+        {
+            adopt(world, req);
+            pred.ring.clear();
+            pred.floor = req.newest + 1;
+            return Outcome::Recovered(RecoveryCause::DeadlineExceeded);
+        }
+    } else if complete_state {
+        pred.deadline_start = None;
+    }
     if own_agrees && !remote_diverged {
         return Outcome::Matched;
     }
@@ -576,6 +630,17 @@ fn classify_and_run(
         (pos_error, rot_error),
         (remote_error, remote_diverged),
     )
+}
+
+/// Every contact body and trailer in the recorded world has its host row
+/// in this snapshot (a stale-epoch row was already dropped from the
+/// request, so it counts as missing).
+fn partners_complete(past: &WorldCapture, req: &Request<'_>) -> bool {
+    req.remotes
+        .iter()
+        .map(|r| (r.body, r.assertion))
+        .chain(req.trailers.iter().map(|t| (t.body, t.assertion)))
+        .all(|(body, assertion)| assertion.is_some() || !in_capture(past, body))
 }
 
 fn in_capture(capture: &WorldCapture, e: Entity) -> bool {
@@ -879,6 +944,7 @@ pub fn reconcile_own(world: &mut World) {
     if reset {
         pred.ring.clear();
         pred.floor = newest + 1;
+        pred.deadline_start = None;
         pred.resets += 1;
         pred.last = Some(Outcome::Reset);
         println!("event=own_reconcile kind=reset newest={newest}");
@@ -1008,6 +1074,7 @@ fn report(
             RecoveryCause::TooDeep => "recover_depth",
             RecoveryCause::CommandGap => "recover_gap",
             RecoveryCause::ReplayRefused => "recover_refused",
+            RecoveryCause::DeadlineExceeded => "recover_deadline",
         },
         _ => return,
     };
@@ -1744,6 +1811,8 @@ mod tests {
 
 #[cfg(test)]
 mod contact_tests;
+#[cfg(test)]
+mod deadline_tests;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]

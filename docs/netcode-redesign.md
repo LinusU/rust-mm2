@@ -1497,3 +1497,32 @@ landing between the compared tick and `now` are not re-applied (the copy's
 history is the client's own, so a late row corrects the copy from the next
 row on, not retroactively); prop contact through `worldprops::apply_props` is
 the same entrant path but has no app-level test here.
+
+## Fixed recovery deadline (NETPLAY-05B-4, #1934)
+
+*Designed, not original.* A contact body that disagrees with the host is
+normally corrected by replay. If it is still disagreeing
+`RECOVERY_DEADLINE_TICKS` (60 host ticks, 1 s) after the deadline started,
+`reconcile` adopts the host state of the own car, the contact bodies and
+the trailers outright and reports `RecoveryCause::DeadlineExceeded`
+(`recovered_deadline`, `kind=recover_deadline`).
+
+The deadline starts at the first **usable complete** authoritative state in
+which a contact body diverged: usable means it was compared (not
+`Skipped`), complete means every contact body and trailer in the recorded
+world has its host row (a row dropped as stale-epoch counts as missing).
+Neither the contact itself nor a partial snapshot starts it, so lost or late
+snapshots postpone the start rather than spend the budget. Once running, a
+partial snapshot neither restarts nor stops it; a complete state that agrees,
+any recovery, an authority reset and a new generation end the episode. The
+count is in `server_tick`, so it does not depend on how many snapshots
+arrived. Only a *contact body* divergence engages it; the own car's routine
+corrections never do.
+
+Tests: `netpredict/deadline_tests.rs` (persistent divergence recovers at
+exactly the deadline; a late first snapshot starts it late; incomplete and
+skipped snapshots do not start it; an agreeing state gives the next episode a
+fresh budget). Evidence level: synthetic integration on the production step.
+Open: the over-the-wire assertion in `tests/net_contact.rs`, which waits for
+the client on the datagram lane (NETPLAY-06E-4) and the host sending
+`RemoteCommands`; its header caveat stays until then.
