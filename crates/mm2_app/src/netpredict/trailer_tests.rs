@@ -151,6 +151,7 @@ fn host_run() -> Vec<[Body; 3]> {
 fn assertion(wire: u16, b: &Body) -> RemoteAssertion {
     RemoteAssertion {
         wire,
+        epoch: 0,
         pos: p(b),
         rot: Quat::from_array(b.rotation),
         vel: v(b),

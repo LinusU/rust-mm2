@@ -1311,3 +1311,46 @@ host state.
 Evidence level: synthetic integration on the production step. Not covered:
 the real transport, a trailer on a retail car, trailer attach by a *new*
 tractor mid-session.
+
+## Reset epochs of remote cars in predicted contact (NETPLAY-05E, #1912)
+
+A host reset teleports a seat; its `Snap` row carries the new reset epoch.
+The own car already clears its history on one. A remote car's contact body
+(`PredictedRemoteBody`) now carries the epoch its recorded history reflects
+(`epoch`, stamped 0 at spawn like `ResetEpoch`), and `RemoteAssertion.epoch`
+is the seat's epoch in the snapshot (a trailer row takes its towing seat's).
+`netpredict::reconcile` compares them on the wrapping `u8` circle:
+
+| Assertion epoch vs the body's | Rule |
+|---|---|
+| equal | compared and corrected as before |
+| ahead (the host reset the seat) | the recorded past of that body predates a teleport: the replay is forced even if the poses happen to be close. The restored world takes the host's post-reset pose at the compared tick and the own car is replayed against it, so a car that already passed the spot on the client meets the reset body where the host did instead of being pushed out of it. The body's epoch advances only once an assertion was *consumed* (`Matched`, `Replayed` or `Recovered`); a skipped snapshot leaves the reset pending for the next one. |
+| behind | dropped from the request (`OwnPrediction::stale_remote`): never compared, never written back over the reset |
+
+Snapshots already arrive in order (`RemoteSnaps::push` drops older ones),
+so "behind" is a guard rather than an observed path. No restitution, grip or
+collision-layer change is involved and no car is ghosted.
+
+Found while measuring: a correction at replay depth 0 (the snapshot acks the
+newest tick, e.g. loopback) restored nothing, because there was no step to
+run; the history recorded a correction the world never took (a 36 m error on
+the reset body that never closed). The corrected capture is now restored
+without stepping.
+
+Tests: `netpredict::tests` (forced replay then `Matched`, stale epoch ignored,
+epoch wrap, depth-0 correction) and `multi_tests` (`reset_into_the_path`: car 1
+is idle off the road and is reset at tick 150 into car 0's path; delays 0/3/12/30
+and 30 %/60 % snapshot loss: 0 recoveries, final error 0.00 m, no lift of car 0
+over the host's, one reset folded in). The same scene with epochs ignored is
+measured for comparison and gives the same result at delay 3-30: the pose
+difference of a real teleport already forces the replay, so the epoch's
+contribution is the forced replay for close poses, the stale guard and the
+pending-until-consumed rule, not a different trajectory in this scene.
+
+Not covered (evidence level: synthetic integration on the production step):
+the real transport with the impairment proxies; the vehicle crate's
+`lifetime::ResetEpoch` / `SessionEpoch` components are still not wired in the
+app (captures are stamped with the own car's `EpochRef` only); a contact body
+that spawns after the compared tick keeps the pose it was spawned at until
+its first in-ring assertion (a re-entering seat). The latter is the remaining
+"desynchronized re-entry" piece.

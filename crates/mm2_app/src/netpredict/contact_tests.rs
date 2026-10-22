@@ -403,6 +403,7 @@ fn run(s: &Scn, cfg: Cfg, (host, host_starts): &(Vec<[Body; 2]>, u32), fwd: Vec3
             };
             let ra = |bd: &Body| RemoteAssertion {
                 wire: PLAYER,
+                epoch: 0,
                 pos: p(bd),
                 rot: Quat::from_array(bd.rotation),
                 vel: v(bd),

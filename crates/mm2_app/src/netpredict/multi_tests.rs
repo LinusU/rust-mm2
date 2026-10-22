@@ -38,6 +38,16 @@ struct Scene {
     wall: Option<(Vec3, Quat)>,
     drivers: Vec<Driver>,
     ticks: u64,
+    /// Authority resets: at host tick `.0` (before that tick's step) car
+    /// `.1` is put at rest at `.2`, `.3`, and its reset epoch advances.
+    resets: Vec<(u64, usize, Vec3, Quat)>,
+}
+
+impl Scene {
+    /// The reset epoch the host reports for car `i` at its tick `t`.
+    fn epoch_at(&self, i: usize, t: u64) -> u8 {
+        self.resets.iter().filter(|r| r.1 == i && r.0 <= t).count() as u8
+    }
 }
 
 /// A point `along` the driving axis and `side` to its right, at ride height.
@@ -59,7 +69,7 @@ fn spawn(app: &mut App, s: &Scene) -> Vec<Entity> {
             Transform::from_translation(c).with_rotation(r),
         ));
     }
-    let cars = s
+    let cars: Vec<Entity> = s
         .cars
         .iter()
         .map(|(pos, rot)| {
@@ -71,8 +81,28 @@ fn spawn(app: &mut App, s: &Scene) -> Vec<Entity> {
             e
         })
         .collect();
+    for (i, e) in cars.iter().enumerate().skip(1) {
+        app.world_mut().entity_mut(*e).insert(PredictedRemoteBody {
+            wire: PLAYER + i as u16,
+            visual: Entity::PLACEHOLDER,
+            epoch: 0,
+        });
+    }
     app.update();
     cars
+}
+
+/// What the host's authority does to car `i` before its step at tick `t`.
+fn apply_resets(app: &mut App, s: &Scene, cars: &[Entity], t: u64) {
+    for (_, i, pos, rot) in s.resets.iter().filter(|r| r.0 == t) {
+        app.world_mut().entity_mut(cars[*i]).insert((
+            Position(*pos),
+            Rotation(*rot),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+            Teleported,
+        ));
+    }
 }
 
 /// Door rubbing: B drives alongside A and drifts into it from tick 120.
@@ -89,6 +119,7 @@ fn side_swipe(fwd: Vec3) -> Scene {
             Box::new(|t| q(0.8, 0.0, if t >= 120 { -0.12 } else { 0.0 })),
         ],
         ticks: 420,
+        resets: Vec::new(),
     }
 }
 
@@ -107,6 +138,7 @@ fn pinned_on_a_wall(fwd: Vec3) -> Scene {
             Box::new(|_| q(0.6, 0.0, 0.0)),
         ],
         ticks: 420,
+        resets: Vec::new(),
     }
 }
 
@@ -129,6 +161,7 @@ fn pileup(fwd: Vec3) -> Scene {
             Box::new(|_| q(1.0, 0.0, 0.0)),
         ],
         ticks: 420,
+        resets: Vec::new(),
     }
 }
 
@@ -156,6 +189,7 @@ fn converge(fwd: Vec3, n: usize) -> Scene {
         wall: None,
         drivers,
         ticks: 300,
+        resets: Vec::new(),
     }
 }
 
@@ -165,6 +199,7 @@ fn host_run(s: &Scene) -> Vec<Vec<Body>> {
     let cars = spawn(&mut app, s);
     (1..=s.ticks)
         .map(|t| {
+            apply_resets(&mut app, s, &cars, t);
             for (c, d) in cars.iter().zip(&s.drivers) {
                 *app.world_mut().get_mut::<VehicleInput>(*c).unwrap() = input(&d(t));
             }
@@ -202,6 +237,8 @@ struct Cfg {
     cmd_delay: Vec<u64>,
     /// Chance that a snapshot never arrives.
     loss: f64,
+    /// Report every seat at epoch 0, as before the epoch was tracked.
+    ignore_epochs: bool,
 }
 
 impl Cfg {
@@ -210,6 +247,7 @@ impl Cfg {
             snap_delay: delay,
             cmd_delay: vec![delay; remotes],
             loss: 0.0,
+            ignore_epochs: false,
         }
     }
 }
@@ -231,13 +269,21 @@ struct Report {
     replay_ms: Vec<f64>,
     /// Deepest replay (steps).
     deepest: usize,
+    remote_resets: u64,
+    stale_remote: u64,
+    /// Highest point any car reached above where the host's did (m): a
+    /// launch.
+    peak_lift: f32,
 }
 
 impl Report {
     fn line(&self) -> String {
         let n = self.replay_ms.len().max(1) as f64;
         format!(
-            "peak {:.2?} final {:.2?} vgap {:.2?} imp h{} c{} settle {:?} rep{} rec{} deepest {} replay_ms mean {:.2} max {:.2}",
+            "lift {:.2} resets {} stale {} peak {:.2?} final {:.2?} vgap {:.2?} imp h{} c{} settle {:?} rep{} rec{} deepest {} replay_ms mean {:.2} max {:.2}",
+            self.peak_lift,
+            self.remote_resets,
+            self.stale_remote,
             self.peak_error,
             self.final_error,
             self.final_speed_gap,
@@ -313,6 +359,11 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
                     body: cars[i],
                     assertion: Some(RemoteAssertion {
                         wire: PLAYER + i as u16,
+                        epoch: if cfg.ignore_epochs {
+                            0
+                        } else {
+                            s.epoch_at(i, tt)
+                        },
                         pos: p(&h[i]),
                         rot: Quat::from_array(h[i].rotation),
                         vel: v(&h[i]),
@@ -369,6 +420,7 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
             }
             prev_host[i] = Some(hv);
             prev_client[i] = Some(cv);
+            r.peak_lift = r.peak_lift.max(p(&now).y - p(&host[ti][i]).y);
             let err = p(&now).distance(p(&host[ti][i]));
             r.peak_error[i] = r.peak_error[i].max(err);
             r.final_error[i] = err;
@@ -383,6 +435,8 @@ fn run(s: &Scene, cfg: &Cfg, host: &[Vec<Body>]) -> Report {
     r.settle = first_off.zip(last_off).map(|(f, l)| l + 1 - f);
     r.replays = pred.replays;
     r.recoveries = pred.recoveries;
+    r.remote_resets = pred.remote_resets;
+    r.stale_remote = pred.stale_remote;
     r
 }
 
@@ -448,6 +502,7 @@ fn unequal_seat_delays_and_lost_snapshots_still_converge() {
         snap_delay: 6,
         cmd_delay: vec![3, 24],
         loss: 0.3,
+        ignore_epochs: false,
     };
     let r = run(&s, &cfg, &host);
     println!("unequal delays + 30% loss, {}: {}", s.name, r.line());
@@ -541,5 +596,87 @@ fn costs_grow_with_seats_up_to_eight() {
         );
         assert!(r.deepest <= MAX_REPLAY_STEPS);
         assert_eq!(r.recoveries, 0, "{n} seats: {}", r.line());
+    }
+}
+
+/// A is driving down the road; B stands idle off to the side until the host
+/// resets it, at tick 150, onto the road 25 m ahead of A and pointing back
+/// at it. A reaches B's new place well after the reset on the host and
+/// earlier than that on a client that runs ahead of the host.
+fn reset_into_the_path(fwd: Vec3) -> Scene {
+    Scene {
+        name: "reset into the path",
+        cars: vec![
+            (at(fwd, -60.0, 0.0), Quat::IDENTITY),
+            (at(fwd, 40.0, 30.0), Quat::IDENTITY),
+        ],
+        wall: None,
+        drivers: vec![
+            Box::new(|_| q(0.8, 0.0, 0.0)),
+            Box::new(|_| q(0.0, 0.0, 0.0)),
+        ],
+        ticks: 420,
+        resets: vec![(150, 1, at(fwd, 10.0, 0.0), facing(fwd, -fwd))],
+    }
+}
+
+/// The host reset B under A's feet while A was already at the place: a
+/// reset that lands inside the predicted window of a client.
+#[test]
+fn a_remote_reset_into_the_path_is_replayed_not_launched() {
+    let fwd = forward();
+    let s = reset_into_the_path(fwd);
+    let host = host_run(&s);
+    for d in [0u64, 3, 12, 30] {
+        let r = run(&s, &Cfg::even(d, 1), &host);
+        println!("epochs tracked, delay {d}: {}", r.line());
+        assert_eq!(r.recoveries, 0, "delay {d}: {}", r.line());
+        assert!(r.remote_resets >= 1, "delay {d}: {}", r.line());
+        assert!(r.peak_lift < 0.5, "delay {d}: {}", r.line());
+        assert!(
+            r.final_error.iter().all(|&e| e < 0.5),
+            "delay {d}: {}",
+            r.line()
+        );
+    }
+}
+
+/// Lost snapshots delay when the reset is first seen, never its effect.
+#[test]
+fn a_remote_reset_survives_lost_snapshots() {
+    let fwd = forward();
+    let s = reset_into_the_path(fwd);
+    let host = host_run(&s);
+    for seed_loss in [0.3, 0.6] {
+        let cfg = Cfg {
+            snap_delay: 12,
+            cmd_delay: vec![12],
+            loss: seed_loss,
+            ignore_epochs: false,
+        };
+        let r = run(&s, &cfg, &host);
+        println!("epochs tracked, loss {seed_loss}: {}", r.line());
+        assert_eq!(r.recoveries, 0, "loss {seed_loss}: {}", r.line());
+        assert!(r.remote_resets >= 1, "loss {seed_loss}: {}", r.line());
+        assert!(r.peak_lift < 0.5, "loss {seed_loss}: {}", r.line());
+        assert!(
+            r.final_error.iter().all(|&e| e < 0.5),
+            "loss {seed_loss}: {}",
+            r.line()
+        );
+    }
+}
+
+/// The same scene as the baseline: seats reported at epoch 0 throughout.
+#[test]
+fn the_reset_scene_without_epochs_is_measured_for_comparison() {
+    let fwd = forward();
+    let s = reset_into_the_path(fwd);
+    let host = host_run(&s);
+    for d in [3u64, 12, 30] {
+        let mut cfg = Cfg::even(d, 1);
+        cfg.ignore_epochs = true;
+        let r = run(&s, &cfg, &host);
+        println!("epochs ignored, delay {d}: {}", r.line());
     }
 }

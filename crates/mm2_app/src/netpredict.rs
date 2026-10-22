@@ -56,7 +56,7 @@ use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, Session};
 use mm2_vehicle::capture::EpochRef;
-use mm2_vehicle::physics_world::{WorldCapture, capture_world};
+use mm2_vehicle::physics_world::{WorldCapture, capture_world, restore_world};
 use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from};
 use mm2_vehicle::{RemoteReplica, Teleported, VehicleInput};
 
@@ -102,6 +102,9 @@ pub struct OwnAssertion {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RemoteAssertion {
     pub wire: u16,
+    /// The seat's reset epoch in that snapshot (a trailer row carries its
+    /// towing seat's).
+    pub epoch: u8,
     pub pos: Vec3,
     pub rot: Quat,
     pub vel: Vec3,
@@ -227,6 +230,12 @@ pub struct OwnPrediction {
     pub recovered_too_deep: u64,
     pub recovered_gap: u64,
     pub recovered_refused: u64,
+    /// Remote assertions dropped because their reset epoch is older than
+    /// the contact body's.
+    pub stale_remote: u64,
+    /// Remote seat resets (a newer epoch than the body's history) that a
+    /// consumed assertion folded into the history.
+    pub remote_resets: u64,
 }
 
 impl Default for OwnPrediction {
@@ -251,6 +260,8 @@ impl Default for OwnPrediction {
             recovered_too_deep: 0,
             recovered_gap: 0,
             recovered_refused: 0,
+            stale_remote: 0,
+            remote_resets: 0,
         }
     }
 }
@@ -284,6 +295,41 @@ pub struct RemoteDrive {
     /// Its command for each step `ack+1..=newest`, oldest first; `None`
     /// when any step's command is unknown (a [`RecoveryCause::CommandGap`]).
     pub commands: Option<Vec<VehicleInput>>,
+}
+
+/// Where a host assertion's reset epoch stands against the epoch the
+/// contact body's history reflects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpochState {
+    /// The same epoch, or the body does not track one.
+    Current,
+    /// The host reset the seat since the body's history was recorded: the
+    /// recorded past of this body is from before a teleport.
+    Reset,
+    /// The assertion predates the body's epoch: a stale state that must
+    /// not be written back over a newer one.
+    Behind,
+}
+
+/// `new` is ahead of `cur` on the wrapping `u8` epoch circle.
+fn epoch_ahead(new: u8, cur: u8) -> bool {
+    new != cur && new.wrapping_sub(cur) < 128
+}
+
+impl RemoteDrive {
+    fn epoch_state(&self, world: &World) -> EpochState {
+        let (Some(a), Some(body)) = (self.assertion, world.get::<PredictedRemoteBody>(self.body))
+        else {
+            return EpochState::Current;
+        };
+        if a.epoch == body.epoch {
+            EpochState::Current
+        } else if epoch_ahead(a.epoch, body.epoch) {
+            EpochState::Reset
+        } else {
+            EpochState::Behind
+        }
+    }
 }
 
 /// A real (jointed) trailer body towed by the own car or a remote contact
@@ -361,7 +407,48 @@ fn own_body(capture: &WorldCapture, own: Entity) -> Option<(Vec3, Quat, Vec3, Ve
 /// own car's history is rewritten.
 pub fn reconcile(world: &mut World, pred: &mut OwnPrediction, req: &Request<'_>) -> Outcome {
     let a = req.assertion;
-    let outcome = classify_and_run(world, pred, req);
+    // A remote assertion from before the body's epoch is dropped from the
+    // request, so it can neither be compared nor written back; one from a
+    // later epoch is a teleport the recorded past does not contain.
+    let mut resets = Vec::new();
+    let mut stale = 0;
+    let remotes: Vec<RemoteDrive> = req
+        .remotes
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            match r.epoch_state(world) {
+                EpochState::Current => {}
+                EpochState::Reset => resets.push(r.body),
+                EpochState::Behind => {
+                    r.assertion = None;
+                    stale += 1;
+                }
+            }
+            r
+        })
+        .collect();
+    pred.stale_remote += stale;
+    let req = &Request {
+        remotes: &remotes,
+        ..*req
+    };
+    let outcome = classify_and_run(world, pred, req, &resets);
+    if matches!(
+        outcome,
+        Outcome::Matched | Outcome::Replayed { .. } | Outcome::Recovered(_)
+    ) {
+        // The reset is part of the corrected history now (or the body was
+        // adopted outright): later assertions of that epoch compare as usual.
+        for r in req.remotes.iter().filter(|r| resets.contains(&r.body)) {
+            if let (Some(a), Some(mut body)) =
+                (r.assertion, world.get_mut::<PredictedRemoteBody>(r.body))
+            {
+                body.epoch = a.epoch;
+                pred.remote_resets += 1;
+            }
+        }
+    }
     match outcome {
         Outcome::Skipped(_) => pred.skipped += 1,
         Outcome::Matched => {
@@ -401,7 +488,12 @@ pub fn reconcile(world: &mut World, pred: &mut OwnPrediction, req: &Request<'_>)
     outcome
 }
 
-fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'_>) -> Outcome {
+fn classify_and_run(
+    world: &mut World,
+    pred: &mut OwnPrediction,
+    req: &Request<'_>,
+    resets: &[Entity],
+) -> Outcome {
     let a = req.assertion;
     if a.generation != pred.generation {
         return Outcome::Skipped(Skip::OtherGeneration);
@@ -439,7 +531,10 @@ fn classify_and_run(world: &mut World, pred: &mut OwnPrediction, req: &Request<'
         && rot_error <= ROT_TOLERANCE
         && vel.distance(a.vel) <= VEL_TOLERANCE
         && ang.distance(a.ang) <= ANG_TOLERANCE;
-    let (remote_error, remote_diverged) = compare_partners(past, req);
+    let (remote_error, mut remote_diverged) = compare_partners(past, req);
+    // A seat the host reset since the body's history was recorded is a
+    // teleport inside it: replay even when the poses happen to be close.
+    remote_diverged |= resets.iter().any(|b| in_capture(past, *b));
     if own_agrees && !remote_diverged {
         return Outcome::Matched;
     }
@@ -594,6 +689,30 @@ fn replay(
     scratch.record(a.ack, corrected.clone());
     let mut staged: Vec<(u64, WorldCapture)> = Vec::with_capacity(req.commands.len());
     let mut from = a.ack;
+    if req.commands.is_empty() {
+        // The host's state is for the newest tick: nothing to step, but
+        // the corrected capture still has to reach the world (the own car
+        // and the reset or diverged bodies), or the history would record
+        // a correction the world never took.
+        let restore = restore_world(world, &corrected);
+        put_back(world, &remotes);
+        if !restore.refused.is_empty() || !restore.issues.is_empty() {
+            adopt(world, req);
+            pred.ring.clear();
+            pred.floor = req.newest + 1;
+            return Outcome::Recovered(RecoveryCause::ReplayRefused);
+        }
+        pred.ring.record(a.ack, corrected);
+        return Outcome::Replayed {
+            steps: 0,
+            pos_error,
+            rot_error,
+            shift: 0.0,
+            turn: 0.0,
+            remote_error,
+            remote_diverged,
+        };
+    }
     for (i, (seq, input)) in req.commands.iter().enumerate() {
         let mut inputs = vec![(req.own, *input)];
         inputs.extend(req.remotes.iter().filter_map(|r| {
@@ -1278,6 +1397,7 @@ mod tests {
         let (pos, rot, vel, ang) = own_body(pred.ring.get(ack).unwrap(), remote).unwrap();
         RemoteAssertion {
             wire: 2,
+            epoch: 0,
             pos,
             rot,
             vel,
@@ -1328,6 +1448,113 @@ mod tests {
             app.world().get::<Rotation>(e).unwrap().0,
             app.world().get::<LinearVelocity>(e).unwrap().0,
         )
+    }
+
+    fn tracked(app: &mut App, remote: Entity, epoch: u8) {
+        app.world_mut()
+            .entity_mut(remote)
+            .insert(PredictedRemoteBody {
+                wire: 2,
+                visual: Entity::PLACEHOLDER,
+                epoch,
+            });
+    }
+
+    fn body_epoch(app: &App, remote: Entity) -> u8 {
+        app.world()
+            .get::<PredictedRemoteBody>(remote)
+            .unwrap()
+            .epoch
+    }
+
+    /// The host reset the seat to where the recorded body already is: the
+    /// poses agree, but the recorded past is from before a teleport, so
+    /// the epoch alone forces one replay, and then the same assertion
+    /// matches.
+    #[test]
+    fn a_newer_remote_epoch_forces_one_replay_even_when_the_poses_agree() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 1;
+        let r = drive(remote, Some(ra), 21, 30);
+        let out = go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        assert!(
+            matches!(
+                out,
+                Outcome::Replayed {
+                    remote_diverged: true,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        assert_eq!(body_epoch(&app, remote), 1);
+        assert_eq!(pred.remote_resets, 1);
+        // The next assertion of that epoch compares as usual.
+        let a = assertion_from(&pred, own, 25);
+        let mut ra = remote_assertion_from(&pred, remote, 25);
+        ra.epoch = 1;
+        let r = drive(remote, Some(ra), 26, 30);
+        assert_eq!(
+            go2(&mut app, &mut pred, own, &a, &[r], 30),
+            Outcome::Matched
+        );
+    }
+
+    /// A remote state older than the body's epoch is dropped whatever its
+    /// pose says: it can neither trigger a replay nor be written back over
+    /// the reset.
+    #[test]
+    fn a_remote_state_from_before_the_reset_is_not_written_back() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 3);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let before = pose(&app, remote);
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 2;
+        ra.pos += Vec3::new(30.0, 0.0, 0.0);
+        let r = drive(remote, Some(ra), 21, 30);
+        assert_eq!(
+            go2(&mut app, &mut pred, own, &a, &[r], 30),
+            Outcome::Matched
+        );
+        assert_eq!(pose(&app, remote), before);
+        assert_eq!(body_epoch(&app, remote), 3);
+        assert_eq!(pred.stale_remote, 1);
+    }
+
+    /// The epoch circle wraps: 0 is ahead of 255, and 255 is behind 0.
+    #[test]
+    fn remote_epochs_compare_on_the_wrapping_circle() {
+        assert!(epoch_ahead(0, 255));
+        assert!(!epoch_ahead(255, 0));
+        assert!(!epoch_ahead(7, 7));
+    }
+
+    /// An assertion for the newest tick (nothing to step) still has to
+    /// reach the world: the diverged remote body takes the host's pose.
+    #[test]
+    fn a_correction_with_nothing_to_step_reaches_the_world() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let a = assertion_from(&pred, own, 30);
+        let mut ra = remote_assertion_from(&pred, remote, 30);
+        ra.epoch = 1;
+        ra.pos += Vec3::new(0.0, 0.0, 8.0);
+        let want = ra.pos;
+        let r = drive(remote, Some(ra), 31, 30);
+        let out = go2(&mut app, &mut pred, own, &a, &[r], 30);
+        assert!(matches!(out, Outcome::Replayed { steps: 0, .. }), "{out:?}");
+        assert!(pose(&app, remote).0.distance(want) < 1e-3);
+        assert_eq!(body_epoch(&app, remote), 1);
     }
 
     /// Both cars agreeing with the host change nothing, whatever the pair

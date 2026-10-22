@@ -448,6 +448,11 @@ pub struct PredictedRemoteBody {
     pub wire: u16,
     /// The presentation entity this body belongs to.
     pub visual: Entity,
+    /// The host reset epoch this body's history reflects, stamped `0` at
+    /// spawn like [`ResetEpoch`]. `netpredict::reconcile` advances it once
+    /// an assertion carrying the new epoch has been consumed; until then
+    /// the body's recorded past is from before the seat's last reset.
+    pub epoch: u8,
 }
 
 /// Blend state on a `Predicted` remote copy: the pose it displayed when
@@ -2327,7 +2332,11 @@ fn spawn_contact_body(
     commands
         .spawn((
             owner,
-            PredictedRemoteBody { wire, visual },
+            PredictedRemoteBody {
+                wire,
+                visual,
+                epoch: 0,
+            },
             HumanDriver::default(),
             vehicle_bundle(cfg),
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -4042,6 +4051,7 @@ fn apply_snap_frame(
             if snaps.own_stage.enabled {
                 staged_remotes.push(crate::netpredict::RemoteAssertion {
                     wire: entry.player,
+                    epoch: entry.epoch,
                     pos: to_pos,
                     rot: to_rot,
                     vel: Vec3::from(entry.vel),
@@ -4115,6 +4125,13 @@ fn apply_snap_frame(
             .iter()
             .map(|t| crate::netpredict::RemoteAssertion {
                 wire: t.owner,
+                // A trailer carries no epoch of its own: its towing
+                // seat's.
+                epoch: snap
+                    .entries
+                    .iter()
+                    .find(|e| e.player == t.owner)
+                    .map_or(0, |e| e.epoch),
                 pos: Vec3::from(t.pos),
                 rot: wire_quat(t.rot),
                 vel: Vec3::from(t.vel),
