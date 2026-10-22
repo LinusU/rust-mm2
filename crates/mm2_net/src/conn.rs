@@ -379,6 +379,25 @@ impl PeerWriter {
         self.done.load(Ordering::Acquire)
     }
 
+    /// Stop accepting frames, give the thread up to `deadline` to write
+    /// what is queued, then half-close the send side so the peer reads
+    /// the frames and a clean FIN. Returns whether everything was
+    /// written: `false` when the deadline passed or the socket failed.
+    /// The bound keeps a stalled peer from hanging an exit; the read
+    /// side is left open for the caller to drain.
+    pub fn flush_and_close_send(&mut self, deadline: Duration) -> bool {
+        self.close_send();
+        let by = std::time::Instant::now() + deadline;
+        while !self.is_drained() && std::time::Instant::now() < by {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let flushed = self.is_drained() && !self.failed.load(Ordering::Acquire);
+        if flushed {
+            let _ = self.stream.shutdown(std::net::Shutdown::Write);
+        }
+        flushed
+    }
+
     /// Forcibly close the socket: a write parked in the thread and a
     /// blocked `recv` on the peer's reader both wake with an error.
     pub fn disconnect(&mut self) {
@@ -688,6 +707,42 @@ mod tests {
         let (peer_conn, _) = listener.accept().unwrap();
         assert!(conn.peer_addr().ip().is_loopback());
         assert!(peer_conn.peer_addr().unwrap().ip().is_loopback());
+    }
+
+    /// A frame queued right before `flush_and_close_send` reaches the
+    /// peer, followed by a clean end of stream.
+    #[test]
+    fn flush_and_close_send_delivers_the_queued_frames() {
+        use std::io::Read;
+        let (mut writer, mut far) = peer_pair();
+        far.set_read_timeout(Some(TIMEOUT)).unwrap();
+        for _ in 0..50 {
+            writer.send(&Message::Leave).unwrap();
+        }
+        assert!(writer.flush_and_close_send(Duration::from_secs(5)));
+        for _ in 0..50 {
+            assert_eq!(
+                Message::decode(&read_frame(&mut far).unwrap()).unwrap(),
+                Message::Leave
+            );
+        }
+        let mut rest = Vec::new();
+        far.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+    }
+
+    /// A stalled peer bounds the flush instead of hanging it.
+    #[test]
+    fn flush_and_close_send_gives_up_on_a_stalled_peer() {
+        let (mut writer, _far) = peer_pair();
+        let big = vec![0u8; 200 * 1024];
+        for _ in 0..64 {
+            let _ = writer.send_frame(big.clone());
+        }
+        let start = std::time::Instant::now();
+        assert!(!writer.flush_and_close_send(Duration::from_millis(100)));
+        assert!(start.elapsed() < TIMEOUT);
+        writer.disconnect();
     }
 
     /// A connected loopback pair: the accepted side wrapped in a
