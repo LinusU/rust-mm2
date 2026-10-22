@@ -1488,8 +1488,8 @@ harness (the 8-seat `Snap` / `RemoteCommands` figures are in the 05B
 section: 110.6 kB/s together without 06D cadence).
 
 Not covered here: a replay's frame-time cost under the frame loop and
-contact-heavy replays at 8 seats (NETPLAY-05I, below), and the real transport. Evidence level: synthetic integration on the
-production step.
+contact-heavy replays at 8 seats (NETPLAY-05I, below), and the real
+transport. Evidence level: synthetic integration on the production step.
 
 ## Replay under the frame loop and under contact (NETPLAY-05I, #1932)
 
