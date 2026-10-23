@@ -1183,6 +1183,15 @@ fn remote_drives(
         .filter(|r| r.seq > assertion.ack)
         .map(|r| r.predicted_tick)
         .collect();
+    // The snapshot's remote states are at host tick `server_tick`, the
+    // state of the own seat after command `ack`; replay step `k` (0-based)
+    // is therefore host tick `server_tick + 1 + k`, and the store is keyed
+    // by host tick.
+    if let Some(first) = ticks.first().copied()
+        && let Some(mut feed) = world.get_resource_mut::<RemoteFeed>()
+    {
+        feed.set_offset(first, assertion.server_tick + 1);
+    }
     let bodies: Vec<(Entity, u16)> = world
         .query::<(Entity, &PredictedRemoteBody)>()
         .iter(world)
@@ -1198,7 +1207,11 @@ fn remote_drives(
             assertion: states.iter().find(|s| s.wire == wire).copied(),
             commands: ticks
                 .iter()
-                .map(|t| feed.command_at(wire, *t).map(|c| decode_tick_command(&c)))
+                .enumerate()
+                .map(|(k, t)| {
+                    feed.command_at(wire, *t, assertion.server_tick + 1 + k as u64)
+                        .map(|c| decode_tick_command(&c))
+                })
                 .collect(),
         })
         .collect()

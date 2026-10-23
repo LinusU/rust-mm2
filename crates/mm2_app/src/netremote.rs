@@ -194,6 +194,11 @@ pub struct RemoteFeed {
     /// client tick. [`RemoteCommands::consume`] forgets a tick once it is
     /// used, so a replay (NETPLAY-05A-4) re-reads its past from here.
     applied: BTreeMap<(u16, u64), TickCommand>,
+    /// Host tick minus client tick for the same simulation instant, as the
+    /// newest snapshot showed it: the host finalizes a seat's command `n`
+    /// at its own tick `n + host_offset`, and the store is keyed by host
+    /// tick. Set by the own-car reconcile (`netpredict::remote_drives`).
+    host_offset: i64,
 }
 
 /// Ticks of applied commands kept per seat: past [`MAX_REPLAY_STEPS`]
@@ -206,6 +211,7 @@ impl Default for RemoteFeed {
             store: RemoteCommands::new(),
             predictor: RemotePredictor::new(Policy::HoldLast),
             applied: BTreeMap::new(),
+            host_offset: 0,
         }
     }
 }
@@ -219,13 +225,26 @@ impl RemoteFeed {
         self.applied.retain(|(p, t), _| *p != player || *t >= floor);
     }
 
-    /// The command to replay `player`'s body with at `tick`: the stored
-    /// authoritative one when it is still there (it may have arrived after
-    /// the tick was predicted), else what the live step used. `None` when
-    /// neither is known. Read-only: the predictor and cursor are untouched.
-    pub fn command_at(&self, player: u16, tick: u64) -> Option<TickCommand> {
+    /// The host tick the client's `tick` runs at, per the newest snapshot.
+    pub fn host_tick(&self, tick: u64) -> u64 {
+        tick.saturating_add_signed(self.host_offset)
+    }
+
+    /// Record that client tick `client` ran at host tick `host`.
+    pub fn set_offset(&mut self, client: u64, host: u64) {
+        self.host_offset = i128::from(host)
+            .saturating_sub(i128::from(client))
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+    }
+
+    /// The command to replay `player`'s body with at client tick `tick`
+    /// (host tick `host`): the stored authoritative one when it is still
+    /// there (it may have arrived after the tick was predicted), else what
+    /// the live step used. `None` when neither is known. Read-only: the
+    /// predictor and cursor are untouched.
+    pub fn command_at(&self, player: u16, tick: u64, host: u64) -> Option<TickCommand> {
         self.store
-            .get(player, tick)
+            .get(player, host)
             .map(|c| c.command)
             .or_else(|| self.applied.get(&(player, tick)).copied())
     }
@@ -244,9 +263,10 @@ pub fn drive_predicted_bodies(
     }
     let feed = &mut *feed;
     for (body, mut input) in &mut bodies {
+        let host_tick = feed.host_tick(session.tick());
         let p = feed
             .predictor
-            .command_for(&mut feed.store, body.wire, session.tick());
+            .command_for(&mut feed.store, body.wire, host_tick);
         *input = decode_tick_command(&p.command);
         feed.note_applied(body.wire, session.tick(), p.command);
     }
@@ -544,19 +564,19 @@ mod tests {
         feed.note_applied(3, 10, p.command);
         // Tick 10 is consumed (gone from the store) but replayable.
         assert!(feed.store.get(3, 10).is_none());
-        assert_eq!(feed.command_at(3, 10), Some(cmd(100, 0)));
+        assert_eq!(feed.command_at(3, 10, 10), Some(cmd(100, 0)));
         // A late authoritative command for a predicted tick beats the log.
         feed.note_applied(3, 11, cmd(1, 0));
-        assert_eq!(feed.command_at(3, 11), Some(cmd(110, 0)));
-        assert_eq!(feed.command_at(3, 99), None);
-        assert_eq!(feed.command_at(4, 10), None);
+        assert_eq!(feed.command_at(3, 11, 11), Some(cmd(110, 0)));
+        assert_eq!(feed.command_at(3, 99, 99), None);
+        assert_eq!(feed.command_at(4, 10, 10), None);
         // Bounded per seat, and another seat's entries are left alone.
         feed.note_applied(4, 1, cmd(7, 0));
         for t in 100..100 + 3 * APPLIED_KEEP {
             feed.note_applied(3, t, cmd(5, 0));
         }
-        assert_eq!(feed.command_at(3, 10), None);
-        assert_eq!(feed.command_at(4, 1), Some(cmd(7, 0)));
+        assert_eq!(feed.command_at(3, 10, 10), None);
+        assert_eq!(feed.command_at(4, 1, 1), Some(cmd(7, 0)));
         assert!(feed.applied.len() as u64 <= APPLIED_KEEP + 2);
     }
     fn rc(throttle: u8) -> RemoteCommand {
