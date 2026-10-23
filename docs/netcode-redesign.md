@@ -1693,3 +1693,53 @@ fresh budget). Evidence level: synthetic integration on the production step.
 Open: the over-the-wire assertion in `tests/net_contact.rs`, which waits for
 the client on the datagram lane (NETPLAY-06E-4) and the host sending
 `RemoteCommands`; its header caveat stays until then.
+
+## Lifecycle on the lane (NETPLAY-06F, #1872)
+
+*Evidence level: synthetic integration — real `mm2` OS processes over
+loopback, dev world, no retail data. Loopback proves the code path; it
+says nothing about a real LAN, router or the Internet (OWNER #1249 for
+driving feel, #1240 for reachability).* Every client in these legs
+negotiated the lane (`transport=lane`); none ran `--tcp-only`.
+
+| Lifecycle | Leg | Result |
+|---|---|---|
+| Direct host/join, start, drive | `net_drive::two_mm2_processes_drive_one_session_over_loopback` | inputs up, snapshots down, remote seat spawned |
+| Rematch (cancel, re-ready, generation 2) | `net_drive::two_mm2_processes_play_a_rematch_without_reconnecting`; lossy: `net_lane_loss` | client ends in `gen2` |
+| Start, reset ask, rematch, leave under 15 % loss / 10 % dup / 10 % reorder, a datagram dropped ahead of each event | `net_lane_loss` | each applied once; seat reaped `cause=quit` |
+| Late join into a running session | `net_drive::a_client_that_joins_a_running_session_is_handed_the_live_one` | joiner is handed generation 1 |
+| Late join behind a lossy lane | `net_lifecycle::a_late_joiner_behind_a_lossy_lane_is_handed_the_live_session` (new) | joiner drives `gen1`, proxy impaired both ways |
+| Client vanishes mid-session | `net_lifecycle::a_killed_client_is_reaped_and_a_new_one_joins_the_running_session` (new) | host `cause=lost` (2.3 ms measured on loopback: the kernel closes the sockets); a newcomer then joins generation 1 and drives |
+| Host vanishes | `net_edge::a_killed_host_*` | clients close / end |
+
+### Open: the host does not time out a silent client
+
+A client that stops speaking while its sockets stay open (SIGSTOP, a
+black-holed link) is **not** reaped by the host. `LIVENESS_TIMEOUT` (5 s)
+is a *client-side* read timeout on the host's keepalives; the host reaps
+a seat when a write to it fails (closed socket, or a stalled socket whose
+send buffer fills), and the lane has no seat-silence timer either. A
+SIGSTOPped client was still on the roster after 30 s. Until a host-side
+liveness rule exists, an Internet client that loses its route without a
+FIN/RST lingers as a seat. Filed as follow-up #1967; the former
+reachability wording that "a silent peer is declared dead after 5 s" is
+corrected to say this applies to the host as seen by a client.
+
+### #1767 acceptance mapping
+
+Evidence for each criterion lives in the sections above and the named
+tests; none of it is WAN evidence.
+
+1. Datagram drop/reorder/duplicate both directions: `UdpImpairProxy`
+   (06B) and `net_lane_loss`.
+2. Bulk/reliable delay does not stop movement; budgets measured: 06C
+   "Measured" and 06D "Measured" sections.
+3. Wrong seat/generation/token rejected, stale bases and partial
+   assemblies safe: 06A counters, 06C.
+4. Start, reset, leave, rematch survive a lost significant message and
+   apply once: `net_lane_loss` and `mm2_net` `lane_lobby_tests` /
+   `lane_reliable_tests`. C&R and impact outcomes: 06E-3 section.
+5. Direct join, late join, disconnect on loopback: the table above.
+   Endpoint/firewall requirements: `docs/multiplayer-reachability.md`.
+   **Open:** the host-side silent-client timeout above, and all real
+   machine validation (OWNER #1240, #1249).

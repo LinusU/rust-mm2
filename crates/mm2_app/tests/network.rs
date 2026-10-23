@@ -17,6 +17,7 @@ mod net_focus_handoff;
 mod net_host;
 mod net_join;
 mod net_lane_loss;
+mod net_lifecycle;
 mod net_matrix;
 mod net_remote_commands;
 mod net_remote_predict;

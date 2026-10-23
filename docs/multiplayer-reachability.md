@@ -47,8 +47,14 @@ in with real results.
   or public bind is always an explicit `--bind`. Use a **fixed port**
   (e.g. `:27015`) for LAN/Internet runs so firewall and port-forward
   rules can name it.
-- Handshake timeout 10 s; keepalive 1 s; a silent peer is declared dead
-  after 5 s (`crates/mm2_net/src/{conn,lobby}.rs`).
+- Handshake timeout 10 s; keepalive 1 s. A **client** declares a silent
+  *host* dead after 5 s (`LIVENESS_TIMEOUT`, `crates/mm2_net/src/lobby.rs`).
+  The **host** has no such timer for a silent client: it reaps a seat when
+  the socket closes (immediately, e.g. process death) or a write fails.
+  A client whose route is black-holed without a FIN/RST can linger on the
+  host's roster (measured on loopback with SIGSTOP: still seated after
+  30 s). Rows L6/I5 below therefore may not show `cause=lost` within 5 s;
+  record what happens.
 - Every machine must mount an install and mods with the same gameplay
   fingerprint (`fnv1a64:...`, printed in the host's `listening=` record
   and the client's `connected=` record). A mismatch is `join_failed`.
@@ -113,7 +119,12 @@ Run on 2026-10-10 against the retail install, `--dev-world`,
 
 Level reached: synthetic integration with retail-mounted content, no
 windowed client, no real network. The automated multi-process tests
-cover the same ground in CI.
+cover the same ground in CI, including (NETPLAY-06F) late join into a
+running session, late join behind a lossy lane, and a killed client
+reaped as `cause=lost` (2.3 ms on loopback, because the kernel closes
+its sockets) with the session running on:
+`crates/mm2_app/tests/net_lifecycle.rs`, table in
+`docs/netcode-redesign.md` "Lifecycle on the lane".
 
 ## Scope 2: LAN (owner fills in)
 
@@ -127,7 +138,7 @@ through a NAT between them. Run each row; record host and client output.
 | L3 | `A_LAN_IP:27015` | `mm2 --join` on B | joined, lobby shows both | | |
 | L4 | `A_LAN_IP:27015` | `mm2-join` on B with OS firewall on at A, no rule | blocked: `join_failed` after ~10 s | | record the OS prompt/behaviour |
 | L5 | as L1, after allowing `mm2-host` in the firewall | `mm2-join` on B | joined | | |
-| L6 | as L1, pull B's cable/Wi-Fi mid-lobby | — | host `left ... cause=lost` within ~5 s | | |
+| L6 | as L1, pull B's cable/Wi-Fi mid-lobby | — | host `left ... cause=lost`; **no host-side 5 s timer exists**, record the actual delay | | |
 | L7 | as L1, `mm2-join` with a different mod set | — | `join_failed` (fingerprint) | | |
 
 ## Scope 3: Internet (owner fills in)
@@ -144,7 +155,7 @@ shown by a "what is my IP" site: forwarding cannot work), and IPv4/IPv6.
 | I2 | as I1 | `mm2 --join PUBLIC_IP:27015` from outside | joined | | |
 | I3 | no port-forward | `mm2-join` from outside | `join_failed` after ~10 s (timeout) or refused | | note which |
 | I4 | forwarded; host on CGNAT | — | not reachable; note it | | |
-| I5 | as I1, drop the client's network mid-lobby | — | `left ... cause=lost` within ~5 s | | |
+| I5 | as I1, drop the client's network mid-lobby | — | `left ... cause=lost`; **no host-side 5 s timer exists**, record the actual delay | | |
 | I6 | as I1, client from a different NAT behind Wi-Fi hotspot | `mm2-join` | joined | | |
 
 ## Report template
