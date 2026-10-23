@@ -61,10 +61,13 @@ use avian3d::prelude::{AngularVelocity, CollisionStart, LinearVelocity, Position
 use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, Session};
-use mm2_vehicle::capture::EpochRef;
+use mm2_vehicle::capture::{EpochRef, VehicleCapture};
 use mm2_vehicle::physics_world::{WorldCapture, capture_world, restore_world};
 use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from_observed};
-use mm2_vehicle::{RemoteReplica, Teleported, VehicleInput};
+use mm2_vehicle::{
+    EngineImpairment, PreStepVelocity, RemoteReplica, Teleported, Vehicle, VehicleInput,
+    VehicleState,
+};
 
 use crate::car_visual::Trailer;
 use crate::net::LobbyLink;
@@ -741,6 +744,7 @@ fn classify_and_run(
         (pos_error, rot_error),
         (remote_error, remote_diverged),
         &entrants,
+        resets,
     )
 }
 
@@ -864,10 +868,12 @@ fn replay(
     (pos_error, rot_error): (f32, f32),
     (remote_error, remote_diverged): (f32, bool),
     entrants: &[Entity],
+    resets: &[Entity],
 ) -> Outcome {
     let a = req.assertion;
     let mut corrected = pred.ring.get(a.ack).expect("checked by the caller").clone();
     seed_entrants(world, req, entrants, &mut corrected);
+    renew_reset_bodies(world, resets, &mut corrected);
     if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == req.own) {
         vc.body.position = a.pos.to_array();
         vc.body.rotation = a.rot.to_array();
@@ -997,6 +1003,38 @@ fn replay(
         turn,
         remote_error,
         remote_diverged,
+    }
+}
+
+/// A contact body whose seat the host reset: its recorded drivetrain, tyre
+/// and suspension state belongs to the life before the teleport, so the
+/// corrected capture carries a fresh state instead (what the host's
+/// `vehicle_reset` gave the seat). The body pose is overwritten with the
+/// host's by the caller. How many ticks before the compared tick the
+/// reset happened is not on the wire, so the fresh state is taken at the
+/// compared tick: an inference, not a wire fact.
+fn renew_reset_bodies(world: &World, resets: &[Entity], corrected: &mut WorldCapture) {
+    for body in resets {
+        let (Some(vehicle), Some((_, vc))) = (
+            world.get::<Vehicle>(*body),
+            corrected.vehicles.iter_mut().find(|(e, _)| e == body),
+        ) else {
+            continue;
+        };
+        let mut state = VehicleState::new(&vehicle.config);
+        let (spins, completed) = (vc.gyro_spins, vc.gyro_completed);
+        state.gyro_spins = spins;
+        state.gyro_completed = completed;
+        let input = vc.input;
+        let fresh = VehicleCapture::from_parts(
+            vc.epoch,
+            vc.body,
+            &VehicleInput::default(),
+            PreStepVelocity::default(),
+            vc.impairment.map(EngineImpairment),
+            &state,
+        );
+        *vc = VehicleCapture { input, ..fresh };
     }
 }
 
@@ -1778,6 +1816,35 @@ mod tests {
             go2(&mut app, &mut pred, own, &a, &[r], 30),
             Outcome::Matched
         );
+    }
+
+    /// A reset seat's recorded drivetrain belongs to the life before the
+    /// teleport: the corrected history holds a fresh state for it, and
+    /// the own car (no reset) keeps what it had.
+    #[test]
+    fn a_reset_remote_body_continues_from_a_fresh_state() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let speed_of = |pred: &OwnPrediction, e: Entity, tick: u64| {
+            let past = pred.ring.get(tick).unwrap();
+            past.vehicles
+                .iter()
+                .find(|(v, _)| *v == e)
+                .unwrap()
+                .1
+                .forward_speed
+        };
+        let (own_before, remote_before) = (speed_of(&pred, own, 20), speed_of(&pred, remote, 20));
+        assert!(remote_before.abs() > 0.1, "the body was driven");
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 1;
+        let r = drive(remote, Some(ra), 21, 30);
+        go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        assert_eq!(speed_of(&pred, remote, 20), 0.0);
+        assert_eq!(speed_of(&pred, own, 20), own_before);
     }
 
     /// A remote state older than the body's epoch is dropped whatever its

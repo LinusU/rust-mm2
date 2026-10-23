@@ -1108,14 +1108,7 @@ pub fn vehicle_reset(
             av.0 = Vec3::ZERO;
             transform.translation = ev.position;
             transform.rotation = Quat::from_rotation_y(ev.yaw);
-            // The gyro counters are run evidence, not sim state — a reset
-            // clears the car's motion bookkeeping, not the record of what
-            // it did (a self-right now lands here too, and wiping them
-            // would erase a flip's own maneuver history).
-            let (spins, completed) = (state.gyro_spins, state.gyro_completed);
-            *state = VehicleState::new(&vehicle.config);
-            state.gyro_spins = spins;
-            state.gyro_completed = completed;
+            state.start_new_life(&vehicle.config);
             commands
                 .entity(entity)
                 .insert(Teleported)

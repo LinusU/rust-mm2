@@ -1503,6 +1503,31 @@ app (captures are stamped with the own car's `EpochRef` only, and the
 `PredictedRemoteBody::epoch` carries the seat's reset epoch instead, which is
 what reconcile needs).
 
+### A reset starts a new life on every peer (NETPLAY-08D, #1977)
+
+The host's `vehicle_reset` gives the teleported seat a fresh `VehicleState`
+(engine, gearbox, tyre bristles, suspension, pending forces; the gyro
+counters are run evidence and survive, `VehicleState::start_new_life`).
+Before this change the pose reached the other peers but the old life did
+not leave them:
+
+| Where | Before | Now |
+|---|---|---|
+| Own car on a client, epoch advance in a `Snap` | pose/velocity taken, drivetrain and tyre state kept: a kick on the next tick | `apply_snapshots` queues `start_new_life` for the seat (and the own rig's trailer, which reseats with it); a later same-epoch snapshot never zeroes it, reconciliation restores the real state through the replay |
+| Remote contact body, epoch ahead | host pose written over the recorded vehicle state | the corrected capture carries a fresh state (`renew_reset_bodies`) with the host's body state; input and run counters are kept |
+| Remote copies (`RemoteReplica`) | state comes from the v7 tail each snapshot | unchanged |
+
+How many ticks before the compared tick the host reset happened is not on
+the wire, so a contact body's fresh state is taken at the compared tick: an
+inference, not a wire fact. The player's input filter (`BufferedPlayerInput`)
+is local to one peer and reaches the host only as quantized commands, so it
+cannot diverge between peers and is left alone (whether retail clears it on
+a reset is unknown). Tests: `netdrive::tests::an_authority_reset_of_the_own_seat_starts_a_new_life`,
+`netpredict::tests::a_reset_remote_body_continues_from_a_fresh_state`.
+Evidence level: synthetic integration. Not covered: damage repair,
+rematch/city reload/late join/disconnect/round change interplay and a real
+transport run with a trailer rig.
+
 ### Re-entering seats (NETPLAY-05E, #1933)
 
 A contact body that spawns after the compared tick is not in the recorded

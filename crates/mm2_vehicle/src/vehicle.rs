@@ -368,6 +368,17 @@ impl VehicleState {
         }
     }
 
+    /// Replace everything the previous life left in the car (engine,
+    /// gearbox, tyre bristles, suspension, pending forces) with a fresh
+    /// state, keeping the gyro counters: they are run evidence, not sim
+    /// state, and a reset must not erase a flip's own maneuver history.
+    pub fn start_new_life(&mut self, config: &VehicleConfig) {
+        let (spins, completed) = (self.gyro_spins, self.gyro_completed);
+        *self = Self::new(config);
+        self.gyro_spins = spins;
+        self.gyro_completed = completed;
+    }
+
     /// Fresh state for `config`.
     pub fn new(config: &VehicleConfig) -> Self {
         Self {

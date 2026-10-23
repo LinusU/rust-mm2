@@ -3012,6 +3012,21 @@ pub fn retire_stalled_wire_seats(
     }
 }
 
+/// Give a car the state of a fresh reset on this peer: what the host's
+/// `vehicle_reset` did to its own copy when it teleported the seat. The
+/// pose and velocity come from the snapshot; this clears the rest of the
+/// previous life. Later snapshots reconcile the real drivetrain/tyre
+/// state through the replay and are never zeroed here.
+fn start_new_life(world: &mut World, entity: Entity) {
+    let mut q = world.query::<(&Vehicle, &mut VehicleState)>();
+    if let Ok((vehicle, mut state)) = q.get_mut(world, entity) {
+        state.start_new_life(&vehicle.config);
+    }
+    if let Some(mut pre) = world.get_mut::<mm2_vehicle::PreStepVelocity>(entity) {
+        *pre = mm2_vehicle::PreStepVelocity::default();
+    }
+}
+
 /// Host-side: fold every [`ResetVehicle`] the session's reset paths
 /// emit into the targets' [`ResetEpoch`] — the wire's reset signal
 /// (F25-A.5). `vehicle_reset` consumes the same message stream to apply
@@ -4198,6 +4213,11 @@ fn apply_snap_frame(
                     snaps.own_drift = DriftWatch::default();
                     own_reseat = true;
                     if authority_reset {
+                        // The pose moved to the host's fresh continuation;
+                        // the drivetrain, tyre and suspension state must
+                        // not carry the old life into it (a kick on the
+                        // next tick, or a pull back to the old state).
+                        commands.queue(move |world: &mut World| start_new_life(world, entity));
                         snaps.own_settle = SettleWatch::default();
                         report.resets += 1;
                         report.own_resets += 1;
@@ -4347,6 +4367,9 @@ fn apply_snap_frame(
             };
             if own_rig && !snap_to {
                 continue;
+            }
+            if own_rig && reset_owners.contains(&t.owner) {
+                commands.queue(move |world: &mut World| start_new_life(world, entity));
             }
             *vel = LinearVelocity(Vec3::from(t.vel));
             *ang = AngularVelocity(Vec3::from(t.angvel));
@@ -6045,6 +6068,97 @@ mod tests {
         );
         app.update();
         assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 2);
+    }
+
+    /// The host reset the local seat: the pose and velocity are the host's
+    /// fresh continuation, and nothing of the previous life's drivetrain
+    /// stays in the car. A snapshot of the same epoch afterwards leaves the
+    /// state alone (reconciliation never zeroes it).
+    #[test]
+    fn an_authority_reset_of_the_own_seat_starts_a_new_life() {
+        let mut session = Session::new();
+        session
+            .begin(mm2_game::SessionConfig {
+                authority: mm2_game::SessionAuthority::Remote,
+                ..mm2_game::SessionConfig::default()
+            })
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let own = app
+            .world_mut()
+            .spawn((
+                NetPlayer(1),
+                Player {
+                    id: mm2_game::PlayerId(1),
+                    control: PlayerControl::Local,
+                },
+                ResetEpoch(0),
+                Position(Vec3::new(50.0, 0.0, 0.0)),
+                Rotation(Quat::IDENTITY),
+                vehicle_bundle(&VehicleConfig::default()),
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(own)
+            .insert(LinearVelocity(Vec3::new(20.0, 0.0, 0.0)));
+        {
+            let mut state = app.world_mut().get_mut::<VehicleState>(own).unwrap();
+            state.forward_speed = 20.0;
+            state.steer_angle = 0.4;
+            state.gear = 3;
+            state.gyro_spins = 2;
+        }
+        let mut entry = snap_entry();
+        entry.epoch = 1;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            5,
+            vec![entry],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        app.update();
+        let state = app.world().get::<VehicleState>(own).unwrap();
+        assert_eq!(
+            (state.forward_speed, state.steer_angle, state.gear),
+            (0.0, 0.0, 0)
+        );
+        assert_eq!(state.gyro_spins, 2, "run evidence survives the reset");
+        assert_eq!(app.world().get::<ResetEpoch>(own).unwrap().0, 1);
+        // The same epoch again: the car's state is its own.
+        app.world_mut()
+            .get_mut::<VehicleState>(own)
+            .unwrap()
+            .forward_speed = 7.0;
+        let mut entry = snap_entry();
+        entry.epoch = 1;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            6,
+            vec![entry],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        app.update();
+        assert_eq!(
+            app.world().get::<VehicleState>(own).unwrap().forward_speed,
+            7.0
+        );
     }
 
     /// `reset` ends a stream at its authority boundary: the staged
