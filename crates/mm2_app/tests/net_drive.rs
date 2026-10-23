@@ -161,47 +161,47 @@ fn stop_field<'a>(line: &'a str, leg: &str) -> &'a str {
 /// the authority, applied on a client) reads 0 on a surface-table-
 /// less install and counts on the fixture pair's.
 #[derive(Debug, Default)]
-struct NetField {
-    inputs_sent: u64,
-    inputs_applied: u64,
-    snaps_sent: u64,
-    snaps_applied: u64,
-    snaps_staled: u64,
-    remotes: u64,
-    remote_spin: u64,
+pub(crate) struct NetField {
+    pub(crate) inputs_sent: u64,
+    pub(crate) inputs_applied: u64,
+    pub(crate) snaps_sent: u64,
+    pub(crate) snaps_applied: u64,
+    pub(crate) snaps_staled: u64,
+    pub(crate) remotes: u64,
+    pub(crate) remote_spin: u64,
     #[allow(dead_code)]
-    damage_synced: u64,
+    pub(crate) damage_synced: u64,
     #[allow(dead_code)]
-    trailers_synced: u64,
-    impacts_sent: u64,
-    impacts_applied: u64,
+    pub(crate) trailers_synced: u64,
+    pub(crate) impacts_sent: u64,
+    pub(crate) impacts_applied: u64,
     #[allow(dead_code)]
-    breaks_detached: u64,
+    pub(crate) breaks_detached: u64,
     #[allow(dead_code)]
-    breaks_restored: u64,
+    pub(crate) breaks_restored: u64,
     #[allow(dead_code)]
-    race_applied: u64,
+    pub(crate) race_applied: u64,
     #[allow(dead_code)]
-    race_dropped: u64,
+    pub(crate) race_dropped: u64,
     #[allow(dead_code)]
-    progress_applied: u64,
+    pub(crate) progress_applied: u64,
     #[allow(dead_code)]
-    progress_dropped: u64,
-    surfaces_sent: u64,
-    surfaces_applied: u64,
-    own_settles: u64,
+    pub(crate) progress_dropped: u64,
+    pub(crate) surfaces_sent: u64,
+    pub(crate) surfaces_applied: u64,
+    pub(crate) own_settles: u64,
     /// Own-seat moving-drift corrections (`drf`; #1502), printed only
     /// once non-zero.
     #[allow(dead_code)]
-    own_drifts: u64,
-    requests_sent: u64,
-    requests_granted: u64,
-    requests_dropped: u64,
+    pub(crate) own_drifts: u64,
+    pub(crate) requests_sent: u64,
+    pub(crate) requests_granted: u64,
+    pub(crate) requests_dropped: u64,
     /// The trailing `rst<n>` cell, printed only once non-zero.
-    resets: u64,
+    pub(crate) resets: u64,
 }
 
-fn net_field(line: &str) -> NetField {
+pub(crate) fn net_field(line: &str) -> NetField {
     let tok = field(line, "net");
     // `inSs/Aa/Xx`-style cells — strip the name, split the counters,
     // read each cell's leading digits (the suffix letter is a marker).
@@ -262,7 +262,7 @@ fn net_field(line: &str) -> NetField {
 
 /// Metres the run's own car drove — the `moved=` field (`none` when
 /// the session never produced a player).
-fn moved_m(line: &str) -> f64 {
+pub(crate) fn moved_m(line: &str) -> f64 {
     field(line, "moved")
         .strip_suffix('m')
         .and_then(|n| n.parse().ok())
@@ -353,7 +353,7 @@ fn surface_counts(line: &str) -> (u64, u64, u64, u64) {
 /// the session: its `net=` shows the clients' inputs were applied to
 /// the simulated remote seats and snapshots went back out. (`quit` is
 /// also the host's Cancel→teardown→exit lifecycle leg.)
-fn quit_and_assert_host_drove(mut host: Proc) -> NetField {
+pub(crate) fn quit_and_assert_host_drove(mut host: Proc) -> NetField {
     host.cmd("quit");
     let rec = host.until_within("smoke=headless-physics", Duration::from_secs(60));
     assert_eq!(field(&rec, "status"), "pass", "{rec}");

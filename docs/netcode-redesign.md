@@ -1304,6 +1304,26 @@ return `Dead` and fall back to the control stream). The senders here only
 send inside the running generation; resetting a channel on a new
 generation belongs with 06E-2's Start/Cancel sequencing.
 
+Still true (rechecked in NETPLAY-06E-5, #1950): lobby-scope messages
+(generation 0: `Start`, `Cancel`, roster, `Leave`, ready) are immune, since
+generation 0 is always admitted, but a generation-scoped message minted
+after its generation has ended is refused
+(`a_reliable_datagram_naming_a_generation_that_does_not_run_is_still_refused`)
+and still costs the channel its 8 attempts. Resetting or retiring the
+generation-scoped part of a seat's channel on `Start`/`Cancel` is filed as
+follow-up work (#1954); the app-level process test below does not reach the case,
+because its senders only send inside the running generation.
+
+Process-level evidence (`net_lane_loss`, #1950): a host and a client as
+separate `mm2` processes, the client's lane routed through a seeded
+`UdpImpairProxy` (`mm2 --join --lane-via <dial>/<advertise port>`, a hidden
+test seam), 15 % loss/duplication/reordering plus a datagram dropped ahead
+of each event: `Start` (generation 1), a reset ask (sent once, granted once),
+`cancel` and the client's re-ready, `Start` (generation 2) and the client's
+`Leave` (one `event=left cause=quit`). The drop is armed just before the
+event, so under live input traffic it may land on another datagram; the
+guaranteed first-datagram-lost cases are `lane_lobby_tests`'.
+
 Evidence level: synthetic integration over the seeded UDP impairment proxy
 (`lane_reliable_tests`): the first reset ask, the first Cnr outcome frame
 and the first impact event are each lost on purpose from connection start

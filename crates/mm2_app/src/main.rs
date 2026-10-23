@@ -633,6 +633,13 @@ struct Cli {
     #[arg(long, requires = "join")]
     tcp_only: bool,
 
+    /// Steer the UDP lane through a relay: `<dial addr>/<advertise port>`
+    /// — send datagrams to the relay's client-facing address and tell the
+    /// host to expect them from the relay's host-facing port. A test
+    /// seam for the UDP impairment proxy; not a user setting.
+    #[arg(long, requires = "join", conflicts_with = "tcp_only", value_parser = parse_lane_via, hide = true)]
+    lane_via: Option<mm2_net::LaneRoute>,
+
     /// Mark ready as soon as the lobby admits us — with it the host's
     /// `start` can fire immediately — and again whenever the host
     /// closes a session, so the next round can start unattended.
@@ -699,6 +706,17 @@ struct SmokeTest {
     pending: Option<PathBuf>,
     /// Frames left to wait for `pending` before calling it a failure.
     capture_wait: u32,
+}
+
+/// `--lane-via` value: `<dial addr>/<advertise port>`.
+fn parse_lane_via(raw: &str) -> Result<mm2_net::LaneRoute, String> {
+    let (dial, port) = raw
+        .split_once('/')
+        .ok_or("expected <dial addr>/<advertise port>")?;
+    Ok(mm2_net::LaneRoute {
+        dial: dial.parse().map_err(|e| format!("dial address: {e}"))?,
+        advertise_port: port.parse().map_err(|e| format!("advertise port: {e}"))?,
+    })
 }
 
 fn main() {
@@ -1376,7 +1394,13 @@ fn main() {
             warn!("--tcp-only: joining without the UDP lane, lower quality");
             net::LobbyLink::join_tcp_only(addr, &hello, has_mods, session_config.dev.clone())
         } else {
-            net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone())
+            net::LobbyLink::join_routed(
+                addr,
+                &hello,
+                has_mods,
+                session_config.dev.clone(),
+                cli.lane_via,
+            )
         };
         let mut link = match joined {
             Ok(link) => link.keep_ready(cli.ready),

@@ -455,8 +455,22 @@ impl LobbyLink {
         mods_active: bool,
         dev: DevOverrides,
     ) -> Result<Self, NetError> {
+        Self::join_routed(addr, hello, mods_active, dev, None)
+    }
+
+    /// [`LobbyLink::join`] with the datagram path steered through a relay
+    /// (`mm2 --lane-via`): a harness seam for the UDP impairment proxy,
+    /// which the host's source-address check otherwise keeps off the path.
+    /// `None` is the ordinary direct join.
+    pub fn join_routed(
+        addr: SocketAddr,
+        hello: &Hello,
+        mods_active: bool,
+        dev: DevOverrides,
+        route: Option<mm2_net::LaneRoute>,
+    ) -> Result<Self, NetError> {
         Self::adopt(
-            Client::join_lane(addr, hello)?,
+            Client::join_lane_routed(addr, hello, mm2_net::LANE_ECHO_TIMEOUT, route)?,
             addr,
             hello,
             mods_active,
