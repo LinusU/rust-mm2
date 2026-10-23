@@ -869,6 +869,23 @@ scripts), and wiring the predictor to a body, which is 05A-3. Evidence
 level: synthetic integration on the production step; flat ground, default
 car, no collisions, no retail data.
 
+**Live policy (NETPLAY-05K, #1959).** The synthetic choice above is for
+flat ground and no collisions. The live contact-body step runs on the
+received store with `Policy::AgeAware { hold: 4, fade: 12 }`
+(`netremote::LIVE_POLICY`): a client's bodies are always ahead of the
+newest frame it holds (lead plus link latency, 9-19 ticks in the pileup),
+so every live command is a prediction, never a received one. In the
+three-car wall pileup (`net_contact`, unequal links) the pinned cars
+steer in a closed loop and saturate left and right in turn; holding
+that steering 10-20 ticks past its source drove the contact bodies into
+the own car and the replay reproduced the same shove each snapshot (own
+error 1.4-4 m that no replay removed). With hold-last the test failed on
+roughly half of runs (1.3-20 m); with the fade it passed 19 of 19 in a row
+(neutral bodies, the earlier baseline, 6 of 6). The replay is unchanged
+(`command_at`: the stored command for its host tick, else what the live
+step applied). Evidence level: synthetic integration over loopback with
+the seeded lossy proxy; no retail data.
+
 ## Dynamic remote body, visual apart (NETPLAY-05A-3, #1894)
 
 Behind `NetplayTimeline`, `spawn_remote` on a predicted client gives each
@@ -889,10 +906,10 @@ gone (leave, changed pick); both carry the session's `SessionEntity`.
 Host-planned bots and trailers keep the legacy kinematic copies; with the
 selector off nothing changes.
 
-**Not done here.** (Update, 05J: the host now emits frames and the client
-absorbs them into `RemoteFeed.store`; only the replay reads them, the live
-step still runs neutral because reading them live destabilised the
-three-car wall pileup in `net_contact`.) The body is not corrected towards the host:
+**Not done here.** (Update, 05K: the host emits frames, the client absorbs
+them into `RemoteFeed.store`, and the live step reads them. Pure hold-last
+over that store failed the three-car wall pileup in `net_contact`, so the
+live step fades stale commands; see "Live policy" below.) The body is not corrected towards the host:
 `reconcile_own` restoring and replaying both cars is 05A-4. Evidence level:
 synthetic integration (unit tests on `spawn_remote` with a dev car and the
 lerp system); no retail data, no rendered capture.
@@ -1003,8 +1020,8 @@ change is in what is compared, corrected and driven:
   before. Each adopts the host state of the own car and of every remote body
   that had an assertion.
 
-Still open: (05J: frames are now absorbed and read by the replay; the live
-step does not read them) and contact-specific
+Still open: (05J/05K: frames are absorbed and read by both the replay and
+the live step) and contact-specific
 tests and cost numbers are 05A-5. Evidence level: synthetic integration on
 the production step (twin-world equality for a two-car replay); no retail
 data, no rendered capture.

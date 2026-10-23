@@ -187,8 +187,7 @@ fn extrapolate(policy: Policy, command: TickCommand, age: u64) -> TickCommand {
 pub struct RemoteFeed {
     /// Commands the host applied to remote seats, by seat and tick.
     pub store: RemoteCommands,
-    /// The policy for ticks the store lacks: hold-last (the measured
-    /// choice, see `docs/netcode-redesign.md`).
+    /// The policy for ticks the store lacks ([`LIVE_POLICY`]).
     pub predictor: RemotePredictor,
     /// The command each contact body was actually stepped with, by seat and
     /// client tick. [`RemoteCommands::consume`] forgets a tick once it is
@@ -205,11 +204,19 @@ pub struct RemoteFeed {
 /// nothing can be replayed, so older entries are dead weight.
 const APPLIED_KEEP: u64 = MAX_REPLAY_STEPS as u64 * 2;
 
+/// The policy the live contact-body step predicts with. Every live command
+/// is older than the newest received frame (the client runs ahead of the
+/// host), and a closed-loop driver's steering held that long shoves the
+/// contact bodies into the own car, which the replay then reproduces each
+/// snapshot; fading stale commands passes the three-car wall pileup that
+/// pure hold-last fails (`docs/netcode-redesign.md`, "Live policy").
+const LIVE_POLICY: Policy = Policy::AgeAware { hold: 4, fade: 12 };
+
 impl Default for RemoteFeed {
     fn default() -> Self {
         Self {
             store: RemoteCommands::new(),
-            predictor: RemotePredictor::new(Policy::HoldLast),
+            predictor: RemotePredictor::new(LIVE_POLICY),
             applied: BTreeMap::new(),
             host_offset: 0,
         }
@@ -264,13 +271,9 @@ pub fn drive_predicted_bodies(
     let feed = &mut *feed;
     for (body, mut input) in &mut bodies {
         let host_tick = feed.host_tick(session.tick());
-        // The live step deliberately does not read the received store: feeding
-        // it real commands made the three-car wall pileup (net_contact)
-        // diverge 1.5-11 m on 60-80% of runs, while hold-last/neutral over an
-        // empty store passes. The received commands are used by the replay
-        // (`command_at`) only. Why the live step diverges is still open.
-        let mut empty = RemoteCommands::new();
-        let p = feed.predictor.command_for(&mut empty, body.wire, host_tick);
+        let p = feed
+            .predictor
+            .command_for(&mut feed.store, body.wire, host_tick);
         *input = decode_tick_command(&p.command);
         feed.note_applied(body.wire, session.tick(), p.command);
     }
