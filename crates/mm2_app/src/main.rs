@@ -1824,6 +1824,7 @@ fn main() {
     .add_plugins(display_trial::DisplayTrialPlugin)
     .add_message::<ImpactEvent>()
     .add_message::<netdrive::RemoteImpact>()
+    .init_resource::<mm2_app::impact_presentation::ImpactPresentation>()
     .add_message::<DamageEvent>()
     .add_message::<StuckEvent>()
     .add_message::<PartDetached>()

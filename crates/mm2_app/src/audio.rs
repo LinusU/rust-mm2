@@ -2480,6 +2480,7 @@ pub fn impact_voices(
     bangers: Query<&Banger>,
     voices: Query<&AudioVoice>,
     mut watch: Local<ScrapeWatch>,
+    mut presentation: Option<ResMut<crate::impact_presentation::ImpactPresentation>>,
 ) {
     if !session.is_playing() {
         reader.read().for_each(drop);
@@ -2604,6 +2605,13 @@ pub fn impact_voices(
     };
     for event in reader.read() {
         if event.generation != generation {
+            continue;
+        }
+        // NETPLAY-08A: the authority's row for this hit already played.
+        if !presentation
+            .as_deref_mut()
+            .is_none_or(|p| p.admit_local(event))
+        {
             continue;
         }
         for side in 0..2 {

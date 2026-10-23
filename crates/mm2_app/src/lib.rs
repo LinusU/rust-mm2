@@ -35,6 +35,7 @@ pub mod drowned;
 pub mod environment;
 pub mod hud;
 pub mod hudmap;
+pub mod impact_presentation;
 pub mod input;
 pub mod layers;
 pub mod leafnet;

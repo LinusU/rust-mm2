@@ -136,11 +136,11 @@ use avian3d::prelude::{
 use bevy::prelude::*;
 use mm2_game::{
     Banger, BangerPhase, BangerPool, BangerStateChanged, DamageSignals, DamageSpec, ImpactEvent,
-    Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl, PlayerVehicle,
-    RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy, ResultLedger,
-    Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult, SmokePolicy, SparkPolicy,
-    StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
-    VehicleSparks, VehicleStuck,
+    Mm2Vfs, ObjectId, ObjectIdentity, OrdinalCounter, ParticipantState, Player, PlayerControl,
+    PlayerVehicle, PresentationVerdict, RaceDefinition, RacePhase, RaceProgress, RaceStarted,
+    RaceState, RecoveryPolicy, ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase,
+    SessionResult, SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage,
+    VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE,
@@ -156,6 +156,7 @@ use crate::audio::{SkidContact, SurfaceContact};
 use crate::banger::BangerMut;
 use crate::breakaway::{self, BreakVisualMut};
 use crate::car_visual;
+use crate::impact_presentation::ImpactPresentation;
 use crate::input::control_just_pressed;
 use crate::net::{HostLink, LobbyLink, LobbyState};
 use crate::netplay_timeline::NetplayTimeline;
@@ -3362,6 +3363,14 @@ pub fn publish_snapshots(
         .iter()
         .map(|(_, wire, _, identity, ..)| (identity.0, wire.0))
         .collect();
+    // The host-authored identity's epoch half (NETPLAY-08A): the seat's
+    // reset epoch at publish, which is the epoch the tick's hit belongs
+    // to — a reset bumps it in the same fixed step it teleports in.
+    let seat_epochs: HashMap<u16, u8> = players
+        .iter()
+        .map(|(_, wire, epoch, ..)| (wire.0, epoch.0))
+        .collect();
+    let mut ordinals = OrdinalCounter::default();
     // The struck-side selector index — built only when the drained
     // stream has events to tag, so a publish tick with no impacts
     // never walks the prop inventory.
@@ -3378,35 +3387,35 @@ pub fn publish_snapshots(
     // `generation` field below is the wire namespace.
     let generation = session.generation();
     let wire_generation = session.wire_generation();
-    let (oid_wires, struck_audio) = (&oid_wires, &struck_audio);
-    let mut impact_rows: Vec<SnapImpact> = drained
-        .into_iter()
-        .filter(|e| e.generation == generation)
-        .flat_map(|e| {
-            // `ImpactEvent::normal` points from participant.0 toward
-            // participant.1 — each seat's row carries its own side's
-            // outward normal, and the *other* side's authored audio
-            // selector (world/seat/recordless read the 0 catch-all).
-            [
-                (e.participants.0, e.participants.1, -e.normal),
-                (e.participants.1, e.participants.0, e.normal),
-            ]
-            .into_iter()
-            .filter_map(move |(who, other, normal)| {
-                let &seat = oid_wires.get(&who)?;
-                let sane = e.point.is_finite() && normal.is_finite() && e.severity.is_finite();
-                sane.then_some(SnapImpact {
-                    seat,
-                    id: e.id.0,
-                    tick: e.tick,
-                    point: e.point.to_array(),
-                    normal: normal.to_array(),
-                    severity: e.severity,
-                    audio_id: struck_audio.get(&other).copied().unwrap_or(0),
-                })
-            })
-        })
-        .collect();
+    let mut impact_rows: Vec<SnapImpact> = Vec::new();
+    for e in drained.into_iter().filter(|e| e.generation == generation) {
+        // `ImpactEvent::normal` points from participant.0 toward
+        // participant.1 — each seat's row carries its own side's
+        // outward normal, and the *other* side's authored audio
+        // selector (world/seat/recordless read the 0 catch-all).
+        for (who, other, normal) in [
+            (e.participants.0, e.participants.1, -e.normal),
+            (e.participants.1, e.participants.0, e.normal),
+        ] {
+            let Some(&seat) = oid_wires.get(&who) else {
+                continue;
+            };
+            if !(e.point.is_finite() && normal.is_finite() && e.severity.is_finite()) {
+                continue;
+            }
+            impact_rows.push(SnapImpact {
+                seat,
+                id: e.id.0,
+                tick: e.tick,
+                epoch: seat_epochs.get(&seat).copied().unwrap_or(0),
+                ordinal: ordinals.next(seat, e.tick),
+                point: e.point.to_array(),
+                normal: normal.to_array(),
+                severity: e.severity,
+                audio_id: struck_audio.get(&other).copied().unwrap_or(0),
+            });
+        }
+    }
     impact_rows.sort_by(|a, b| {
         b.severity
             .total_cmp(&a.severity)
@@ -3701,7 +3710,13 @@ pub fn apply_snapshots(
         &render_parts,
         &mut report,
     );
-    impact_io.record_local(&session, time.elapsed_secs_f64());
+    let seat_state: HashMap<u16, (bool, u8)> = players
+        .iter()
+        .map(|(_, wire, player, epoch, ..)| {
+            (wire.0, (player.control == PlayerControl::Local, epoch.0))
+        })
+        .collect();
+    impact_io.record_local(&session, time.elapsed_secs_f64(), &seat_state);
     drain_pending_impacts(
         &mut snaps,
         &session,
@@ -4473,12 +4488,40 @@ pub struct ImpactIo<'w, 's> {
     /// The fixed-tick timeline selector (NETPLAY-04 rides here for the
     /// same parameter-cap reason).
     timeline: Option<Res<'w, NetplayTimeline>>,
+    /// The own-seat presentation ledger (NETPLAY-08A), used when the
+    /// timeline selector is on in place of `recent`.
+    presentation: Option<ResMut<'w, ImpactPresentation>>,
 }
 
 impl ImpactIo<'_, '_> {
     /// Fold this frame's local [`ImpactEvent`]s into the per-seat
     /// memory and age out the old ones.
-    fn record_local(&mut self, session: &Session, now: f64) {
+    fn record_local(&mut self, session: &Session, now: f64, seat_state: &HashMap<u16, (bool, u8)>) {
+        let staged = self.timeline.as_deref().is_some_and(|t| t.enabled);
+        if let Some(presentation) = self.presentation.as_deref_mut() {
+            presentation.sync(
+                staged,
+                session.generation(),
+                session.wire_generation(),
+                self.seats.iter().filter_map(|(wire, identity)| {
+                    let &(local, epoch) = seat_state.get(&wire.0)?;
+                    local.then_some((identity.0, wire.0, epoch))
+                }),
+            );
+            if presentation.enabled() {
+                // Every local contact enters the ledger as it is seen,
+                // so a row arriving later pairs with it; the consumers
+                // of the local stream ask the same memoised question.
+                if let Some(messages) = self.messages.as_deref() {
+                    for e in self.cursor.read(messages) {
+                        if e.point.is_finite() {
+                            presentation.admit_local(e);
+                        }
+                    }
+                }
+                return;
+            }
+        }
         let wires: HashMap<ObjectId, u16> = self
             .seats
             .iter()
@@ -4584,8 +4627,14 @@ fn drain_pending_impacts(
         // local contact matches — and presented when none does (the
         // authority's hit landed first and a snap moved the predicted
         // car past the contact, #1531).
-        if is_local && io.has_local_contact(row.seat, Vec3::from_array(row.point), now) {
-            continue;
+        if is_local {
+            if let Some(presentation) = io.presentation.as_deref_mut().filter(|p| p.enabled()) {
+                if presentation.admit_row(row_gen, &row) != PresentationVerdict::Present {
+                    continue;
+                }
+            } else if io.has_local_contact(row.seat, Vec3::from_array(row.point), now) {
+                continue;
+            }
         }
         io.fx.write(RemoteImpact {
             entity,
@@ -5940,6 +5989,8 @@ mod tests {
             seat: 1,
             id,
             tick: 0,
+            epoch: 0,
+            ordinal: 0,
             point: [0.0; 3],
             normal: [0.0, 1.0, 0.0],
             severity: 1.0,

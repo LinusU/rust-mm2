@@ -205,6 +205,7 @@ pub fn emit_sparks(
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
     mut rigs: Query<&mut VehicleSparks>,
     sparks: Query<&Spark>,
+    mut presentation: Option<ResMut<crate::impact_presentation::ImpactPresentation>>,
 ) {
     if !session.is_playing() {
         reader.read().for_each(drop);
@@ -259,6 +260,13 @@ pub fn emit_sparks(
         };
     for event in reader.read() {
         if event.generation != generation {
+            continue;
+        }
+        // NETPLAY-08A: the authority's row for this hit already played.
+        if !presentation
+            .as_deref_mut()
+            .is_none_or(|p| p.admit_local(event))
+        {
             continue;
         }
         for side in 0..2 {

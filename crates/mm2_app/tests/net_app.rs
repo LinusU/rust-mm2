@@ -5979,6 +5979,8 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         seat,
         id,
         tick: 7,
+        epoch: 0,
+        ordinal: 0,
         point: [3.0, 0.4, -1.0],
         normal: [0.0, 0.0, 1.0],
         severity: 12.5,
@@ -6005,6 +6007,8 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
                     seat: 0,
                     id: 2,
                     tick: 7,
+                    epoch: 0,
+                    ordinal: 0,
                     point: [f32::NAN; 3],
                     normal: [0.0, 1.0, 0.0],
                     severity: 1.0,
@@ -6245,6 +6249,8 @@ fn an_unmatched_own_seat_impact_row_presents_once_over_a_lossy_link() {
         seat: our_id,
         id,
         tick: 7,
+        epoch: 0,
+        ordinal: 0,
         point,
         normal: [0.0, 0.0, 1.0],
         severity: 12.5,
@@ -6310,6 +6316,179 @@ fn an_unmatched_own_seat_impact_row_presents_once_over_a_lossy_link() {
     let drained = seen;
     assert_eq!(drained.len(), 1, "only the unmatched row, once");
     assert_eq!(drained[0].point, Vec3::new(40.0, 0.4, 40.0));
+
+    host.shutdown();
+}
+
+/// NETPLAY-08A (#1974), AC2/AC3 of #1769, over the real transport with
+/// the timeline selector on: an own-seat hit is presented exactly once
+/// whichever of the predicted sim and the authority's row arrives
+/// first, and two distinct hits half a metre apart stay two. The
+/// identities are the production ones (`generation, epoch, seat, tick,
+/// ordinal` off the row, the local event's tick and the seat's epoch),
+/// asserted on the ledger and on the `RemoteImpact` stream.
+#[test]
+fn the_staged_ledger_presents_each_own_seat_hit_once_in_either_order() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join_tcp_only(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    app.insert_resource(mm2_app::netplay_timeline::NetplayTimeline { enabled: true })
+        .init_resource::<mm2_app::impact_presentation::ImpactPresentation>();
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let local_oid = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            ObjectIdentity(local_oid),
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+    let local_generation = app.world().resource::<Session>().generation();
+    let entry = |player: u16| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        ..SnapEntry::default()
+    };
+    let row = |id: u64, tick: u64, x: f32| SnapImpact {
+        seat: our_id,
+        id,
+        tick,
+        epoch: 0,
+        ordinal: 0,
+        point: [x, 0.4, -1.0],
+        normal: [0.0, 0.0, 1.0],
+        severity: 12.5,
+        audio_id: 0,
+    };
+    let local_hit = |app: &mut App, id: u64, tick: u64, x: f32| {
+        app.world_mut().write_message(ImpactEvent {
+            id: ImpactId(id),
+            generation: local_generation,
+            tick,
+            participants: (local_oid, ObjectId::WORLD),
+            point: Vec3::new(x, 0.4, -1.0),
+            normal: Vec3::Z,
+            severity: 9.0,
+            surface: SurfaceState::default(),
+        });
+    };
+    let mut snap_tick = 10;
+    let mut send_rows = |app: &mut App, rows: Vec<SnapImpact>| {
+        snap_tick += 1;
+        host.ctl()
+            .broadcast(&Message::Snap {
+                generation,
+                tick: snap_tick,
+                entries: vec![entry(0), entry(our_id)],
+                trailers: Vec::new(),
+                impacts: rows,
+                race: None,
+            })
+            .unwrap();
+        let deadline = Instant::now() + WAIT;
+        let before = app
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied;
+        while app
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            == before
+        {
+            assert!(Instant::now() < deadline, "the snapshot never applied");
+            app.update();
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let presented = |app: &mut App| -> usize {
+        app.world_mut()
+            .resource_mut::<Messages<netdrive::RemoteImpact>>()
+            .drain()
+            .filter(|i| i.entity == local)
+            .count()
+    };
+    let counts = |app: &App| {
+        app.world()
+            .resource::<mm2_app::impact_presentation::ImpactPresentation>()
+            .counts
+    };
+
+    // Local first: two distinct hits 12 ticks and half a metre apart,
+    // then both rows. Neither row presents.
+    local_hit(&mut app, 500, 100, 3.0);
+    local_hit(&mut app, 501, 112, 3.5);
+    app.update();
+    send_rows(&mut app, vec![row(1, 101, 3.0), row(2, 113, 3.5)]);
+    assert_eq!(presented(&mut app), 0, "both rows had a local twin");
+    assert_eq!(counts(&app).local_presented, 2);
+    assert_eq!(counts(&app).row_suppressed, 2);
+    // The rows repeat in later frames (the in-frame repeat and the
+    // reliable copy): still nothing.
+    send_rows(&mut app, vec![row(1, 101, 3.0), row(2, 113, 3.5)]);
+    assert_eq!(presented(&mut app), 0);
+
+    // Authoritative first: the row plays, the late local twin does not.
+    send_rows(&mut app, vec![row(3, 200, 8.0)]);
+    assert_eq!(presented(&mut app), 1, "no local twin yet: the row plays");
+    local_hit(&mut app, 502, 198, 8.0);
+    app.update();
+    assert_eq!(counts(&app).local_suppressed, 1);
+    send_rows(&mut app, vec![row(3, 200, 8.0)]);
+    assert_eq!(presented(&mut app), 0, "a repeated row is not replayed");
+
+    // A hit only the authority saw is presented once.
+    send_rows(&mut app, vec![row(4, 300, 20.0)]);
+    assert_eq!(presented(&mut app), 1);
+    assert!(
+        app.world()
+            .resource::<mm2_app::impact_presentation::ImpactPresentation>()
+            .ledger()
+            .len()
+            <= mm2_game::presentation::LEDGER_CAPACITY
+    );
 
     host.shutdown();
 }

@@ -300,6 +300,7 @@ pub fn apply_texel_damage(
     mut images: ResMut<Assets<Image>>,
     mut rigs: Query<(&GlobalTransform, &mut TexelDamageRig)>,
     mut report: ResMut<TexelDamageReport>,
+    mut presentation: Option<ResMut<crate::impact_presentation::ImpactPresentation>>,
 ) {
     // No impacts is nearly every step; skip the index walk (see
     // `damage::resolve_disabled`).
@@ -318,6 +319,13 @@ pub fn apply_texel_damage(
         .collect();
     for event in reader.read() {
         if event.generation != generation {
+            continue;
+        }
+        // NETPLAY-08A: the authority's row for this hit already played.
+        if !presentation
+            .as_deref_mut()
+            .is_none_or(|p| p.admit_local(event))
+        {
             continue;
         }
         for object in [event.participants.0, event.participants.1] {

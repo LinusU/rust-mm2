@@ -354,6 +354,8 @@ fn impact(id: u64) -> crate::SnapImpact {
         seat: 1,
         id,
         tick: 40 + id,
+        epoch: 0,
+        ordinal: 0,
         point: [1.0, 2.0, 3.0],
         normal: [0.0, 1.0, 0.0],
         severity: 7.5,

@@ -874,6 +874,8 @@ mod tests {
                     seat: 1 + (i % 7) as u16,
                     id: tick * 64 + i as u64,
                     tick,
+                    epoch: 0,
+                    ordinal: 0,
                     point: [t * 0.3 + i as f32, 0.5, t * 0.1],
                     normal: [0.0, 1.0, 0.0],
                     severity: 1.0 + (t + i as f32).sin(),

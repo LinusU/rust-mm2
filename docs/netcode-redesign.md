@@ -1799,3 +1799,81 @@ tests; none of it is WAN evidence.
    Endpoint/firewall requirements: `docs/multiplayer-reachability.md`.
    The host-side silent-client timeout is above (#1967). **Open:** all real
    machine validation (OWNER #1240, #1249).
+
+## Host-authored event identities and the presentation ledger (NETPLAY-08A, #1974)
+
+**Identity.** A consequential event is named by what the authority
+decided: `EventIdentity { generation, epoch, seat, tick, ordinal }`
+(`mm2_game::presentation`). `epoch` is the seat's reset epoch when the
+event happened, `tick` the fixed session tick, `ordinal` the position among
+that seat's events of the tick in emission order (strongest first, the
+order `collect_impacts` emits). `SnapImpact` carries `epoch` and `ordinal`
+next to `seat`/`tick` (`PROTOCOL_VERSION` 38); `OrdinalCounter` numbers
+both the host's rows and a client's local contacts the same way.
+
+**Ledger.** `PresentationLedger` is bounded (`LEDGER_CAPACITY` 256
+entries, `LEDGER_HORIZON_TICKS` 600) and holds, per presented event, the
+identity each stream gave it. `arrive(Local | Authoritative, ..)` returns
+`Present`, `Suppress` or `Stale`:
+
+| arrival order | outcome |
+| --- | --- |
+| local, then row | local `Present`, row pairs with it and `Suppress`es |
+| row, then local | row `Present`, the late local twin `Suppress`es |
+| replay re-detects a tick (same identity again, either stream) | `Suppress` (a repeat) |
+| row of an epoch older than the seat's current one | `Stale`, never presented |
+
+A speculative local contact of a replaced epoch is cancelled on the seat's
+reset (`seat_reset`), so it cannot absorb a post-reset row. Pairing is **one to
+one** on `(generation, epoch, seat)`, nearest tick within
+`PAIR_TICK_TOLERANCE` (30 ticks, designed, covers prediction lead plus
+reconciliation error), then nearest ordinal, then distance. Each pairing
+consumes both sides, which replaces the 1.5 s / 3 m matcher of #1248/#1532:
+two distinct hits half a metre apart are two presentations. Residual risk,
+accepted: if a row is lost for good, the next row of the same seat inside
+the tolerance may pair with the orphaned speculative contact — rows ride the
+reliable channel (06E-3) so this needs a dead channel.
+
+**Wiring (behind the NETPLAY-02 selector).** With `NetplayTimeline` on,
+`ImpactPresentation` (`mm2_app::impact_presentation`) replaces the old
+`recent` matcher: `apply_snapshots` syncs the local seats and epochs and
+classifies local contacts, `drain_pending_impacts` asks `admit_row` for
+own-seat rows, and the local-stream consumers (`impact_voices`,
+`emit_sparks`, `apply_texel_damage`) ask `admit_local`, which decides an event
+once and memoises it so the consumers agree in any order. With the selector
+off the legacy matcher runs unchanged.
+
+**Replay.** Replayed physics must not emit packets, score or a second
+effect. The ledger makes the effect half safe: a replay that re-detects a
+contact presents nothing (`begin_replay_tick` restarts the ordinal count so
+the identity repeats). Today no replay path emits `ImpactEvent`s at all;
+`begin_replay_tick` is the hook a replay that does must call. Packets and
+score are N08-B/N08-C.
+
+**Lifecycle per effect** (own seat of a predicted client):
+
+- *Damage* is state: the authority's `SnapEntry.damage` fraction replaces the
+  local value; `apply_impact_damage` drops on a non-authority. It never
+  rides the ledger and cannot double.
+- *Sound* (`impact_voices`) and *sparks* (`emit_sparks`): one spawn per
+  ledger `Present`, from the local sim if it came first, from the row if it
+  did. A `Suppress`/`Stale` spawns nothing. Spawned voices and streaks are
+  not retracted when a reset later cancels the speculative entry.
+- *Texel deformation* (`apply_texel_damage` / `apply_remote_texels`): as
+  sound; a repair byte still erases rows at or before its tick.
+- *Fragments* (`detach_breaks`): authority-only; the client mirrors the
+  `breaks` bitmask state. Not ledger-gated.
+- *Scrape loops* (`ScrapeWatch`): per-pair hold over a spawned clip; a
+  suppressed event never reaches it, so it cannot hold a pair for a clip
+  that did not play.
+- *Camera shake*: no impact-driven camera shake exists in the code today;
+  nothing to gate. A future one must ask the ledger like sound.
+
+Evidence level: synthetic integration. `mm2_game::presentation` unit tests
+and `mm2_app::impact_presentation` tests assert production identities for
+local-first, authoritative-first, replay-first and delayed older-epoch
+arrival and for two nearby distinct impacts;
+`net_app::the_staged_ledger_presents_each_own_seat_hit_once_in_either_order`
+runs it over the real transport. No retail data, no rendered capture.
+**Open:** impact-driven camera shake (none exists), Cops & Robbers re-award
+and role swaps (N08-B), tick-correct modifiers (N08-C).

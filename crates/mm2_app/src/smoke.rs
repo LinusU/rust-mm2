@@ -884,6 +884,7 @@ fn run_headless(
             crate::readiness::gate_world_simulation.before(bevy::time::TimeSystems),
         )
         .add_message::<crate::netdrive::RemoteImpact>()
+        .init_resource::<crate::impact_presentation::ImpactPresentation>()
         .add_message::<DamageEvent>()
         .add_message::<mm2_game::StuckEvent>()
         .add_message::<mm2_game::PartDetached>()

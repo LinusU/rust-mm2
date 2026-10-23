@@ -34,6 +34,7 @@ pub mod ped;
 pub mod pedreact;
 pub mod pedwalk;
 pub mod police;
+pub mod presentation;
 pub mod profile;
 pub mod progression;
 pub mod props;
@@ -107,6 +108,10 @@ pub use police::{
     CHASE_DIRECT_RANGE, CHASE_GOAL_DRIFT, CHASE_LOOKAHEAD, CHASE_OFF_ROUTE, ChaseAim, ChaseMode,
     ChaseNav, ChaseRoute, EmergencyLights, LIGHT_BAR_HALF_PERIOD, PoliceIssue, PoliceRoster,
     PoliceSpec, Pursuit, PursuitEvent, PursuitPhase, PursuitPolicy, Sighting, normalize_heading,
+};
+pub use presentation::{
+    Arrival, EntryState, EventIdentity, OrdinalCounter, PresentationLedger,
+    Verdict as PresentationVerdict,
 };
 pub use profile::{
     EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,

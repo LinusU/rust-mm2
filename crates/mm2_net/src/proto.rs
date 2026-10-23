@@ -117,8 +117,10 @@ use crate::cmdbuf::Source;
 /// `Impacts`, the standalone impact-row message (NETPLAY-06E-3) that
 /// rides the reliable channel; a v35 peer would reject the unknown tag. v37:
 /// the reliable data payload gained a `more` byte so one message can span
-/// several datagrams (#1930); a v36 peer would read it as body.
-pub const PROTOCOL_VERSION: u16 = 37;
+/// several datagrams (#1930); a v36 peer would read it as body. v38:
+/// `SnapImpact` gained `epoch` and `ordinal`, completing the host-authored
+/// event identity (NETPLAY-08A); a v37 peer would misread every row.
+pub const PROTOCOL_VERSION: u16 = 38;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -631,6 +633,13 @@ pub struct SnapImpact {
     /// Host session tick the impact was emitted on — diagnostic, not an
     /// ordering guarantee (`id` already is).
     pub tick: u64,
+    /// The seat's reset epoch (wraps at 256) when the impact happened —
+    /// part of the host-authored event identity (NETPLAY-08A).
+    pub epoch: u8,
+    /// Position among this seat's rows of `tick`, strongest first — the
+    /// last component of the identity `(generation, epoch, seat, tick,
+    /// ordinal)` a client pairs a local contact with.
+    pub ordinal: u16,
     /// World-space contact point, metres.
     pub point: [f32; 3],
     /// Outward contact normal from this seat's side of the contact —
@@ -1459,6 +1468,8 @@ fn encode_impacts(out: &mut Vec<u8>, impacts: &[SnapImpact]) -> Result<(), Proto
         out.extend_from_slice(&m.seat.to_le_bytes());
         out.extend_from_slice(&m.id.to_le_bytes());
         out.extend_from_slice(&m.tick.to_le_bytes());
+        out.push(m.epoch);
+        out.extend_from_slice(&m.ordinal.to_le_bytes());
         for v in m.point.iter().chain(m.normal.iter()) {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -1480,6 +1491,8 @@ fn decode_impacts(cur: &mut Cursor<'_>) -> Result<Vec<SnapImpact>, ProtoError> {
             seat: cur.u16()?,
             id: cur.u64()?,
             tick: cur.u64()?,
+            epoch: cur.u8()?,
+            ordinal: cur.u16()?,
             point: cur.vec3()?,
             normal: cur.vec3()?,
             severity: cur.f32()?,
@@ -2531,6 +2544,8 @@ mod tests {
                         seat: 1,
                         id: 7,
                         tick: 2,
+                        epoch: 0,
+                        ordinal: 0,
                         point: [3.0, 0.4, -1.0],
                         normal: [0.0, 0.0, 1.0],
                         severity: 12.5,
@@ -2540,6 +2555,8 @@ mod tests {
                         seat: 3,
                         id: 7,
                         tick: 2,
+                        epoch: 0,
+                        ordinal: 0,
                         point: [3.0, 0.4, -1.0],
                         normal: [0.0, 0.0, -1.0],
                         severity: 12.5,
@@ -3175,6 +3192,8 @@ mod tests {
                 seat: 0,
                 id: 1,
                 tick: 1,
+                epoch: 0,
+                ordinal: 0,
                 point: [0.0; 3],
                 normal: [0.0, 1.0, 0.0],
                 severity: 1.0,
@@ -3202,6 +3221,8 @@ mod tests {
             seat: 2,
             id,
             tick: 9,
+            epoch: 0,
+            ordinal: 0,
             point: [1.0, 2.0, 3.0],
             normal: [0.0, 1.0, 0.0],
             severity: 4.5,
@@ -3415,15 +3436,15 @@ mod tests {
     }
 
     #[test]
-    fn v37_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 37);
-        for protocol in [36, 38] {
+    fn v38_rejects_older_and_newer_protocol_versions() {
+        assert_eq!(PROTOCOL_VERSION, 38);
+        for protocol in [37, 39] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("37"), "{why}");
+            assert!(why.contains("38"), "{why}");
         }
     }
 

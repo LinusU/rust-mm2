@@ -595,6 +595,8 @@ fn impact_row(seat: u16, id: u64, tick: u64, point: Vec3) -> SnapImpact {
         seat,
         id,
         tick,
+        epoch: 0,
+        ordinal: 0,
         point: point.to_array(),
         normal: [0.0, 1.0, 0.0],
         severity: 10.0,

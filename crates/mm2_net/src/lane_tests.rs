@@ -302,6 +302,8 @@ fn big_snap(generation: u64, tick: u64) -> Message {
                 seat: 1,
                 id: 1,
                 tick: 1,
+                epoch: 0,
+                ordinal: 0,
                 point: [0.0; 3],
                 normal: [0.0; 3],
                 severity: 1.0,
