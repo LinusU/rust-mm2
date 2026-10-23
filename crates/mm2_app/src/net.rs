@@ -1792,6 +1792,7 @@ impl HostLink {
                 // from `Start` so they can spawn its car.
                 host_pick: Some(encode_pick(&config.vehicle)?),
                 liveness_timeout: mm2_net::HOST_LIVENESS_TIMEOUT,
+                peer_stall_limit: mm2_net::PEER_STALL_LIMIT,
             },
         )?;
         let ctl = host.ctl();

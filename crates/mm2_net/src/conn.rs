@@ -7,12 +7,13 @@
 //! `listen_loopback` binds `127.0.0.1` only: no public listener exists
 //! unless a caller explicitly asks for one.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::NetError;
 use crate::frame::{read_frame, write_frame};
@@ -286,6 +287,91 @@ impl Writer {
 /// A designed bound.
 pub const PEER_QUEUE_CAP: usize = 256;
 
+/// How long a [`PeerWriter`]'s oldest unwritten frame may wait before the
+/// peer counts as not reading (NETPLAY-10A). Control traffic is a few
+/// frames a second, so a queue can sit under [`PEER_QUEUE_CAP`] for a
+/// long time while the peer reads nothing; this age bound is what
+/// disconnects it. A designed bound, well above the keepalive interval.
+pub const PEER_STALL_LIMIT: Duration = Duration::from_secs(10);
+
+/// A [`PeerWriter`]'s pending-I/O queue: frames handed to the writer
+/// thread and not yet written. This is the *I/O* queue — distinct from
+/// any retained history (a command window kept for retransmission),
+/// which the owner of that history reports separately.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerQueueStats {
+    /// Frames waiting now.
+    pub len: usize,
+    /// The bound.
+    pub capacity: usize,
+    /// How long the oldest waiting frame has waited.
+    pub oldest_age: Duration,
+    /// The longest any written frame waited in the queue.
+    pub max_wait: Duration,
+    /// Frames ever queued (a coalesced replacement is not a new frame).
+    pub queued: u64,
+    /// Queued replaceable frames overwritten by a newer one before they
+    /// were written.
+    pub coalesced: u64,
+    /// Sends refused because the queue was full.
+    pub refused: u64,
+}
+
+/// A read-only handle on a [`PeerWriter`]'s queue ([`PeerWriter::probe`]).
+#[derive(Debug, Clone)]
+pub struct PeerProbe(Arc<PeerQueue>);
+
+impl PeerProbe {
+    /// The pending-I/O queue's occupancy, bound and age.
+    pub fn stats(&self) -> PeerQueueStats {
+        let st = self.0.lock();
+        PeerQueueStats {
+            len: st.frames.len(),
+            oldest_age: oldest_age(&st),
+            ..st.stats
+        }
+    }
+}
+
+struct Pending {
+    frame: Vec<u8>,
+    /// Set for replaceable state: a newer frame with the same key
+    /// supersedes this one while it is still unwritten.
+    key: Option<u8>,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct QueueState {
+    frames: VecDeque<Pending>,
+    /// No more frames accepted; the thread exits once drained.
+    closed: bool,
+    /// The thread has exited (drained, or the socket failed).
+    exited: bool,
+    stats: PeerQueueStats,
+}
+
+struct PeerQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+/// The age of the longest-waiting frame. Not the front's: a coalesced
+/// frame is reordered to the back with its predecessor's age.
+fn oldest_age(st: &QueueState) -> Duration {
+    st.frames
+        .iter()
+        .map(|p| p.at.elapsed())
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
+impl PeerQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// A [`Writer`] behind a bounded queue and its own thread (NETPLAY-06E-4).
 ///
 /// [`send`](Self::send) encodes the message and hands the frame to the
@@ -298,18 +384,26 @@ pub const PEER_QUEUE_CAP: usize = 256;
 /// queue or a failed socket write makes this and every later `send`
 /// return `Err`, and a failed write also closes the socket, so the
 /// caller's existing "failed send = lost peer" discipline applies
-/// unchanged. Handshake-time writes stay blocking on the plain
-/// [`Writer`]; wrap it only once the handshake is done.
+/// unchanged. A peer that is not reading but leaves the queue short is
+/// caught by age: see [`stalled`](Self::stalled). Replaceable state
+/// ([`send_replaceable`](Self::send_replaceable)) overwrites its own
+/// unwritten predecessor instead of piling up. Handshake-time writes stay
+/// blocking on the plain [`Writer`]; wrap it only once the handshake is
+/// done.
 #[derive(Debug)]
 pub struct PeerWriter {
-    tx: Option<mpsc::SyncSender<Vec<u8>>>,
+    queue: Arc<PeerQueue>,
     failed: Arc<AtomicBool>,
-    /// Set by the thread when it exits, drained or failed.
-    done: Arc<AtomicBool>,
     /// Frames handed to the thread, and frames it has written.
     queued: u64,
     written: Arc<AtomicU64>,
     stream: TcpStream,
+}
+
+impl std::fmt::Debug for PeerQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerQueue").finish_non_exhaustive()
+    }
 }
 
 impl PeerWriter {
@@ -317,20 +411,43 @@ impl PeerWriter {
     /// thread ends when the `PeerWriter` is dropped (after flushing what
     /// is queued) or the socket fails.
     pub fn spawn(writer: Writer) -> io::Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PEER_QUEUE_CAP);
+        let queue = Arc::new(PeerQueue {
+            state: Mutex::new(QueueState {
+                stats: PeerQueueStats {
+                    capacity: PEER_QUEUE_CAP,
+                    ..PeerQueueStats::default()
+                },
+                ..QueueState::default()
+            }),
+            ready: Condvar::new(),
+        });
         let failed = Arc::new(AtomicBool::new(false));
         let stream = writer.stream.try_clone()?;
         let flag = Arc::clone(&failed);
-        let done = Arc::new(AtomicBool::new(false));
-        let exited = Arc::clone(&done);
         let written = Arc::new(AtomicU64::new(0));
         let count = Arc::clone(&written);
+        let q = Arc::clone(&queue);
         let mut out = writer.stream;
         thread::Builder::new()
             .name("mm2-peer-writer".into())
             .spawn(move || {
-                while let Ok(frame) = rx.recv() {
-                    if write_frame(&mut out, &frame).is_err() {
+                loop {
+                    let next = {
+                        let mut st = q.lock();
+                        loop {
+                            if let Some(p) = st.frames.pop_front() {
+                                let waited = p.at.elapsed();
+                                st.stats.max_wait = st.stats.max_wait.max(waited);
+                                break Some(p);
+                            }
+                            if st.closed {
+                                break None;
+                            }
+                            st = q.ready.wait(st).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
+                    let Some(p) = next else { break };
+                    if write_frame(&mut out, &p.frame).is_err() {
                         flag.store(true, Ordering::Release);
                         // Wake the reader on this socket: the peer is gone.
                         let _ = out.shutdown(std::net::Shutdown::Both);
@@ -338,12 +455,11 @@ impl PeerWriter {
                     }
                     count.fetch_add(1, Ordering::Release);
                 }
-                exited.store(true, Ordering::Release);
+                q.lock().exited = true;
             })?;
         Ok(Self {
-            tx: Some(tx),
+            queue,
             failed,
-            done,
             queued: 0,
             written,
             stream,
@@ -356,38 +472,90 @@ impl PeerWriter {
         self.send_frame(msg.encode()?)
     }
 
+    /// Queue one *replaceable* message: newest-wins state a later copy
+    /// fully supersedes (a roster, a keepalive, the advertised session).
+    /// If an earlier frame with the same `key` is still unwritten it is
+    /// overwritten in place (counted in [`PeerQueueStats::coalesced`])
+    /// instead of queueing another, so a slow peer holds one copy of each
+    /// kind rather than a backlog of stale ones. Anything that is not
+    /// fully superseded by its successor — a start, a cancel, a leave —
+    /// must use [`send`](Self::send).
+    pub fn send_replaceable(&mut self, key: u8, msg: &Message) -> Result<(), NetError> {
+        self.push(msg.encode()?, Some(key))
+    }
+
     pub(crate) fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), NetError> {
+        self.push(frame, None)
+    }
+
+    fn push(&mut self, frame: Vec<u8>, key: Option<u8>) -> Result<(), NetError> {
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
         }
-        let Some(tx) = &self.tx else {
+        let mut st = self.queue.lock();
+        if st.closed || st.exited {
             return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
-        };
-        match tx.try_send(frame) {
-            Ok(()) => {
-                self.queued += 1;
-                Ok(())
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                Err(io::Error::new(io::ErrorKind::WouldBlock, "peer send queue full").into())
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
-            }
         }
+        let mut at = Instant::now();
+        if let Some(k) = key
+            && let Some(i) = st.frames.iter().position(|p| p.key == Some(k))
+        {
+            // The newest copy takes the back of the queue (so it stays
+            // ordered after anything queued since) but keeps the
+            // predecessor's age: the stall bound measures how long the
+            // peer has gone without reading, not how fresh the newest
+            // state is.
+            if let Some(old) = st.frames.remove(i) {
+                at = old.at;
+            }
+            st.stats.coalesced += 1;
+            st.frames.push_back(Pending { frame, key, at });
+            drop(st);
+            self.queue.ready.notify_one();
+            return Ok(());
+        }
+        if st.frames.len() >= PEER_QUEUE_CAP {
+            st.stats.refused += 1;
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "peer send queue full").into());
+        }
+        st.frames.push_back(Pending { frame, key, at });
+        st.stats.queued += 1;
+        drop(st);
+        self.queued += 1;
+        self.queue.ready.notify_one();
+        Ok(())
+    }
+
+    /// The pending-I/O queue's occupancy, bound and age.
+    pub fn stats(&self) -> PeerQueueStats {
+        self.probe().stats()
+    }
+
+    /// A cloneable read-only view of this queue's stats, for a thread
+    /// that does not own the writer.
+    pub fn probe(&self) -> PeerProbe {
+        PeerProbe(Arc::clone(&self.queue))
+    }
+
+    /// Whether the peer has stopped reading: its oldest unwritten frame
+    /// has waited longer than `limit`. The caller's explicit disconnect
+    /// policy for a persistently non-reading peer ([`PEER_STALL_LIMIT`]).
+    pub fn stalled(&self, limit: Duration) -> bool {
+        oldest_age(&self.queue.lock()) > limit
     }
 
     /// Stop accepting frames; the thread drains what is queued and exits.
     /// Pair with [`is_drained`](Self::is_drained) and
     /// [`disconnect`](Self::disconnect) for an orderly close.
     pub fn close_send(&mut self) {
-        self.tx = None;
+        self.queue.lock().closed = true;
+        self.queue.ready.notify_all();
     }
 
     /// Whether the writer thread has written everything queued (or
     /// failed) and exited. Only meaningful after [`close_send`](Self::close_send).
     pub fn is_drained(&self) -> bool {
-        self.done.load(Ordering::Acquire)
+        self.queue.lock().exited
     }
 
     /// Wait up to `deadline` for the thread to write everything queued
@@ -396,15 +564,19 @@ impl PeerWriter {
     /// a caller that repeats a one-shot message keeps its channel. The
     /// bound keeps a stalled peer from hanging an exit.
     pub fn flush(&self, deadline: Duration) -> bool {
-        let by = std::time::Instant::now() + deadline;
+        let by = Instant::now() + deadline;
         loop {
             if self.failed.load(Ordering::Acquire) {
                 return false;
             }
-            if self.written.load(Ordering::Acquire) >= self.queued {
+            // Coalesced replacements are not counted in `queued`, and a
+            // frame the thread popped is counted in `written` only after
+            // its write: drained means nothing waits and all are written.
+            let empty = self.queue.lock().frames.is_empty();
+            if empty && self.written.load(Ordering::Acquire) >= self.queued {
                 return true;
             }
-            if std::time::Instant::now() >= by {
+            if Instant::now() >= by {
                 return false;
             }
             thread::sleep(Duration::from_millis(1));
@@ -414,8 +586,15 @@ impl PeerWriter {
     /// Forcibly close the socket: a write parked in the thread and a
     /// blocked `recv` on the peer's reader both wake with an error.
     pub fn disconnect(&mut self) {
-        self.tx = None;
+        self.close_send();
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl Drop for PeerWriter {
+    fn drop(&mut self) {
+        // The thread flushes what is queued, then exits.
+        self.close_send();
     }
 }
 
@@ -824,5 +1003,65 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "send never failed");
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// NETPLAY-10A: replaceable state held behind a parked write is
+    /// overwritten, not stacked; the newest copy is written, ordered
+    /// after what was queued since; one-shot frames are never merged.
+    #[test]
+    fn replaceable_frames_coalesce_behind_a_stalled_write() {
+        let (mut writer, far) = peer_pair();
+        // Park the thread mid-write on a socket nobody reads.
+        let big = vec![0u8; 200 * 1024];
+        while writer.stats().len < 4 {
+            writer.send_frame(big.clone()).unwrap();
+        }
+        let before = writer.stats().len;
+        for n in 0..50u8 {
+            writer
+                .send_replaceable(
+                    1,
+                    &Message::Welcome {
+                        player_id: u16::from(n),
+                    },
+                )
+                .unwrap();
+        }
+        writer.send(&Message::Accept).unwrap();
+        writer
+            .send_replaceable(1, &Message::Welcome { player_id: 99 })
+            .unwrap();
+        let s = writer.stats();
+        assert_eq!(
+            s.len,
+            before + 2,
+            "50 replaceable frames held more than one"
+        );
+        assert_eq!(s.coalesced, 50);
+        drop(far);
+        writer.disconnect();
+    }
+
+    /// NETPLAY-10A: a coalesced frame keeps its predecessor's age, so
+    /// the stall bound still trips on a peer that reads nothing while
+    /// fresh state keeps arriving.
+    #[test]
+    fn a_stalled_peer_is_detected_by_age_despite_coalescing() {
+        let (mut writer, _far) = peer_pair();
+        let big = vec![0u8; 200 * 1024];
+        while writer.stats().len < 4 {
+            writer.send_frame(big.clone()).unwrap();
+        }
+        writer
+            .send_replaceable(1, &Message::Welcome { player_id: 1 })
+            .unwrap();
+        thread::sleep(Duration::from_millis(60));
+        writer
+            .send_replaceable(1, &Message::Welcome { player_id: 2 })
+            .unwrap();
+        assert!(writer.stalled(Duration::from_millis(50)));
+        assert!(!writer.stalled(Duration::from_secs(60)));
+        assert!(writer.stats().oldest_age >= Duration::from_millis(60));
+        writer.disconnect();
     }
 }

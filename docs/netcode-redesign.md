@@ -1912,3 +1912,36 @@ replicas and the arrival-gap-driven `RemoteLerp` (AC5); trailers/wheels of the
 corrected car beyond the carried subtree (trailer is a separate body); the
 physics-versus-rendered developer overlay; rendered captures and 30/60/144 FPS
 route runs (AC1, AC3); input-to-render latency measurement.
+
+## NETPLAY-10A: nonblocking bounded I/O handoff
+
+No simulation or render system waits on a socket or a contended socket
+mutex, in either direction:
+
+- **Egress.** Every post-handshake control-stream write goes through a
+  `PeerWriter`: the caller queues an encoded frame (bounded,
+  `PEER_QUEUE_CAP`) and a per-peer thread writes it, so one peer that stops
+  reading cannot delay another. Replaceable state (`Keepalive`, `Session`,
+  `Roster`) is coalesced in place (`send_replaceable`); `Start`, `Cancel`,
+  `Leave` and everything else is never merged, and a full queue is an
+  error, not a drop. `Snap` is not coalesced on TCP because its impact rows
+  are events; moving world state off TCP is NETPLAY-10C.
+- **Disconnect policy.** A persistently non-reading peer is removed `Lost`
+  when its queue fills or when its oldest unwritten frame is older than
+  `HostConfig::peer_stall_limit` (`PEER_STALL_LIMIT`, 10 s). A coalesced
+  frame keeps its predecessor's age, so fresh state cannot hide a stall.
+- **Ingress.** The host loop's wake-up queue and its event queue are
+  bounded. A game-thread `HostCtl` call on a full loop queue returns
+  `WouldBlock`; reader threads wait (backing a flooding peer up onto its own
+  socket). A consumer that leaves `EVENT_QUEUE_CAP` events undrained ends the
+  lobby rather than let the queue grow or drop an event.
+- **Telemetry.** The pending-I/O queue (`Host::io_queue`,
+  `ClientCtl::io_queue`: length, `oldest_age`, `max_wait`, `coalesced`,
+  `refused`) is reported separately from the lane's queues
+  (`lane_queue`) and from retained history (reliable-channel windows, the
+  command ring). A seat reaped as stalled logs its I/O-queue stats on stderr.
+
+Tests: `io_backpressure_tests` (non-reading peer among healthy ones over
+real sockets) and the `conn` unit tests. The reliable Start/Cancel/reset/
+Leave paths are covered under the seeded lossy proxy by
+`lane_reliable_tests` and `lane_lobby_tests`.

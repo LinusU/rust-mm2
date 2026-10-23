@@ -46,14 +46,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::NetError;
 use crate::cmdbuf::{Consumed, SeatBuffer, SeatStats};
-use crate::conn::{Conn, HANDSHAKE_TIMEOUT, PeerWriter, listen_loopback, recv_hello_within};
+use crate::conn::{
+    Conn, HANDSHAKE_TIMEOUT, PEER_STALL_LIMIT, PeerProbe, PeerQueueStats, PeerWriter,
+    listen_loopback, recv_hello_within,
+};
 use crate::proto::{
     DriveInput, FIRST_RESERVED_PLAYER_ID, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode,
     RosterEntry, SessionAdvertisement, TickCommand, VehiclePick,
@@ -88,6 +91,17 @@ const TEARDOWN_FLUSH: Duration = Duration::from_secs(1);
 
 /// How often the lobby loop looks for reliably delivered `Leave`/`SetReady`
 /// while no channel message wakes it (designed: a human-scale latency bound).
+/// Capacity of the host loop's wake-up queue (control calls, peer messages,
+/// handshake verdicts). Callers on the game thread get an error rather than
+/// a wait when it is full; reader threads wait, which backs a flooding peer
+/// up onto its own socket. A designed bound.
+const LOOP_QUEUE_CAP: usize = 1024;
+
+/// Capacity of the lobby event queue the consumer drains. Events are a few
+/// per peer per second at most; a consumer this far behind is wedged, and
+/// the lobby shuts down rather than grow ([`EventTx`]). A designed bound.
+const EVENT_QUEUE_CAP: usize = 4096;
+
 const INTENT_POLL: Duration = Duration::from_millis(50);
 
 /// How often the host loop sends every rostered peer a
@@ -168,6 +182,10 @@ pub struct HostConfig {
     /// How long a seat's lane may stay silent before the host removes it
     /// as lost; [`HOST_LIVENESS_TIMEOUT`] by default. A test seam.
     pub liveness_timeout: Duration,
+    /// How long a seat's oldest unwritten control frame may wait before
+    /// the host disconnects the seat as not reading;
+    /// [`PEER_STALL_LIMIT`] by default (NETPLAY-10A). A test seam.
+    pub peer_stall_limit: Duration,
 }
 
 impl HostConfig {
@@ -180,6 +198,7 @@ impl HostConfig {
             pick_validator: None,
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
+            peer_stall_limit: PEER_STALL_LIMIT,
         }
     }
 }
@@ -220,6 +239,44 @@ pub enum LeaveCause {
     /// The peer spoke out of turn post-handshake — a protocol violation,
     /// answered by dropping it.
     Malformed,
+}
+
+/// The loop's bounded event sender. A full queue means the consumer has
+/// stopped draining; it is never waited on (that would stall every peer)
+/// and an event is never silently dropped — the overflow is flagged and
+/// the loop ends the lobby, which the consumer sees as a closed channel.
+struct EventTx {
+    tx: SyncSender<HostEvent>,
+    overflowed: AtomicBool,
+}
+
+impl EventTx {
+    fn bounded() -> (Self, Receiver<HostEvent>) {
+        let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE_CAP);
+        (
+            Self {
+                tx,
+                overflowed: AtomicBool::new(false),
+            },
+            rx,
+        )
+    }
+
+    /// Queue `event`; `false` when the consumer is gone or too far behind.
+    fn send(&self, event: HostEvent) -> bool {
+        match self.tx.try_send(event) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.overflowed.store(true, Ordering::Relaxed);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Relaxed)
+    }
 }
 
 /// One observable lobby transition, drained by the consumer.
@@ -342,6 +399,9 @@ pub(crate) struct PeerMail {
     /// NETPLAY-06E-2c: `Leave`/`SetReady` the reliable channel delivered,
     /// in arrival order, for the lobby loop ([`RemoteInputs::take_intent`]).
     intents: VecDeque<(u16, Message)>,
+    /// NETPLAY-10A: each rostered seat's pending-I/O queue, for
+    /// [`Host::io_queue`].
+    io: BTreeMap<u16, PeerProbe>,
 }
 
 /// Bound on [`PeerMail::intents`]: the channel's own windows bound what
@@ -599,7 +659,24 @@ impl RemoteInputs {
         mail.window_gens.remove(&id);
         mail.windows.remove(&id);
         mail.intents.retain(|(seat, _)| *seat != id);
+        mail.io.remove(&id);
         mail.lane.remove(id);
+    }
+
+    /// Register `id`'s pending-I/O queue for [`Host::io_queue`].
+    fn register_io(&self, id: u16, probe: PeerProbe) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.io.insert(id, probe);
+    }
+
+    /// The seats whose pending-I/O queue has gone unread past `limit`.
+    fn stalled_io_seats(&self, limit: Duration) -> Vec<(u16, PeerQueueStats)> {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.io
+            .iter()
+            .map(|(&id, p)| (id, p.stats()))
+            .filter(|(_, s)| s.oldest_age > limit)
+            .collect()
     }
 
     /// The seats whose lane has been silent past `bound`.
@@ -727,6 +804,7 @@ impl RemoteInputs {
         mail.window_gens.clear();
         mail.windows.clear();
         mail.running = None;
+        mail.io.clear();
         mail.lane.clear();
     }
 }
@@ -737,7 +815,7 @@ impl RemoteInputs {
 pub struct Host {
     addr: SocketAddr,
     events: Receiver<HostEvent>,
-    control: Sender<LoopMsg>,
+    control: SyncSender<LoopMsg>,
     inputs: RemoteInputs,
     lane: Arc<HostLane>,
     handle: Option<JoinHandle<()>>,
@@ -764,8 +842,8 @@ impl Host {
             ));
         }
         let addr = listener.local_addr()?;
-        let (tx, rx) = mpsc::channel();
-        let (events_tx, events) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(LOOP_QUEUE_CAP);
+        let (events_tx, events) = EventTx::bounded();
         let config = config.clone();
         let control = tx.clone();
         let inputs = RemoteInputs::default();
@@ -831,6 +909,15 @@ impl Host {
     /// valid probe from it).
     pub fn lane_established(&self, id: u16) -> bool {
         self.lane.is_established(id)
+    }
+
+    /// The pending-I/O queue of `id`'s control stream (NETPLAY-10A):
+    /// frames handed to the seat's writer thread and not yet written,
+    /// with the age of the oldest. Distinct from [`lane_queue`](Self::lane_queue)
+    /// and from any retained history, which are reported separately.
+    pub fn io_queue(&self, id: u16) -> Option<PeerQueueStats> {
+        let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.io.get(&id).map(PeerProbe::stats)
     }
 
     /// The outbound queue's bounds, age and drop counters for `id`'s
@@ -979,17 +1066,23 @@ impl Drop for Host {
 /// arrives on the event channel.
 #[derive(Clone)]
 pub struct HostCtl {
-    control: Sender<LoopMsg>,
+    control: SyncSender<LoopMsg>,
     lane: Arc<HostLane>,
 }
 
 impl HostCtl {
     fn send(&self, msg: LoopMsg) -> Result<(), NetError> {
-        self.control.send(msg).map_err(|_| {
-            NetError::Io(io::Error::new(
+        // Never waits: a full queue is an explicit error to the caller
+        // (the loop is wedged or flooded), not a stall of the game thread.
+        self.control.try_send(msg).map_err(|e| match e {
+            TrySendError::Full(_) => NetError::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "host control queue full",
+            )),
+            TrySendError::Disconnected(_) => NetError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "host loop is not running",
-            ))
+            )),
         })
     }
 
@@ -1692,6 +1785,17 @@ impl ClientCtl {
         writer.send(msg)
     }
 
+    /// The pending-I/O queue of this client's control stream
+    /// (NETPLAY-10A): frames queued for the writer thread and not yet
+    /// written, with the age of the oldest. Not the lane's queue
+    /// ([`lane_queue`](Self::lane_queue)) and not retained history.
+    pub fn io_queue(&self) -> PeerQueueStats {
+        self.writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats()
+    }
+
     /// [`Client::set_ready`], from any thread.
     pub fn set_ready(&self, ready: bool) -> Result<(), NetError> {
         let msg = Message::SetReady { ready };
@@ -1948,7 +2052,7 @@ struct Slot {
 /// silently refusing every later join.
 fn spawn_accept(
     listener: TcpListener,
-    tx: Sender<LoopMsg>,
+    tx: SyncSender<LoopMsg>,
     stop: Arc<AtomicBool>,
     adopt: impl Fn(TcpStream) -> io::Result<Conn> + Send + 'static,
 ) -> io::Result<JoinHandle<()>> {
@@ -1990,9 +2094,9 @@ fn run(
     accept: JoinHandle<()>,
     stop: Arc<AtomicBool>,
     config: HostConfig,
-    tx: Sender<LoopMsg>,
+    tx: SyncSender<LoopMsg>,
     rx: Receiver<LoopMsg>,
-    events: Sender<HostEvent>,
+    events: EventTx,
     (inputs, lane): (RemoteInputs, Arc<HostLane>),
 ) {
     let mut players: BTreeMap<u16, Slot> = BTreeMap::new();
@@ -2020,6 +2124,11 @@ fn run(
     let mut start_resend: Option<(u64, Instant)> = None;
     let mut cancel_resend: Option<(u64, Instant)> = None;
     loop {
+        // The consumer stopped draining events: end the lobby (explicit
+        // failure) rather than queue without bound or wait on it.
+        if events.overflowed() {
+            break;
+        }
         // Wake for the next keepalive even when no message arrives.
         let wait = KEEPALIVE_INTERVAL.saturating_sub(last_sent.elapsed());
         // NETPLAY-06E-2c: a `Leave`/`SetReady` the reliable channel
@@ -2053,6 +2162,21 @@ fn run(
                         // keepalive write needs no extra pass: `broadcast_roster`
                         // below reports the corrected roster either way.
                         for id in inputs.silent_lane_seats(config.liveness_timeout) {
+                            remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs);
+                        }
+                        // NETPLAY-10A: a peer that reads nothing is cut loose
+                        // by the age of its oldest unwritten frame, however
+                        // short its queue is. Only this peer is affected.
+                        for (id, stats) in inputs.stalled_io_seats(config.peer_stall_limit) {
+                            eprintln!(
+                                "host: seat {id} not reading, disconnecting: io_queue len={} \
+                                 oldest_age_ms={} max_wait_ms={} coalesced={} refused={}",
+                                stats.len,
+                                stats.oldest_age.as_millis(),
+                                stats.max_wait.as_millis(),
+                                stats.coalesced,
+                                stats.refused,
+                            );
                             remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs);
                         }
                         let running = matches!(phase, Phase::InSession { .. });
@@ -2223,6 +2347,7 @@ fn run(
                 let Ok(writer) = PeerWriter::spawn(writer) else {
                     continue;
                 };
+                inputs.register_io(id, writer.probe());
                 players.insert(
                     id,
                     Slot {
@@ -2566,7 +2691,7 @@ fn remove_player(
     players: &mut BTreeMap<u16, Slot>,
     id: u16,
     cause: LeaveCause,
-    events: &Sender<HostEvent>,
+    events: &EventTx,
     inputs: &RemoteInputs,
 ) -> bool {
     let Some(mut slot) = players.remove(&id) else {
@@ -2591,10 +2716,24 @@ fn remove_player(
 fn broadcast(
     players: &mut BTreeMap<u16, Slot>,
     msg: &Message,
-    events: &Sender<HostEvent>,
+    events: &EventTx,
     inputs: &RemoteInputs,
 ) -> bool {
     broadcast_except(players, msg, &[], events, inputs)
+}
+
+/// The coalescing key of a message a later copy fully supersedes, so a
+/// seat that is not reading holds one copy of each instead of a backlog
+/// (NETPLAY-10A). `Start`, `Cancel` and `Leave` are one-shot and never
+/// coalesce; neither does `Snap`, whose impact rows are events that a
+/// later snapshot does not repeat.
+fn replace_key(msg: &Message) -> Option<u8> {
+    match msg {
+        Message::Keepalive { .. } => Some(1),
+        Message::Session(_) => Some(2),
+        Message::Roster { .. } => Some(3),
+        _ => None,
+    }
 }
 
 /// [`broadcast`] skipping the seats in `skip` — those already got `msg`
@@ -2603,12 +2742,16 @@ fn broadcast_except(
     players: &mut BTreeMap<u16, Slot>,
     msg: &Message,
     skip: &[u16],
-    events: &Sender<HostEvent>,
+    events: &EventTx,
     inputs: &RemoteInputs,
 ) -> bool {
     let mut failed = Vec::new();
     for (id, slot) in players.iter_mut().filter(|(id, _)| !skip.contains(id)) {
-        if slot.writer.send(msg).is_err() {
+        let sent = match replace_key(msg) {
+            Some(key) => slot.writer.send_replaceable(key, msg),
+            None => slot.writer.send(msg),
+        };
+        if sent.is_err() {
             failed.push(*id);
         }
     }
@@ -2648,7 +2791,7 @@ fn queue_lifecycle(lane: &HostLane, seats: impl IntoIterator<Item = u16>, msg: &
 /// refill a stalled peer's bounded reliable window every second.
 fn broadcast_roster(
     players: &mut BTreeMap<u16, Slot>,
-    events: &Sender<HostEvent>,
+    events: &EventTx,
     inputs: &RemoteInputs,
     lane: Option<&HostLane>,
 ) {
@@ -2685,7 +2828,7 @@ fn broadcast_roster(
 /// absorb `Input` into the shared mailbox (data-plane traffic — the loop
 /// is not woken per sample), report `Leave` as a clean quit, and drop
 /// the peer on a protocol violation or a dead socket.
-fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) {
+fn spawn_reader(conn: Conn, id: u16, tx: SyncSender<LoopMsg>, inputs: RemoteInputs) {
     thread::spawn(move || {
         let mut conn = conn;
         loop {
@@ -2946,6 +3089,7 @@ mod tests {
             pick_validator: None,
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
+            peer_stall_limit: PEER_STALL_LIMIT,
         };
         let host = Host::listen_loopback(&config).unwrap();
         let _alice = join(host.addr(), "alice");
@@ -3096,7 +3240,7 @@ mod tests {
             let _ = conn.recv();
             let _ = gone.send(());
         });
-        let (events, rx) = mpsc::channel();
+        let (events, rx) = EventTx::bounded();
         let inputs = RemoteInputs::default();
 
         broadcast_roster(&mut players, &events, &inputs, None);
@@ -3154,7 +3298,7 @@ mod tests {
             .send_frame(big.clone())
             .is_ok()
         {}
-        let (events, rx) = mpsc::channel();
+        let (events, rx) = EventTx::bounded();
         let inputs = RemoteInputs::default();
 
         let start = Instant::now();
@@ -3190,6 +3334,7 @@ mod tests {
             pick_validator: None,
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
+            peer_stall_limit: PEER_STALL_LIMIT,
         };
         match Host::listen_loopback(&over) {
             Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
@@ -3203,6 +3348,7 @@ mod tests {
             pick_validator: None,
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
+            peer_stall_limit: PEER_STALL_LIMIT,
         })
         .unwrap();
     }
@@ -3229,7 +3375,7 @@ mod tests {
     fn the_accept_thread_stops_without_a_wake_connection() {
         let listener = listen_loopback().unwrap();
         let addr = listener.local_addr().unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(LOOP_QUEUE_CAP);
         let stop = Arc::new(AtomicBool::new(false));
         let accept = spawn_accept(listener, tx, stop.clone(), adopt).unwrap();
 
@@ -3260,7 +3406,7 @@ mod tests {
     fn a_connection_that_fails_setup_does_not_stop_accepts() {
         let listener = listen_loopback().unwrap();
         let addr = listener.local_addr().unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(LOOP_QUEUE_CAP);
         let stop = Arc::new(AtomicBool::new(false));
         let failed = AtomicBool::new(false);
         let accept = spawn_accept(listener, tx, stop.clone(), move |stream| {
