@@ -1064,6 +1064,7 @@ pub fn chase_follow(
             &LinearVelocity,
             Option<&VehicleInput>,
             Option<&VehicleTelemetry>,
+            Option<&crate::netvisual::CorrectionOffset>,
         ),
         RootPlayer,
     >,
@@ -1071,7 +1072,7 @@ pub fn chase_follow(
     if !matches!(*mode, CameraMode::Chase | CameraMode::ChaseFar) {
         return;
     }
-    let Ok((veh_ent, veh_xf, vel, input, telemetry)) = vehicle.single() else {
+    let Ok((veh_ent, veh_xf, vel, input, telemetry, correction)) = vehicle.single() else {
         return;
     };
     let reverse_gear = telemetry.is_some_and(|t| t.reverse);
@@ -1089,8 +1090,11 @@ pub fn chase_follow(
     // PlayerVehicle is a root entity, so its local transform is its world
     // render pose. Interpolation writes this before Update; GlobalTransform
     // is propagated in PostUpdate and still describes the previous frame.
-    let veh_pos = veh_xf.translation;
-    let veh_rot = veh_xf.rotation;
+    // The body's reconciliation shift is eased in presentation only
+    // (NETPLAY-07): the camera follows where the car is drawn, so a
+    // correction is neither a camera snap nor a body edit.
+    let (veh_pos, veh_rot) =
+        crate::netvisual::target_pose(veh_xf.translation, veh_xf.rotation, correction);
     // `|forward velocity|` (`carsim+0x248`): the car's −Z axis.
     let speed = vel.dot(veh_rot * Vec3::NEG_Z).abs();
     let dt = time.delta_secs();

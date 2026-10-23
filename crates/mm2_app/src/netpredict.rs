@@ -1156,8 +1156,11 @@ pub fn reconcile_own(world: &mut World) {
     let mut pred = world.remove_resource::<OwnPrediction>().unwrap_or_default();
     if pred.generation != generation {
         pred.restart(generation);
+        crate::netvisual::clear_correction(world, own);
     }
     if reset {
+        // A new life: the drawn pose must not slide from the old one.
+        crate::netvisual::clear_correction(world, own);
         pred.ring.clear();
         pred.floor = newest + 1;
         pred.deadline_start = None;
@@ -1191,6 +1194,13 @@ pub fn reconcile_own(world: &mut World) {
             },
         );
         report(&assertion, outcome, before, present(world, own));
+        // The body moved; what is drawn does not (it eases across). Only
+        // the render path reads this, never `Position`/`Rotation`.
+        if let (Some(b), Some(a)) = (before, present(world, own))
+            && matches!(outcome, Outcome::Replayed { .. } | Outcome::Recovered(_))
+        {
+            crate::netvisual::absorb_correction(world, own, b, a);
+        }
         // Everything up to the ack is inside the host's state: it can
         // never be replayed again.
         if matches!(

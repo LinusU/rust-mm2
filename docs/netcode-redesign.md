@@ -1877,3 +1877,38 @@ arrival and for two nearby distinct impacts;
 runs it over the real transport. No retail data, no rendered capture.
 **Open:** impact-driven camera shake (none exists), Cops & Robbers re-award
 and role swaps (N08-B), tick-correct modifiers (N08-C).
+
+## Own-car correction smoothing (NETPLAY-07 slice 1, #1768)
+
+`mm2_app::netvisual`, behind the `NetplayTimeline` selector. When
+`reconcile_own` replays (or recovers) the own car, the body shift
+`before -> after` at the same simulation instant is absorbed into a
+`CorrectionOffset` (world translation + shortest-arc rotation about the body
+origin) so the *drawn* pose stays where it was, then decays with wall-clock
+time (`exp(-dt/0.12 s)`, frame-rate independent, cleared below 1 mm / 0.1
+degree). The offset is bounded (1.5 m, 0.35 rad); a shift over 6 m, an
+authority reset, a generation change or a non-finite pose clears it so the
+view never slides across the city or from a previous life.
+
+- Never touches `Position`/`Rotation`/`Transform` of the body: it edits the
+  `GlobalTransform` subtree of the car after propagation (`apply_offsets`) and
+  restores it before the next propagation (`undo_offsets`), so Avian's
+  transform sync cannot read it back and a static subtree cannot accumulate.
+  Body state is therefore identical with smoothing on or off by construction.
+- The chase camera (`camera::chase_follow`) targets the drawn pose; a cockpit
+  camera is a child and moves with the subtree. No input or steering is
+  filtered and nothing is buffered.
+- The numbers are designed values (no original network correction exists).
+
+Evidence (synthetic, `cargo test -p mm2_app --lib netvisual`): drawn pose
+preserved at the correction and converging; same settle time at 30/60/144 fps
+(within 50 ms, under 1 s); 2 cm alternating corrections never exceed 4 cm;
+bounds and teleport clear; yaw across +-pi takes the 0.1 rad arc; alternating
+yaw settles; non-finite clears; the PostUpdate systems leave `Transform`
+unchanged and do not accumulate over repeated frames.
+
+Open (not claimed): snapshot-buffer sampling for non-predicted distant
+replicas and the arrival-gap-driven `RemoteLerp` (AC5); trailers/wheels of the
+corrected car beyond the carried subtree (trailer is a separate body); the
+physics-versus-rendered developer overlay; rendered captures and 30/60/144 FPS
+route runs (AC1, AC3); input-to-render latency measurement.
