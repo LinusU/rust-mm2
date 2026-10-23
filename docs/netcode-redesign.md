@@ -889,9 +889,10 @@ gone (leave, changed pick); both carry the session's `SessionEntity`.
 Host-planned bots and trailers keep the legacy kinematic copies; with the
 selector off nothing changes.
 
-**Not done here.** Frames are not yet absorbed into `RemoteFeed.store`
-(no receive path calls `RemoteCommands::absorb`), so until that lands the
-body is driven neutral. The body is not corrected towards the host:
+**Not done here.** (Update, 05J: the host now emits frames and the client
+absorbs them into `RemoteFeed.store`; only the replay reads them, the live
+step still runs neutral because reading them live destabilised the
+three-car wall pileup in `net_contact`.) The body is not corrected towards the host:
 `reconcile_own` restoring and replaying both cars is 05A-4. Evidence level:
 synthetic integration (unit tests on `spawn_remote` with a dev car and the
 lerp system); no retail data, no rendered capture.
@@ -1002,8 +1003,8 @@ change is in what is compared, corrected and driven:
   before. Each adopts the host state of the own car and of every remote body
   that had an assertion.
 
-Still open: `RemoteFeed.store` has no receive path yet (bodies run on
-predicted/neutral commands until frames are absorbed), and contact-specific
+Still open: (05J: frames are now absorbed and read by the replay; the live
+step does not read them) and contact-specific
 tests and cost numbers are 05A-5. Evidence level: synthetic integration on
 the production step (twin-world equality for a two-car replay); no retail
 data, no rendered capture.

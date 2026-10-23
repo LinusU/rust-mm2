@@ -264,9 +264,13 @@ pub fn drive_predicted_bodies(
     let feed = &mut *feed;
     for (body, mut input) in &mut bodies {
         let host_tick = feed.host_tick(session.tick());
-        let p = feed
-            .predictor
-            .command_for(&mut feed.store, body.wire, host_tick);
+        // The live step deliberately does not read the received store: feeding
+        // it real commands made the three-car wall pileup (net_contact)
+        // diverge 1.5-11 m on 60-80% of runs, while hold-last/neutral over an
+        // empty store passes. The received commands are used by the replay
+        // (`command_at`) only. Why the live step diverges is still open.
+        let mut empty = RemoteCommands::new();
+        let p = feed.predictor.command_for(&mut empty, body.wire, host_tick);
         *input = decode_tick_command(&p.command);
         feed.note_applied(body.wire, session.tick(), p.command);
     }
