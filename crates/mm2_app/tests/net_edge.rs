@@ -368,6 +368,32 @@ fn a_stopped_host_ends_a_parked_app_client() {
     assert_eq!(client.wait_timeout(WAIT).code(), Some(3));
 }
 
+/// The dead-but-open half from the host's side: SIGSTOP leaves a joined
+/// `mm2 --join` client's TCP stream open and its lane silent, so no write
+/// ever fails. The host reaps the seat `cause=lost` after its silence
+/// bound (`HOST_LIVENESS_TIMEOUT`, 8 s, plus slack for a loaded runner),
+/// the lobby keeps running, and a newcomer takes a seat afterwards.
+#[test]
+fn a_stopped_client_is_reaped_lost_and_a_newcomer_joins() {
+    let install = tempfile::tempdir().unwrap();
+    let host = Proc::spawn(HOST_EXE, &dev_host_args(install.path()));
+    let (addr, _fp, _) = listening(&host);
+
+    let client = Proc::spawn(
+        MM2_EXE,
+        &mm2_join_args(install.path(), addr, HOST_FRAME_CEILING),
+    );
+    host.until("event=joined");
+
+    client.stop();
+    let left = host.until_within("event=left", STOPPED_HOST_BOUND);
+    assert!(left.contains("cause=lost"), "{left}");
+
+    let newcomer = Proc::spawn(JOIN_EXE, &join_args(install.path(), addr, "bob", &[]));
+    assert!(newcomer.line().starts_with("connected="));
+    host.until("event=joined");
+}
+
 /// Same kill, one state later: the lobby already minted a session, so
 /// the client has observed `event=started` when the host dies — the
 /// close is still reported and still nonzero.

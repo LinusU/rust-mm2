@@ -745,6 +745,9 @@ pub(crate) struct LaneSeat {
     port: u16,
     token: u64,
     established: bool,
+    /// When the last authenticated datagram arrived (the grant, until
+    /// then): the host's liveness clock for the seat.
+    heard: Instant,
     window: SeqWindow,
     out: Arc<SeatOut>,
     ack: Option<LaneAck>,
@@ -770,6 +773,16 @@ impl LaneTable {
     pub(crate) fn clear(&mut self) {
         self.generation = 0;
         self.seats.clear();
+    }
+
+    /// The seats whose lane has authenticated nothing for longer than
+    /// `bound` as of `now`.
+    pub(crate) fn silent(&self, now: Instant, bound: Duration) -> Vec<u16> {
+        self.seats
+            .iter()
+            .filter(|(_, s)| now.saturating_duration_since(s.heard) > bound)
+            .map(|(id, _)| *id)
+            .collect()
     }
 }
 
@@ -859,6 +872,7 @@ fn ingest(
         return Verdict::Dropped(Refuse::Replayed);
     }
     seat.established = true;
+    seat.heard = now;
     match h.tag {
         LaneTag::Probe => {
             // Echo every probe: the client may have lost the last echo.
@@ -986,6 +1000,7 @@ impl HostLane {
                 port,
                 token,
                 established: false,
+                heard: Instant::now(),
                 window: SeqWindow::default(),
                 out: Arc::new(SeatOut::new(self.wake.clone())),
                 ack: None,
@@ -1652,6 +1667,11 @@ impl ClientLane {
     }
 
     fn send_loop(&self, socket: &UdpSocket) {
+        // The host reaps a seat whose lane is silent (`HOST_LIVENESS_TIMEOUT`),
+        // so an idle client — a lobby, a paused session — sends a probe
+        // (which the host authenticates and echoes) when nothing else left
+        // for a keepalive interval.
+        let mut last_sent = Instant::now();
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
             let due = self
@@ -1667,6 +1687,12 @@ impl ClientLane {
             while let Some(item) = self.out.queue.pop() {
                 let header = self.header(item.tag, item.generation);
                 flush(socket, self.host, &header, &item.payload, &self.counters);
+                last_sent = Instant::now();
+            }
+            if last_sent.elapsed() >= crate::lobby::KEEPALIVE_INTERVAL {
+                let header = self.header(LaneTag::Probe, 0);
+                flush(socket, self.host, &header, &probe_padding(), &self.counters);
+                last_sent = Instant::now();
             }
         }
     }

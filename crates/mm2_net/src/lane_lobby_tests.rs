@@ -345,3 +345,53 @@ fn an_oversize_start_survives_a_lost_datagram_on_the_channel_and_applies_once() 
     let seen = drain_lifecycle(&mut rig.client);
     assert_eq!(seen.first(), Some(&("start", generation)), "{seen:?}");
 }
+
+/// A client whose datagrams stop arriving while its TCP stream stays open
+/// is reaped as `Lost` after the host's silence bound, and an idle client
+/// whose probes do arrive is not.
+#[test]
+fn a_silent_lane_is_reaped_as_lost_and_an_idle_one_is_not() {
+    use crate::{HostConfig, HostEvent, LeaveCause};
+    let bound = Duration::from_millis(1500);
+    let host = Host::listen_loopback(&HostConfig {
+        liveness_timeout: bound,
+        ..HostConfig::new(crate::lane_tests::FP)
+    })
+    .unwrap();
+    let target = std::net::SocketAddr::new(host.addr().ip(), host.lane_port());
+    let proxy = UdpImpairProxy::loopback_seeded(target, 7).unwrap();
+    let mute = Client::join_lane_routed(host.addr(), &hello_for("mute"), WAIT, Some(proxy.route()))
+        .unwrap();
+    let idle = Client::join_lane(host.addr(), &hello_for("idle")).unwrap();
+    let (mute_id, idle_id) = (mute.player_id(), idle.player_id());
+    eventually("both lanes", || {
+        host.lane_established(mute_id) && host.lane_established(idle_id)
+    });
+    // Black-hole the mute client's uplink; its TCP stream stays open.
+    proxy.set(
+        LinkDir::Up,
+        UdpImpair {
+            link: Impair {
+                loss: 1.0,
+                ..Impair::default()
+            },
+            ..UdpImpair::default()
+        },
+    );
+    let deadline = std::time::Instant::now() + bound * 6;
+    loop {
+        if let Ok(HostEvent::Left { id, cause, .. }) = host.recv_timeout(Duration::from_millis(100))
+        {
+            assert_eq!(id, mute_id, "only the muted seat is reaped");
+            assert_eq!(cause, LeaveCause::Lost);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the silent seat was never reaped"
+        );
+    }
+    assert!(!host.lane_established(mute_id), "the lane seat is released");
+    assert!(host.lane_established(idle_id), "the idle client stays");
+    drop((mute, idle));
+}

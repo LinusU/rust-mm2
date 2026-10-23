@@ -98,9 +98,9 @@ pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
 pub use impair_udp::{UdpImpair, UdpImpairProxy, UdpStats};
 pub use lobby::{
-    Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST, INPUT_RATE_HZ,
-    KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LaneRoute, LateJoin, LeaveCause, PickValidator,
-    ReliableFanout, RemoteInputs, StampedInput, Transport,
+    Client, ClientCtl, HOST_LIVENESS_TIMEOUT, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST,
+    INPUT_RATE_HZ, KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LaneRoute, LateJoin, LeaveCause,
+    PickValidator, ReliableFanout, RemoteInputs, StampedInput, Transport,
 };
 pub use netcmd::{REMOTE_BUFFER_CAP, RemoteCommands, RemoteSeatStats};
 pub use pace::{

@@ -1791,6 +1791,7 @@ impl HostLink {
                 // The host seat is a player — peers learn its pick
                 // from `Start` so they can spawn its car.
                 host_pick: Some(encode_pick(&config.vehicle)?),
+                liveness_timeout: mm2_net::HOST_LIVENESS_TIMEOUT,
             },
         )?;
         let ctl = host.ctl();

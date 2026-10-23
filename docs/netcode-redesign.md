@@ -1132,6 +1132,26 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   channel once, whole; `reliable` unit tests cover reassembly across loss,
   reorder and duplicates, atomic refusal and an unterminated run.
 
+## Lifecycle on the lane: host-side liveness (#1967)
+
+A client that stops speaking while its sockets stay open (SIGSTOP, a
+black-holed route with no FIN/RST) fails no write, so the host never
+reaped it. The host now keeps, per lane seat, when the last authenticated
+datagram arrived (`LaneSeat::heard`, set after the token, address, replay
+and generation checks, so a forger cannot keep a seat alive). On the
+keepalive tick, a seat silent past `HostConfig::liveness_timeout`
+(`HOST_LIVENESS_TIMEOUT`, 8 s, designed not original) is removed as
+`LeaveCause::Lost` through `remove_player`, which releases the lane seat
+and token and rebroadcasts the roster; a running session continues with
+the remaining seats. A client's lane send loop sends a `Probe` (which the
+host authenticates and echoes) whenever nothing else left for
+`KEEPALIVE_INTERVAL`, so an idle lobby seat or a paused session is never
+silent. A TCP-only join has no lane and keeps the write-failure rule.
+Tests: `a_silent_lane_is_reaped_as_lost_and_an_idle_one_is_not`
+(`lane_lobby_tests`, a black-holed uplink) and
+`a_stopped_client_is_reaped_lost_and_a_newcomer_joins` (`net_edge`, SIGSTOP
+of a real `mm2 --join`).
+
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 
 `crates/mm2_app/src/netpredict/contact_tests.rs` (unit tests of the

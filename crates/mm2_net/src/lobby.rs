@@ -116,6 +116,16 @@ pub const LIFECYCLE_RESEND_WINDOW: Duration = Duration::from_secs(5);
 /// so a loaded host is not mistaken for a dead one. Designed.
 pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the host lets a seat's datagram lane stay silent — no
+/// authenticated datagram of any kind, the client's idle probes included
+/// (sent every [`KEEPALIVE_INTERVAL`]) — before it removes the seat as
+/// [`LeaveCause::Lost`]. A client that stopped (stopped process,
+/// black-holed route) keeps its sockets open, so no write fails and
+/// nothing else would ever reap it. Several keepalive intervals, a little
+/// above the client's own [`LIVENESS_TIMEOUT`] on the host. Designed, not
+/// original. Applies to lane clients; a TCP-only join has no lane to hear.
+pub const HOST_LIVENESS_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Bound on `Client::leave`'s post-`Leave` drain. The host closes
 /// promptly once it reads the quit (its reader thread exits and drops
 /// the socket); this only bounds a host that never does.
@@ -155,6 +165,9 @@ pub struct HostConfig {
     /// exist. Carried on `Start` so a client can spawn the host's car
     /// (F25-A); the wire roster itself never lists the seat.
     pub host_pick: Option<VehiclePick>,
+    /// How long a seat's lane may stay silent before the host removes it
+    /// as lost; [`HOST_LIVENESS_TIMEOUT`] by default. A test seam.
+    pub liveness_timeout: Duration,
 }
 
 impl HostConfig {
@@ -166,6 +179,7 @@ impl HostConfig {
             max_clients: MAX_PLAYERS as u16,
             pick_validator: None,
             host_pick: None,
+            liveness_timeout: HOST_LIVENESS_TIMEOUT,
         }
     }
 }
@@ -586,6 +600,12 @@ impl RemoteInputs {
         mail.windows.remove(&id);
         mail.intents.retain(|(seat, _)| *seat != id);
         mail.lane.remove(id);
+    }
+
+    /// The seats whose lane has been silent past `bound`.
+    fn silent_lane_seats(&self, bound: Duration) -> Vec<u16> {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane.silent(Instant::now(), bound)
     }
 
     /// The oldest reliably delivered `Leave`/`SetReady` not yet handled.
@@ -2032,6 +2052,9 @@ fn run(
                         // newest-wins) snapshot bounds that to one tick. A failed
                         // keepalive write needs no extra pass: `broadcast_roster`
                         // below reports the corrected roster either way.
+                        for id in inputs.silent_lane_seats(config.liveness_timeout) {
+                            remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs);
+                        }
                         let running = matches!(phase, Phase::InSession { .. });
                         broadcast(
                             &mut players,
@@ -2922,6 +2945,7 @@ mod tests {
             max_clients: 1,
             pick_validator: None,
             host_pick: None,
+            liveness_timeout: HOST_LIVENESS_TIMEOUT,
         };
         let host = Host::listen_loopback(&config).unwrap();
         let _alice = join(host.addr(), "alice");
@@ -3165,6 +3189,7 @@ mod tests {
             max_clients: MAX_PLAYERS as u16 + 1,
             pick_validator: None,
             host_pick: None,
+            liveness_timeout: HOST_LIVENESS_TIMEOUT,
         };
         match Host::listen_loopback(&over) {
             Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
@@ -3177,6 +3202,7 @@ mod tests {
             max_clients: MAX_PLAYERS as u16,
             pick_validator: None,
             host_pick: None,
+            liveness_timeout: HOST_LIVENESS_TIMEOUT,
         })
         .unwrap();
     }
