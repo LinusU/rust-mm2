@@ -22,6 +22,10 @@ const BOUND: Duration = Duration::from_secs(600);
 /// A retail `sf` seed on which the lobby bots drive to the gold within
 /// the five-minute limit (measured locally; the bots take the pickup
 /// by contact, the same rule a human's car plays under).
+///
+/// A `session` edit without `seed=` mints a fresh clock seed, so the
+/// command must name it again or the host's `--seed` is lost and each
+/// run fields different bots.
 const SEED: u64 = 1291;
 /// Host-controlled bots hold wire ids from here up.
 const BOT_A: u16 = mm2_app::cnr_bots::NET_BOT_PLAYER_BASE;
@@ -115,7 +119,7 @@ fn play_to_results(city: &str, variant: &str) -> (String, String) {
         &["--until-results", "--deadline", "900"],
     );
     let addr = listening_addr(&host);
-    host.cmd("session bots=2");
+    host.cmd(&format!("session bots=2 seed={SEED}"));
     host.until("event=session_changed");
     let mut client_args = join_args_tcp_only(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
@@ -247,7 +251,7 @@ fn a_rematch_fields_the_same_bots_on_both_machines() {
     let (retail, _slot) = support::retail_slot().unwrap();
     let mut host = host_proc(&retail, "sf", "ffa", "5m", &[]);
     let addr = listening_addr(&host);
-    host.cmd("session bots=2");
+    host.cmd(&format!("session bots=2 seed={SEED}"));
     host.until("event=session_changed");
     let mut client_args = join_args_tcp_only(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
