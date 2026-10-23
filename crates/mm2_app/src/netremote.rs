@@ -27,15 +27,21 @@
 //! `hold` ticks of age and then fades the analog controls linearly to
 //! neutral over `fade` ticks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use bevy::prelude::*;
-use mm2_game::Session;
-use mm2_net::{MAX_REMOTE_RUN, RemoteCommands, TickCommand};
-use mm2_vehicle::VehicleInput;
+use mm2_game::{PlayerVehicle, Session};
+use mm2_net::{
+    MAX_REMOTE_RUN, Message, RemoteCommand, RemoteCommands, RemoteSeat, Source, TickCommand,
+};
 use mm2_vehicle::replay::MAX_REPLAY_STEPS;
+use mm2_vehicle::{HumanDriver, VehicleInput};
 
-use crate::netdrive::{PredictedRemoteBody, decode_tick_command};
+use crate::net::{HostLink, LobbyState};
+use crate::netcmd::tick_command;
+use crate::netdrive::{
+    NetPlayer, PredictedRemoteBody, RemotePick, ResetEpoch, decode_tick_command,
+};
 use crate::netplay_timeline::NetplayTimeline;
 
 /// How a missing tick is filled.
@@ -174,9 +180,9 @@ fn extrapolate(policy: Policy, command: TickCommand, age: u64) -> TickCommand {
 }
 
 /// The client's store of the host's remote-seat commands and the
-/// predictor that fills its gaps, one per client. Frames are absorbed
-/// into `store` by the receive path (not wired yet); the contact bodies
-/// below read it.
+/// predictor that fills its gaps, one per client. `net::drain_lobby`
+/// absorbs the host's `RemoteCommands` frames into `store`; the contact
+/// bodies below read it.
 #[derive(Resource, Debug)]
 pub struct RemoteFeed {
     /// Commands the host applied to remote seats, by seat and tick.
@@ -244,6 +250,161 @@ pub fn drive_predicted_bodies(
         *input = decode_tick_command(&p.command);
         feed.note_applied(body.wire, session.tick(), p.command);
     }
+}
+
+/// One seat's recent finalized commands on the host: a contiguous run of
+/// at most [`MAX_REMOTE_RUN`] ticks ending at the newest.
+#[derive(Debug)]
+struct SeatLog {
+    epoch: u8,
+    first_tick: u64,
+    commands: VecDeque<RemoteCommand>,
+}
+
+/// Host-side: the commands actually applied to each human seat, by
+/// authoritative tick (NETPLAY-05J). Remote seats are recorded by
+/// `netdrive::consume_seat_commands` from what the mailbox finalized
+/// (including substitutes, tagged by their [`Source`]), the host's own
+/// seat by [`record_local_seat`]. [`publish_remote_commands`] sends each
+/// client everything but its own seat.
+#[derive(Resource, Debug, Default)]
+pub struct HostCommandLog {
+    seats: BTreeMap<u16, SeatLog>,
+    /// `(generation, tick)` of the last frame sent, so an `Update` that
+    /// ran no fixed step sends nothing.
+    sent: Option<(u64, u64)>,
+}
+
+impl HostCommandLog {
+    /// Record the command applied to `player` on `tick`. A reset epoch
+    /// change or a gap in ticks starts the seat's run afresh.
+    pub fn record(&mut self, player: u16, epoch: u8, tick: u64, command: RemoteCommand) {
+        let seat = self.seats.entry(player).or_insert_with(|| SeatLog {
+            epoch,
+            first_tick: tick,
+            commands: VecDeque::new(),
+        });
+        let next = seat.first_tick + seat.commands.len() as u64;
+        if seat.epoch != epoch || (!seat.commands.is_empty() && next != tick) {
+            seat.epoch = epoch;
+            seat.first_tick = tick;
+            seat.commands.clear();
+        } else if seat.commands.is_empty() {
+            seat.first_tick = tick;
+        }
+        seat.commands.push_back(command);
+        if seat.commands.len() > MAX_REMOTE_RUN {
+            seat.commands.pop_front();
+            seat.first_tick += 1;
+        }
+    }
+
+    /// Forget every seat (the session is not running).
+    pub fn clear(&mut self) {
+        self.seats.clear();
+        self.sent = None;
+    }
+
+    /// The frame owed to `receiver`: a run per other seat, `None` when
+    /// there is nothing to say. `tick` is the host session tick.
+    pub fn frame_for(&self, receiver: u16, generation: u64, tick: u64) -> Option<Message> {
+        let seats: Vec<RemoteSeat> = self
+            .seats
+            .iter()
+            .filter(|(player, seat)| **player != receiver && !seat.commands.is_empty())
+            .map(|(player, seat)| RemoteSeat {
+                player: *player,
+                epoch: seat.epoch,
+                first_tick: seat.first_tick,
+                commands: seat.commands.iter().copied().collect(),
+            })
+            .filter(|run| run.last_tick() <= tick)
+            .take(mm2_net::MAX_REMOTE_SEATS)
+            .collect();
+        (!seats.is_empty()).then_some(Message::RemoteCommands {
+            generation,
+            tick,
+            seats,
+        })
+    }
+}
+
+/// The host's own car: wire id, settled controls, driver options, epoch.
+type LocalSeat = (
+    &'static NetPlayer,
+    &'static VehicleInput,
+    Option<&'static HumanDriver>,
+    Option<&'static ResetEpoch>,
+);
+
+/// Fixed-tick, after the player's input settled: record the host's own
+/// seat command for the tick, so clients can predict the host's car from
+/// what it really applied.
+pub fn record_local_seat(
+    session: Res<Session>,
+    mut log: ResMut<HostCommandLog>,
+    local: Query<LocalSeat, (With<PlayerVehicle>, Without<RemotePick>)>,
+) {
+    if !session.is_playing() {
+        return;
+    }
+    for (wire, input, human, epoch) in &local {
+        log.record(
+            wire.0,
+            epoch.map_or(0, |e| e.0),
+            session.tick(),
+            RemoteCommand {
+                command: tick_command(input, human),
+                source: Source::Command,
+            },
+        );
+    }
+}
+
+/// Update: send every rostered client the other seats' recent commands
+/// on the datagram lane (TCP for a client without one — `send_to` picks).
+/// Each frame repeats the last [`MAX_REMOTE_RUN`] ticks, so a dropped
+/// datagram costs nothing; it leaves once per fixed tick advanced.
+pub fn publish_remote_commands(
+    host: Res<HostLink>,
+    session: Res<Session>,
+    lobby: Res<LobbyState>,
+    mut log: ResMut<HostCommandLog>,
+) {
+    if !session.is_playing() {
+        log.clear();
+        return;
+    }
+    let key = (session.wire_generation(), session.tick());
+    if log.sent == Some(key) {
+        return;
+    }
+    log.sent = Some(key);
+    for entry in &lobby.roster {
+        if let Some(frame) = log.frame_for(entry.player_id, key.0, key.1) {
+            // A failed send is the next frame's repeat to cover.
+            let _ = host.ctl().send_to(entry.player_id, &frame);
+        }
+    }
+}
+
+/// Host systems: the finalized-command log and its publisher.
+pub fn add_host_systems(app: &mut App) {
+    app.init_resource::<HostCommandLog>()
+        .add_systems(
+            FixedUpdate,
+            record_local_seat
+                .after(crate::input::apply_player_input)
+                .run_if(crate::netplay_timeline::timeline_enabled)
+                .run_if(resource_exists::<HostLink>),
+        )
+        .add_systems(
+            Update,
+            publish_remote_commands
+                .after(crate::net::drive_host)
+                .run_if(crate::netplay_timeline::timeline_enabled)
+                .run_if(resource_exists::<HostLink>),
+        );
 }
 
 /// Register the contact-body driver behind the [`NetplayTimeline`]
@@ -397,5 +558,70 @@ mod tests {
         assert_eq!(feed.command_at(3, 10), None);
         assert_eq!(feed.command_at(4, 1), Some(cmd(7, 0)));
         assert!(feed.applied.len() as u64 <= APPLIED_KEEP + 2);
+    }
+    fn rc(throttle: u8) -> RemoteCommand {
+        RemoteCommand {
+            command: cmd(throttle, 0),
+            source: Source::Command,
+        }
+    }
+
+    #[test]
+    fn host_log_frames_skip_the_receiver_and_bound_each_run() {
+        let mut log = HostCommandLog::default();
+        for tick in 1..=40u64 {
+            log.record(0, 0, tick, rc(tick as u8));
+            log.record(1, 0, tick, rc(100 + tick as u8));
+            log.record(2, 0, tick, rc(200));
+        }
+        let Some(Message::RemoteCommands { seats, tick, .. }) = log.frame_for(2, 7, 40) else {
+            panic!("a frame is owed");
+        };
+        assert_eq!(tick, 40);
+        let ids: Vec<u16> = seats.iter().map(|s| s.player).collect();
+        assert_eq!(ids, [0, 1], "the receiver's own seat is never sent");
+        for run in &seats {
+            assert_eq!(run.commands.len(), MAX_REMOTE_RUN);
+            assert_eq!(run.last_tick(), 40);
+        }
+        assert_eq!(seats[0].commands[0], rc(40 - MAX_REMOTE_RUN as u8 + 1));
+        assert!(HostCommandLog::default().frame_for(1, 7, 1).is_none());
+    }
+
+    #[test]
+    fn host_log_restarts_a_run_on_a_gap_or_a_reset_epoch() {
+        let mut log = HostCommandLog::default();
+        log.record(1, 0, 5, rc(1));
+        log.record(1, 0, 6, rc(2));
+        log.record(1, 0, 9, rc(3));
+        let run = |log: &HostCommandLog| {
+            let Some(Message::RemoteCommands { mut seats, .. }) = log.frame_for(0, 1, 20) else {
+                panic!("a frame is owed");
+            };
+            seats.remove(0)
+        };
+        let r = run(&log);
+        assert_eq!((r.first_tick, r.commands.len()), (9, 1));
+        log.record(1, 1, 10, rc(4));
+        let r = run(&log);
+        assert_eq!((r.epoch, r.first_tick, r.commands.len()), (1, 10, 1));
+    }
+
+    #[test]
+    fn a_client_replays_the_hosts_commands_not_its_guess() {
+        let mut log = HostCommandLog::default();
+        for tick in 1..=20u64 {
+            // The remote driver alternates, so hold-last would be wrong.
+            log.record(1, 0, tick, rc(if tick % 2 == 0 { 10 } else { 200 }));
+        }
+        let frame = log.frame_for(2, 3, 20).unwrap();
+        let mut feed = RemoteFeed::default();
+        feed.store.set_generation(Some(3));
+        assert!(feed.store.absorb(&frame));
+        for tick in 5..=20u64 {
+            let p = feed.predictor.command_for(&mut feed.store, 1, tick);
+            assert_eq!(p.basis, Basis::Authoritative, "tick {tick}");
+            assert_eq!(p.command.throttle, if tick % 2 == 0 { 10 } else { 200 });
+        }
     }
 }

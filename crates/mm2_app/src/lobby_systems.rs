@@ -126,6 +126,7 @@ pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> +
 pub fn add_host_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + Clone) {
     // NETPLAY-02B: one command per remote seat per fixed step, ahead of
     // the physics schedule; only under the fixed-tick selector.
+    crate::netremote::add_host_systems(app);
     app.add_systems(
         FixedUpdate,
         netdrive::consume_seat_commands

@@ -199,6 +199,11 @@ impl RemoteCommands {
         Some(c)
     }
 
+    /// The seats the store tracks, ascending.
+    pub fn players(&self) -> impl Iterator<Item = u16> + '_ {
+        self.seats.keys().copied()
+    }
+
     /// `player`'s counters, if the seat is tracked.
     pub fn stats(&self, player: u16) -> Option<RemoteSeatStats> {
         self.seats.get(&player).map(|s| s.stats)

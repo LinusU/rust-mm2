@@ -1358,6 +1358,7 @@ fn run_headless(
             add_lobby_client_systems(&mut app);
         }
         RunSource::Host(link) => {
+            crate::netremote::add_host_systems(&mut app);
             app.add_systems(
                 FixedUpdate,
                 crate::netdrive::consume_seat_commands
@@ -1895,6 +1896,23 @@ fn run_headless(
             }
         })
         .unwrap_or_default();
+    // NETPLAY-05J: ` rcmd=<seat>:<stored>s/<consumed>c/<conflicts>x,...` —
+    // the host's `RemoteCommands` a client absorbed per remote seat.
+    // Absent until a frame was stored, so every other record is unchanged.
+    let net_detail = net_detail
+        + &world_ecs
+            .get_resource::<crate::netremote::RemoteFeed>()
+            .map(|feed| {
+                feed.store
+                    .players()
+                    .filter_map(|p| feed.store.stats(p).map(|s| (p, s)))
+                    .map(|(p, s)| format!("{p}:{}s/{}c/{}x", s.stored, s.consumed, s.conflicts))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|cells| !cells.is_empty())
+            .map(|cells| format!(" rcmd={cells}"))
+            .unwrap_or_default();
     // F25-AC05 trailer evidence: `trl=` is the trailer entities alive
     // at the last reconcile (own rig included) and the remote copies
     // among them, the rows that reseated one on its seat's reset epoch,

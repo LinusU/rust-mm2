@@ -2628,22 +2628,46 @@ pub fn apply_remote_inputs(
 pub fn consume_seat_commands(
     host: Res<HostLink>,
     session: Res<Session>,
-    mut remotes: Query<(&NetPlayer, &mut VehicleInput, &mut HumanDriver), With<RemotePick>>,
+    mut remotes: Query<
+        (
+            &NetPlayer,
+            &mut VehicleInput,
+            &mut HumanDriver,
+            Option<&ResetEpoch>,
+        ),
+        With<RemotePick>,
+    >,
     mut report: ResMut<NetDriveReport>,
+    // The finalized commands clients predict this seat from (NETPLAY-05J).
+    mut log: Option<ResMut<crate::netremote::HostCommandLog>>,
 ) {
     let inputs: RemoteInputs = host.remote_inputs();
     if !session.is_playing() {
         inputs.set_running_generation(None);
+        if let Some(log) = log.as_mut() {
+            log.clear();
+        }
         return;
     }
     inputs.set_running_generation(Some(session.wire_generation()));
     report.inputs_limited = inputs.rate_limited();
-    for (wire, mut input, mut human) in &mut remotes {
+    for (wire, mut input, mut human, epoch) in &mut remotes {
         let Some(slot) = inputs.consume_command_at(wire.0, Instant::now()) else {
             continue;
         };
         *input = decode_tick_command(&slot.command);
         human.auto_reverse = slot.command.auto_reverse;
+        if let Some(log) = log.as_mut() {
+            log.record(
+                wire.0,
+                epoch.map_or(0, |e| e.0),
+                session.tick(),
+                mm2_net::RemoteCommand {
+                    command: slot.command,
+                    source: slot.source,
+                },
+            );
+        }
         match slot.source {
             CommandSource::Command => report.inputs_applied += 1,
             CommandSource::HeldLast | CommandSource::Neutral => report.inputs_staled += 1,

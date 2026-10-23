@@ -856,6 +856,7 @@ pub fn drive_lobby(
     menu: Option<Res<MenuShell>>,
     mut snaps: ResMut<crate::netdrive::RemoteSnaps>,
     mut lead: Option<ResMut<crate::netpace::ClientLead>>,
+    mut feed: Option<ResMut<crate::netremote::RemoteFeed>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for event in link.drain() {
@@ -902,6 +903,17 @@ pub fn drive_lobby(
                     lead.note_snap(link.player_id(), generation, tick, &entries);
                 }
                 snaps.push(generation, tick, entries, trailers, impacts, race)
+            }
+            LobbyEvent::Message(msg @ Message::RemoteCommands { generation, .. }) => {
+                // Namespace the store to the running session; a frame from
+                // another generation is counted and dropped by `absorb`.
+                if let Some(feed) = feed.as_mut()
+                    && session.is_playing()
+                    && session.wire_generation() == generation
+                {
+                    feed.store.set_generation(Some(generation));
+                    feed.store.absorb(&msg);
+                }
             }
             LobbyEvent::Message(Message::Impacts {
                 generation,
