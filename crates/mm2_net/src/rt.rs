@@ -1308,6 +1308,23 @@ impl Inbox {
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
+            // A control stream that ended (EOF, a reset) is
+            // the last thing the client hears: the host exiting right after
+            // it sent a once-only message (the results frame) must not
+            // lose what the lane already delivered. A read timeout is not
+            // an end and keeps its place in line.
+            let ended = matches!(
+                st.tcp.front(),
+                Some(Err(NetError::Io(e))) if !is_timeout(e)
+            );
+            if ended {
+                if let Some(msg) = st.rel.pop_front() {
+                    return Ok(msg);
+                }
+                if let Some(msg) = st.lane.pop() {
+                    return Ok(msg);
+                }
+            }
             if let Some(item) = st.tcp.pop_front() {
                 self.cv.notify_all();
                 return item;
@@ -1863,6 +1880,28 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), tokens.len());
+    }
+
+    #[test]
+    fn inbox_hands_over_lane_delivered_messages_before_a_control_stream_end() {
+        let inbox = Inbox::new();
+        inbox.push_rel(Message::Cancel { generation: 1 });
+        inbox.push_lane(Message::Cancel { generation: 2 });
+        assert!(inbox.push_tcp(Err(NetError::Io(io::Error::from(
+            io::ErrorKind::UnexpectedEof
+        )))));
+        assert_eq!(
+            inbox.pop(Some(Duration::ZERO)).unwrap(),
+            Message::Cancel { generation: 1 }
+        );
+        assert_eq!(
+            inbox.pop(Some(Duration::ZERO)).unwrap(),
+            Message::Cancel { generation: 2 }
+        );
+        assert!(matches!(
+            inbox.pop(Some(Duration::ZERO)),
+            Err(NetError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[test]
