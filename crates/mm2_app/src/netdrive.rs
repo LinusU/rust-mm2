@@ -396,6 +396,29 @@ const MAX_PENDING_IMPACTS: usize = 256;
 /// grows would itself be the leak.
 const MAX_SEEN_IMPACTS: usize = 512;
 
+/// Bit marking a trailer owner in `RemoteSnaps::arrivals`.
+const TRAILER_KEY: u32 = 1 << 16;
+
+/// Bound on the per-seat freshness and arrival maps. A live roster is at
+/// most `mm2_net::MAX_PLAYERS`; the headroom covers leavers and a host
+/// naming ids outside the roster, and the oldest mark retires first.
+const MAX_FRESHNESS_KEYS: usize = 4 * mm2_net::MAX_PLAYERS as usize;
+
+/// Whether a row for `seat` at `frame` is newer than the seat's mark.
+fn fresh_row(marks: &HashMap<u16, (u64, u64)>, seat: u16, frame: (u64, u64)) -> bool {
+    marks.get(&seat).is_none_or(|m| frame > *m)
+}
+
+/// Record `frame` as `seat`'s newest, retiring the oldest mark past the bound.
+fn note_mark(marks: &mut HashMap<u16, (u64, u64)>, seat: u16, frame: (u64, u64)) {
+    marks.insert(seat, frame);
+    if marks.len() > MAX_FRESHNESS_KEYS
+        && let Some(oldest) = marks.iter().min_by_key(|(_, m)| **m).map(|(k, _)| *k)
+    {
+        marks.remove(&oldest);
+    }
+}
+
 /// The wire roster id this participant entity carries. `0` is the host
 /// seat — the roster never lists it, but its `Start`-carried pick and
 /// snapshot entries use it. Stamped on the local car too: the host's
@@ -545,16 +568,31 @@ pub struct RemoteImpact {
 /// drop, its unreceived effects still land.
 #[derive(Resource, Default)]
 pub struct RemoteSnaps {
-    latest: Option<Snap>,
-    /// Session-clock arrival of `latest` — the lerp interval is the gap
-    /// between consecutive arrivals.
-    last_arrival: Option<f64>,
-    /// The newest applied (generation, tick) — an older or equal frame
-    /// is dropped; a snap from an older session can never apply, and a
-    /// new generation resets the tick check.
+    /// The staged groups, ascending `(generation, tick)`. A full `Snap`
+    /// is one group; a partial one (NETPLAY-10C) carries a disjoint
+    /// subset of the seats of its tick. A seat sits in at most one
+    /// staged group (a newer row strips it from an older one), so the
+    /// list is bounded by the seat count.
+    staged: Vec<Snap>,
+    /// Per-seat freshness: the newest `(generation, tick)` of a seat row
+    /// staged or applied. A row at or behind it is stale. A seat a group
+    /// does not name keeps its mark — absent is "not in this group",
+    /// never "left". Bounded by [`MAX_FRESHNESS_KEYS`].
+    seat_marks: HashMap<u16, (u64, u64)>,
+    /// The same freshness for trailer rows, keyed by the towing seat.
+    trailer_marks: HashMap<u16, (u64, u64)>,
+    /// Session-clock arrival of each seat's (and trailer owner's) last
+    /// applied row — the lerp interval is the gap between a seat's own
+    /// consecutive arrivals, so a group that carries only some seats
+    /// blends them over their own period. Trailer keys have bit 16 set.
+    arrivals: HashMap<u32, f64>,
+    /// The newest applied (generation, tick) — a snap from an older
+    /// session can never apply, and a new generation resets the tick
+    /// check. Gates only frames with no seat rows; seat rows gate on
+    /// their own marks.
     applied: Option<(u64, u64)>,
     /// Pose frames dropped stale at [`push`](Self::push) — a duplicated
-    /// or reordered frame at or behind the staged/applied watermark.
+    /// or reordered frame whose every row is at or behind its seat's mark.
     /// Folded into [`NetDriveReport`] by `apply_snapshots`, the only
     /// consumer that runs with one.
     stale: u64,
@@ -628,7 +666,8 @@ pub struct RemoteSnaps {
     pub(crate) cnr: crate::cnrnet::CnrStage,
 }
 
-/// A staged snapshot frame.
+/// A staged snapshot group: the rows of one `Snap` message (all of a
+/// tick's seats, or a disjoint subset of them).
 struct Snap {
     generation: u64,
     tick: u64,
@@ -910,6 +949,22 @@ impl RemoteSnaps {
         &mut self.own_stage
     }
 
+    /// The newest `(generation, tick)` of a row staged or applied for
+    /// wire `seat` — its freshness mark (`None` before its first row).
+    pub fn seat_mark(&self, seat: u16) -> Option<(u64, u64)> {
+        self.seat_marks.get(&seat).copied()
+    }
+
+    /// Groups staged and not yet applied (bounded by the seat count).
+    pub fn staged_groups(&self) -> usize {
+        self.staged.len()
+    }
+
+    /// Frames dropped stale at push and not yet folded into the report.
+    pub fn stale_drops(&self) -> u64 {
+        self.stale
+    }
+
     /// Replicated impact rows still waiting for `apply_snapshots`
     /// (bounded by `MAX_PENDING_IMPACTS`); the perf soak samples it.
     pub fn pending_impacts(&self) -> usize {
@@ -928,17 +983,31 @@ impl RemoteSnaps {
         &mut self,
         generation: u64,
         tick: u64,
-        entries: Vec<SnapEntry>,
-        trailers: Vec<SnapTrailer>,
+        mut entries: Vec<SnapEntry>,
+        mut trailers: Vec<SnapTrailer>,
         impacts: Vec<SnapImpact>,
         race: Option<SnapRace>,
     ) {
-        let staged = self.latest.as_ref().map(|s| (s.generation, s.tick));
-        let watermark = staged.into_iter().chain(self.applied).max();
-        if watermark.is_some_and(|w| (generation, tick) <= w) {
+        let frame = (generation, tick);
+        let had_rows = !entries.is_empty() || !trailers.is_empty();
+        entries.retain(|e| fresh_row(&self.seat_marks, e.player, frame));
+        trailers.retain(|t| fresh_row(&self.trailer_marks, t.owner, frame));
+        let stale = if had_rows {
+            entries.is_empty() && trailers.is_empty()
+        } else {
+            // A row-less frame has no seat to judge it by: the frame
+            // watermark decides, as it always did.
+            let staged = self.staged.last().map(|s| (s.generation, s.tick));
+            staged
+                .into_iter()
+                .chain(self.applied)
+                .max()
+                .is_some_and(|w| frame <= w)
+        };
+        if stale {
             self.stale += 1;
         } else {
-            self.latest = Some(Snap {
+            self.stage_group(Snap {
                 generation,
                 tick,
                 entries,
@@ -958,6 +1027,67 @@ impl RemoteSnaps {
             }
         }
         self.queue_impacts(generation, impacts);
+    }
+
+    /// Stage a group whose rows already passed the freshness check: its
+    /// rows take their seats' marks, strip those seats from any older
+    /// staged group (latest-wins per seat), and a group of the same tick
+    /// merges into the staged one (the seat sets are disjoint — a
+    /// repeated seat was stale).
+    fn stage_group(&mut self, group: Snap) {
+        let frame = (group.generation, group.tick);
+        for e in &group.entries {
+            note_mark(&mut self.seat_marks, e.player, frame);
+        }
+        for t in &group.trailers {
+            note_mark(&mut self.trailer_marks, t.owner, frame);
+        }
+        // A group the strip empties has nothing left to apply; a
+        // row-less frame never had anything to lose and stays.
+        self.staged.retain_mut(|older| {
+            if (older.generation, older.tick) >= frame {
+                return true;
+            }
+            let rows = older.entries.len() + older.trailers.len();
+            older
+                .entries
+                .retain(|e| !group.entries.iter().any(|g| g.player == e.player));
+            older
+                .trailers
+                .retain(|t| !group.trailers.iter().any(|g| g.owner == t.owner));
+            rows == 0 || !older.entries.is_empty() || !older.trailers.is_empty()
+        });
+        match self
+            .staged
+            .iter_mut()
+            .find(|s| (s.generation, s.tick) == frame)
+        {
+            Some(same) => {
+                same.entries.extend(group.entries);
+                same.trailers.extend(group.trailers);
+            }
+            None => {
+                self.staged.push(group);
+                self.staged.sort_by_key(|s| (s.generation, s.tick));
+            }
+        }
+    }
+
+    /// Blend interval for the row keyed `key` arriving `now`: the gap
+    /// since that key's previous arrival, clamped; `0` for the first.
+    fn blend_interval(&mut self, key: u32, now: f64) -> f64 {
+        let prev = self.arrivals.insert(key, now);
+        if self.arrivals.len() > MAX_FRESHNESS_KEYS
+            && let Some(oldest) = self
+                .arrivals
+                .iter()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(k, _)| *k)
+        {
+            self.arrivals.remove(&oldest);
+        }
+        prev.map(|p| (now - p).clamp(*BLEND_GAP.start(), *BLEND_GAP.end()))
+            .unwrap_or(0.0)
     }
 
     /// Queue received impact rows (from a `Snap` or a reliable `Impacts`
@@ -1080,8 +1210,10 @@ impl RemoteSnaps {
     /// themselves are report evidence awaiting the `apply_snapshots`
     /// fold, not stream state — they survive.
     pub fn reset(&mut self) {
-        self.latest = None;
-        self.last_arrival = None;
+        self.staged.clear();
+        self.seat_marks.clear();
+        self.trailer_marks.clear();
+        self.arrivals.clear();
         self.applied = None;
         self.dropped += self.pending.len() as u64;
         self.pending.clear();
@@ -3693,23 +3825,28 @@ pub fn apply_snapshots(
     // `RemoteSnaps::repaired` before the queued impact rows are
     // judged, so a hit the authority wiped before publishing the snap
     // drops instead of splatting on top of the wipe that erased it.
-    apply_snap_frame(
-        &mut snaps,
-        &mut session,
-        &time,
-        &mut commands,
-        &mut players,
-        &mut surfaces,
-        &mut trailers,
-        &mut mirror,
-        &mut texel,
-        &pool,
-        &mut bangers,
-        &mut banger_writer,
-        &mut break_visuals,
-        &render_parts,
-        &mut report,
-    );
+    // Every staged group applies, oldest tick first, each on its own:
+    // a partial group never waits for the rest of its tick.
+    for snap in std::mem::take(&mut snaps.staged) {
+        apply_snap_frame(
+            snap,
+            &mut snaps,
+            &mut session,
+            &time,
+            &mut commands,
+            &mut players,
+            &mut surfaces,
+            &mut trailers,
+            &mut mirror,
+            &mut texel,
+            &pool,
+            &mut bangers,
+            &mut banger_writer,
+            &mut break_visuals,
+            &render_parts,
+            &mut report,
+        );
+    }
     let seat_state: HashMap<u16, (bool, u8)> = players
         .iter()
         .map(|(_, wire, player, epoch, ..)| {
@@ -3963,6 +4100,7 @@ fn apply_break_bits(
 /// drain that follows.
 #[allow(clippy::too_many_arguments)] // Bevy system helper — the borrows are the contract.
 fn apply_snap_frame(
+    snap: Snap,
     snaps: &mut RemoteSnaps,
     session: &mut Session,
     time: &Time,
@@ -3979,9 +4117,6 @@ fn apply_snap_frame(
     render_parts: &Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
     report: &mut NetDriveReport,
 ) {
-    let Some(snap) = snaps.latest.take() else {
-        return;
-    };
     // A frame from another session is never applied — and a stale tick
     // inside this generation isn't either (physics only moves on fixed
     // steps, so a same-tick snap carries a duplicate pose). Either way
@@ -3994,15 +4129,6 @@ fn apply_snap_frame(
     if snap.generation == 0 || snap.generation != session.wire_generation() {
         return;
     }
-    let stale = snaps
-        .applied
-        .is_some_and(|(g, t)| snap.generation == g && snap.tick <= t);
-    if stale {
-        // Unreachable through `push` (its watermark already gates
-        // this), but the drop still counts if a future path stages one.
-        report.snaps_staled += 1;
-        return;
-    }
     // The first frame of a generation is the observable "the client is
     // live" edge: process-level tests wait on this record instead of
     // sleeping after the host's `event=started`.
@@ -4012,16 +4138,15 @@ fn apply_snap_frame(
             snap.generation
         );
     }
-    snaps.applied = Some((snap.generation, snap.tick));
+    // The newest tick any group reached: a group of an older tick can
+    // still apply after a newer one (other seats), so this only rises.
+    snaps.applied = snaps.applied.max(Some((snap.generation, snap.tick)));
     report.note_bot_poses(snap.generation, snap.tick, snap.entries.iter());
     let now = time.elapsed_secs_f64();
-    // The blend interval is the observed arrival gap, clamped so a
-    // stalled stream doesn't smear a jump and a fast one doesn't snap.
-    let interval = snaps
-        .last_arrival
-        .map(|prev| (now - prev).clamp(*BLEND_GAP.start(), *BLEND_GAP.end()))
-        .unwrap_or(0.0);
-    snaps.last_arrival = Some(now);
+    // The blend interval is each seat's observed arrival gap, clamped
+    // so a stalled stream doesn't smear a jump and a fast one doesn't
+    // snap — taken per row below, so a partial group blends its seats
+    // over their own period.
     // Owners whose epoch advanced this frame — the trailer rows snap on
     // the same signal the seat does (v9, F25-B) — plus the local seat's
     // entity/wire pair the own rig's trailer keys off.
@@ -4038,6 +4163,7 @@ fn apply_snap_frame(
     // assertion for the two-car replay (NETPLAY-05A-4).
     let mut staged_remotes: Vec<crate::netpredict::RemoteAssertion> = Vec::new();
     for entry in &snap.entries {
+        let interval = snaps.blend_interval(u32::from(entry.player), now);
         for (
             entity,
             wire,
@@ -4314,7 +4440,11 @@ fn apply_snap_frame(
             break;
         }
     }
-    if snaps.own_stage.enabled {
+    // Staged only from the group that carries the own seat: the remotes
+    // travel with the assertion of their own snapshot, and a group
+    // without it (the world rows of a split tick) must not clear what
+    // the owner's group staged.
+    if snaps.own_stage.enabled && own_seat.is_some() {
         snaps.own_stage.remotes = staged_remotes;
         snaps.own_stage.trailers = snap
             .trailers
@@ -4342,6 +4472,7 @@ fn apply_snap_frame(
     // only when *our* seat's epoch advanced (the authority reseated the
     // whole rig in the same broadcast).
     for t in &snap.trailers {
+        let interval = snaps.blend_interval(u32::from(t.owner) | TRAILER_KEY, now);
         for (
             entity,
             trailer,
@@ -5998,6 +6129,305 @@ mod tests {
         }
     }
 
+    fn seat_entry(player: u16) -> SnapEntry {
+        SnapEntry {
+            player,
+            ..snap_entry()
+        }
+    }
+
+    fn push_seats(snaps: &mut RemoteSnaps, tick: u64, seats: &[u16]) {
+        let rows = seats.iter().map(|&p| seat_entry(p)).collect();
+        snaps.push(1, tick, rows, Vec::new(), Vec::new(), None);
+    }
+
+    fn staged_seats(snaps: &RemoteSnaps) -> Vec<(u64, Vec<u16>)> {
+        snaps
+            .staged
+            .iter()
+            .map(|g| (g.tick, g.entries.iter().map(|e| e.player).collect()))
+            .collect()
+    }
+
+    /// NETPLAY-10C-1: the two groups of one tick merge into the staged
+    /// frame in either arrival order, and neither counts stale.
+    #[test]
+    fn groups_of_one_tick_stage_in_either_order() {
+        for order in [[0usize, 1], [1, 0]] {
+            let groups: [&[u16]; 2] = [&[1], &[2, 3]];
+            let mut snaps = RemoteSnaps::default();
+            for i in order {
+                push_seats(&mut snaps, 7, groups[i]);
+            }
+            assert_eq!(snaps.stale, 0);
+            let staged = staged_seats(&snaps);
+            assert_eq!(staged.len(), 1);
+            let mut seats = staged[0].1.clone();
+            seats.sort();
+            assert_eq!(seats, vec![1, 2, 3]);
+        }
+    }
+
+    /// A duplicate of one group is a counted stale drop; its sibling is
+    /// unaffected, and a dropped group never blocks the other.
+    #[test]
+    fn a_duplicated_group_is_stale_and_a_missing_one_blocks_nothing() {
+        let mut snaps = RemoteSnaps::default();
+        push_seats(&mut snaps, 7, &[1]);
+        push_seats(&mut snaps, 7, &[1]);
+        assert_eq!(snaps.stale, 1);
+        // The world group never arrives: the owner's row is staged and usable.
+        assert_eq!(staged_seats(&snaps), vec![(7, vec![1])]);
+        // It arrives late, after the owner's group applied.
+        snaps.staged.clear();
+        push_seats(&mut snaps, 7, &[2, 3]);
+        assert_eq!(snaps.stale, 1);
+        assert_eq!(staged_seats(&snaps), vec![(7, vec![2, 3])]);
+        // A partly-stale group keeps its fresh rows.
+        push_seats(&mut snaps, 7, &[3, 4]);
+        assert_eq!(snaps.stale, 1);
+        assert_eq!(staged_seats(&snaps), vec![(7, vec![2, 3, 4])]);
+    }
+
+    /// A newer tick's group overtakes a missing group of an older tick:
+    /// the older group's late arrival is stale for the seats the newer
+    /// one named, but still applies for seats it did not.
+    #[test]
+    fn a_newer_tick_overtakes_a_missing_group_of_an_older_one() {
+        let mut snaps = RemoteSnaps::default();
+        push_seats(&mut snaps, 9, &[1]);
+        // Tick 8's world group arrives after tick 9's owner group.
+        push_seats(&mut snaps, 8, &[2, 3]);
+        assert_eq!(snaps.stale, 0, "seats 2 and 3 were never named at 9");
+        assert_eq!(
+            staged_seats(&snaps),
+            vec![(8, vec![2, 3]), (9, vec![1])],
+            "applied oldest first, each on its own"
+        );
+        // Tick 9's world group supersedes the staged tick-8 rows outright.
+        push_seats(&mut snaps, 9, &[2, 3]);
+        assert_eq!(staged_seats(&snaps), vec![(9, vec![1, 2, 3])]);
+        // Tick 8's owner row now reads stale.
+        push_seats(&mut snaps, 8, &[1]);
+        assert_eq!(snaps.stale, 1);
+        // An older generation's rows never stage over a newer mark.
+        snaps.push(0, 99, vec![seat_entry(1)], Vec::new(), Vec::new(), None);
+        assert_eq!(snaps.stale, 2);
+        assert_eq!(snaps.seat_mark(1), Some((1, 9)));
+    }
+
+    /// Trailer rows carry their own per-owner freshness.
+    #[test]
+    fn trailer_rows_are_judged_per_owner() {
+        let trailer = |owner| SnapTrailer {
+            owner,
+            pos: [0.0; 3],
+            rot: [0.0, 0.0, 0.0, 1.0],
+            vel: [0.0; 3],
+            angvel: [0.0; 3],
+            spin: 0,
+            flags: 0,
+        };
+        let mut snaps = RemoteSnaps::default();
+        snaps.push(1, 5, Vec::new(), vec![trailer(1)], Vec::new(), None);
+        snaps.push(
+            1,
+            5,
+            Vec::new(),
+            vec![trailer(1), trailer(2)],
+            Vec::new(),
+            None,
+        );
+        assert_eq!(snaps.stale, 0);
+        assert_eq!(snaps.staged.len(), 1);
+        assert_eq!(snaps.staged[0].trailers.len(), 2);
+        snaps.push(1, 4, Vec::new(), vec![trailer(2)], Vec::new(), None);
+        assert_eq!(snaps.stale, 1);
+    }
+
+    /// The freshness state is roster-bounded: ids a host invents retire
+    /// the oldest mark instead of growing the map.
+    #[test]
+    fn freshness_state_is_bounded() {
+        let mut snaps = RemoteSnaps::default();
+        for seat in 0..1000u16 {
+            push_seats(&mut snaps, u64::from(seat) + 1, &[seat]);
+            snaps.staged.clear();
+        }
+        assert!(snaps.seat_marks.len() <= MAX_FRESHNESS_KEYS);
+        assert!(snaps.staged.len() <= 1);
+        let now = 1.0;
+        for key in 0..1000u32 {
+            snaps.blend_interval(key, now + f64::from(key));
+        }
+        assert!(snaps.arrivals.len() <= MAX_FRESHNESS_KEYS);
+    }
+
+    /// Each staged group applies on its own run through `apply_snapshots`,
+    /// and a group naming only some seats is "not in this group", not "left".
+    #[test]
+    fn apply_snapshots_applies_each_group_independently() {
+        let mut session = Session::new();
+        session
+            .begin(mm2_game::SessionConfig {
+                authority: mm2_game::SessionAuthority::Remote,
+                ..mm2_game::SessionConfig::default()
+            })
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let gen_ = app.world().resource::<Session>().wire_generation();
+        let push = |app: &mut App, tick: u64, seats: &[u16]| {
+            let rows = seats.iter().map(|&p| seat_entry(p)).collect();
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                gen_,
+                tick,
+                rows,
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+        };
+        // Owner group alone: applies at once.
+        push(&mut app, 5, &[1]);
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().snaps_applied, 1);
+        // The world group of the same tick, later: applies on its own,
+        // and is not stale.
+        push(&mut app, 5, &[2, 3]);
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!((report.snaps_applied, report.snaps_staled), (2, 0));
+        // Two groups of different ticks staged in one run both apply.
+        push(&mut app, 7, &[2, 3]);
+        push(&mut app, 6, &[1]);
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!((report.snaps_applied, report.snaps_staled), (4, 0));
+        let snaps = app.world().resource::<RemoteSnaps>();
+        assert_eq!(snaps.applied(), Some((gen_, 7)));
+        assert_eq!(snaps.seat_mark(1), Some((gen_, 6)));
+        assert_eq!(snaps.seat_mark(2), Some((gen_, 7)));
+        // A duplicate of an applied group is stale.
+        push(&mut app, 7, &[2, 3]);
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 1);
+    }
+
+    /// The own-seat correction survives a split tick (NETPLAY-04): the
+    /// owner's group stages its assertion alone, and a later world group
+    /// (no own row) neither replaces it nor clears the remote states
+    /// staged with it. The assertion is the owner's tick and `input_ack`.
+    #[test]
+    fn the_owner_group_stages_its_assertion_alone_and_the_world_group_leaves_it() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(NetplayTimeline { enabled: true })
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        for (wire, id, control) in [(2, 4, PlayerControl::Local), (3, 5, PlayerControl::Remote)] {
+            app.world_mut().spawn((
+                NetPlayer(wire),
+                Player {
+                    id: mm2_game::PlayerId(id),
+                    control,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+            ));
+        }
+        let push = |app: &mut App, tick: u64, seats: &[(u16, u64)]| {
+            let rows = seats
+                .iter()
+                .map(|&(player, ack)| SnapEntry {
+                    player,
+                    input_ack: ack,
+                    ..snap_entry()
+                })
+                .collect();
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                1,
+                tick,
+                rows,
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+        };
+        // A full frame: the own assertion travels with seat 3's state.
+        push(&mut app, 4, &[(2, 2), (3, 0)]);
+        app.update();
+        let stage = app.world_mut().resource_mut::<RemoteSnaps>();
+        let stage = &stage.own_stage;
+        assert_eq!(
+            stage.assertion.map(|a| (a.server_tick, a.ack)),
+            Some((4, 2))
+        );
+        assert_eq!(stage.remotes.len(), 1);
+        // The reconcile consumes it; the next tick's owner group arrives alone.
+        app.world_mut()
+            .resource_mut::<RemoteSnaps>()
+            .own_stage_mut()
+            .assertion = None;
+        push(&mut app, 5, &[(2, 3)]);
+        app.update();
+        let snaps = app.world().resource::<RemoteSnaps>();
+        assert_eq!(
+            snaps.own_stage.assertion.map(|a| (a.server_tick, a.ack)),
+            Some((5, 3)),
+            "the owner's group alone is a usable correction"
+        );
+        assert!(snaps.own_stage.remotes.is_empty());
+        assert_eq!(snaps.own_stage.remotes_at, Some((1, 5)));
+        // The same tick's world group lands afterwards: the assertion and
+        // its staging are untouched, and the world seat applied on its own.
+        push(&mut app, 5, &[(3, 0)]);
+        app.update();
+        let snaps = app.world().resource::<RemoteSnaps>();
+        assert_eq!(
+            snaps.own_stage.assertion.map(|a| (a.server_tick, a.ack)),
+            Some((5, 3))
+        );
+        assert_eq!(snaps.own_stage.remotes_at, Some((1, 5)));
+        assert_eq!(snaps.own_stage.own_wire, Some(2));
+        assert_eq!(app.world().resource::<NetDriveReport>().snaps_applied, 3);
+    }
+
     /// NETPLAY-06E-3: the same impact reaching the client twice — once in
     /// its `Snap` and once in the reliable `Impacts` message, in either
     /// order, and repeated — queues exactly once.
@@ -6031,7 +6461,7 @@ mod tests {
             vec![snap_impact(7)],
             None,
         );
-        assert_eq!(snaps.latest.as_ref().unwrap().tick, 10);
+        assert_eq!(snaps.staged.last().unwrap().tick, 10);
         assert_eq!(snaps.stale, 1);
         assert_eq!(
             snaps.pending.len(),
@@ -6052,17 +6482,17 @@ mod tests {
         assert_eq!(snaps.pending.len(), 1);
         // Latest-wins still moves forward.
         snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new(), None);
-        assert_eq!(snaps.latest.as_ref().unwrap().tick, 11);
+        assert_eq!(snaps.staged.last().unwrap().tick, 11);
         // The applied watermark gates too — nothing staged needed.
         snaps.applied = Some((1, 11));
-        snaps.latest = None;
+        snaps.staged.clear();
         snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new(), None);
-        assert!(snaps.latest.is_none());
+        assert!(snaps.staged.is_empty());
         assert_eq!(snaps.stale, 3);
         // A new generation is always newer — a session restart never
         // reads as a straggler of the last one.
         snaps.push(2, 1, vec![snap_entry()], Vec::new(), Vec::new(), None);
-        assert_eq!(snaps.latest.as_ref().unwrap().generation, 2);
+        assert_eq!(snaps.staged.last().unwrap().generation, 2);
         assert_eq!(snaps.stale, 3);
     }
 
@@ -6236,15 +6666,15 @@ mod tests {
         // stream carries when its authority dies.
         snaps.push(2, 800, vec![snap_entry()], Vec::new(), Vec::new(), None);
         snaps.applied = Some((2, 900));
-        snaps.latest = None;
+        snaps.staged.clear();
         snaps.repaired.insert(1, (2, 800));
         assert_eq!(snaps.stale, 1);
         assert_eq!(snaps.pending.len(), 1);
 
         snaps.reset();
-        assert!(snaps.latest.is_none());
+        assert!(snaps.staged.is_empty());
         assert_eq!(snaps.applied, None);
-        assert!(snaps.last_arrival.is_none());
+        assert!(snaps.arrivals.is_empty());
         assert!(snaps.pending.is_empty());
         assert_eq!(snaps.dropped, 1, "the queued row folds into the drop count");
         assert!(snaps.repaired.is_empty());
@@ -6264,7 +6694,7 @@ mod tests {
             vec![snap_impact(7)],
             None,
         );
-        assert_eq!(snaps.latest.as_ref().unwrap().generation, 1);
+        assert_eq!(snaps.staged.last().unwrap().generation, 1);
         assert_eq!(snaps.stale, 1);
         assert_eq!(snaps.pending.len(), 1, "the new stream's rows queue");
     }
@@ -7335,7 +7765,7 @@ mod tests {
             assert_eq!(report.snaps_applied, 0, "the load consumed nothing");
             assert_eq!(report.race_dropped, 0, "the race row held, not dropped");
             let snaps = app.world().resource::<RemoteSnaps>();
-            assert!(snaps.latest.is_some(), "the frame stays staged");
+            assert!(!snaps.staged.is_empty(), "the frame stays staged");
             assert!(snaps.race.is_some(), "the race row stays staged");
             assert_eq!(
                 app.world().resource::<Session>().phase(),
