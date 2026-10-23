@@ -1690,9 +1690,13 @@ Tests: `netpredict/deadline_tests.rs` (persistent divergence recovers at
 exactly the deadline; a late first snapshot starts it late; incomplete and
 skipped snapshots do not start it; an agreeing state gives the next episode a
 fresh budget). Evidence level: synthetic integration on the production step.
-Open: the over-the-wire assertion in `tests/net_contact.rs`, which waits for
-the client on the datagram lane (NETPLAY-06E-4) and the host sending
-`RemoteCommands`; its header caveat stays until then.
+Over the wire (#1921, bb183f85): `tests/net_contact.rs` now runs the clients on
+the datagram lane while the host sends `RemoteCommands`, and asserts
+convergence and the response deadline on ordinary links. Integration check of
+#1766 (all nine dependencies done): AC1-AC6 are advanced at the evidence levels
+named in their sections (synthetic integration and loopback processes). No
+real-Internet or human evidence exists; #1240 and #1249 remain the gates for
+any Internet-play claim.
 
 ## Lifecycle on the lane (NETPLAY-06F, #1872)
 
