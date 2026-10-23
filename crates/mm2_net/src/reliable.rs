@@ -331,6 +331,8 @@ pub struct ReliableReceiver {
     /// Pieces of the message being reassembled, and how many.
     partial: Vec<u8>,
     partial_pieces: usize,
+    /// Whether a piece of the message being reassembled was retired.
+    partial_retired: bool,
     delivered: VecDeque<Vec<u8>>,
     stats: ReceiverStats,
 }
@@ -358,6 +360,10 @@ impl ReliableReceiver {
             self.buffered.insert(id, (more, body.to_vec()));
             while let Some((more, piece)) = self.buffered.remove(&(self.cum + 1)) {
                 self.cum += 1;
+                // A retired piece is empty and keeps its `more` flag; no
+                // real piece is empty, so it marks the whole message, whose
+                // already-acked pieces would otherwise be delivered cut short.
+                self.partial_retired |= piece.is_empty();
                 self.partial.extend_from_slice(&piece);
                 self.partial_pieces += 1;
                 if more && self.partial_pieces < MAX_RELIABLE_PIECES {
@@ -365,15 +371,16 @@ impl ReliableReceiver {
                 }
                 let whole = std::mem::take(&mut self.partial);
                 let pieces = std::mem::take(&mut self.partial_pieces);
+                let retired = std::mem::take(&mut self.partial_retired);
                 if more {
                     // A sender never exceeds MAX_RELIABLE_PIECES pieces: this
                     // run is not a conforming message. Count, never
                     // deliver half of it.
                     self.stats.malformed += pieces as u64;
-                } else if whole.is_empty() {
-                    // A tombstone: the sender retired this id (no real
-                    // message has an empty body). It holds its place in
-                    // the order and is not an app message.
+                } else if retired {
+                    // A tombstone: the sender retired part or all of this
+                    // message. It holds its place in the order and is not
+                    // an app message.
                     self.stats.retired += 1;
                 } else {
                     self.delivered.push_back(whole);
@@ -559,6 +566,23 @@ mod tests {
         assert_eq!(rx.stats().retired, 1);
         assert_eq!(tx.stats().in_flight, 0);
         assert!(!tx.is_dead());
+    }
+
+    #[test]
+    fn retiring_a_half_acked_fragmented_message_delivers_nothing() {
+        let mut tx = ReliableSender::new(4);
+        let mut rx = ReliableReceiver::new();
+        let first = tx.send(0, 7, &[9; 10]).unwrap();
+        assert_eq!(first.len(), 3);
+        // Only the first piece arrives; the rest are lost.
+        deliver(&mut rx, &mut tx, &first[0]);
+        assert_eq!(tx.retire(10, |g| g == 7), 2);
+        for (_, p) in tx.poll(10) {
+            deliver(&mut rx, &mut tx, &p);
+        }
+        assert_eq!(rx.pop(), None);
+        assert_eq!(rx.stats().retired, 1);
+        assert_eq!(tx.stats().in_flight, 0);
     }
 
     #[test]
