@@ -32,7 +32,11 @@
 //! a sustained push. A scripted dodge, brake or swipe may legitimately
 //! miss, so whether the contact happened is reported (`pursuer_contact_tick`
 //! null = missed) and only the parked seats' agreement is bounded; the
-//! push guarantees the hit and is bounded on every seat.
+//! push guarantees the hit and is bounded on every seat. The pusher lets go
+//! and parks at 40 s (`input::PUSH_UNTIL`): a car held against another never
+//! rests, and its predicted copy saw-tooths against the authority by up to
+//! 3.3 m at 400 ms (#1969), so only a settled field has a convergence to
+//! measure.
 //!
 //! NETPLAY-05F-3 adds the scene cases. `--net-contact wall` sends a car
 //! east down the dev world's z = 0 line to its 1 m thick, 4 m high
