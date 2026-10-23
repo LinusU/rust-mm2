@@ -751,7 +751,8 @@ acknowledged baselines.
 
 ### Not done / open
 
-- The app does not yet produce grouped or delta snapshots: `mm2_app`
+- The app does not yet produce grouped or delta snapshots (the client now
+  accepts them: see "Partial same-tick Snap groups"): `mm2_app`
   still broadcasts one `Snap`, which now fragments as a single group. Choosing
   the owner/contact grouping and engaging `BaselineSender` per seat belongs
   with the send-cadence and prioritisation work (NETPLAY-06D) and the app
@@ -1476,8 +1477,8 @@ is the seat's epoch in the snapshot (a trailer row takes its towing seat's).
 | ahead (the host reset the seat) | the recorded past of that body predates a teleport: the replay is forced even if the poses happen to be close. The restored world takes the host's post-reset pose at the compared tick and the own car is replayed against it, so a car that already passed the spot on the client meets the reset body where the host did instead of being pushed out of it. The body's epoch advances only once an assertion was *consumed* (`Matched`, `Replayed` or `Recovered`); a skipped snapshot leaves the reset pending for the next one. |
 | behind | dropped from the request (`OwnPrediction::stale_remote`): never compared, never written back over the reset |
 
-Snapshots already arrive in order (`RemoteSnaps::push` drops older ones),
-so "behind" is a guard rather than an observed path. No restitution, grip or
+Snapshots already arrive in order (`RemoteSnaps::push` drops older rows per
+seat), so "behind" is a guard rather than an observed path. No restitution, grip or
 collision-layer change is involved and no car is ghosted.
 
 Found while measuring: a correction at replay depth 0 (the snapshot acks the
@@ -2041,3 +2042,65 @@ and the aggregate cap are live); the producer (`publish_snapshots`) still
 broadcasts one `Snap` and does not yet honour `peer_adapt` (cadence divisor,
 relevance, bulk marking); the 8-peer loopback qualification with a
 bandwidth-limited relay is NETPLAY-10E.
+
+## Partial same-tick Snap groups (NETPLAY-10C-1, #2024)
+
+`mm2_net` delivers each completed fragment group as its own `Message::Snap`,
+so a tick split into an owner/interaction group and a world group reaches the
+app as two `Snap`s with the same `(generation, tick)` and disjoint seats.
+`RemoteSnaps` used to keep one `latest` frame behind one frame-wide
+watermark, which dropped the second group as stale. It now judges freshness
+per row:
+
+- **Freshness is per seat.** `seat_marks` holds the newest `(generation,
+  tick)` staged or applied for each seat, `trailer_marks` the same per
+  towing seat. A row at or behind its mark is stale; a `Snap` whose every row
+  is stale is one counted `snaps_staled` drop (a duplicate of a group, or a
+  reordered straggler); a partly stale one keeps its fresh rows. Both maps
+  and the per-row blend-arrival map are bounded (`MAX_FRESHNESS_KEYS`, 4 x
+  `MAX_PLAYERS`, oldest retired first). A frame with no seat or trailer rows
+  keeps the old frame watermark.
+- **Groups apply independently.** Staged groups are a list in ascending
+  tick; a group of a tick already staged merges into it, and a newer row for
+  a seat strips that seat from an older staged group, so a seat sits in at
+  most one staged group and the list is bounded by the seat count.
+  `apply_snapshots` applies every staged group each run, oldest first. A
+  group never waits for its siblings, and a newer tick overtaking a missing
+  group of an older one leaves that group's late arrival usable for the seats
+  the newer tick did not name. `applied` is the newest tick any group
+  reached.
+- **Absent is not left.** Nothing derives a departure from a missing entry:
+  apply only touches the seats a group names, and roster removal comes from
+  the reliable roster messages. Blend intervals are per seat (the gap since
+  that seat's own previous row), so a group carrying only some seats blends
+  them over their own period.
+- **Race row, impacts, trailers** keep their rules: race on
+  `race_order_key`, impacts on `(generation, seat, id)`, trailers on
+  `trailer_marks`.
+- **Own-seat correction.** The assertion (`OwnStage::assertion`) is staged
+  from the own seat's row only, so the owner's group alone is a usable
+  correction and a group without it never replaces or clears it. The remote
+  seats' states and trailers (`remotes`, `trailers`, `remotes_at`) are
+  staged only by the group that carries the own row, and travel only with
+  the assertion of that same `(generation, tick)` as before; a split tick
+  therefore replays without the other group's seats, exactly as if they were
+  absent from a snapshot. The own rig's trailer corrects only with the
+  group that carries the own seat, and a remote trailer's owner-reset signal
+  needs its owner's row in the same group.
+- **What the ack acknowledges.** `input_ack` and `input_depth` ride the own
+  seat's row, so the lane report (`ClientLead::note_snap`) and the
+  assertion's `ack` are those of the owner's group at the owner's tick; a
+  world group carries none, and the owner's ack never waits for it. A lost
+  world group costs only the remote seats' freshness.
+
+A single full `Snap` (today's host output) is one group naming every seat and
+behaves as before. Tests: `netdrive::tests` (`groups_of_one_tick_stage_in_either_order`,
+`a_duplicated_group_is_stale_and_a_missing_one_blocks_nothing`,
+`a_newer_tick_overtakes_a_missing_group_of_an_older_one`,
+`trailer_rows_are_judged_per_owner`, `freshness_state_is_bounded`,
+`apply_snapshots_applies_each_group_independently`,
+`the_owner_group_stages_its_assertion_alone_and_the_world_group_leaves_it`)
+and `net_partial_snaps` (a real lane through the seeded `UdpImpairProxy`:
+15 % loss, 20 % duplication, 30 % reordering; the outcome equals an
+independent model of the freshness rule). Evidence level: synthetic
+integration.
