@@ -1005,6 +1005,19 @@ mod tests {
         }
     }
 
+    /// Frames [`park`] queues: 16 MB, over any loopback socket buffer.
+    const PARK_FRAMES: u64 = 80;
+
+    /// Queue enough data to an unread peer that the writer thread is
+    /// certainly parked mid-write; returns the frames queued.
+    fn park(writer: &mut PeerWriter) -> u64 {
+        let big = vec![0u8; 200 * 1024];
+        for _ in 0..PARK_FRAMES {
+            writer.send_frame(big.clone()).unwrap();
+        }
+        PARK_FRAMES
+    }
+
     /// NETPLAY-10A: replaceable state held behind a parked write is
     /// overwritten, not stacked; the newest copy is written, ordered
     /// after what was queued since; one-shot frames are never merged.
@@ -1012,11 +1025,7 @@ mod tests {
     fn replaceable_frames_coalesce_behind_a_stalled_write() {
         let (mut writer, far) = peer_pair();
         // Park the thread mid-write on a socket nobody reads.
-        let big = vec![0u8; 200 * 1024];
-        while writer.stats().len < 4 {
-            writer.send_frame(big.clone()).unwrap();
-        }
-        let before = writer.stats().len;
+        let bigs = park(&mut writer);
         for n in 0..50u8 {
             writer
                 .send_replaceable(
@@ -1032,11 +1041,12 @@ mod tests {
             .send_replaceable(1, &Message::Welcome { player_id: 99 })
             .unwrap();
         let s = writer.stats();
-        assert_eq!(
-            s.len,
-            before + 2,
-            "50 replaceable frames held more than one"
-        );
+        // 50 replaceable frames and the late one held a single slot: only
+        // the first replaceable frame and the `Accept` were new entries.
+        // (Counted, not read off `len`: the thread may have popped a big
+        // frame meanwhile.)
+        assert_eq!(s.queued, bigs + 2, "replaceable frames stacked");
+        assert!(s.len <= PARK_FRAMES as usize + 2);
         assert_eq!(s.coalesced, 50);
         drop(far);
         writer.disconnect();
@@ -1048,10 +1058,7 @@ mod tests {
     #[test]
     fn a_stalled_peer_is_detected_by_age_despite_coalescing() {
         let (mut writer, _far) = peer_pair();
-        let big = vec![0u8; 200 * 1024];
-        while writer.stats().len < 4 {
-            writer.send_frame(big.clone()).unwrap();
-        }
+        park(&mut writer);
         writer
             .send_replaceable(1, &Message::Welcome { player_id: 1 })
             .unwrap();
