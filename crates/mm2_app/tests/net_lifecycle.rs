@@ -8,9 +8,9 @@
 //! are the lane's lifecycle, not a TCP-only path's. The legs:
 //! - a SIGKILLed client (its sockets close) is reaped by the host as
 //!   `cause=lost` and the host's session keeps running. A client that
-//!   goes silent with its sockets open (SIGSTOP) is *not* reaped by the
-//!   host today: only the client side has a liveness timeout; see
-//!   `docs/netcode-redesign.md`, "Lifecycle on the lane";
+//!   goes silent with its sockets open (SIGSTOP) is reaped as
+//!   `cause=lost` after the host's silence bound (`HOST_LIVENESS_TIMEOUT`,
+//!   #1967); see `docs/netcode-redesign.md`, "Lifecycle on the lane";
 //! - a second client then joins that running generation and drives it;
 //! - a late joiner behind a seeded lossy [`UdpImpairProxy`] is handed the
 //!   live generation and drives it.
@@ -64,6 +64,36 @@ fn a_killed_client_is_reaped_and_a_new_one_joins_the_running_session() {
     assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
     let net = net_field(&rec);
     assert!(net.snaps_applied > 0 && net.inputs_sent > 0, "{rec}");
+    late.wait_success("late", &rec);
+    assert!(host.until("event=left").contains("cause=quit"));
+    quit_and_assert_host_drove(host);
+}
+
+/// The dead-but-open half: SIGSTOP leaves the client's TCP stream open and
+/// its lane silent, so no write ever fails. The host reaps the seat
+/// `cause=lost` after its silence bound (8 s plus slack for a loaded
+/// runner), the running session continues, and a newcomer joins it.
+#[test]
+fn a_stopped_client_is_reaped_lost_and_a_new_one_joins_the_running_session() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
+    let addr = listening_addr(&host);
+
+    let frozen = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "frozen", 600_000));
+    host.until("ready=true");
+    host.cmd("start");
+    host.until("event=started generation=1");
+    host.until("remote participant spawned");
+
+    frozen.stop();
+    let left = host.until_within("event=left", LOST_BOUND);
+    assert!(left.contains("cause=lost"), "{left}");
+
+    let late = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "late", 4500));
+    host.until("remote participant spawned");
+    let rec = late.until_within("smoke=headless-physics", Duration::from_secs(120));
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    assert_eq!(field(&rec, "mp"), "gen1", "{rec}");
     late.wait_success("late", &rec);
     assert!(host.until("event=left").contains("cause=quit"));
     quit_and_assert_host_drove(host);

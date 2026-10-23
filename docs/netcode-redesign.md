@@ -1132,26 +1132,6 @@ tags and wired into both lane endpoints (`PROTOCOL_VERSION` 35).
   channel once, whole; `reliable` unit tests cover reassembly across loss,
   reorder and duplicates, atomic refusal and an unterminated run.
 
-## Lifecycle on the lane: host-side liveness (#1967)
-
-A client that stops speaking while its sockets stay open (SIGSTOP, a
-black-holed route with no FIN/RST) fails no write, so the host never
-reaped it. The host now keeps, per lane seat, when the last authenticated
-datagram arrived (`LaneSeat::heard`, set after the token, address, replay
-and generation checks, so a forger cannot keep a seat alive). On the
-keepalive tick, a seat silent past `HostConfig::liveness_timeout`
-(`HOST_LIVENESS_TIMEOUT`, 8 s, designed not original) is removed as
-`LeaveCause::Lost` through `remove_player`, which releases the lane seat
-and token and rebroadcasts the roster; a running session continues with
-the remaining seats. A client's lane send loop sends a `Probe` (which the
-host authenticates and echoes) whenever nothing else left for
-`KEEPALIVE_INTERVAL`, so an idle lobby seat or a paused session is never
-silent. A TCP-only join has no lane and keeps the write-failure rule.
-Tests: `a_silent_lane_is_reaped_as_lost_and_an_idle_one_is_not`
-(`lane_lobby_tests`, a black-holed uplink) and
-`a_stopped_client_is_reaped_lost_and_a_newcomer_joins` (`net_edge`, SIGSTOP
-of a real `mm2 --join`).
-
 ## Two-car contact tests and costs (NETPLAY-05A-5, #1896)
 
 `crates/mm2_app/src/netpredict/contact_tests.rs` (unit tests of the
@@ -1734,20 +1714,30 @@ negotiated the lane (`transport=lane`); none ran `--tcp-only`.
 | Late join into a running session | `net_drive::a_client_that_joins_a_running_session_is_handed_the_live_one` | joiner is handed generation 1 |
 | Late join behind a lossy lane | `net_lifecycle::a_late_joiner_behind_a_lossy_lane_is_handed_the_live_session` (new) | joiner drives `gen1`, proxy impaired both ways |
 | Client vanishes mid-session | `net_lifecycle::a_killed_client_is_reaped_and_a_new_one_joins_the_running_session` (new) | host `cause=lost` (2.3 ms measured on loopback: the kernel closes the sockets); a newcomer then joins generation 1 and drives |
+| Client goes silent, sockets open (SIGSTOP) | `net_lifecycle::a_stopped_client_is_reaped_lost_and_a_new_one_joins_the_running_session` (#1967) | host `cause=lost` after ~8 s; a newcomer then joins generation 1 and drives |
 | Host vanishes | `net_edge::a_killed_host_*` | clients close / end |
 
-### Open: the host does not time out a silent client
+### Host-side liveness for a silent client (#1967)
 
 A client that stops speaking while its sockets stay open (SIGSTOP, a
-black-holed link) is **not** reaped by the host. `LIVENESS_TIMEOUT` (5 s)
-is a *client-side* read timeout on the host's keepalives; the host reaps
-a seat when a write to it fails (closed socket, or a stalled socket whose
-send buffer fills), and the lane has no seat-silence timer either. A
-SIGSTOPped client was still on the roster after 30 s. Until a host-side
-liveness rule exists, an Internet client that loses its route without a
-FIN/RST lingers as a seat. Filed as follow-up #1967; the former
-reachability wording that "a silent peer is declared dead after 5 s" is
-corrected to say this applies to the host as seen by a client.
+black-holed route with no FIN/RST) fails no write, so the host used to
+keep its seat forever. The host now keeps, per lane seat, when the last
+authenticated datagram arrived (`LaneSeat::heard`, set after the token,
+address, replay and generation checks, so a forger cannot keep a seat
+alive). On the keepalive tick, a seat silent past
+`HostConfig::liveness_timeout` (`HOST_LIVENESS_TIMEOUT`, 8 s, designed not
+original) is removed as `LeaveCause::Lost` through `remove_player`, which
+releases the lane seat and token and rebroadcasts the roster; a running
+session continues with the remaining seats. A client's lane send loop
+sends a `Probe` (which the host authenticates and echoes) whenever nothing
+else left for `KEEPALIVE_INTERVAL`, so an idle lobby seat or a paused
+session is never silent. A TCP-only join has no lane and keeps the
+write-failure rule. The client-side `LIVENESS_TIMEOUT` (5 s) is unchanged:
+it is the client's read timeout on host keepalives.
+Tests: `a_silent_lane_is_reaped_as_lost_and_an_idle_one_is_not`
+(`lane_lobby_tests`, a black-holed uplink) and
+`net_lifecycle::a_stopped_client_is_reaped_lost_and_a_new_one_joins_the_running_session`
+(SIGSTOP of a real `mm2 --join`).
 
 ### #1767 acceptance mapping
 
@@ -1765,5 +1755,5 @@ tests; none of it is WAN evidence.
    `lane_reliable_tests`. C&R and impact outcomes: 06E-3 section.
 5. Direct join, late join, disconnect on loopback: the table above.
    Endpoint/firewall requirements: `docs/multiplayer-reachability.md`.
-   **Open:** the host-side silent-client timeout above, and all real
+   The host-side silent-client timeout is above (#1967). **Open:** all real
    machine validation (OWNER #1240, #1249).
