@@ -553,6 +553,14 @@ const SWIPE_ALONGSIDE: (f32, f32) = (8.0, 1.0);
 /// runner is steered back onto the line after the spawn jostle.
 const WALL_AIM: f32 = 40.0;
 
+/// Updates into play at which a pushing car (`push`) lets go and parks
+/// (40 s at the 60 Hz tick). The push is sustained for most of the run, but
+/// a car held against another one never rests: the own seat's prediction
+/// then saw-tooths against the authority (up to 3.3 m at 400 ms links
+/// before each deadline recovery), so a comparison at an arbitrary stop
+/// tick measures the phase of that cycle rather than convergence.
+const PUSH_UNTIL: u64 = 2400;
+
 /// [`contact_drive`]'s per-session memory.
 #[derive(Debug, Default)]
 pub struct ContactState {
@@ -671,7 +679,15 @@ pub fn contact_drive(
         let from = at.translation();
         let target = nearest_ram_target(from, &others).map(|(_, t)| t);
         let speed = vel.length();
-        *vi = if drive.0 == ContactScript::Push {
+        *vi = if drive.0 == ContactScript::Push && state.ticks > PUSH_UNTIL {
+            // Released: park, so the field comes to rest and the clients'
+            // end-of-run comparison is of settled poses, not of a predicted
+            // car caught mid-creep against a car it is still pushing.
+            VehicleInput {
+                handbrake: 1.0,
+                ..default()
+            }
+        } else if drive.0 == ContactScript::Push {
             if let Some(to) = target
                 && from.distance(to) > RAM_STANDOFF
             {
