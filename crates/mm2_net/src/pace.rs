@@ -134,6 +134,15 @@ impl Budget {
         self.credit = (self.credit + add as i64).min(i64::from(self.burst));
     }
 
+    /// Change the refill rate and burst at `now`. Credit earned so far
+    /// is kept (clamped to the new burst); debt is kept as it is.
+    pub fn retune(&mut self, rate: u32, burst: u32, now: Instant) {
+        self.refill(now);
+        self.rate = rate;
+        self.burst = burst;
+        self.credit = self.credit.min(i64::from(burst));
+    }
+
     /// Spend `bytes` for bulk: only when the credit covers it.
     pub fn try_spend(&mut self, bytes: usize, now: Instant) -> bool {
         self.refill(now);

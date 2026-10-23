@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 
 use crate::NetError;
 use crate::cmdbuf::{Consumed, SeatBuffer, SeatStats};
+use crate::congest::HOST_UPLINK_BYTES_PER_SEC;
 use crate::conn::{
     Conn, HANDSHAKE_TIMEOUT, PEER_STALL_LIMIT, PeerProbe, PeerQueueStats, PeerWriter,
     listen_loopback, recv_hello_within,
@@ -186,6 +187,11 @@ pub struct HostConfig {
     /// the host disconnects the seat as not reading;
     /// [`PEER_STALL_LIMIT`] by default (NETPLAY-10A). A test seam.
     pub peer_stall_limit: Duration,
+    /// The host's aggregate send budget over every seat's lane, in wire
+    /// bytes per second (payload, lane header, UDP and IP);
+    /// [`HOST_UPLINK_BYTES_PER_SEC`] (5 Mbit/s) by default
+    /// (NETPLAY-10B). Retunable with [`Host::set_uplink_cap`].
+    pub uplink_bytes_per_sec: u32,
 }
 
 impl HostConfig {
@@ -199,6 +205,7 @@ impl HostConfig {
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
             peer_stall_limit: PEER_STALL_LIMIT,
+            uplink_bytes_per_sec: HOST_UPLINK_BYTES_PER_SEC,
         }
     }
 }
@@ -848,7 +855,7 @@ impl Host {
         let control = tx.clone();
         let inputs = RemoteInputs::default();
         let loop_inputs = inputs.clone();
-        let lane = HostLane::bind(addr.ip(), inputs.clone())?;
+        let lane = HostLane::bind(addr.ip(), inputs.clone(), config.uplink_bytes_per_sec)?;
         let loop_lane = lane.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let accept = spawn_accept(listener, tx.clone(), stop.clone(), adopt)?;
@@ -930,6 +937,26 @@ impl Host {
     /// `id`'s established lane (NETPLAY-06D).
     pub fn lane_pace(&self, id: u16) -> Option<crate::PaceStats> {
         self.lane.established_out(id).map(|o| o.pace_stats())
+    }
+
+    /// Change the aggregate send budget over every seat's lane (wire
+    /// bytes per second): the host learned of, or was told, a different
+    /// uplink (NETPLAY-10B). Each seat's share follows within one send
+    /// tick.
+    pub fn set_uplink_cap(&self, bytes_per_sec: u32) {
+        self.lane.set_uplink_cap(bytes_per_sec);
+    }
+
+    /// The aggregate uplink's current cap and the wire bytes it has
+    /// admitted so far (every seat, every datagram kind).
+    pub fn uplink(&self) -> (u32, u64) {
+        self.lane.uplink_stats()
+    }
+
+    /// How traffic to `id` should adapt to the seat's congestion rate
+    /// (NETPLAY-10B); `None` without an established lane.
+    pub fn peer_adapt(&self, id: u16) -> Option<crate::Adapt> {
+        self.lane.established_out(id).map(|o| o.adapt())
     }
 
     /// [`HostCtl::reliable_send`], from the `Host` itself.
@@ -1146,7 +1173,9 @@ impl HostCtl {
                     None
                 };
                 let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
+                let now = Instant::now();
                 for (_, out) in outs {
+                    out.note_tick(*tick, now);
                     match &frags {
                         Some(f) => out.push_fragments(*generation, f.clone()),
                         None => out.push_data(*generation, bytes.clone()),
@@ -1179,6 +1208,7 @@ impl HostCtl {
         } = msg
             && let Some(out) = self.lane.established_out(player_id)
         {
+            out.note_tick(*tick, Instant::now());
             if bytes.len() > crate::rt::MAX_PAYLOAD {
                 let f = crate::frag::split(*tick, &[&bytes]).map_err(oversize_snap)?;
                 out.push_fragments(*generation, f);
@@ -1242,6 +1272,7 @@ impl HostCtl {
         let Some(out) = self.lane.established_out(player_id) else {
             return Ok(false);
         };
+        out.note_tick(tick, Instant::now());
         let slices: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
         let frags = crate::frag::split(tick, &slices).map_err(oversize_snap)?;
         if priorities.is_empty() {
@@ -3090,6 +3121,7 @@ mod tests {
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
             peer_stall_limit: PEER_STALL_LIMIT,
+            uplink_bytes_per_sec: HOST_UPLINK_BYTES_PER_SEC,
         };
         let host = Host::listen_loopback(&config).unwrap();
         let _alice = join(host.addr(), "alice");
@@ -3335,6 +3367,7 @@ mod tests {
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
             peer_stall_limit: PEER_STALL_LIMIT,
+            uplink_bytes_per_sec: HOST_UPLINK_BYTES_PER_SEC,
         };
         match Host::listen_loopback(&over) {
             Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
@@ -3349,6 +3382,7 @@ mod tests {
             host_pick: None,
             liveness_timeout: HOST_LIVENESS_TIMEOUT,
             peer_stall_limit: PEER_STALL_LIMIT,
+            uplink_bytes_per_sec: HOST_UPLINK_BYTES_PER_SEC,
         })
         .unwrap();
     }

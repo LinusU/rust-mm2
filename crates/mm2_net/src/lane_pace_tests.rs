@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use crate::lane_tests::{FP, WAIT, eventually, hello_for, host, snap, start_session};
 use crate::proto::SnapEntry;
 use crate::{
-    BULK_MAX_AGE, BULK_QUEUE_CAP, Client, HostConfig, MOVEMENT_QUEUE_CAP, Message,
-    PEER_BURST_BYTES, PEER_BYTES_PER_SEC, Priority,
+    BULK_MAX_AGE, BULK_QUEUE_CAP, Client, HostConfig, MOVEMENT_MAX_AGE, MOVEMENT_QUEUE_CAP,
+    Message, PEER_BURST_BYTES, PEER_BYTES_PER_SEC, Priority,
 };
 
 fn movement(generation: u64, tick: u64) -> Message {
@@ -161,4 +161,73 @@ fn a_stalled_link_never_accumulates_obsolete_state() {
         "{p:?}"
     );
     assert!(p.bulk.expired > 0 || p.bulk_deferred > 0, "{p:?}");
+}
+
+/// NETPLAY-10B on real sockets: the host's aggregate uplink holds across
+/// seats, counts every byte it admits, and old movement is discarded
+/// rather than queued when the offered load exceeds it.
+#[test]
+fn the_aggregate_uplink_cap_holds_across_two_real_lanes() {
+    const CAP: u32 = 40_000;
+    let mut config = HostConfig::new(FP);
+    config.uplink_bytes_per_sec = CAP;
+    let host = crate::Host::listen_loopback(&config).unwrap();
+    let mut a = Client::join_lane(host.addr(), &hello_for("alice")).unwrap();
+    let mut b = Client::join_lane(host.addr(), &hello_for("bob")).unwrap();
+    a.set_timeout(Some(WAIT)).unwrap();
+    b.set_timeout(Some(WAIT)).unwrap();
+    let generation = start_session(&host, &mut [&mut a, &mut b]);
+    let ids = [a.player_id(), b.player_id()];
+    for id in ids {
+        eventually("the lane", || host.lane_established(id));
+    }
+    let (_, spent_before) = host.uplink();
+    let wire_before: u64 = ids
+        .iter()
+        .map(|id| host.lane_pace(*id).unwrap().wire_sent)
+        .sum();
+
+    // ~54 kB/s offered to each of two seats against a 40 kB/s cap.
+    const TICKS: u64 = 180;
+    let ctl = host.ctl();
+    let started = Instant::now();
+    for tick in 1..=TICKS {
+        let mut m = movement(generation, tick);
+        if let Message::Snap { entries, .. } = &mut m {
+            *entries = vec![SnapEntry::default(); 8];
+        }
+        for id in ids {
+            ctl.send_snap_groups(id, generation, tick, std::slice::from_ref(&m))
+                .unwrap();
+        }
+        thread::sleep(Duration::from_millis(16));
+    }
+    let elapsed = started.elapsed();
+    thread::sleep(MOVEMENT_MAX_AGE * 2);
+
+    let (cap, spent) = host.uplink();
+    assert_eq!(cap, CAP);
+    let admitted = spent - spent_before;
+    let seats: u64 = ids
+        .iter()
+        .map(|id| host.lane_pace(*id).unwrap().wire_sent)
+        .sum::<u64>()
+        - wire_before;
+    assert_eq!(admitted, seats, "every admitted byte belongs to a seat");
+    let allowed = u64::from(CAP) * (elapsed + MOVEMENT_MAX_AGE * 2).as_millis() as u64 / 1000
+        + u64::from(crate::UPLINK_BURST_BYTES);
+    assert!(
+        admitted <= allowed,
+        "{admitted} B > {allowed} B in {elapsed:?}"
+    );
+    for id in ids {
+        let p = host.lane_pace(id).unwrap();
+        assert!(p.movement.len <= MOVEMENT_QUEUE_CAP, "{p:?}");
+        assert!(
+            p.wait_max <= MOVEMENT_MAX_AGE + Duration::from_millis(60),
+            "{p:?}"
+        );
+        assert!(p.movement_deferred > 0, "the cap did bind: {p:?}");
+    }
+    eprintln!("uplink: admitted {admitted} B of {allowed} B allowed in {elapsed:?}");
 }

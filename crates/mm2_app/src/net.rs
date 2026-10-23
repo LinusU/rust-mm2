@@ -1793,6 +1793,7 @@ impl HostLink {
                 host_pick: Some(encode_pick(&config.vehicle)?),
                 liveness_timeout: mm2_net::HOST_LIVENESS_TIMEOUT,
                 peer_stall_limit: mm2_net::PEER_STALL_LIMIT,
+                uplink_bytes_per_sec: mm2_net::HOST_UPLINK_BYTES_PER_SEC,
             },
         )?;
         let ctl = host.ctl();

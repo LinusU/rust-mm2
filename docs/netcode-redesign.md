@@ -1945,3 +1945,99 @@ Tests: `io_backpressure_tests` (non-reading peer among healthy ones over
 real sockets) and the `conn` unit tests. The reliable Start/Cancel/reset/
 Leave paths are covered under the seeded lossy proxy by
 `lane_reliable_tests` and `lane_lobby_tests`.
+
+## NETPLAY-10B: congestion controller and aggregate uplink budget
+
+Code: `mm2_net::congest` (pure, clock-injected: `PeerController`, `Uplink`,
+`Adapt`, `wire_bytes`, `Quantiles`), applied per seat in `mm2_net::rt`
+(`SeatOut`, `divide_uplink`). Mechanism after RFC 8085: reduce on congestion
+evidence at most once per hold (3.1), raise additively and only while the
+rate is in use or the traffic is shed to fit it (3.1.6, 3.2), keep a floor.
+All numbers are *designed*, none recovered from the retail game.
+
+### Rules
+
+- **Wire bytes.** Every budget counts `payload + 32 B lane header + 28 B
+  IP/UDP` per datagram. Redundant commands, ACKs, reliable retransmissions and
+  fragments are datagrams like any other and pay the same.
+- **Per peer.** A `PeerController` starts at 128 KiB/s (1 Mbit/s) and floors
+  at 12 KiB/s. Congestion evidence: a reliable-channel retransmission; a
+  movement datagram discarded unsent (older than its 100 ms bound); the
+  oldest queued movement datagram >= 66 ms (two snapshot periods); a smoothed
+  RTT more than 50 ms above the lowest seen in 10 s (a standing queue before
+  any loss); a snapshot passed over by a newer acknowledgement; the last
+  acknowledgement >= 500 ms old while datagrams flow. Bulk expiry is *not*
+  evidence: bulk is meant to yield. On evidence the rate is cut to 70 %, at
+  most once per 250 ms, and the clean wait before the next step doubles (up
+  to 4 s; reset after 10 s clean). After a clean wait the rate rises: x1.25
+  while below the last rate that worked (recovery), then +4 KiB/s, never
+  past the ceiling. It is raised only if the interval used at least half the
+  rate, or the traffic is already degraded (a shed level's demand is below
+  its rate by design and only a higher rate lets it rise; a failed probe is
+  cut again). Congestion never raises a rate and never queues old snapshots.
+- **Aggregate.** `HostConfig::uplink_bytes_per_sec` (default 5 Mbit/s,
+  retunable at run time with `Host::set_uplink_cap`) is a token bucket (64 KiB
+  burst) every datagram of every seat must pass, and is divided max-min
+  fairly: each send tick a seat's bucket refills at
+  `max(floor, min(controller rate, fair share))`, a seat asking for less
+  than an equal share gets what it asks and the rest is split among the
+  others. One constrained peer therefore costs the healthy ones nothing,
+  and a cap cut is divided, not queued.
+- **Order and bounds.** Movement (snapshots, `Data`, ACKs, reliable) goes
+  first and needs positive credit; bulk needs its datagram plus a 2 KiB
+  reserve in credit, so catch-up never makes the next snapshot wait. Queues
+  hold at most 32 datagrams and 100 ms (movement) / 250 ms (bulk) of age: a
+  datagram that cannot be sent in time is discarded, never replaced by an
+  older one. The unacknowledged-tick log is capped at 64; the wait samples
+  at 4096.
+- **How traffic adapts** (`Adapt::for_rate`, rate vs the 128 KiB/s ceiling):
+
+  | rate | snapshot cadence | bulk (low priority) | relevance radius |
+  |---|---|---|---|
+  | >= 1/2 | 30 Hz | sent | 100 % |
+  | >= 1/4 | 30 Hz | shed | 100 % |
+  | >= 1/8 | 15 Hz | shed | 70 % |
+  | below | 10 Hz | shed | 40 % |
+
+  Coalescing: only the newest snapshot of a seat matters, so a seat that
+  cannot keep up is sent every n-th snapshot, not a backlog; replaceable
+  control state (`Keepalive`, `Session`, `Roster`) is already coalesced in
+  place (10A).
+  `Host::peer_adapt(seat)` exposes the level to the producer.
+- **Reports.** `Host::lane_pace(seat)` adds `wire_sent`, `rate`, `ceiling`,
+  `share`, `decreases`, `movement_deferred`, `uplink_denied`, `adapt` and the
+  movement-queue wait p50/p95/p99/max; `Host::uplink()` the cap and the wire
+  bytes admitted.
+
+### Measured (`cargo test -p mm2_net congest_sim -- --nocapture`)
+
+Virtual-clock simulation of the production send side against modelled
+drop-tail links (150 ms buffer, 20 ms one way), 30 Hz snapshots of 900 B plus
+four 1.2 kB catch-up fragments, 120 B reliable every 100 ms, client acks over
+256 kbit/s. Host plus 7 peers, 5 Mbit/s host cap, 1 Mbit/s peer links.
+
+| scenario | healthy-peer movement wait p95 / max | state age p50 / p95 | host wire | notes |
+|---|---|---|---|---|
+| steady | 10-12 ms / <= 33 ms | 33 / 41 ms | 624 of 625 kB/s | Jain fairness 1.000, no loss |
+| 5 -> 2 -> 5 Mbit/s | 0 / 0 ms at 2 Mbit | 28 / 35 ms at 2 Mbit | 245 of 250 kB/s at 2 | catch-up yields, movement keeps full cadence |
+| one peer on 160 kbit/s | 0 / 0 ms | 31 / 37 ms (healthy) | 612 kB/s | slow peer cut to 15 kB/s, 10 Hz, healthy peers 101 kB/s each |
+| all links 1 Mbit -> 200 kbit -> 1 Mbit | 0 ms at the dip | p95 54 ms, p99 150 ms at the dip | 64 kB/s at the dip | fresh state <= 100 ms on every peer within 1 s of widening, queues in bounds within 2 s, full cadence after 3.25 s |
+
+Real sockets: `the_aggregate_uplink_cap_holds_across_two_real_lanes` (two lane
+clients, 40 kB/s cap, ~108 kB/s offered) admits 159 kB in 3.7 s against 223 kB
+allowed, every admitted byte attributed to a seat, movement wait <= 100 ms.
+
+### Evidence and open
+
+Evidence level: code checks and synthetic integration (virtual clock and one
+loopback test). No bandwidth-limited real-socket qualification, no WAN, no
+retail or rendered level. Retransmission rate is modelled for the reliable
+datagram only; the real channel's retransmits feed the controller in `rt.rs`
+but are not exercised under loss here.
+
+Open, filed as tasks: the client does not send `lane_ack` yet, so the RTT and
+skipped-snapshot signals are idle in the app (queue age, expiry, retransmits
+and the aggregate cap are live); the producer (`publish_snapshots`) still
+broadcasts one `Snap` and does not yet honour `peer_adapt` (cadence divisor,
+relevance, bulk marking); the 8-peer loopback qualification with a
+bandwidth-limited relay is NETPLAY-10E.

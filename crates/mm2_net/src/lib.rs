@@ -57,6 +57,7 @@
 //! decision record.
 
 mod cmdbuf;
+mod congest;
 mod conn;
 mod frag;
 mod frame;
@@ -69,6 +70,8 @@ mod proto;
 mod reliable;
 mod rt;
 
+#[cfg(test)]
+mod congest_sim_tests;
 #[cfg(test)]
 mod io_backpressure_tests;
 #[cfg(test)]
@@ -85,6 +88,11 @@ mod lane_tests;
 pub use cmdbuf::{
     BUFFER_CAP, COMMAND_BURST, COMMAND_RATE_HZ, Consumed, HOLD_LAST_TICKS, NEUTRAL, SeatStats,
     Source,
+};
+pub use congest::{
+    Adapt, Claim, DECREASE_HOLD, DEFAULT_PEER_CEILING, Feedback, HOST_UPLINK_BYTES_PER_SEC,
+    IP_UDP_OVERHEAD, MIN_PEER_BYTES_PER_SEC, PeerController, Quantiles, UPLINK_BURST_BYTES, Uplink,
+    wire_bytes,
 };
 pub use conn::{
     Conn, HANDSHAKE_TIMEOUT, PEER_QUEUE_CAP, PEER_STALL_LIMIT, PeerProbe, PeerQueueStats,

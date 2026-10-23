@@ -45,6 +45,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::congest::{
+    Adapt, CONGESTED_ACK_AGE, Claim, DEFAULT_PEER_CEILING, Feedback, PeerController, Quantiles,
+    Uplink, effective_rate, wire_bytes,
+};
 use crate::frag::{Assembler, AssemblerStats, decode_ack, encode_ack};
 use crate::lobby::{PeerMail, RemoteInputs};
 use crate::pace::{
@@ -91,6 +95,9 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// Socket read timeout and queue wait: how often a lane thread notices
 /// its stop flag.
 const POLL: Duration = Duration::from_millis(50);
+/// How soon the host's sender looks again while a seat has datagrams
+/// waiting for credit.
+const BACKLOG_POLL: Duration = Duration::from_millis(2);
 
 /// The millisecond clock reliable-message retransmission runs on: wall
 /// time, or — for the lockstep lane tests — a manual one the test
@@ -428,6 +435,32 @@ pub struct PaceStats {
     pub bulk_deferred: u64,
     /// The most bytes the seat's budget was ever overdrawn by.
     pub max_debt: u64,
+    /// Wire bytes sent (payload, lane header, UDP and IP), both
+    /// priorities: what the host's uplink paid for this seat.
+    pub wire_sent: u64,
+    /// The congestion controller's current rate, wire bytes per second.
+    pub rate: u32,
+    /// The most the rate may be.
+    pub ceiling: u32,
+    /// The seat's share of the host uplink, wire bytes per second.
+    pub share: u32,
+    /// Times the controller cut the rate.
+    pub decreases: u64,
+    /// Polls in which the movement head had to wait for rate or uplink.
+    pub movement_deferred: u64,
+    /// Of those, the polls the aggregate uplink refused.
+    pub uplink_denied: u64,
+    /// How the traffic to the seat adapts at this rate.
+    pub adapt: Adapt,
+    /// Movement-queue wait of sent datagrams: median, 95th, 99th
+    /// percentile and maximum over the last few thousand.
+    pub wait_p50: Duration,
+    /// See `wait_p50`.
+    pub wait_p95: Duration,
+    /// See `wait_p50`.
+    pub wait_p99: Duration,
+    /// See `wait_p50`.
+    pub wait_max: Duration,
 }
 
 #[derive(Debug)]
@@ -438,6 +471,8 @@ struct Bounded<T> {
     dropped: u64,
     expired: u64,
     max_wait: Duration,
+    /// How long the entry popped last had waited.
+    last_wait: Duration,
 }
 
 impl<T> Bounded<T> {
@@ -449,14 +484,20 @@ impl<T> Bounded<T> {
             dropped: 0,
             expired: 0,
             max_wait: Duration::ZERO,
+            last_wait: Duration::ZERO,
         }
     }
 
     /// Pop the oldest entry younger than `max_age` that `gate` admits;
     /// older entries are discarded and counted. A refused head stays.
-    fn pop_gated(&mut self, max_age: Duration, mut gate: impl FnMut(&T) -> bool) -> Option<T> {
+    fn pop_gated(
+        &mut self,
+        now: Instant,
+        max_age: Duration,
+        mut gate: impl FnMut(&T) -> bool,
+    ) -> Option<T> {
         while let Some((at, _)) = self.items.front() {
-            if at.elapsed() > max_age {
+            if now.saturating_duration_since(*at) > max_age {
                 self.items.pop_front();
                 self.expired += 1;
             } else {
@@ -466,25 +507,32 @@ impl<T> Bounded<T> {
         if !gate(&self.items.front()?.1) {
             return None;
         }
-        self.pop()
+        self.pop(now)
     }
 
-    fn push(&mut self, item: T) {
+    fn push(&mut self, now: Instant, item: T) {
         self.pushed += 1;
         if self.items.len() >= self.cap {
             self.items.pop_front();
             self.dropped += 1;
         }
-        self.items.push_back((Instant::now(), item));
+        self.items.push_back((now, item));
     }
 
-    fn pop(&mut self) -> Option<T> {
+    /// Pop the head and report how long it waited.
+    fn pop_timed(&mut self, now: Instant) -> Option<(T, Duration)> {
         let (at, item) = self.items.pop_front()?;
-        self.max_wait = self.max_wait.max(at.elapsed());
-        Some(item)
+        let wait = now.saturating_duration_since(at);
+        self.max_wait = self.max_wait.max(wait);
+        self.last_wait = wait;
+        Some((item, wait))
     }
 
-    fn stats(&self) -> QueueStats {
+    fn pop(&mut self, now: Instant) -> Option<T> {
+        self.pop_timed(now).map(|(item, _)| item)
+    }
+
+    fn stats(&self, now: Instant) -> QueueStats {
         QueueStats {
             len: self.items.len(),
             capacity: self.cap,
@@ -493,7 +541,7 @@ impl<T> Bounded<T> {
             oldest_age: self
                 .items
                 .front()
-                .map_or(Duration::ZERO, |(at, _)| at.elapsed()),
+                .map_or(Duration::ZERO, |(at, _)| now.saturating_duration_since(*at)),
             max_wait: self.max_wait,
             expired: self.expired,
         }
@@ -553,10 +601,15 @@ impl<T> LaneQueue<T> {
 
     /// Enqueue `item`, discarding the oldest entry when full.
     pub fn push(&self, item: T) {
+        self.push_at(Instant::now(), item);
+    }
+
+    /// [`push`](Self::push) at an injected `now`.
+    fn push_at(&self, now: Instant, item: T) {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(item);
+            .push(now, item);
         if let Some(wake) = &self.wake {
             wake.notify();
         }
@@ -564,62 +617,117 @@ impl<T> LaneQueue<T> {
 
     /// Dequeue the oldest entry, if any.
     pub fn pop(&self) -> Option<T> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).pop()
-    }
-
-    fn pop_gated(&self, max_age: Duration, gate: impl FnMut(&T) -> bool) -> Option<T> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pop_gated(max_age, gate)
+            .pop(Instant::now())
+    }
+
+    fn pop_gated(
+        &self,
+        now: Instant,
+        max_age: Duration,
+        gate: impl FnMut(&T) -> bool,
+    ) -> Option<(T, Duration)> {
+        let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let item = q.pop_gated(now, max_age, gate)?;
+        Some((item, q.last_wait))
     }
 
     /// Occupancy, drop and queue-age counters.
     pub fn stats(&self) -> QueueStats {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).stats()
+        self.stats_at(Instant::now())
+    }
+
+    fn stats_at(&self, now: Instant) -> QueueStats {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats(now)
     }
 }
 
 /// One outbound datagram waiting for the sender thread.
 #[derive(Debug)]
 pub(crate) struct OutItem {
-    tag: LaneTag,
+    pub(crate) tag: LaneTag,
     generation: u64,
-    payload: Vec<u8>,
+    pub(crate) payload: Vec<u8>,
 }
 
 /// A lane direction's outbound side: two bounded queues (movement drains
-/// before bulk, NETPLAY-06D), the budget that gates bulk, and the
-/// datagram sequence.
+/// before bulk, NETPLAY-06D), the budget that gates what is sent, the
+/// congestion controller that sets that budget's rate (NETPLAY-10B) and
+/// the datagram sequence.
 #[derive(Debug)]
 pub(crate) struct SeatOut {
     queue: LaneQueue<OutItem>,
     bulk: LaneQueue<OutItem>,
     seq: AtomicU64,
-    pace: Mutex<PaceState>,
+    /// The host's aggregate uplink; `None` on a client, whose single
+    /// peer is the host and whose traffic is small.
+    uplink: Option<Arc<Mutex<Uplink>>>,
+    pub(crate) pace: Mutex<PaceState>,
 }
 
+/// Samples kept for the queue-wait percentiles.
+const WAIT_SAMPLES: usize = 4096;
+
 #[derive(Debug)]
-struct PaceState {
+pub(crate) struct PaceState {
     budget: Budget,
+    ctl: PeerController,
+    /// The uplink share last granted (wire bytes per second).
+    share: u32,
     movement_sent: u64,
     bulk_sent: u64,
     bulk_deferred: u64,
+    movement_deferred: u64,
+    uplink_denied: u64,
     max_debt: u64,
+    wire_sent: u64,
+    /// When something was last sent, for the silent-peer test.
+    last_sent: Option<Instant>,
+    pub(crate) movement_waits: Quantiles,
+    /// Snapshot ticks queued and not yet acknowledged, oldest first.
+    pub(crate) ticks: VecDeque<(u64, Instant)>,
+    /// The newest round-trip sample the controller has not seen yet.
+    rtt: Option<Duration>,
+    /// Snapshots a newer acknowledgement passed over.
+    skipped: u64,
 }
 
+/// Credit bulk leaves in the bucket for movement: world catch-up never
+/// spends the last of a seat's credit, so the next snapshot is not made to
+/// wait behind it.
+const BULK_RESERVE_BYTES: usize = 2048;
+
+/// Unacknowledged snapshot ticks remembered per seat.
+const TICK_LOG_CAP: usize = 64;
+
 impl SeatOut {
-    fn new(wake: Arc<Wake>) -> Self {
+    pub(crate) fn new(wake: Arc<Wake>, uplink: Option<Arc<Mutex<Uplink>>>, now: Instant) -> Self {
         Self {
             queue: LaneQueue::with_wake(MOVEMENT_QUEUE_CAP, wake.clone()),
             bulk: LaneQueue::with_wake(BULK_QUEUE_CAP, wake),
             seq: AtomicU64::new(0),
+            uplink,
             pace: Mutex::new(PaceState {
-                budget: Budget::new(PEER_BYTES_PER_SEC, PEER_BURST_BYTES, Instant::now()),
+                budget: Budget::new(PEER_BYTES_PER_SEC, PEER_BURST_BYTES, now),
+                ctl: PeerController::new(DEFAULT_PEER_CEILING, now),
+                share: DEFAULT_PEER_CEILING,
                 movement_sent: 0,
                 bulk_sent: 0,
                 bulk_deferred: 0,
+                movement_deferred: 0,
+                uplink_denied: 0,
                 max_debt: 0,
+                wire_sent: 0,
+                last_sent: None,
+                movement_waits: Quantiles::new(WAIT_SAMPLES),
+                ticks: VecDeque::new(),
+                rtt: None,
+                skipped: 0,
             }),
         }
     }
@@ -639,14 +747,25 @@ impl SeatOut {
     }
 
     fn push_tagged(&self, tag: LaneTag, priority: Priority, generation: u64, payload: Vec<u8>) {
+        self.push_tagged_at(Instant::now(), tag, priority, generation, payload);
+    }
+
+    pub(crate) fn push_tagged_at(
+        &self,
+        now: Instant,
+        tag: LaneTag,
+        priority: Priority,
+        generation: u64,
+        payload: Vec<u8>,
+    ) {
         let item = OutItem {
             tag,
             generation,
             payload,
         };
         match priority {
-            Priority::Movement => self.queue.push(item),
-            Priority::Bulk => self.bulk.push(item),
+            Priority::Movement => self.queue.push_at(now, item),
+            Priority::Bulk => self.bulk.push_at(now, item),
         }
     }
 
@@ -674,33 +793,188 @@ impl SeatOut {
         }
     }
 
-    /// The next datagram to send, or `None` when nothing is due: stale
-    /// entries are discarded, movement goes first and always, bulk only
-    /// while the budget covers it.
+    /// The next datagram to send, or `None` when nothing is due.
     fn next_to_send(&self) -> Option<OutItem> {
-        let now = Instant::now();
+        self.next_to_send_at(Instant::now())
+    }
+
+    /// [`next_to_send`](Self::next_to_send) at an injected `now`: stale
+    /// entries are discarded, movement goes first, and every datagram
+    /// must fit both the peer's rate budget and the host's aggregate
+    /// uplink (wire bytes). A datagram that does not fit waits; it is
+    /// never replaced by an older one and is discarded when it outlives
+    /// its queue age.
+    pub(crate) fn next_to_send_at(&self, now: Instant) -> Option<OutItem> {
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(item) = self.queue.pop_gated(MOVEMENT_MAX_AGE, |_| true) {
-            pace.budget.spend(item.payload.len(), now);
+        let PaceState { budget, ctl, .. } = &mut *pace;
+        let allow_bulk = ctl.adapt().bulk;
+        let mut denied = false;
+        let uplink = self.uplink.as_deref();
+        let got = self.queue.pop_gated(now, MOVEMENT_MAX_AGE, |i| {
+            let wire = wire_bytes(i.payload.len());
+            // Movement needs positive credit (and may end one datagram in
+            // debt); the uplink is asked second so a refused peer does
+            // not consume shared credit.
+            if budget.credit(now) <= 0 {
+                return false;
+            }
+            if let Some(up) = uplink
+                && !up
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .try_spend(wire, now)
+            {
+                denied = true;
+                return false;
+            }
+            budget.spend(wire, now);
+            true
+        });
+        if let Some((item, wait)) = got {
             pace.movement_sent += 1;
+            pace.wire_sent += wire_bytes(item.payload.len()) as u64;
+            pace.last_sent = Some(now);
+            pace.movement_waits.add(wait.as_micros() as u64);
             let debt = (-pace.budget.credit(now)).max(0) as u64;
             pace.max_debt = pace.max_debt.max(debt);
             return Some(item);
         }
+        if self.queue.stats_at(now).len > 0 {
+            pace.movement_deferred += 1;
+            if denied {
+                pace.uplink_denied += 1;
+            }
+            // Movement waits; bulk never overtakes it.
+            return None;
+        }
+        if !allow_bulk {
+            // Low-priority traffic is shed, not queued, at a low rate.
+            return None;
+        }
         let PaceState { budget, .. } = &mut *pace;
         let mut blocked = false;
-        let item = self.bulk.pop_gated(BULK_MAX_AGE, |i| {
-            let ok = budget.try_spend(i.payload.len(), now);
-            blocked = !ok;
-            ok
+        let got = self.bulk.pop_gated(now, BULK_MAX_AGE, |i| {
+            let wire = wire_bytes(i.payload.len());
+            if budget.credit(now) < (wire + BULK_RESERVE_BYTES) as i64 {
+                blocked = true;
+                return false;
+            }
+            if let Some(up) = uplink
+                && !up
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .try_spend(wire, now)
+            {
+                blocked = true;
+                return false;
+            }
+            budget.spend(wire, now);
+            true
         });
         if blocked {
             pace.bulk_deferred += 1;
         }
-        if item.is_some() {
-            pace.bulk_sent += 1;
+        let (item, _) = got?;
+        pace.bulk_sent += 1;
+        pace.wire_sent += wire_bytes(item.payload.len()) as u64;
+        pace.last_sent = Some(now);
+        Some(item)
+    }
+
+    /// Whether anything is queued at either priority.
+    fn has_pending(&self) -> bool {
+        self.queue.stats().len + self.bulk.stats().len > 0
+    }
+
+    /// Note that the snapshot of `tick` was queued for this seat now: the
+    /// round-trip clock for its acknowledgement.
+    pub(crate) fn note_tick(&self, tick: u64, now: Instant) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if pace.ticks.back().is_some_and(|(t, _)| *t >= tick) {
+            // The same tick again (another group), or a restarted clock.
+            if pace.ticks.back().is_some_and(|(t, _)| *t == tick) {
+                return;
+            }
+            pace.ticks.clear();
         }
-        item
+        if pace.ticks.len() >= TICK_LOG_CAP {
+            pace.ticks.pop_front();
+        }
+        pace.ticks.push_back((tick, now));
+    }
+
+    /// The peer acknowledged the state of `tick`: take a round-trip
+    /// sample from it and count every older snapshot it passed over.
+    pub(crate) fn on_ack(&self, tick: u64, now: Instant) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sample = None;
+        while let Some(&(t, at)) = pace.ticks.front() {
+            if t > tick {
+                break;
+            }
+            pace.ticks.pop_front();
+            if t == tick {
+                sample = Some(now.saturating_duration_since(at));
+            } else {
+                pace.skipped += 1;
+            }
+        }
+        if sample.is_some() {
+            pace.rtt = sample;
+        }
+    }
+
+    /// The controller's input from the send loop: the reliable channel's
+    /// retransmission count and the age of the peer's newest
+    /// acknowledgement (`None`: nothing to acknowledge yet).
+    pub(crate) fn update_control(&self, now: Instant, retransmits: u64, ack_age: Option<Duration>) {
+        let mv = self.queue.stats_at(now);
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        // An ack that is merely quiet because nothing was sent is no
+        // evidence: only count it while datagrams flow.
+        let flowing = pace
+            .last_sent
+            .is_some_and(|t| now.saturating_duration_since(t) <= CONGESTED_ACK_AGE);
+        let fb = Feedback {
+            retransmits,
+            // Bulk is meant to expire when the budget is spent on
+            // movement; only movement discarded unsent is congestion.
+            expired: mv.expired,
+            wire_sent: pace.wire_sent,
+            queue_age: mv.oldest_age,
+            ack_age: ack_age.filter(|_| flowing),
+            rtt: pace.rtt.take(),
+            skipped: pace.skipped,
+        };
+        pace.ctl.on_feedback(fb, now);
+        let rate = effective_rate(pace.ctl.rate(), pace.share);
+        pace.budget.retune(rate, PEER_BURST_BYTES, now);
+    }
+
+    /// The rate the peer wants from the uplink.
+    pub(crate) fn claim_rate(&self) -> u32 {
+        self.pace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ctl
+            .rate()
+    }
+
+    /// Grant the peer `share` wire bytes per second of the uplink.
+    pub(crate) fn set_share(&self, share: u32, now: Instant) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        pace.share = share;
+        let rate = effective_rate(pace.ctl.rate(), share);
+        pace.budget.retune(rate, PEER_BURST_BYTES, now);
+    }
+
+    /// How the traffic to this peer should adapt now.
+    pub(crate) fn adapt(&self) -> Adapt {
+        self.pace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ctl
+            .adapt()
     }
 
     /// The movement queue's counters (the one `Data` and `Ack` use).
@@ -709,15 +983,33 @@ impl SeatOut {
     }
 
     pub(crate) fn pace_stats(&self) -> PaceStats {
+        self.pace_stats_at(Instant::now())
+    }
+
+    pub(crate) fn pace_stats_at(&self, now: Instant) -> PaceStats {
         let pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        let waits = &pace.movement_waits;
+        let us = |p| Duration::from_micros(waits.percentile(p));
         PaceStats {
-            movement: self.queue.stats(),
-            bulk: self.bulk.stats(),
+            movement: self.queue.stats_at(now),
+            bulk: self.bulk.stats_at(now),
             movement_sent: pace.movement_sent,
             bulk_sent: pace.bulk_sent,
             bytes_sent: pace.budget.spent(),
             bulk_deferred: pace.bulk_deferred,
             max_debt: pace.max_debt,
+            wire_sent: pace.wire_sent,
+            rate: pace.ctl.rate(),
+            ceiling: pace.ctl.ceiling(),
+            share: pace.share,
+            decreases: pace.ctl.decreases(),
+            movement_deferred: pace.movement_deferred,
+            uplink_denied: pace.uplink_denied,
+            adapt: pace.ctl.adapt(),
+            wait_p50: us(50),
+            wait_p95: us(95),
+            wait_p99: us(99),
+            wait_max: Duration::from_micros(waits.max()),
         }
     }
 }
@@ -751,6 +1043,8 @@ pub(crate) struct LaneSeat {
     window: SeqWindow,
     out: Arc<SeatOut>,
     ack: Option<LaneAck>,
+    /// When `ack` last advanced.
+    ack_at: Option<Instant>,
     rel: ReliableChannel,
 }
 
@@ -931,6 +1225,8 @@ fn ingest(
                         epoch,
                         tick,
                     });
+                    seat.ack_at = Some(now);
+                    seat.out.on_ack(tick, now);
                 }
                 Verdict::Accepted
             }
@@ -948,12 +1244,15 @@ pub(crate) struct HostLane {
     stop: AtomicBool,
     wake: Arc<Wake>,
     clock: ReliableClock,
+    /// The host's aggregate uplink, shared by every seat's sender.
+    uplink: Arc<Mutex<Uplink>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl HostLane {
-    /// Bind `ip:0` and start the receive and send threads.
-    pub(crate) fn bind(ip: IpAddr, inputs: RemoteInputs) -> io::Result<Arc<Self>> {
+    /// Bind `ip:0` and start the receive and send threads. `uplink_cap` is
+    /// the host's aggregate send budget in wire bytes per second.
+    pub(crate) fn bind(ip: IpAddr, inputs: RemoteInputs, uplink_cap: u32) -> io::Result<Arc<Self>> {
         let socket = Arc::new(UdpSocket::bind(SocketAddr::new(ip, 0))?);
         socket.set_read_timeout(Some(POLL))?;
         let lane = Arc::new(Self {
@@ -963,6 +1262,7 @@ impl HostLane {
             stop: AtomicBool::new(false),
             wake: Arc::new(Wake::default()),
             clock: ReliableClock::new(),
+            uplink: Arc::new(Mutex::new(Uplink::new(uplink_cap, Instant::now()))),
             threads: Mutex::new(Vec::new()),
         });
         let recv = {
@@ -988,6 +1288,21 @@ impl HostLane {
         self.counters.snapshot()
     }
 
+    /// Change the aggregate uplink budget (wire bytes per second).
+    pub(crate) fn set_uplink_cap(&self, cap: u32) {
+        self.uplink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_cap(cap, Instant::now());
+        self.wake.notify();
+    }
+
+    /// The aggregate uplink's cap and the wire bytes it has admitted.
+    pub(crate) fn uplink_stats(&self) -> (u32, u64) {
+        let up = self.uplink.lock().unwrap_or_else(|e| e.into_inner());
+        (up.cap(), up.spent())
+    }
+
     /// Open (or replace) `id`'s lane for a peer at `ip`, expecting
     /// datagrams from `port`; returns the token to grant.
     pub(crate) fn register(&self, id: u16, ip: IpAddr, port: u16) -> u64 {
@@ -1002,8 +1317,13 @@ impl HostLane {
                 established: false,
                 heard: Instant::now(),
                 window: SeqWindow::default(),
-                out: Arc::new(SeatOut::new(self.wake.clone())),
+                out: Arc::new(SeatOut::new(
+                    self.wake.clone(),
+                    Some(self.uplink.clone()),
+                    Instant::now(),
+                )),
                 ack: None,
+                ack_at: None,
                 rel: ReliableChannel::new(MAX_RELIABLE_BODY),
             },
         );
@@ -1154,8 +1474,13 @@ impl HostLane {
     }
 
     fn send_loop(&self, socket: &UdpSocket) {
+        let mut backlog = false;
         while !self.stop.load(Ordering::Relaxed) {
-            self.wake.wait(POLL);
+            // Datagrams held back for rate or uplink credit are retried
+            // on a short tick: credit accrues with time, not with a push.
+            self.wake.wait(if backlog { BACKLOG_POLL } else { POLL });
+            backlog = false;
+            let wall = Instant::now();
             let targets: Vec<(u16, SocketAddr, u64, Arc<SeatOut>)> = {
                 let now = self.clock.now_ms();
                 let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1167,10 +1492,18 @@ impl HostLane {
                         for (generation, payload) in s.rel.sender.poll(now) {
                             s.out.push_reliable(LaneTag::Reliable, generation, payload);
                         }
+                        let retransmits = s.rel.sender.stats().retransmits;
+                        let ack_age = s.ack_at.map(|t| wall.saturating_duration_since(t));
+                        s.out.update_control(wall, retransmits, ack_age);
                         (*id, SocketAddr::new(s.ip, s.port), s.token, s.out.clone())
                     })
                     .collect()
             };
+            {
+                let outs: Vec<(u16, &SeatOut)> =
+                    targets.iter().map(|(id, _, _, o)| (*id, &**o)).collect();
+                divide_uplink(&self.uplink, &outs, wall);
+            }
             for (seat, addr, token, out) in targets {
                 while let Some(item) = out.next_to_send() {
                     let header = Header {
@@ -1182,8 +1515,29 @@ impl HostLane {
                     };
                     flush(socket, addr, &header, &item.payload, &self.counters);
                 }
+                backlog |= out.has_pending();
             }
         }
+    }
+}
+
+/// Hand every seat its max-min fair share of the aggregate uplink
+/// (NETPLAY-10B): a seat asking for less than an equal share gets what it
+/// asks and the remainder is split among the rest.
+pub(crate) fn divide_uplink(uplink: &Mutex<Uplink>, outs: &[(u16, &SeatOut)], now: Instant) {
+    let claims: Vec<Claim> = outs
+        .iter()
+        .map(|(seat, out)| Claim {
+            seat: *seat,
+            rate: out.claim_rate(),
+        })
+        .collect();
+    let shares = uplink
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shares(&claims);
+    for ((_, out), (_, share)) in outs.iter().zip(shares) {
+        out.set_share(share, now);
     }
 }
 
@@ -1307,7 +1661,7 @@ impl Inbox {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .lane
-            .push(msg);
+            .push(Instant::now(), msg);
         self.cv.notify_all();
     }
 
@@ -1321,7 +1675,7 @@ impl Inbox {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .lane
-            .stats()
+            .stats(Instant::now())
     }
 
     /// The next message, reliable side first. `timeout` bounds the wait
@@ -1343,7 +1697,7 @@ impl Inbox {
                 if let Some(msg) = st.rel.pop_front() {
                     return Ok(msg);
                 }
-                if let Some(msg) = st.lane.pop() {
+                if let Some(msg) = st.lane.pop(Instant::now()) {
                     return Ok(msg);
                 }
             }
@@ -1354,7 +1708,7 @@ impl Inbox {
             if let Some(msg) = st.rel.pop_front() {
                 return Ok(msg);
             }
-            if let Some(msg) = st.lane.pop() {
+            if let Some(msg) = st.lane.pop(Instant::now()) {
                 return Ok(msg);
             }
             if st.closed {
@@ -1421,7 +1775,7 @@ impl ClientLane {
             host,
             seat,
             token,
-            out: SeatOut::new(wake.clone()),
+            out: SeatOut::new(wake.clone(), None, Instant::now()),
             wake,
             counters: Counters::default(),
             stop: AtomicBool::new(false),
