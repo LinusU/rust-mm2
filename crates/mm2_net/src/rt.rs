@@ -996,13 +996,20 @@ impl HostLane {
     }
 
     /// Set the generation datagrams must name (0 = no session).
+    ///
+    /// Every seat's unacked reliable messages minted for any other nonzero
+    /// generation are retired (`ReliableSender::retire`): that generation
+    /// has ended, the receiver would refuse them unacked and the channel
+    /// would die. Lobby-scope messages stay.
     pub(crate) fn set_generation(&self, generation: u64) {
-        self.inputs
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .lane
-            .generation = generation;
+        let now = self.clock.now_ms();
+        let mut mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane.generation = generation;
+        for seat in mail.lane.seats.values_mut() {
+            seat.rel.sender.retire(now, |g| g != generation);
+        }
+        drop(mail);
+        self.wake.notify();
     }
 
     /// The outbound side of every seat whose lane is established.
@@ -1730,6 +1737,19 @@ impl ClientLane {
 
     pub(crate) fn note_started(&self, generation: u64) {
         self.started.fetch_max(generation, Ordering::Relaxed);
+        self.retire_through(generation.saturating_sub(1));
+    }
+
+    /// Retire the unacked reliable messages minted for generations up to
+    /// and including `generation`, which have ended (a newer `Start` or a
+    /// `Cancel`); see `ReliableSender::retire`.
+    pub(crate) fn retire_through(&self, generation: u64) {
+        self.rel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sender
+            .retire(self.clock.now_ms(), |g| g <= generation);
+        self.wake.notify();
     }
 
     pub(crate) fn counts(&self) -> LaneCounts {

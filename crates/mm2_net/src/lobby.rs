@@ -1557,6 +1557,9 @@ impl Client {
                     && generation > self.cancelled =>
                 {
                     self.cancelled = generation;
+                    if let Some(link) = &self.lane {
+                        link.lane.0.retire_through(generation);
+                    }
                     return Ok(Message::Cancel { generation });
                 }
                 Message::Keepalive { .. } => {}
@@ -1570,6 +1573,9 @@ impl Client {
                         }
                         Message::Cancel { generation } => {
                             self.cancelled = self.cancelled.max(*generation);
+                            if let Some(link) = &self.lane {
+                                link.lane.0.retire_through(*generation);
+                            }
                         }
                         _ => {}
                     }

@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::lane_impair_tests::{Rig, STEP, TICK_PACE};
+use crate::lane_tests::start_session;
 use crate::{Impair, LinkDir, RELIABLE_WINDOW, ReliableSendError, SendError, UdpImpair};
 
 /// Reliable data datagrams carry this lane tag.
@@ -532,4 +533,91 @@ fn a_refused_reliable_send_falls_back_to_the_control_stream() {
         _ => 0,
     });
     assert_eq!(got, sent);
+}
+
+fn impacts(generation: u64, id: u64) -> Message {
+    Message::Impacts {
+        generation,
+        impacts: vec![impact(id)],
+    }
+}
+
+/// The known limit of #1899/#1950, closed by #1954: a generation-scoped
+/// reliable message in flight when its generation ends (`Cancel`) is
+/// retired instead of refused unacked until the channel dies. Both
+/// directions: the first datagram of each is lost and the relay is frozen
+/// until the cancel has been issued, so neither was ever acked.
+#[test]
+fn generation_scoped_messages_in_flight_across_a_cancel_do_not_kill_the_channel() {
+    let mut rig = rig(31, 0.15);
+    let old = rig.generation;
+    rig.proxy.drop_next(LinkDir::Down, 1);
+    rig.proxy.drop_next(LinkDir::Up, 1);
+    rig.host
+        .ctl()
+        .reliable_broadcast(old, &impacts(old, 1))
+        .unwrap();
+    rig.client.reliable_send(old, b"old").unwrap();
+    assert_eq!(rig.host.reliable_stats(rig.id).unwrap().sender.in_flight, 1);
+    rig.host.cancel().unwrap();
+
+    // Run past the 8 attempts a refused message would burn (~3.9 s
+    // virtual); the client learns of the cancel as it reads its events.
+    let mut seen = Vec::new();
+    for _ in 0..MAX_ROUNDS {
+        round(&rig);
+        seen.extend(client_events(&mut rig));
+    }
+    assert!(
+        seen.is_empty(),
+        "the old impact must not be delivered: {seen:?}"
+    );
+    let host = rig.host.reliable_stats(rig.id).unwrap();
+    let client = rig.client.reliable_stats().unwrap();
+    assert!(
+        !host.sender.dead && !client.sender.dead,
+        "{host:?} {client:?}"
+    );
+    assert_eq!((host.sender.in_flight, client.sender.in_flight), (0, 0));
+    assert!(client.receiver.retired >= 1, "{client:?}");
+    assert!(host.receiver.retired >= 1, "{host:?}");
+    assert_eq!(rig.host.reliable_recv(), None, "the old ask never arrives");
+
+    // A lobby-scope message still gets through, once.
+    rig.client.reliable_send(0, b"lobby").unwrap();
+    pump(&rig, "the lobby message", || {
+        rig.host.reliable_stats(rig.id).unwrap().receiver.delivered > host.receiver.delivered
+    });
+    quiesce(&rig, 40);
+    assert_eq!(rig.host.reliable_recv(), Some((rig.id, b"lobby".to_vec())));
+    assert_eq!(rig.host.reliable_recv(), None);
+
+    // The next generation's messages ride the same channel, once each.
+    let next = start_session(&rig.rig.host, &mut [&mut rig.rig.client]);
+    assert!(next > old);
+    let mut got = Vec::new();
+    rig.host
+        .ctl()
+        .reliable_broadcast(next, &impacts(next, 2))
+        .unwrap();
+    rig.client.reliable_send(next, b"new").unwrap();
+    let mut from_client = Vec::new();
+    for _ in 0..MAX_ROUNDS {
+        got.extend(client_events(&mut rig));
+        from_client.extend(std::iter::from_fn(|| rig.host.reliable_recv()));
+        if !got.is_empty() && !from_client.is_empty() {
+            break;
+        }
+        round(&rig);
+    }
+    assert!(
+        !got.is_empty() && !from_client.is_empty(),
+        "never converged"
+    );
+    quiesce(&rig, 40);
+    got.extend(client_events(&mut rig));
+    from_client.extend(std::iter::from_fn(|| rig.host.reliable_recv()));
+    assert_eq!(got, vec![impacts(next, 2)]);
+    assert_eq!(from_client, vec![(rig.id, b"new".to_vec())]);
+    assert!(!rig.host.reliable_stats(rig.id).unwrap().sender.dead);
 }

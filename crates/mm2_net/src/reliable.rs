@@ -129,6 +129,9 @@ pub struct ReceiverStats {
     pub backpressure: u64,
     /// Undecodable payloads (counted by the caller via [`decode_data`]).
     pub malformed: u64,
+    /// Retired messages (an empty body from [`ReliableSender::retire`]),
+    /// consumed in id order and not handed to the app.
+    pub retired: u64,
     /// Messages delivered and not yet popped.
     pub pending: usize,
 }
@@ -284,6 +287,28 @@ impl ReliableSender {
         out
     }
 
+    /// Retire every unacked message whose generation `ended` returns
+    /// true for. The channel is ordered, so the id is kept: the message
+    /// becomes an empty tombstone in lobby scope (generation 0, which a
+    /// receiver always admits) that the receiver consumes without
+    /// delivering, and its attempts start over. Without this a message
+    /// minted for a generation that has ended is refused unacked and
+    /// kills the channel. Returns how many were retired. Lobby-scope
+    /// messages are never touched.
+    pub fn retire(&mut self, now: u64, ended: impl Fn(u64) -> bool) -> usize {
+        let mut n = 0;
+        for p in &mut self.pending {
+            if p.generation != 0 && ended(p.generation) {
+                p.generation = 0;
+                p.body.clear();
+                p.attempts = 1;
+                p.due = now;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Whether the channel gave up on the peer.
     pub fn is_dead(&self) -> bool {
         self.stats.dead
@@ -345,6 +370,11 @@ impl ReliableReceiver {
                     // run is not a conforming message. Count, never
                     // deliver half of it.
                     self.stats.malformed += pieces as u64;
+                } else if whole.is_empty() {
+                    // A tombstone: the sender retired this id (no real
+                    // message has an empty body). It holds its place in
+                    // the order and is not an app message.
+                    self.stats.retired += 1;
                 } else {
                     self.delivered.push_back(whole);
                     self.stats.delivered += 1;
@@ -505,6 +535,30 @@ mod tests {
         let s = rx.stats();
         assert_eq!((s.delivered, s.duplicates, s.reordered), (4, 3, 2));
         assert_eq!(tx.stats().in_flight, 0);
+    }
+
+    #[test]
+    fn retiring_keeps_the_order_and_never_delivers_the_message() {
+        let mut tx = ReliableSender::new(64);
+        let mut rx = ReliableReceiver::new();
+        // 1: lobby scope, 2: generation 7 (lost), 3: generation 8.
+        for (gen_, body) in [(0, &b"a"[..]), (7, b"b"), (8, b"c")] {
+            let first = tx.send(0, gen_, body).unwrap();
+            if body != b"b" {
+                deliver(&mut rx, &mut tx, &first[0]);
+            }
+        }
+        assert_eq!(tx.retire(10, |g| g == 7), 1);
+        let due = tx.poll(10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, 0, "the tombstone is lobby scope");
+        deliver(&mut rx, &mut tx, &due[0].1);
+        assert_eq!(rx.pop(), Some(b"a".to_vec()));
+        assert_eq!(rx.pop(), Some(b"c".to_vec()));
+        assert_eq!(rx.pop(), None);
+        assert_eq!(rx.stats().retired, 1);
+        assert_eq!(tx.stats().in_flight, 0);
+        assert!(!tx.is_dead());
     }
 
     #[test]

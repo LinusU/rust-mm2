@@ -1297,23 +1297,30 @@ lost frame is corrected by the next; there is no one-shot damage message.
 The one-shot part of damage — texel deformation — is the impact events
 above.
 
-**Known limit.** The channel is ordered, per seat, and survives
-generations; a datagram for a generation the receiver is not running is
-refused without an ack, so a reliable message minted against a dead
-generation eats its 8 attempts and kills the channel (later reliable sends
-return `Dead` and fall back to the control stream). The senders here only
-send inside the running generation; resetting a channel on a new
-generation belongs with 06E-2's Start/Cancel sequencing.
-
-Still true (rechecked in NETPLAY-06E-5, #1950): lobby-scope messages
-(generation 0: `Start`, `Cancel`, roster, `Leave`, ready) are immune, since
-generation 0 is always admitted, but a generation-scoped message minted
-after its generation has ended is refused
-(`a_reliable_datagram_naming_a_generation_that_does_not_run_is_still_refused`)
-and still costs the channel its 8 attempts. Resetting or retiring the
-generation-scoped part of a seat's channel on `Start`/`Cancel` is filed as
-follow-up work (#1954); the app-level process test below does not reach the case,
-because its senders only send inside the running generation.
+**Generation end retires the scoped messages (#1954).** The channel is
+ordered, per seat, and survives generations; a datagram for a generation
+the receiver is not running is refused without an ack, so a reliable
+message minted for a generation that has since ended would eat its 8
+attempts and kill the channel. It no longer does: when the generation
+changes the sender *retires* its unacked generation-scoped messages
+(`ReliableSender::retire`). The id is ordered, so it cannot simply be
+dropped (the receiver would wait for it forever): the message becomes an
+empty lobby-scope tombstone (generation 0, always admitted) with fresh
+attempts, and the receiver consumes it in id order without delivering it
+(`ReceiverStats::retired`; no real message has an empty body). The host
+retires in `set_generation` (`Start` of generation N retires everything
+not N; `Cancel` sets 0 and retires everything scoped); the client retires
+through the generation it learns ended (a newer `Start`, or `Cancel`).
+Lobby-scope messages (generation 0: `Start`, `Cancel`, roster, `Leave`,
+ready) are never touched. The consequence is that a late reset ask, `Cnr`
+outcome or impact event minted across a `Cancel` is lost by design (its
+generation is over); the in-frame `Snap` rows and the control stream carry
+state that outlives it. A datagram of the old generation already queued
+for the wire is still refused by the receiver, which costs one datagram,
+not the channel. Evidence (synthetic integration):
+`generation_scoped_messages_in_flight_across_a_cancel_do_not_kill_the_channel`
+(`lane_reliable_tests`, seeded `UdpImpairProxy`, both directions) and
+`retiring_keeps_the_order_and_never_delivers_the_message` (`reliable`).
 
 Process-level evidence (`net_lane_loss`, #1950): a host and a client as
 separate `mm2` processes, the client's lane routed through a seeded
