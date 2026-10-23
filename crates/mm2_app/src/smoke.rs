@@ -456,12 +456,21 @@ struct StopWatch {
     peers_peak: usize,
     /// Updates the session has spent on its results screen.
     results_updates: u32,
+    /// When the current stay on the results screen began.
+    results_since: Option<std::time::Instant>,
 }
 
 /// Updates a `results` stop holds on the results screen: the closing
 /// call is voiced from the verdict, a frame or more after the phase
 /// flips, and a record taken on the flip itself would miss it.
 const RESULTS_HOLD_UPDATES: u32 = 120;
+
+/// Wall-clock floor of a `results` stop's hold. Headless updates are
+/// unpaced, so 120 of them can pass in milliseconds; a host that exits
+/// that fast closes its socket under a slower peer still in `Playing`
+/// or mid-hold, which then reports `lost the host` (#1951). The floor
+/// is bounded, so two `results` stops waiting on each other still end.
+const RESULTS_HOLD_WALL: Duration = Duration::from_secs(2);
 
 impl StopWatch {
     fn new(stop: StopWhen) -> Self {
@@ -470,6 +479,7 @@ impl StopWatch {
             started: std::time::Instant::now(),
             peers_peak: 0,
             results_updates: 0,
+            results_since: None,
         }
     }
 
@@ -557,7 +567,14 @@ impl StopWatch {
             } else {
                 0
             };
-            if self.results_updates >= RESULTS_HOLD_UPDATES {
+            let since = *self
+                .results_since
+                .get_or_insert_with(std::time::Instant::now);
+            if !on_results {
+                self.results_since = None;
+            }
+            if self.results_updates >= RESULTS_HOLD_UPDATES && since.elapsed() >= RESULTS_HOLD_WALL
+            {
                 return Some(StopReason::Results);
             }
         }
