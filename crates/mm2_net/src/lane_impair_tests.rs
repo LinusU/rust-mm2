@@ -105,6 +105,11 @@ impl Rig {
         self.proxy.set(LinkDir::Down, recipe);
     }
 
+    /// (These waits are for *a* frame past `before`, never for exactly one
+    /// more: the sender threads also put reliable-channel and probe frames
+    /// on the same socket, and on a starved runner one of them can leave in
+    /// the same interval, after which `before + 1` is never observed.)
+    ///
     /// Queue one window `first..=last` (command `seq` carries `throttle =
     /// seq as u8`) and wait until the client's sender thread put it on the
     /// wire.
@@ -117,7 +122,7 @@ impl Rig {
             .send_input_window(self.generation, 0, first, commands)
             .unwrap();
         eventually("the window to leave the client", || {
-            self.client.lane_counts().unwrap().sent == before + 1
+            self.client.lane_counts().unwrap().sent > before
         });
     }
 
@@ -139,7 +144,7 @@ impl Rig {
         };
         self.host.ctl().send_to(self.id, &msg).unwrap();
         eventually("the snap to leave the host", || {
-            self.host.lane_counts().sent == before + 1
+            self.host.lane_counts().sent > before
         });
     }
 
@@ -700,7 +705,7 @@ fn remote_commands_survive_loss_reorder_and_duplication_without_an_ack() {
         };
         rig.host.ctl().send_to(rig.id, &msg).unwrap();
         eventually("the frame to leave the host", || {
-            rig.host.lane_counts().sent == before + 1
+            rig.host.lane_counts().sent > before
         });
         rig.settle(STEP);
         while rig.client.lane_inbox_stats().unwrap().len > 0 {
