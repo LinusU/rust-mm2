@@ -13,17 +13,17 @@
 //!
 //! The cases exchange roles (alice rams, bob rams) and put the host in
 //! the contact (the host rams, so the clients only ever see it through
-//! the wire). What is asserted is what the production path promises
-//! today: the contact happened, nothing went non-finite, and the seats
-//! both clients hold agree once the field is at rest. The per-process
-//! timings (first-motion tick, ticks from the rammer's contact to the
-//! victim's motion, the own-car correction peak after contact) are
-//! *reported* to `target/captures/netcode-contact/` for #1766's
-//! deadlines, not asserted: the app does not yet carry the remote-input
-//! stream or the joint replay on the wire (RemoteCommands are not sent by
-//! the host; the client is still on the TCP data plane until NETPLAY-06E-4
-//! moves it to the datagram lane), so a deadline here would pin the
-//! legacy snapshot-pull behaviour rather than the redesign.
+//! the wire). The clients ride the UDP lane through a seeded
+//! [`UdpImpairProxy`]; the host forwards the finalized per-seat commands
+//! as `RemoteCommands`. Asserted: the contact happened, nothing went
+//! non-finite, the seats both clients hold agree within 1 m once the field
+//! is at rest (a guaranteed contact), a displaced seat first moves within
+//! `RESPONSE_TICKS` of the pursuer's contact and no own car is corrected by
+//! more than `CORRECTION_PEAK_M` in a tick (ordinary links). The
+//! high-latency timings and the scripted cases that may miss are reported
+//! to `target/captures/netcode-contact/`. Not yet asserted: a separation
+//! deadline, and deadlines counted from the first authoritative state
+//! covering the contact rather than the pursuer's own contact tick.
 //!
 //! NETPLAY-05F-2 adds the cases that need the *other* car to act, through
 //! `--net-contact <script>` (`evade`, `brake`, `swipe`, `push`; keyed on
@@ -55,13 +55,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mm2_app::netprobe::{self, Sample};
-use mm2_net::{Impair, ImpairProxy, LinkDir};
+use mm2_net::{Impair, LinkDir, UdpImpair, UdpImpairProxy};
 use serde_json::{Value, json};
 
-use crate::net_drive::{
-    HOST_FRAME_CEILING, field, host_args, join_args_tcp_only, listening_addr, seat_poses,
-    until_live,
-};
+use crate::net_drive::{HOST_FRAME_CEILING, field, host_args, join_args, seat_poses, until_live};
 use crate::support::Proc;
 
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
@@ -76,6 +73,12 @@ const DEADLINE: Duration = Duration::from_secs(150);
 const SETTLE_SECS: u64 = 58;
 /// A parked car moving faster than this (m/s) has been touched.
 const MOVED_MS: f64 = 0.5;
+/// First-response deadline: ticks from the pursuer's contact to a displaced
+/// seat's first motion on its own process.
+const RESPONSE_TICKS: u64 = 150;
+/// Largest own-car position correction (m, one tick) tolerated after a
+/// guaranteed contact on the ordinary links.
+const CORRECTION_PEAK_M: f64 = 4.0;
 /// Ticks skipped at the start of a trace: the spawn landing jostles.
 const SETTLE_SKIP: usize = 120;
 
@@ -142,13 +145,16 @@ const fn slow(mut c: Case) -> Case {
 
 /// One client's link: the same recipe family with a different delay and
 /// seed, so the two seats see the session at unequal pings.
-fn link(delay_ms: u64) -> Impair {
-    Impair {
-        delay: Duration::from_millis(delay_ms),
-        jitter: Duration::from_millis(delay_ms / 4),
-        loss: 0.02,
-        duplicate: 0.02,
-        reorder: 0.02,
+fn link(delay_ms: u64) -> UdpImpair {
+    UdpImpair {
+        link: Impair {
+            delay: Duration::from_millis(delay_ms),
+            jitter: Duration::from_millis(delay_ms / 4),
+            loss: 0.02,
+            duplicate: 0.02,
+            reorder: 0.02,
+        },
+        ..UdpImpair::default()
     }
 }
 
@@ -221,18 +227,27 @@ fn run(case: Case, dir: &std::path::Path) -> Run {
         MM2_EXE,
         &common(host_args(install.path(), HOST_FRAME_CEILING), "host", HOST),
     );
-    let addr = listening_addr(&host);
-    // Asymmetric paths (alice faster than bob), own seeds.
-    let proxy_alice = ImpairProxy::loopback_seeded(addr, 0xC0A1).unwrap();
-    let proxy_bob = ImpairProxy::loopback_seeded(addr, 0xB0B2).unwrap();
+    let listening = host.until("listening=");
+    let addr: std::net::SocketAddr = field(&listening, "listening").parse().unwrap();
+    let lane_port: u16 = field(&listening, "lane_port").parse().unwrap();
+    let lane_addr = std::net::SocketAddr::new(addr.ip(), lane_port);
+    // Asymmetric paths (alice faster than bob), own seeds. The control
+    // stream stays direct; the data plane is the UDP lane through the proxy.
+    let proxy_alice = UdpImpairProxy::loopback_seeded(lane_addr, 0xC0A1).unwrap();
+    let proxy_bob = UdpImpairProxy::loopback_seeded(lane_addr, 0xB0B2).unwrap();
 
     let settle_tick = SETTLE_SECS * mm2_game::RACE_TICK_HZ as u64;
-    let client = |who: &str, me: usize, via: &ImpairProxy| {
+    let client = |who: &str, me: usize, via: &UdpImpairProxy| {
         let mut flags = common(
-            join_args_tcp_only(install.path(), via.addr(), who, HOST_FRAME_CEILING),
+            join_args(install.path(), addr, who, HOST_FRAME_CEILING),
             who,
             me,
         );
+        let route = via.route();
+        flags.extend([
+            "--lane-via".to_string(),
+            format!("{}/{}", route.dial, route.advertise_port),
+        ]);
         flags.extend(["--until-snap-tick".to_string(), settle_tick.to_string()]);
         if who == "alice" {
             // Stay seated until bob leaves so bob's record holds all
@@ -268,7 +283,7 @@ fn run(case: Case, dir: &std::path::Path) -> Run {
         }
     }
     for (name, p) in [("alice", &proxy_alice), ("bob", &proxy_bob)] {
-        let (up, down) = (p.stats(LinkDir::Up), p.stats(LinkDir::Down));
+        let (up, down) = (p.stats(LinkDir::Up).link, p.stats(LinkDir::Down).link);
         assert!(
             up.frames_in > 0 && down.frames_in > 0 && up.delayed > 0 && down.delayed > 0,
             "{name}'s link carried or held nothing: {up:?} {down:?}"
@@ -345,6 +360,35 @@ fn contact_case(case: Case) {
     }
     let from = contact.unwrap_or(SETTLE_SKIP as u64);
 
+    // Deadlines (#1766 AC1, AC2). Measured on the lane over unequal links:
+    // a displaced seat's first motion fell within 79 ticks of the rammer's
+    // own contact tick (the host, seeing a client's hit through its link)
+    // and the own-car correction peaked at 1.9 m. The bounds are about
+    // twice that, to be a deadline and not a flake; the
+    // contact tick is the pursuer's own view, so this is not yet counted
+    // from the first authoritative state covering the contact.
+    if case.contact_certain && case.delays == UNEQUAL {
+        let contact = contact.expect("asserted above");
+        for (who, first) in &moved {
+            if let Some(first) = first {
+                assert!(
+                    *first <= contact + RESPONSE_TICKS,
+                    "{}: {who} first moved at tick {first}, {} ticks after the contact at {contact}",
+                    case.name,
+                    first - contact
+                );
+            }
+        }
+        for (who, t) in seats.iter().zip(&run.traces) {
+            let peak = correction_peak(t, from);
+            assert!(
+                peak < CORRECTION_PEAK_M,
+                "{}: {who}'s own car was corrected by {peak:.2} m in one tick",
+                case.name
+            );
+        }
+    }
+
     // Convergence once at rest: every seat both clients hold agrees.
     let (alice, bob) = (&run.records[0], &run.records[1]);
     let bob_seats = seat_poses(bob);
@@ -373,13 +417,13 @@ fn contact_case(case: Case) {
         compared += 1;
     }
     assert!(compared >= 2, "{alice}");
-    // With the host in the contact the legacy path converges (the
-    // shove tests' bound). With two clients in it the rammer's local sim
-    // and the victim's predicted car resolve the hit separately and the
-    // snapshot pull only partly reconciles them: measured at 1.2 m and
-    // 3.9 m in two runs. That is exactly what NETPLAY-05 exists to fix, so
-    // it is reported, and only a car in another part of the map fails.
-    let bound = if rammer == HOST { 1.0 } else { 10.0 };
+    // A guaranteed contact converges to the shove tests' 1 m whoever is in
+    // it: the host forwards the finalized commands (`RemoteCommands`) and
+    // the clients replay the contact jointly over the datagram lane. (On
+    // the legacy TCP snapshot pull two clients in the contact ended 1.2 m
+    // and 3.9 m apart.) A scripted case that may miss keeps the loose bound
+    // that only catches a car in another part of the map.
+    let bound = if case.contact_certain { 1.0 } else { 10.0 };
     assert!(
         worst_bounded.1 < bound,
         "{}: seat {} diverged by {:.2} m:\n {alice}\n {bob}",
@@ -408,13 +452,13 @@ fn contact_case(case: Case) {
         .collect();
     let report = json!({
         "case": case.name,
-        "transport": format!("TCP data plane via per-client seeded ImpairProxy (alice {} ms, bob {} ms each way, 2 % loss/dup/reorder), three mm2 processes", case.delays[0], case.delays[1]),
+        "transport": format!("UDP lane via per-client seeded UdpImpairProxy (alice {} ms, bob {} ms each way, 2 % loss/dup/reorder), three mm2 processes", case.delays[0], case.delays[1]),
         "pursuer_seat": seats[rammer],
         "pursuer_contact_tick": contact,
         "contact_certain": case.contact_certain,
         "max_client_pose_divergence_m": {"seat": worst.0, "metres": worst.1},
         "seats": per_seat,
-        "not_asserted": "timings are reported for NETPLAY-05 deadlines; the app does not yet send RemoteCommands or use the datagram lane",
+        "asserted": "convergence < 1 m on guaranteed contacts; first response and correction peak bounded on the ordinary links; high-latency timings are reported only",
     });
     eprintln!("{report:#}");
     std::fs::write(
