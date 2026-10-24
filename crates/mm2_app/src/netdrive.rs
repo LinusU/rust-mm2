@@ -1319,6 +1319,9 @@ pub struct NetDriveReport {
     pub snap_groups_owner: u64,
     /// World (`Bulk`) snapshot groups the host sent over a seat's lane.
     pub snap_groups_world: u64,
+    /// Per-seat baselined-state sends the lane refused (an oversize group);
+    /// the seat's next tick is a fresh full state (NETPLAY-10D-2).
+    pub snap_states_refused: u64,
     /// Updates whose snapshot the cadence deferred (NETPLAY-06D).
     pub snaps_skipped: u64,
     /// Snapshot frames the client applied to its remote copies.
@@ -3659,6 +3662,12 @@ pub fn publish_snapshots(
         // briefly while the wire id has already moved).
         race: race_row,
     };
+    // `Playing` frames go out as baselined states (deltas against what the
+    // seat acknowledged, one baseline per logical group id: 0 owner, 1
+    // world). Ready, Countdown and Results frames repeat a tick or carry the
+    // terminal rows every seat must see, so they keep the plain groups.
+    let baselined = *session.phase() == SessionPhase::Playing;
+    let epoch = pace.baseline_epoch(&seats);
     let sent_ok = match lobby.as_ref() {
         Some(lobby) => {
             let islands = ContactIslands::new(&full, &hit_pairs, WORLD_GROUP_RANGE_M);
@@ -3676,13 +3685,30 @@ pub fn publish_snapshots(
                         }
                     })
                     .collect();
-                let sent = match host.ctl().send_snap_groups_prio(
-                    seat,
-                    wire_generation,
-                    session.tick(),
-                    &groups,
-                    &prios,
-                ) {
+                let sent = if baselined {
+                    let ids: Vec<(u8, Message)> = groups
+                        .iter()
+                        .enumerate()
+                        .map(|(i, g)| (i as u8, g.clone()))
+                        .collect();
+                    host.ctl().send_snap_states_prio(
+                        seat,
+                        wire_generation,
+                        session.tick(),
+                        epoch,
+                        &ids,
+                        &prios,
+                    )
+                } else {
+                    host.ctl().send_snap_groups_prio(
+                        seat,
+                        wire_generation,
+                        session.tick(),
+                        &groups,
+                        &prios,
+                    )
+                };
+                let sent = match sent {
                     Ok(true) => {
                         report.snap_groups_owner += 1;
                         report.snap_groups_world += groups.len().saturating_sub(1) as u64;
@@ -3691,7 +3717,10 @@ pub fn publish_snapshots(
                     // No established lane: the one full Snap over the
                     // existing path.
                     Ok(false) => host.ctl().send_to(seat, &full).is_ok(),
-                    Err(_) => false,
+                    Err(_) => {
+                        report.snap_states_refused += u64::from(baselined);
+                        false
+                    }
                 };
                 any |= sent;
             }
@@ -3922,6 +3951,31 @@ pub struct PublishPace {
     last: Option<(u64, Duration)>,
     /// Its sorted seat set with each seat's reset epoch.
     seats: Option<Vec<(u16, u8)>>,
+    /// The seat set the baseline epoch was last minted for, and the epoch.
+    baseline: Option<(Vec<(u16, u8)>, u8)>,
+}
+
+impl PublishPace {
+    /// The reset epoch the lane's delta baselines are valid within
+    /// (NETPLAY-10D-2). It moves whenever the seat set or any seat's wire
+    /// reset epoch changes — a join, a leave, a teleport — so the first
+    /// state after such a change is a full one for every seat, and an
+    /// acknowledgement of an older epoch no longer names a baseline.
+    fn baseline_epoch(&mut self, seats: &[(u16, u8)]) -> u8 {
+        match &mut self.baseline {
+            Some((known, epoch)) => {
+                if known != seats {
+                    *known = seats.to_vec();
+                    *epoch = epoch.wrapping_add(1);
+                }
+                *epoch
+            }
+            None => {
+                self.baseline = Some((seats.to_vec(), 0));
+                0
+            }
+        }
+    }
 }
 
 /// The snapshot application's query row — factored out of the system
@@ -6530,6 +6584,76 @@ mod tests {
             .iter()
             .map(|g| (g.tick, g.entries.iter().map(|e| e.player).collect()))
             .collect()
+    }
+
+    fn at(player: u16, x: f32) -> SnapEntry {
+        SnapEntry {
+            player,
+            pos: [x, 0.0, 0.0],
+            ..snap_entry()
+        }
+    }
+
+    fn frame(entries: Vec<SnapEntry>, impacts: Vec<SnapImpact>, with_race: bool) -> Message {
+        let trailers = entries
+            .iter()
+            .map(|e| SnapTrailer {
+                owner: e.player,
+                pos: e.pos,
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                spin: 0,
+                flags: 0,
+            })
+            .collect();
+        Message::Snap {
+            generation: 3,
+            tick: 90,
+            entries,
+            trailers,
+            impacts,
+            race: with_race.then_some(SnapRace {
+                phase: 1,
+                countdown: 0,
+                clock: 90,
+            }),
+        }
+    }
+
+    fn rows(m: &Message) -> (Vec<u16>, Vec<u16>, Vec<u16>, bool) {
+        let Message::Snap {
+            entries,
+            trailers,
+            impacts,
+            race,
+            ..
+        } = m
+        else {
+            panic!("not a Snap");
+        };
+        (
+            entries.iter().map(|e| e.player).collect(),
+            trailers.iter().map(|t| t.owner).collect(),
+            impacts.iter().map(|i| i.seat).collect(),
+            race.is_some(),
+        )
+    }
+
+    /// The baseline epoch moves with the seat set and any seat's reset
+    /// epoch, and with nothing else.
+    #[test]
+    fn the_baseline_epoch_moves_with_the_roster_and_with_resets_only() {
+        let mut pace = PublishPace::default();
+        let seats = vec![(0, 0), (1, 0)];
+        let e0 = pace.baseline_epoch(&seats);
+        assert_eq!(pace.baseline_epoch(&seats), e0);
+        let joined = vec![(0, 0), (1, 0), (2, 0)];
+        let e1 = pace.baseline_epoch(&joined);
+        assert_ne!(e1, e0);
+        assert_eq!(pace.baseline_epoch(&joined), e1);
+        let reset = vec![(0, 0), (1, 1), (2, 0)];
+        assert_ne!(pace.baseline_epoch(&reset), e1);
     }
 
     /// NETPLAY-10C-1: the two groups of one tick merge into the staged

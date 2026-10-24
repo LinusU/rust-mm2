@@ -324,5 +324,5 @@ fn a_seeded_lossy_run_reconstructs_every_applied_group_exactly() {
     assert!(host.sent_delta > host.sent_full, "{host:?}");
     assert!(host.sent_bytes < host.raw_bytes, "{host:?}");
     assert!(host.sent_full >= 4, "an epoch bump refreshes: {host:?}");
-    assert_eq!(client.malformed, 0);
+    assert_eq!((client.malformed, client.missing_base), (0, 0));
 }
