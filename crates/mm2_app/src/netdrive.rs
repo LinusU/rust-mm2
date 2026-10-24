@@ -1279,7 +1279,10 @@ impl NetDriveReport {
             self.bot_poses.clear();
         }
         let second = tick / BOT_POSE_TICKS;
-        if self.bot_poses.contains_key(&second) {
+        // A multi-group snapshot arrives as several frames of one tick;
+        // the sampled tick's frames merge, a later tick of the same
+        // second is ignored.
+        if self.bot_poses.get(&second).is_some_and(|(t, _)| *t != tick) {
             return;
         }
         let mut bots: Vec<(u16, [f32; 3])> = entries
@@ -1289,8 +1292,13 @@ impl NetDriveReport {
         if bots.is_empty() {
             return;
         }
-        bots.sort_by_key(|b| b.0);
-        self.bot_poses.insert(second, (tick, bots));
+        let sample = self.bot_poses.entry(second).or_insert((tick, Vec::new()));
+        for bot in bots.drain(..) {
+            if !sample.1.iter().any(|b| b.0 == bot.0) {
+                sample.1.push(bot);
+            }
+        }
+        sample.1.sort_by_key(|b| b.0);
         while self.bot_poses.len() > BOT_POSE_KEEP {
             self.bot_poses.pop_first();
         }
@@ -6567,6 +6575,24 @@ mod tests {
             player,
             ..snap_entry()
         }
+    }
+
+    #[test]
+    fn bot_poses_merge_the_group_frames_of_one_tick() {
+        let base = crate::cnr_bots::NET_BOT_PLAYER_BASE;
+        let mut report = NetDriveReport::default();
+        let a = [seat_entry(base + 1), seat_entry(0)];
+        let b = [seat_entry(base)];
+        report.note_bot_poses(1, 120, a.iter());
+        report.note_bot_poses(1, 120, b.iter());
+        // A later tick of the same second is not sampled.
+        report.note_bot_poses(1, 121, [seat_entry(base + 2)].iter());
+        let (tick, bots) = &report.bot_poses[&2];
+        assert_eq!(*tick, 120);
+        assert_eq!(
+            bots.iter().map(|b| b.0).collect::<Vec<_>>(),
+            [base, base + 1]
+        );
     }
 
     fn push_seats(snaps: &mut RemoteSnaps, tick: u64, seats: &[u16]) {
