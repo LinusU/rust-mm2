@@ -702,9 +702,10 @@ No WAN, retail-data or rendered level.
   state, which is also the refresh on a missing baseline.
   `BaselineReceiver::apply` rejects a delta whose base it does not hold
   (never received, evicted, other epoch/generation) with `MissingBase` and
-  stores nothing; the caller acks only after a successful apply. Eight
-  baselines are held per side and the acknowledged one outlives newer
-  unacknowledged ones. `Client::lane_ack` sends the ack; `Host::lane_ack`
+  stores nothing; the caller acks only after a successful apply. Sixty-four
+  baselines are held per side (at least `REFRESH_TICKS`; eight made every
+  delta `MissingBase` once the ack round trip passed about eight snapshots,
+  NETPLAY-10D-2) and the acknowledged one outlives newer unacknowledged ones. `Client::lane_ack` sends the ack; `Host::lane_ack`
   reports the newest per seat (an ack for another generation is refused at
   the door as `wrong_generation`).
 - **Lossless deltas.** `delta_encode` is a byte-run diff, so a continuation

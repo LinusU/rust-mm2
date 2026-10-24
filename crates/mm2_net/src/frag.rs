@@ -53,8 +53,14 @@ pub const MAX_ASSEMBLIES: usize = 4;
 pub const MAX_TICK_LAG: u64 = 8;
 /// How long an assembly may stay incomplete before it is expired.
 pub const FRAGMENT_TTL: Duration = Duration::from_millis(250);
-/// Baselines each side keeps.
-pub const BASELINE_CAP: usize = 8;
+/// Baselines each side keeps. At least [`REFRESH_TICKS`]: the sender
+/// deltas against an acknowledged state up to that many ticks old, and
+/// the receiver must still hold it however many newer states it applied
+/// while the acknowledgement was in flight or lost. (Eight was too few:
+/// past a round trip of about eight snapshots every delta was refused
+/// `MissingBase` and updates fell to the refresh cadence.)
+pub const BASELINE_CAP: usize = 64;
+const _: () = assert!(BASELINE_CAP as u64 >= REFRESH_TICKS);
 /// A sender falls back to a full state when its newest acknowledged
 /// baseline is more than this many ticks behind (designed bound: one
 /// second at the 60 Hz fixed step).
@@ -871,7 +877,11 @@ mod tests {
             rx.apply(1, 0, t, &p).unwrap();
         }
         assert!(!rx.holds(1));
-        assert_eq!(rx.apply(1, 0, 20, &delta), Err(StateError::MissingBase(1)));
+        let later = 3 + BASELINE_CAP as u64 + 10;
+        assert_eq!(
+            rx.apply(1, 0, later, &delta),
+            Err(StateError::MissingBase(1))
+        );
         // Epoch and generation boundaries.
         let full = |tick| BaselineSender::new().encode(1, 0, tick, &s).0;
         let mut other = BaselineReceiver::new();
@@ -1071,6 +1081,50 @@ mod tests {
         }
         run.expired = asm.stats().expired + asm.stats().evicted;
         run
+    }
+
+    /// One state per tick over a slow, lossy ack path: a delta is never
+    /// refused for a missing base, and deltas are actually used.
+    #[test]
+    fn a_slow_lossy_ack_path_never_strands_a_delta() {
+        for (rtt, ack_loss) in [(4u64, 0.9), (30, 0.4), (55, 0.0)] {
+            let mut rng = Rng(0x1234_5678_9abc_def0 ^ rtt);
+            let (mut tx, mut rx) = (BaselineSender::new(), BaselineReceiver::new());
+            let mut acks: Vec<(u64, u64)> = Vec::new();
+            let (mut deltas, mut fulls, mut missing) = (0u64, 0u64, 0u64);
+            let mut s = blob(600, 3);
+            for tick in 1..=1200u64 {
+                acks.retain(|&(due, t)| {
+                    if due <= tick {
+                        tx.ack(1, 0, t);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                s[(tick % 600) as usize] = tick as u8;
+                let (payload, plan) = tx.encode(1, 0, tick, &s);
+                match plan {
+                    Plan::Full => fulls += 1,
+                    Plan::Delta(_) => deltas += 1,
+                }
+                if rng.next() < 0.1 {
+                    continue;
+                }
+                match rx.apply(1, 0, tick, &payload) {
+                    Ok(state) => {
+                        assert_eq!(state, s);
+                        if rng.next() >= ack_loss {
+                            acks.push((tick + rtt, tick));
+                        }
+                    }
+                    Err(StateError::MissingBase(_)) => missing += 1,
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
+            assert_eq!(missing, 0, "rtt {rtt} ack_loss {ack_loss}");
+            assert!(deltas > fulls, "rtt {rtt}: {deltas} deltas, {fulls} full");
+        }
     }
 
     #[test]
