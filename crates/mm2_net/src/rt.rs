@@ -1031,6 +1031,10 @@ impl SeatOut {
 
     /// The peer acknowledged the state of `tick`: take a round-trip
     /// sample from it and count every older snapshot it passed over.
+    // Not called while snapshot acks stay out of the congestion controller
+    // (see the baseline ack in `ingest`); kept for the change that feeds
+    // it, which has to be measured against `net_contact` first.
+    #[allow(dead_code)]
     pub(crate) fn on_ack(&self, tick: u64, now: Instant) {
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
         let mut sample = None;
