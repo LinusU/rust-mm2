@@ -25,6 +25,8 @@ struct Run {
     pred: OwnPrediction,
     cars: [Entity; 3],
     t: u64,
+    /// Added to every remote body's host velocity and angular velocity.
+    noise: Vec3,
 }
 
 impl Run {
@@ -44,6 +46,7 @@ impl Run {
             pred,
             cars,
             t: 0,
+            noise: Vec3::ZERO,
         }
     }
 
@@ -100,8 +103,8 @@ impl Run {
                         epoch: 0,
                         pos,
                         rot,
-                        vel,
-                        ang,
+                        vel: vel + self.noise,
+                        ang: ang + self.noise,
                     }),
                     commands: Some((ack + 1..=newest).map(|_| Self::cmd()).collect()),
                 }
@@ -129,7 +132,8 @@ fn replayed(o: Outcome) -> bool {
 
 /// A contact body that keeps disagreeing is replayed until exactly
 /// [`RECOVERY_DEADLINE_TICKS`] host ticks after the first complete state,
-/// then the host state is adopted by name.
+/// then the host state is adopted by name, replayed forward so the own car
+/// keeps its lead.
 #[test]
 fn a_persistent_divergence_recovers_exactly_at_the_deadline() {
     let mut r = Run::new();
@@ -150,7 +154,9 @@ fn a_persistent_divergence_recovers_exactly_at_the_deadline() {
     );
     assert_eq!(r.pred.recovered_deadline, 1);
     assert_eq!(r.pred.deadline_start(), None);
-    assert!(r.pred.ring.is_empty());
+    // The lead survives: the history still reaches the newest tick, and the
+    // car was not thrown back to the host's state at the ack.
+    assert_eq!(r.pred.ring.newest(), Some(r.t));
 }
 
 /// The clock counts from the first usable complete state, not from the
@@ -221,5 +227,57 @@ fn an_agreeing_complete_state_stops_the_clock() {
     assert_eq!(
         r.snapshot(40 + RECOVERY_DEADLINE_TICKS, &[1], &[]),
         Outcome::Recovered(RecoveryCause::DeadlineExceeded)
+    );
+}
+
+/// A resting body's replay keeps a residue in velocity (the host's
+/// suspension state is not on the wire): replayed, but never a reason to
+/// give up the recorded past. Measured 0.22 m/s and 0.14 rad/s at the 99th
+/// percentile in `net_contact`.
+#[test]
+fn a_velocity_residue_with_the_pose_agreeing_never_runs_the_clock() {
+    let mut r = Run::new();
+    r.noise = Vec3::new(0.2, 0.0, 0.1);
+    r.ticks(10 + LAG);
+    for ack in 10..10 + 3 * RECOVERY_DEADLINE_TICKS {
+        r.tick();
+        let out = r.snapshot(ack, &[], &[]);
+        assert!(replayed(out), "ack {ack}: {out:?}");
+        assert_eq!(r.pred.deadline_start(), None, "ack {ack}");
+    }
+    assert_eq!(r.pred.recovered_deadline, 0);
+}
+
+/// The deadline replays the host's state forward: the own car ends at the
+/// tick it was at, not at the host's state `LAG` ticks behind it.
+#[test]
+fn the_deadline_keeps_the_own_cars_lead() {
+    let mut r = Run::new();
+    let first = 10;
+    r.ticks(first + LAG);
+    r.snapshot(first, &[1], &[]);
+    for ack in first + 1..first + RECOVERY_DEADLINE_TICKS {
+        r.tick();
+        r.snapshot(ack, &[1], &[]);
+    }
+    r.tick();
+    let before = present(r.app.world(), r.cars[0]).expect("posed").0;
+    let ack = first + RECOVERY_DEADLINE_TICKS;
+    let host = own_body(r.pred.ring.get(ack).expect("recorded"), r.cars[0])
+        .expect("in the capture")
+        .0;
+    assert_eq!(
+        r.snapshot(ack, &[1], &[]),
+        Outcome::Recovered(RecoveryCause::DeadlineExceeded)
+    );
+    let after = present(r.app.world(), r.cars[0]).expect("posed").0;
+    assert!(
+        before.distance(after) < 0.05,
+        "the car moved {} m",
+        before.distance(after)
+    );
+    assert!(
+        after.distance(host) > 0.05,
+        "the car sits at the host's state at the ack"
     );
 }

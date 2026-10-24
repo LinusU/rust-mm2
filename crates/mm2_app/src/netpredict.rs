@@ -49,9 +49,12 @@
 //! reset. The cases that cannot be replayed each take a distinct, counted
 //! path ([`RecoveryCause`]) that adopts the host body state outright, and
 //! snapshots that cannot be compared are skipped with a [`Skip`] reason.
-//! A contact body that keeps disagreeing with the host is replayed only
-//! for [`RECOVERY_DEADLINE_TICKS`] host ticks, counted from the first
-//! usable complete state ([`RecoveryCause::DeadlineExceeded`]).
+//! A contact body whose pose keeps disagreeing with the host is replayed
+//! against the recorded past only for [`RECOVERY_DEADLINE_TICKS`] host
+//! ticks, counted from the first usable complete state; then the past is
+//! dropped and the host's state is stepped forward through the commands in
+//! flight, so the own car keeps its lead
+//! ([`RecoveryCause::DeadlineExceeded`]).
 //! An authority reset (new reset epoch) clears the history instead; the
 //! commands issued before it are never replayed across it.
 
@@ -99,6 +102,21 @@ pub const ROT_TOLERANCE: f32 = 0.001;
 pub const VEL_TOLERANCE: f32 = 0.02;
 /// Angular velocity difference (rad/s) below which states agree.
 pub const ANG_TOLERANCE: f32 = 0.02;
+/// Position difference (m) at which a contact body's disagreement counts
+/// towards [`RECOVERY_DEADLINE_TICKS`]. A body that disagrees by less is
+/// replayed (the tolerances above) but is not "still disagreeing": the
+/// host's suspension and tyre state is not on the wire, so a parked or
+/// resting body's replay keeps a residue of its own. Measured over the
+/// `net_contact` bob-rams/alice-rams runs (5900 partner comparisons): the
+/// 99th percentile of the residue was 0.011 m and 0.004 rad in pose, 0.22 m/s
+/// and 0.14 rad/s in velocity, so with the replay tolerances alone the clock
+/// ran out every [`RECOVERY_DEADLINE_TICKS`] on bodies that agreed to a
+/// centimetre. Designed, not original.
+pub const DEADLINE_POS_TOLERANCE: f32 = 0.05;
+/// Orientation difference (radians) at which a contact body's disagreement
+/// counts towards the deadline; see [`DEADLINE_POS_TOLERANCE`]. Velocities
+/// never do: with the pose agreeing they are that residue.
+pub const DEADLINE_ROT_TOLERANCE: f32 = 0.02;
 
 /// The host's body state for the own seat at its completed tick, staged
 /// by `apply_snapshots` for [`reconcile_own`].
@@ -682,32 +700,31 @@ fn classify_and_run(
         && rot_error <= ROT_TOLERANCE
         && vel.distance(a.vel) <= VEL_TOLERANCE
         && ang.distance(a.ang) <= ANG_TOLERANCE;
-    let (remote_error, mut remote_diverged) = compare_partners(past, req);
+    let (remote_error, mut remote_diverged, mut lasting) = compare_partners(past, req);
     // A seat the host reset since the body's history was recorded is a
     // teleport inside it: replay even when the poses happen to be close.
-    remote_diverged |= resets.iter().any(|b| in_capture(past, *b));
+    let reset_seen = resets.iter().any(|b| in_capture(past, *b));
+    remote_diverged |= reset_seen;
+    lasting |= reset_seen;
     // A seat that spawned after the compared tick has no recorded past to
     // compare: it sits at its spawn pose. Seed it from the host's state so
     // the replay steps it, and force the replay even if the own car agrees.
     let entrants = entrants(past, req);
     remote_diverged |= !entrants.is_empty();
+    lasting |= !entrants.is_empty();
     let complete_state = partners_complete(past, req);
-    if remote_diverged {
+    let mut deadline = false;
+    if lasting {
         // Only a usable complete state starts the clock; the contact tick
         // and a partial snapshot never do.
         if complete_state && pred.deadline_start.is_none() {
             pred.deadline_start = Some(a.server_tick);
         }
-        if pred
+        deadline = pred
             .deadline_start
-            .is_some_and(|t| a.server_tick.saturating_sub(t) >= RECOVERY_DEADLINE_TICKS)
-        {
-            adopt(world, req);
-            pred.ring.clear();
-            pred.floor = req.newest + 1;
-            return Outcome::Recovered(RecoveryCause::DeadlineExceeded);
-        }
+            .is_some_and(|t| a.server_tick.saturating_sub(t) >= RECOVERY_DEADLINE_TICKS);
     } else if complete_state {
+        // Nothing disagrees beyond the replay residue: the clock stops.
         pred.deadline_start = None;
     }
     if own_agrees && !remote_diverged {
@@ -737,7 +754,7 @@ fn classify_and_run(
         pred.floor = req.newest + 1;
         return Outcome::Recovered(RecoveryCause::TooDeep);
     }
-    replay(
+    let outcome = replay(
         world,
         pred,
         req,
@@ -745,7 +762,14 @@ fn classify_and_run(
         (remote_error, remote_diverged),
         &entrants,
         resets,
-    )
+    );
+    // The deadline gives up on the recorded past, not on the car's lead: the
+    // host's state at the ack is stepped forward through the commands still
+    // in flight, so the own car is not thrown back by lead x speed.
+    if deadline && matches!(outcome, Outcome::Replayed { .. }) {
+        return Outcome::Recovered(RecoveryCause::DeadlineExceeded);
+    }
+    outcome
 }
 
 /// Remote contact bodies that spawned after the compared tick (absent from
@@ -781,24 +805,28 @@ fn in_capture(capture: &WorldCapture, e: Entity) -> bool {
 }
 
 /// Compare each remote body and trailer the host reported with its
-/// recorded state: the largest position difference, and whether any
-/// tolerance was passed. A body that is not in the recorded world (it
+/// recorded state: the largest position difference, whether any tolerance
+/// was passed (replay it) and whether the pose disagrees by a deadline
+/// tolerance (the deadline clock runs). A body that is not in the recorded world (it
 /// spawned after that tick) has nothing to compare.
-fn compare_partners(past: &WorldCapture, req: &Request<'_>) -> (f32, bool) {
+fn compare_partners(past: &WorldCapture, req: &Request<'_>) -> (f32, bool, bool) {
     let mut worst = 0.0_f32;
     let mut diverged = false;
+    let mut lasting = false;
     for (body, a) in req.partners() {
         let Some((pos, rot, vel, ang)) = own_body(past, body) else {
             continue;
         };
         let err = pos.distance(a.pos);
         worst = worst.max(err);
+        lasting |=
+            err > DEADLINE_POS_TOLERANCE || rotation_error(rot, a.rot) > DEADLINE_ROT_TOLERANCE;
         diverged |= err > POS_TOLERANCE
             || rotation_error(rot, a.rot) > ROT_TOLERANCE
             || vel.distance(a.vel) > VEL_TOLERANCE
             || ang.distance(a.ang) > ANG_TOLERANCE;
     }
-    (worst, diverged)
+    (worst, diverged, lasting)
 }
 
 /// The host's body state, written onto the own car.

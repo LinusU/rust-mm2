@@ -1819,11 +1819,34 @@ integration, no sockets, no retail data.
 ## Fixed recovery deadline (NETPLAY-05B-4, #1934)
 
 *Designed, not original.* A contact body that disagrees with the host is
-normally corrected by replay. If it is still disagreeing
+normally corrected by replay. If its pose is still disagreeing
 `RECOVERY_DEADLINE_TICKS` (60 host ticks, 1 s) after the deadline started,
-`reconcile` adopts the host state of the own car, the contact bodies and
-the trailers outright and reports `RecoveryCause::DeadlineExceeded`
-(`recovered_deadline`, `kind=recover_deadline`).
+`reconcile` drops the recorded past and replays forward from the host state
+of the own car, the contact bodies and the trailers, and reports
+`RecoveryCause::DeadlineExceeded` (`recovered_deadline`,
+`kind=recover_deadline`). The own car keeps its lead: it is not set to the
+host's state at the ack (which would throw it back by lead x speed, 1.4-5 m
+in `net_contact`), and a refused replay falls back to the named recoveries.
+
+*What counts as disagreeing* is the pose only, past
+`DEADLINE_POS_TOLERANCE` (0.05 m) or `DEADLINE_ROT_TOLERANCE` (0.02 rad).
+A resting body's replay keeps a residue the replay tolerances (0.01 m,
+0.001 rad, 0.02 m/s, 0.02 rad/s) call a divergence (the host's suspension and
+tyre state is not on the wire): measured on `net_contact` it was 0.011 m,
+0.004 rad, 0.22 m/s and 0.14 rad/s at the 99th percentile. Counted against the
+deadline it made the clock run out every ~78 ticks on bodies that agreed to a
+centimetre. Such a body is still replayed; it just never runs the clock.
+
+*Why the own car was also pulled back after every replay (#2020).*
+`reconcile_own` ran unordered in `FixedFirst` against avian's transform
+interpolation, whose `complete_*_easing` writes last tick's end into
+`Transform`. When it ran later it undid the reconcile's pose in `Transform`;
+the replay's own physics steps had advanced avian's `LastPhysicsTick` past the
+`Position` write, so `transform_to_position` took the stale `Transform` over
+`Position`, and in a sustained contact the car snapped back to its
+pre-replay pose every tick (a pinned rammer stayed a steady 1.3 m from the
+host, replay gap 1.28-1.30 m). `reconcile_own` now runs after
+`TransformEasingSystems::Reset` and before `UpdateStart`.
 
 The deadline starts at the first **usable complete** authoritative state in
 which a contact body diverged: usable means it was compared (not
@@ -1838,7 +1861,8 @@ arrived. Only a *contact body* divergence engages it; the own car's routine
 corrections never do.
 
 Tests: `netpredict/deadline_tests.rs` (persistent divergence recovers at
-exactly the deadline; a late first snapshot starts it late; incomplete and
+exactly the deadline and keeps the lead; a velocity residue with the pose
+agreeing never runs the clock; a late first snapshot starts it late; incomplete and
 skipped snapshots do not start it; an agreeing state gives the next episode a
 fresh budget). Evidence level: synthetic integration on the production step.
 Over the wire (#1921, bb183f85): `tests/net_contact.rs` now runs the clients on
