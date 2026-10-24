@@ -84,6 +84,8 @@ mod lane_pace_tests;
 mod lane_reliable_tests;
 #[cfg(test)]
 mod lane_tests;
+#[cfg(test)]
+mod lane_world_tests;
 
 pub use cmdbuf::{
     BUFFER_CAP, COMMAND_BURST, COMMAND_RATE_HZ, Consumed, HOLD_LAST_TICKS, NEUTRAL, SeatStats,

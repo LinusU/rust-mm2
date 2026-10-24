@@ -1327,6 +1327,77 @@ impl HostCtl {
         Ok(fanout)
     }
 
+    /// Send a world-prop `Props` frame to `player_id` (NETPLAY-10C-3).
+    /// The host commits its per-client owed and late-join snapshot state
+    /// when this returns `Ok`, so a seat with a lane gets it on the
+    /// lane's reliable channel (numbered, repeated until acknowledged,
+    /// chunked when over one datagram) and **never** on the control
+    /// stream: a refusal (window full, dead channel) is an `Err` the
+    /// caller retries next frame, so a large catch-up cannot queue behind
+    /// or ahead of anything on TCP. A seat without a lane takes the
+    /// control stream. The reliable channel is independent of the
+    /// `Movement` queue, so a catch-up never holds a healthy peer's
+    /// corrections.
+    pub fn send_props(
+        &self,
+        player_id: u16,
+        generation: u64,
+        msg: &Message,
+    ) -> Result<(), NetError> {
+        if !matches!(msg, Message::Props { .. }) {
+            return Err(NetError::Unexpected("send_props takes a Props frame"));
+        }
+        let bytes = msg.encode()?;
+        if self.lane.established_out(player_id).is_some() {
+            return self
+                .lane
+                .send_reliable(player_id, generation, &bytes)
+                .map_err(|_| {
+                    NetError::Io(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "reliable channel refused the props frame",
+                    ))
+                });
+        }
+        self.send(LoopMsg::SendTo(player_id, msg.clone()))
+    }
+
+    /// Send a world-state frame (`Traffic` or `Signals`) to `player_id`
+    /// (NETPLAY-10C-3): as [`Priority::Bulk`](crate::Priority) fragments on
+    /// the lane when the seat has one — state that self-corrects on the
+    /// next frame, so nothing repeats it and the pacer may shed it — and
+    /// over the control stream otherwise.
+    pub fn send_world_state(&self, player_id: u16, msg: &Message) -> Result<(), NetError> {
+        let Some((kind, generation, tick)) = crate::rt::WorldKind::of(msg) else {
+            return Err(NetError::Unexpected("not a world-state frame"));
+        };
+        if let Some(out) = self.lane.established_out(player_id) {
+            let bytes = msg.encode()?;
+            let frags = crate::frag::split(tick, &[&bytes]).map_err(oversize_snap)?;
+            out.push_world(kind, generation, frags);
+            return Ok(());
+        }
+        self.send(LoopMsg::SendTo(player_id, msg.clone()))
+    }
+
+    /// [`send_world_state`](Self::send_world_state) to every client.
+    pub fn broadcast_world_state(&self, msg: &Message) -> Result<(), NetError> {
+        let Some((kind, generation, tick)) = crate::rt::WorldKind::of(msg) else {
+            return Err(NetError::Unexpected("not a world-state frame"));
+        };
+        let outs = self.lane.established_outs();
+        if outs.is_empty() {
+            return self.send(LoopMsg::Broadcast(msg.clone()));
+        }
+        let bytes = msg.encode()?;
+        let frags = crate::frag::split(tick, &[&bytes]).map_err(oversize_snap)?;
+        let ids: Vec<u16> = outs.iter().map(|(id, _)| *id).collect();
+        for (_, out) in outs {
+            out.push_world(kind, generation, frags.clone());
+        }
+        self.send(LoopMsg::BroadcastExcept(msg.clone(), ids))
+    }
+
     /// Send `body` to `player_id` on the reliable channel (NETPLAY-06E-1):
     /// numbered and repeated until acknowledged, delivered exactly once
     /// and in order, at most

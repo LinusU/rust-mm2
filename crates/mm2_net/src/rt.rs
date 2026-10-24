@@ -168,6 +168,61 @@ pub enum LaneTag {
     /// Cumulative and selective acknowledgement of [`LaneTag::Reliable`]
     /// messages (either direction).
     ReliableAck = 6,
+    /// One fragment of an ambient-traffic frame ([`WorldKind::Cars`],
+    /// host to client). Its own tag, so its tick domain and its
+    /// assembler never mix with a `Snap`'s.
+    WorldCars = 7,
+    /// One fragment of a traffic-signal frame ([`WorldKind::Signals`],
+    /// host to client).
+    WorldSignals = 8,
+}
+
+/// The world-state messages that ride the lane as [`Priority::Bulk`]
+/// fragment groups (NETPLAY-10C-3). *State*, not events: a lost frame
+/// self-corrects on the next, so neither is repeated by the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldKind {
+    /// `Message::Traffic`, the ambient cars.
+    Cars,
+    /// `Message::Signals`, the traffic-light phases.
+    Signals,
+}
+
+impl WorldKind {
+    pub(crate) const ALL: [Self; 2] = [Self::Cars, Self::Signals];
+
+    /// The kind of `msg`, `None` for everything else.
+    pub(crate) fn of(msg: &Message) -> Option<(Self, u64, u64)> {
+        match msg {
+            Message::Traffic {
+                generation, tick, ..
+            } => Some((Self::Cars, *generation, *tick)),
+            Message::Signals {
+                generation, tick, ..
+            } => Some((Self::Signals, *generation, *tick)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tag(self) -> LaneTag {
+        match self {
+            Self::Cars => LaneTag::WorldCars,
+            Self::Signals => LaneTag::WorldSignals,
+        }
+    }
+
+    fn from_tag(tag: LaneTag) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.tag() == tag)
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The generation `msg` carries when it is this kind.
+    fn generation_of(self, msg: &Message) -> Option<u64> {
+        Self::of(msg).and_then(|(k, g, _)| (k == self).then_some(g))
+    }
 }
 
 impl LaneTag {
@@ -179,6 +234,8 @@ impl LaneTag {
             4 => Some(Self::Ack),
             5 => Some(Self::Reliable),
             6 => Some(Self::ReliableAck),
+            7 => Some(Self::WorldCars),
+            8 => Some(Self::WorldSignals),
             _ => None,
         }
     }
@@ -793,6 +850,14 @@ impl SeatOut {
         }
     }
 
+    /// Queue one world-state frame's fragments as bulk datagrams under
+    /// `kind`'s tag.
+    pub(crate) fn push_world(&self, kind: WorldKind, generation: u64, fragments: Vec<Vec<u8>>) {
+        for f in fragments {
+            self.push_tagged(kind.tag(), Priority::Bulk, generation, f);
+        }
+    }
+
     /// The next datagram to send, or `None` when nothing is due.
     fn next_to_send(&self) -> Option<OutItem> {
         self.next_to_send_at(Instant::now())
@@ -1193,7 +1258,9 @@ fn ingest(
             Ok(_) => Verdict::Dropped(Refuse::Unexpected),
             Err(_) => Verdict::Dropped(Refuse::Malformed),
         },
-        LaneTag::Fragment => Verdict::Dropped(Refuse::Unexpected),
+        LaneTag::Fragment | LaneTag::WorldCars | LaneTag::WorldSignals => {
+            Verdict::Dropped(Refuse::Unexpected)
+        }
         LaneTag::Reliable => match decode_data(payload) {
             Some((id, more, body)) => {
                 let ack = seat.rel.receiver.on_data(id, more, body);
@@ -1568,12 +1635,15 @@ const REL_INBOX_CAP: usize = 64;
 /// Whether a reliably delivered body is a host event the client's inbox
 /// owns (everything else stays for `recv_reliable`). A lobby `Roster`
 /// (NETPLAY-06E-2a) and the session `Start`/`Cancel` (2b) are too:
-/// `Client::recv` returns them.
+/// `Client::recv` returns them, and so is the world-prop `Props` frame
+/// (NETPLAY-10C-3), whose late-join snapshot is committed on the host as
+/// delivered.
 fn is_host_event(body: &[u8]) -> bool {
     matches!(
         Message::decode(body),
         Ok(Message::Cnr { .. }
             | Message::Impacts { .. }
+            | Message::Props { .. }
             | Message::Roster { .. }
             | Message::Start { .. }
             | Message::Cancel { .. })
@@ -1752,6 +1822,9 @@ pub(crate) struct ClientLane {
     started: AtomicU64,
     inbox: Arc<Inbox>,
     assembler: Mutex<Assembler>,
+    /// One assembler per [`WorldKind`] (indexed by it): each kind has its
+    /// own tick domain.
+    world: [Mutex<Assembler>; 2],
     rel: Mutex<ReliableChannel>,
     clock: ReliableClock,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -1782,6 +1855,7 @@ impl ClientLane {
             started: AtomicU64::new(0),
             inbox,
             assembler: Mutex::new(Assembler::new()),
+            world: [Mutex::new(Assembler::new()), Mutex::new(Assembler::new())],
             rel: Mutex::new(ReliableChannel::new(MAX_RELIABLE_BODY)),
             clock: ReliableClock::new(),
             threads: Mutex::new(Vec::new()),
@@ -1883,10 +1957,10 @@ impl ClientLane {
             let (n, from) = match socket.recv_from(&mut buf) {
                 Ok(r) => r,
                 Err(e) if is_timeout(&e) => {
-                    self.assembler
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .expire(Instant::now());
+                    let now = Instant::now();
+                    for a in std::iter::once(&self.assembler).chain(&self.world) {
+                        a.lock().unwrap_or_else(|e| e.into_inner()).expire(now);
+                    }
                     continue;
                 }
                 Err(_) => {
@@ -1920,6 +1994,9 @@ impl ClientLane {
                     Err(_) => self.counters.drop_for(Refuse::Malformed),
                 },
                 LaneTag::Fragment => self.on_fragment(&header, payload),
+                LaneTag::WorldCars | LaneTag::WorldSignals => {
+                    self.on_world_fragment(&header, payload)
+                }
                 LaneTag::Ack => self.counters.drop_for(Refuse::Unexpected),
                 LaneTag::Reliable => match decode_data(payload) {
                     Some((id, more, body)) => {
@@ -1990,6 +2067,35 @@ impl ClientLane {
                 }
                 Ok(Message::Snap { .. }) => self.counters.drop_for(Refuse::WrongGeneration),
                 Ok(_) => self.counters.drop_for(Refuse::Unexpected),
+                Err(_) => self.counters.drop_for(Refuse::Malformed),
+            },
+            Err(_) => self.counters.drop_for(Refuse::Malformed),
+        }
+    }
+
+    /// One fragment of a world-state frame: reassembled by its kind's own
+    /// assembler, admitted only as that kind and under the datagram's
+    /// generation, and queued for the game like a `Snap`. The game's
+    /// freshness rules (newest tick per generation) are unchanged.
+    fn on_world_fragment(&self, header: &Header, payload: &[u8]) {
+        let Some(kind) = WorldKind::from_tag(header.tag) else {
+            return self.counters.drop_for(Refuse::Unexpected);
+        };
+        let done = self.world[kind.index()]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accept(payload, Instant::now());
+        match done {
+            Ok(None) => Counters::bump(&self.counters.accepted),
+            Ok(Some(group)) => match Message::decode(&group.data) {
+                Ok(msg) => match kind.generation_of(&msg) {
+                    Some(g) if g == header.generation => {
+                        Counters::bump(&self.counters.accepted);
+                        self.inbox.push_lane(msg);
+                    }
+                    Some(_) => self.counters.drop_for(Refuse::WrongGeneration),
+                    None => self.counters.drop_for(Refuse::Unexpected),
+                },
                 Err(_) => self.counters.drop_for(Refuse::Malformed),
             },
             Err(_) => self.counters.drop_for(Refuse::Malformed),

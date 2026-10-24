@@ -42,7 +42,7 @@ fn lossy(loss: f64) -> UdpImpair {
 /// and reorders: the relay's virtual clock is frozen until a test advances
 /// it, so a delayed probe could never establish the lane. Both reliable
 /// clocks are manual.
-fn rig(seed: u64, loss: f64) -> Lobby {
+pub(crate) fn rig(seed: u64, loss: f64) -> Lobby {
     let from_start = UdpImpair {
         link: Impair {
             loss,
@@ -76,9 +76,9 @@ fn rig(seed: u64, loss: f64) -> Lobby {
 
 /// A [`Rig`] plus the count of roster messages already carried
 /// host→client before the test began.
-struct Lobby {
+pub(crate) struct Lobby {
     rig: Rig,
-    base: u64,
+    pub(crate) base: u64,
 }
 
 impl std::ops::DerefMut for Lobby {
@@ -95,7 +95,7 @@ impl std::ops::Deref for Lobby {
 }
 
 /// One virtual round: both reliable clocks and the relay move by [`STEP`].
-fn round(rig: &Rig) {
+pub(crate) fn round(rig: &Rig) {
     rig.host.advance_reliable_clock(STEP);
     rig.client.advance_reliable_clock(STEP);
     rig.settle(STEP);
@@ -103,7 +103,7 @@ fn round(rig: &Rig) {
 }
 
 /// Run rounds until `done`, failing after [`MAX_ROUNDS`].
-fn pump(rig: &Rig, what: &str, mut done: impl FnMut() -> bool) {
+pub(crate) fn pump(rig: &Rig, what: &str, mut done: impl FnMut() -> bool) {
     for _ in 0..MAX_ROUNDS {
         if done() {
             return;
@@ -115,7 +115,7 @@ fn pump(rig: &Rig, what: &str, mut done: impl FnMut() -> bool) {
 
 /// Keep running `n` more rounds: whatever was going to be delivered twice
 /// has had every chance to be.
-fn quiesce(rig: &Rig, n: u32) {
+pub(crate) fn quiesce(rig: &Rig, n: u32) {
     for _ in 0..n {
         round(rig);
     }

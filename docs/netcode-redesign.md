@@ -978,9 +978,35 @@ a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
   ambient cars) `Bulk`, nor engage `BaselineSender` per seat. The mechanism
   and its bounds are in place and tested; choosing the grouping belongs with
   the correction path (NETPLAY-04) and congestion work (NETPLAY-10).
-- The world catch-up messages (`Cars`, props, signals) still go over TCP,
-  separate from the lane, so a delayed reliable update cannot queue behind
-  movement on the lane; their own budget is not applied.
+- World catch-up no longer rides TCP for a seat with a lane (NETPLAY-10C-3,
+  protocol v39); TCP stays only for seats without one:
+  - `Props` (`HostCtl::send_props`) takes the lane's **reliable channel**,
+    because the host commits a client's owed set and late-join snapshot
+    position when a send succeeds. The channel numbers, repeats and chunks
+    it (up to `MAX_RELIABLE_MESSAGE`); a refusal (window full, dead
+    channel) is an `Err` and the owed mark stays set for the next frame,
+    never a TCP fallback. The client's reliable receiver hands it to the
+    inbox like `Cnr`/`Impacts`, so the existing freshness/dedup rules apply
+    unchanged.
+  - `Traffic` and `Signals` (`send_world_state` / `broadcast_world_state`)
+    are state that the next frame supersedes, so they ride `Priority::Bulk`
+    fragments on their own lane tags (`WorldCars` 7, `WorldSignals` 8) with
+    one assembler per kind (their tick domains differ from `Snap`'s and
+    each other's). The client admits a completed frame only as its own kind
+    and only under the datagram's generation. They spend the bulk byte
+    budget and are shed first; nothing repeats them.
+  Tested through the seeded lossy relay (`lane_world_tests`): a late-join
+  `Props` run completes once each and in order, cars and lights recover on
+  the next frame, a reliable `Impacts` completes once beside four full
+  `Props` frames and queued cars, and a seat's movement groups all arrive
+  with the pacer's `bulk_sent` advancing and no movement dropped or expired.
+  Open: reliable `Props` data shares the *movement-priority* queue with the
+  other reliable traffic (so events are never starved by bulk), which means
+  a catch-up offered faster than the peer's budget does cost that seat's own
+  movement; the producer paces the snapshot (`rows_for_client`) and the
+  reliable window bounds it, but a per-seat catch-up byte budget is not yet
+  applied. Other seats are unaffected (separate queues; only the host's
+  shared uplink couples them).
 - The tick-driven cadence path is unit-tested (`Cadence`) and exercised
   live only through the stalled-clock keepalive; a render-rate-vs-fixed-rate
   headless run is open.

@@ -542,7 +542,7 @@ pub fn publish_traffic(
             roster,
             rows,
         };
-        if host.ctl().send_to(id, &frame).is_ok()
+        if host.ctl().send_world_state(id, &frame).is_ok()
             && let Some(report) = report.as_mut()
         {
             report.cars_sent += sent;

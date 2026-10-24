@@ -206,7 +206,7 @@ pub fn publish_signals(
         tick: clock.ticks,
         rows: rows.clone(),
     };
-    if host.ctl().broadcast(&frame).is_ok() {
+    if host.ctl().broadcast_world_state(&frame).is_ok() {
         *last = Some((generation, clock.ticks, rows));
     }
 }

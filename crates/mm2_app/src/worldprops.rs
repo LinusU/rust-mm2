@@ -567,7 +567,11 @@ pub fn publish_props(
         };
         // Only a frame that left clears the owed mark — a failed send
         // leaves the change queued for the next.
-        if host.ctl().send_to(id, &frame).is_ok() {
+        if host
+            .ctl()
+            .send_props(id, session.wire_generation(), &frame)
+            .is_ok()
+        {
             let client = ledger.clients.entry(id).or_default();
             client.commit_snapshot(snapshot_slots);
             for (key, _) in &rows {
