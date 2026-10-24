@@ -19,9 +19,12 @@
 //! has no network correction), chosen to bound both the duration and the
 //! distance of any visible slide.
 
+use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
+use crate::car_visual::Trailer;
+use crate::netdrive::RemoteTrailer;
 use crate::netplay_timeline::NetplayTimeline;
 
 /// Time constant of the exponential decay (seconds). 99% gone after
@@ -215,6 +218,51 @@ pub fn apply_offsets(
     }
 }
 
+/// When the last correction of this body was absorbed: the host tick of the
+/// snapshot that caused it and how many corrections the body has absorbed.
+/// Read only by the developer overlay.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CorrectionStamp {
+    pub server_tick: u64,
+    pub count: u64,
+}
+
+/// The own car's jointed trailers (real bodies, not the wire-driven
+/// [`RemoteTrailer`] copies of a remote car).
+fn own_trailers(world: &mut World, own: Entity) -> Vec<Entity> {
+    world
+        .query_filtered::<(Entity, &Trailer), Without<RemoteTrailer>>()
+        .iter(world)
+        .filter_map(|(e, t)| (t.towing == own).then_some(e))
+        .collect()
+}
+
+/// The body poses of the own car's trailers, to compare around a
+/// reconciliation with [`absorb_rig`].
+pub fn trailer_poses(world: &mut World, own: Entity) -> Vec<(Entity, (Vec3, Quat))> {
+    own_trailers(world, own)
+        .into_iter()
+        .filter_map(|e| {
+            Some((
+                e,
+                (world.get::<Position>(e)?.0, world.get::<Rotation>(e)?.0),
+            ))
+        })
+        .collect()
+}
+
+/// A reconciliation moved the own trailers: each keeps its drawn pose like
+/// the car does. The remote contact bodies need nothing here: they carry no
+/// mesh, their model is the wire-driven replica (`netdrive::RemoteLerp`).
+pub fn absorb_rig(world: &mut World, before: &[(Entity, (Vec3, Quat))], server_tick: u64) {
+    for &(e, b) in before {
+        let (Some(p), Some(r)) = (world.get::<Position>(e), world.get::<Rotation>(e)) else {
+            continue;
+        };
+        absorb_correction(world, e, b, (p.0, r.0), server_tick);
+    }
+}
+
 /// The own car, ready to receive an offset.
 pub fn ensure_offset(world: &mut World, own: Entity) {
     if world.get::<CorrectionOffset>(own).is_none() {
@@ -230,18 +278,120 @@ pub fn absorb_correction(
     own: Entity,
     before: (Vec3, Quat),
     after: (Vec3, Quat),
+    server_tick: u64,
 ) {
     ensure_offset(world, own);
     if let Some(mut offset) = world.get_mut::<CorrectionOffset>(own) {
         offset.absorb(before, after);
     }
+    let mut stamp = world.entity_mut(own);
+    let count = stamp.get::<CorrectionStamp>().map_or(0, |s| s.count);
+    stamp.insert(CorrectionStamp {
+        server_tick,
+        count: count + 1,
+    });
 }
 
 /// An authority reset or a recovery: the old life must not be animated
-/// from.
+/// from, and neither must the trailer behind it.
 pub fn clear_correction(world: &mut World, own: Entity) {
-    if let Some(mut offset) = world.get_mut::<CorrectionOffset>(own) {
-        *offset = CorrectionOffset::IDENTITY;
+    let rig: Vec<Entity> = std::iter::once(own)
+        .chain(own_trailers(world, own))
+        .collect();
+    for e in rig {
+        if let Some(mut offset) = world.get_mut::<CorrectionOffset>(e) {
+            *offset = CorrectionOffset::IDENTITY;
+        }
+    }
+}
+
+/// One row of the developer overlay: where a body is against where it is
+/// drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayReading {
+    pub physics: (Vec3, Quat),
+    pub rendered: (Vec3, Quat),
+    pub distance: f32,
+    pub angle: f32,
+    pub snapshot_tick: u64,
+}
+
+impl OverlayReading {
+    pub fn new(
+        position: Vec3,
+        rotation: Quat,
+        offset: &CorrectionOffset,
+        stamp: CorrectionStamp,
+    ) -> Self {
+        Self {
+            physics: (position, rotation),
+            rendered: offset.apply(position, rotation),
+            distance: offset.distance(),
+            angle: offset.angle(),
+            snapshot_tick: stamp.server_tick,
+        }
+    }
+}
+
+/// `MM2_NETVISUAL_OVERLAY=1` draws physics (axes) against rendered (amber
+/// sphere) pose of every body with a live offset, joined by a line.
+pub const OVERLAY_ENV_VAR: &str = "MM2_NETVISUAL_OVERLAY";
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffsetOverlay {
+    pub enabled: bool,
+}
+
+impl OffsetOverlay {
+    pub fn resolve(env: Option<&str>) -> Self {
+        Self {
+            enabled: env.is_some_and(|v| !matches!(v.trim(), "" | "0" | "false" | "off")),
+        }
+    }
+}
+
+fn overlay_enabled(overlay: Option<Res<OffsetOverlay>>) -> bool {
+    overlay.is_some_and(|o| o.enabled)
+}
+
+/// Draw the overlay and log each reading once per absorbed correction.
+fn draw_overlay(
+    bodies: Query<(
+        Entity,
+        &Position,
+        &Rotation,
+        &CorrectionOffset,
+        Option<&CorrectionStamp>,
+    )>,
+    mut gizmos: Gizmos,
+    mut logged: Local<std::collections::HashMap<Entity, u64>>,
+) {
+    for (e, p, r, offset, stamp) in &bodies {
+        if offset.is_rest() {
+            continue;
+        }
+        let stamp = stamp.copied().unwrap_or_default();
+        let reading = OverlayReading::new(p.0, r.0, offset, stamp);
+        gizmos.axes(
+            Transform::from_translation(reading.physics.0).with_rotation(reading.physics.1),
+            1.0,
+        );
+        gizmos.line(
+            reading.physics.0,
+            reading.rendered.0,
+            Color::srgb(1.0, 0.7, 0.1),
+        );
+        gizmos.sphere(
+            Isometry3d::new(reading.rendered.0, reading.rendered.1),
+            0.4,
+            Color::srgb(1.0, 0.7, 0.1),
+        );
+        if logged.insert(e, stamp.count) != Some(stamp.count) {
+            println!(
+                "event=netvisual_offset body={e:?} dist={:.3} angle={:.4} snapshot_tick={}",
+                reading.distance, reading.angle, reading.snapshot_tick
+            );
+        }
     }
 }
 
@@ -270,6 +420,13 @@ pub fn add_systems(app: &mut App) {
             .run_if(selected),
     )
     .add_systems(First, decay_offsets.run_if(selected));
+    app.insert_resource(OffsetOverlay::resolve(
+        std::env::var(OVERLAY_ENV_VAR).ok().as_deref(),
+    ))
+    .add_systems(
+        Update,
+        draw_overlay.run_if(selected).run_if(overlay_enabled),
+    );
 }
 
 #[cfg(test)]
@@ -470,5 +627,127 @@ mod tests {
             .unwrap()
             .translation();
         assert!((g - Vec3::new(10.0, 1.0, 0.0)).length() < 1e-4, "{g:?}");
+    }
+
+    fn rig_world() -> (World, Entity, Entity) {
+        let mut world = World::new();
+        let car = world
+            .spawn((
+                Position(Vec3::new(10.0, 0.0, 0.0)),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        let trailer = world
+            .spawn((
+                Trailer {
+                    towing: car,
+                    rest_offset: Vec3::new(0.0, 0.0, -5.0),
+                },
+                Position(Vec3::new(10.0, 0.0, -5.0)),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        (world, car, trailer)
+    }
+
+    fn move_body(world: &mut World, e: Entity, by: Vec3, rot: Quat) {
+        world.get_mut::<Position>(e).unwrap().0 += by;
+        let r = world.get::<Rotation>(e).unwrap().0;
+        world.get_mut::<Rotation>(e).unwrap().0 = rot * r;
+    }
+
+    fn drawn(world: &World, e: Entity) -> Vec3 {
+        let p = world.get::<Position>(e).unwrap().0;
+        let r = world.get::<Rotation>(e).unwrap().0;
+        world
+            .get::<CorrectionOffset>(e)
+            .map_or(p, |o| o.apply(p, r).0)
+    }
+
+    /// A trailer is its own body: a correction that moves car and trailer
+    /// keeps both where they were drawn, with the stamp of the snapshot.
+    #[test]
+    fn a_trailer_keeps_its_drawn_pose_through_a_correction() {
+        let (mut world, car, trailer) = rig_world();
+        let car_before = (Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY);
+        let rig_before = trailer_poses(&mut world, car);
+        assert_eq!(rig_before.len(), 1);
+        move_body(&mut world, car, Vec3::new(0.3, 0.0, 0.1), yaw(0.05));
+        move_body(&mut world, trailer, Vec3::new(0.4, 0.0, 0.2), yaw(0.08));
+        let (p, r) = (
+            world.get::<Position>(car).unwrap().0,
+            world.get::<Rotation>(car).unwrap().0,
+        );
+        absorb_correction(&mut world, car, car_before, (p, r), 77);
+        absorb_rig(&mut world, &rig_before, 77);
+        assert!((drawn(&world, car) - car_before.0).length() < 1e-5);
+        assert!((drawn(&world, trailer) - Vec3::new(10.0, 0.0, -5.0)).length() < 1e-5);
+        let stamp = world.get::<CorrectionStamp>(trailer).unwrap();
+        assert_eq!((stamp.server_tick, stamp.count), (77, 1));
+        // The hitch gap between drawn car and drawn trailer is unchanged.
+        let gap = drawn(&world, car) - drawn(&world, trailer);
+        assert!((gap - Vec3::new(0.0, 0.0, 5.0)).length() < 1e-5);
+    }
+
+    /// A remote car's wire-driven trailer copy is not the own rig.
+    #[test]
+    fn a_remote_trailer_copy_is_not_part_of_the_own_rig() {
+        let (mut world, car, trailer) = rig_world();
+        world.entity_mut(trailer).insert(RemoteTrailer { owner: 3 });
+        assert!(trailer_poses(&mut world, car).is_empty());
+    }
+
+    /// Authority reset (a new life), reverse, jump: the offset never
+    /// animates across a teleport, and a trailer's goes with the car's.
+    #[test]
+    fn reset_jump_and_reverse_histories() {
+        let (mut world, car, trailer) = rig_world();
+        for e in [car, trailer] {
+            ensure_offset(&mut world, e);
+            world.get_mut::<CorrectionOffset>(e).unwrap().translation = Vec3::X * 0.5;
+        }
+        clear_correction(&mut world, car);
+        assert!(world.get::<CorrectionOffset>(car).unwrap().is_rest());
+        assert!(world.get::<CorrectionOffset>(trailer).unwrap().is_rest());
+
+        // A jump (recovery snap) beyond the teleport distance is not slid.
+        let rig_before = trailer_poses(&mut world, car);
+        move_body(&mut world, trailer, Vec3::X * 20.0, Quat::IDENTITY);
+        absorb_rig(&mut world, &rig_before, 5);
+        assert!(world.get::<CorrectionOffset>(trailer).unwrap().is_rest());
+
+        // The car turned round under a reverse correction (180 degrees):
+        // the slide is bounded to the designed maximum, never a half turn.
+        let mut o = CorrectionOffset::default();
+        o.absorb((Vec3::ZERO, Quat::IDENTITY), (Vec3::ZERO, yaw(PI)));
+        assert!(o.angle() <= MAX_ANGLE + 1e-4, "{}", o.angle());
+        for _ in 0..120 {
+            o.decay(1.0 / 60.0);
+        }
+        assert!(o.is_rest());
+    }
+
+    /// The overlay reading names the offset size and the snapshot that
+    /// caused it. (A gold load changes mass, not pose: its correction is
+    /// an ordinary one, so no gold-specific path exists to test.)
+    #[test]
+    fn the_overlay_reading_names_offset_and_snapshot() {
+        let mut o = CorrectionOffset::default();
+        o.absorb(
+            (Vec3::ZERO, Quat::IDENTITY),
+            (Vec3::new(0.2, 0.0, 0.0), yaw(0.05)),
+        );
+        let stamp = CorrectionStamp {
+            server_tick: 1234,
+            count: 1,
+        };
+        let r = OverlayReading::new(Vec3::new(0.2, 0.0, 0.0), yaw(0.05), &o, stamp);
+        assert!((r.distance - 0.2).abs() < 1e-5);
+        assert!((r.angle - 0.05).abs() < 1e-3);
+        assert_eq!(r.snapshot_tick, 1234);
+        assert!(r.rendered.0.length() < 1e-5);
+        assert!(!OffsetOverlay::resolve(None).enabled);
+        assert!(!OffsetOverlay::resolve(Some("0")).enabled);
+        assert!(OffsetOverlay::resolve(Some("1")).enabled);
     }
 }

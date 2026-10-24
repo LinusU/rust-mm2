@@ -1295,6 +1295,7 @@ pub fn reconcile_own(world: &mut World) {
         let epoch = epoch_ref(world.resource::<Session>(), epoch);
         pred.authored = authored_modifiers(world, own, own_wire, &damage_states);
         let before = present(world, own);
+        let rig_before = crate::netvisual::trailer_poses(world, own);
         let outcome = reconcile(
             world,
             &mut pred,
@@ -1315,7 +1316,8 @@ pub fn reconcile_own(world: &mut World) {
         if let (Some(b), Some(a)) = (before, present(world, own))
             && matches!(outcome, Outcome::Replayed { .. } | Outcome::Recovered(_))
         {
-            crate::netvisual::absorb_correction(world, own, b, a);
+            crate::netvisual::absorb_correction(world, own, b, a, assertion.server_tick);
+            crate::netvisual::absorb_rig(world, &rig_before, assertion.server_tick);
         }
         // Everything up to the ack is inside the host's state: it can
         // never be replayed again.

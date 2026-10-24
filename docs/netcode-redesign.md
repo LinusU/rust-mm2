@@ -2230,9 +2230,34 @@ bounds and teleport clear; yaw across +-pi takes the 0.1 rad arc; alternating
 yaw settles; non-finite clears; the PostUpdate systems leave `Transform`
 unchanged and do not accumulate over repeated frames.
 
-Open (not claimed): trailers/wheels of the
-corrected car beyond the carried subtree (trailer is a separate body); the
-physics-versus-rendered developer overlay; rendered captures and 30/60/144 FPS
+### Slice 2 (#2007): trailers, audit, overlay
+
+- The own trailer is a separate real body, so `reconcile_own` records the
+  own trailers' poses around the reconcile and absorbs each shift into the
+  trailer's own `CorrectionOffset` (`netvisual::absorb_rig`); a reset or
+  generation change clears car and trailer together. Both offsets decay with
+  the same constant, so the drawn hitch gap stays the one that was drawn.
+- Remote contact bodies (`PredictedRemoteBody`, `PredictedRemoteTrailer`)
+  carry no mesh: what is drawn for a remote car is the kinematic replica
+  following the host-timestamped snapshot buffer (07B), so a contact-body correction has no
+  rendered pose to offset. Not applicable, not skipped.
+- Audit: the minimap, the Cops & Robbers markers and the chase/cockpit
+  camera (and so the audio listener) read `GlobalTransform` or the camera
+  target, i.e. the drawn pose; physics queries read `Position`. The two
+  differ by at most `MAX_DISTANCE` for ~0.5 s after a correction.
+  Spatial audio emitters on a car's subtree follow the drawn pose only if
+  bevy_audio's update runs after `apply_offsets`; that ordering is not
+  asserted here.
+- Developer overlay: `MM2_NETVISUAL_OVERLAY=1` (with the timeline selector)
+  draws the physics pose (axes), the rendered pose (amber sphere) and a line
+  between them, and prints `event=netvisual_offset ... dist= angle=
+  snapshot_tick=` once per absorbed correction (`CorrectionStamp`).
+- Evidence: synthetic unit tests (`netvisual::tests`: trailer pose
+  preservation, remote trailer copies excluded, reset/jump/reverse, overlay
+  reading). No rendered capture or lossy-transport run was made.
+
+Open (not claimed): the audio emitter ordering above; rendered captures and
+30/60/144 FPS
 route runs (AC1, AC3); input-to-render latency measurement.
 
 ## Host-timestamped snapshot buffer (NETPLAY-07B, #2006)
