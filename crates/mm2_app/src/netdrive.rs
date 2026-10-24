@@ -6586,60 +6586,6 @@ mod tests {
             .collect()
     }
 
-    fn at(player: u16, x: f32) -> SnapEntry {
-        SnapEntry {
-            player,
-            pos: [x, 0.0, 0.0],
-            ..snap_entry()
-        }
-    }
-
-    fn frame(entries: Vec<SnapEntry>, impacts: Vec<SnapImpact>, with_race: bool) -> Message {
-        let trailers = entries
-            .iter()
-            .map(|e| SnapTrailer {
-                owner: e.player,
-                pos: e.pos,
-                rot: [0.0, 0.0, 0.0, 1.0],
-                vel: [0.0; 3],
-                angvel: [0.0; 3],
-                spin: 0,
-                flags: 0,
-            })
-            .collect();
-        Message::Snap {
-            generation: 3,
-            tick: 90,
-            entries,
-            trailers,
-            impacts,
-            race: with_race.then_some(SnapRace {
-                phase: 1,
-                countdown: 0,
-                clock: 90,
-            }),
-        }
-    }
-
-    fn rows(m: &Message) -> (Vec<u16>, Vec<u16>, Vec<u16>, bool) {
-        let Message::Snap {
-            entries,
-            trailers,
-            impacts,
-            race,
-            ..
-        } = m
-        else {
-            panic!("not a Snap");
-        };
-        (
-            entries.iter().map(|e| e.player).collect(),
-            trailers.iter().map(|t| t.owner).collect(),
-            impacts.iter().map(|i| i.seat).collect(),
-            race.is_some(),
-        )
-    }
-
     /// The baseline epoch moves with the seat set and any seat's reset
     /// epoch, and with nothing else.
     #[test]
