@@ -800,6 +800,28 @@ fn partners_complete(past: &WorldCapture, req: &Request<'_>) -> bool {
         .all(|(body, assertion)| assertion.is_some() || !in_capture(past, body))
 }
 
+/// Put each captured vehicle's mass and inertia back to what the world
+/// holds now. The load a Cops & Robbers carrier bears is a function of
+/// the host's gold state at *this* moment, written by
+/// `cnr::reconcile_gold_load` once per match change; a capture from
+/// before the pickup (or before the drop) holds the other mass, and
+/// restoring it would leave the predicted car lighter (or heavier)
+/// than the host's copy for good, because the reconcile has nothing
+/// left to change. The pose and velocity are the history's to rewrite;
+/// the load is not part of that timeline.
+fn keep_live_mass(world: &World, capture: &mut WorldCapture) {
+    use avian3d::prelude::{AngularInertia, Mass};
+    for (entity, vehicle) in &mut capture.vehicles {
+        let Ok(live) = world.get_entity(*entity) else {
+            continue;
+        };
+        if let (Some(mass), Some(inertia)) = (live.get::<Mass>(), live.get::<AngularInertia>()) {
+            vehicle.body.mass = mass.0;
+            vehicle.body.inertia_principal = inertia.principal.to_array();
+        }
+    }
+}
+
 fn in_capture(capture: &WorldCapture, e: Entity) -> bool {
     capture.vehicles.iter().any(|(v, _)| *v == e)
 }
@@ -900,6 +922,7 @@ fn replay(
 ) -> Outcome {
     let a = req.assertion;
     let mut corrected = pred.ring.get(a.ack).expect("checked by the caller").clone();
+    keep_live_mass(world, &mut corrected);
     seed_entrants(world, req, entrants, &mut corrected);
     renew_reset_bodies(world, resets, &mut corrected);
     if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == req.own) {
@@ -1568,6 +1591,65 @@ mod tests {
         // And a later snapshot of the corrected past now matches.
         let again = assertion_from(&pred, car, 25);
         assert_eq!(go(&mut app, &mut pred, car, &again, 30), Outcome::Matched);
+    }
+
+    /// NETPLAY-08B: the gold load is the host's gold state *now*, not part
+    /// of the replayed past. A replay from before the pickup must leave
+    /// the carrier as heavy as the live world holds it, and a replay from
+    /// before the drop must leave it unloaded.
+    #[test]
+    fn a_replay_keeps_the_carriers_current_load() {
+        const LOAD: f32 = 250.0;
+        let (mut app, car) = app();
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 12);
+        let base = app.world().get::<Mass>(car).unwrap().0;
+        let base_inertia = app.world().get::<AngularInertia>(car).unwrap().principal;
+        // The pickup lands live at tick 12; the history before it is light.
+        let loaded = |app: &mut App| {
+            app.world_mut().get_mut::<Mass>(car).unwrap().0 = base + LOAD;
+            app.world_mut()
+                .get_mut::<AngularInertia>(car)
+                .unwrap()
+                .principal = base_inertia * ((base + LOAD) / base);
+        };
+        loaded(&mut app);
+        for seq in 13..=30 {
+            live(&mut app, car, seq);
+            let cap = capture_world(app.world_mut(), EPOCH);
+            pred.ring.record(seq, cap);
+        }
+        let mut a = assertion_from(&pred, car, 8);
+        a.pos += Vec3::new(0.4, 0.0, -0.3);
+        assert!(matches!(
+            go(&mut app, &mut pred, car, &a, 30),
+            Outcome::Replayed { .. }
+        ));
+        assert_eq!(app.world().get::<Mass>(car).unwrap().0, base + LOAD);
+        let want = base_inertia * ((base + LOAD) / base);
+        assert!(
+            app.world()
+                .get::<AngularInertia>(car)
+                .unwrap()
+                .principal
+                .distance(want)
+                < 1e-3
+        );
+
+        // The drop lands live: the load is gone; a replay across it from
+        // a heavy capture must not bring the load back.
+        app.world_mut().get_mut::<Mass>(car).unwrap().0 = base;
+        app.world_mut()
+            .get_mut::<AngularInertia>(car)
+            .unwrap()
+            .principal = base_inertia;
+        let mut b = assertion_from(&pred, car, 20);
+        b.pos += Vec3::new(0.0, 0.0, 0.5);
+        assert!(matches!(
+            go(&mut app, &mut pred, car, &b, 30),
+            Outcome::Replayed { .. }
+        ));
+        assert_eq!(app.world().get::<Mass>(car).unwrap().0, base);
     }
 
     /// AC3: a duplicated, older or starved ack never applies twice.
