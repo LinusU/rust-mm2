@@ -1161,10 +1161,29 @@ seat's lane: about tick 2550 the bulk queue stopped draining while movement
 was idle, movement datagrams started to expire, and the controller fell from
 131072 to 12288 bytes/s (`decreases` 437, 4188 movement datagrams expired,
 `adapt.bulk` false) for the rest of the match, so the client's bots froze
-(0 sampled ticks in common with the host). The same run with every row in
-group 0 keeps 131072 and sheds nothing. The partition and the per-group
-counters are in place and unit-tested; `WORLD_GROUP_RANGE_M` stays infinite
-until that lane collapse is understood (follow-up #2041).
+(0 sampled ticks in common with the host).
+The same run with every row in group 0 keeps 131072 and sheds nothing.
+
+Follow-up #2041 measured it (lane stats logged from the host send loop,
+`net_cnr_bots_mp` London, range 300 m): the collapse is **not** the `Bulk`
+path. Sending the second group at `Movement` priority collapses the lane
+identically (rate 131072 -> 12288 within ~2000 ticks, `bulk_sent` 0). What
+tips it is the bytes of a second group in the headless harness, which runs
+the simulation about 5x faster than the wall clock the rate is measured in,
+so the demand per wall second is already about half the ceiling; the
+resulting queue age cuts the rate and `PeerController` then could not climb
+back: at the floor the movement queue, throttled by that rate, kept
+expiring and ageing past the congested threshold, which reset `clean_since`
+for ever. That trap is fixed (expiry and queue age at the floor are not
+evidence; a floor peer probes upward, `a_rate_at_the_floor_climbs_again_
+though_its_own_queue_keeps_expiring`), but the probes still fail while the
+harness demand (about 22 KB/s) exceeds the 12 KB/s floor, so with a finite
+range the client's distant bot still freezes late in a London match.
+`WORLD_GROUP_RANGE_M` therefore stays infinite. Open: either the harness
+must pace the simulation to the wall clock, or the lane needs ack evidence
+(`on_ack` is never called) so a probe can be judged by delivery rather than
+by its own queue; a bot sampled only when its `Bulk` group arrives also
+needs `NetDriveReport::note_bot_poses` to merge the groups of one tick.
 
 The unit tests `contact_islands_*` cover the partition; the lane-level
 behaviour of a lost or delayed `Bulk` group is in `lane_pace_tests`.
