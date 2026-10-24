@@ -256,8 +256,14 @@ impl PeerController {
     /// Fold in the sender's counters at `now` and return the new rate.
     pub fn on_feedback(&mut self, fb: Feedback, now: Instant) -> u32 {
         let lost = fb.retransmits > self.seen.retransmits;
-        let expired = fb.expired > self.seen.expired;
-        let slow_queue = fb.queue_age >= CONGESTED_QUEUE_AGE;
+        // Expiry and queue age at the floor are the rate's own doing: the
+        // queue is behind a budget the controller set, with nothing left to
+        // cut. Counting them would hold `clean_since` back for ever and the
+        // rate could never probe upward again; a probe that really fails is
+        // cut back down by the next report.
+        let at_floor = self.rate <= self.floor;
+        let expired = fb.expired > self.seen.expired && !at_floor;
+        let slow_queue = fb.queue_age >= CONGESTED_QUEUE_AGE && !at_floor;
         let silent = fb.ack_age.is_some_and(|a| a >= CONGESTED_ACK_AGE);
         let skipped = fb.skipped > self.seen.skipped;
         let delayed = self.take_rtt(fb.rtt, now);
@@ -572,6 +578,28 @@ mod tests {
         t += DECREASE_HOLD;
         c.on_feedback(skip, t);
         assert!(c.decreases() > before, "a passed-over snapshot is loss");
+    }
+
+    #[test]
+    fn a_rate_at_the_floor_climbs_again_though_its_own_queue_keeps_expiring() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(131_072, t0);
+        let mut now = t0;
+        let mut expired = 0;
+        // Cut to the floor by genuine loss.
+        for i in 1..=40u64 {
+            now += Duration::from_millis(250);
+            c.on_feedback(fb(i, 0, 0, 0), now);
+        }
+        assert_eq!(c.rate(), MIN_PEER_BYTES_PER_SEC);
+        // The loss is over, but the throttled queue expires every report.
+        let mut probed = false;
+        for _ in 0..400 {
+            now += Duration::from_millis(250);
+            expired += 3;
+            probed |= c.on_feedback(fb(40, expired, 0, 100), now) > MIN_PEER_BYTES_PER_SEC;
+        }
+        assert!(probed, "rate stuck at the floor");
     }
 
     #[test]
