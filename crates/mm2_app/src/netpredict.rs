@@ -2252,6 +2252,54 @@ mod tests {
         assert_eq!(speed_of(&pred, own, 20), own_before);
     }
 
+    /// A seat that disconnected and came back (or joined late) is a body
+    /// spawned at epoch 0 while the host's seat is at epoch 3: its first
+    /// assertion renews it once, adopts the host's epoch, and the next
+    /// assertion of that epoch is an ordinary comparison.
+    #[test]
+    fn a_rejoined_body_behind_the_hosts_epoch_is_renewed_once() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 3;
+        let r = drive(remote, Some(ra), 21, 30);
+        go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        assert_eq!(body_epoch(&app, remote), 3);
+        assert_eq!(pred.remote_resets, 1);
+        let a = assertion_from(&pred, own, 25);
+        let mut ra = remote_assertion_from(&pred, remote, 25);
+        ra.epoch = 3;
+        let r = drive(remote, Some(ra), 26, 30);
+        go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        assert_eq!(pred.remote_resets, 1, "the same epoch is not a reset");
+    }
+
+    /// A new session generation (rematch, city reload, C&R round change)
+    /// drops the whole recorded past and the contacts raised in it: an
+    /// assertion of the old generation compares against nothing.
+    #[test]
+    fn a_new_generation_drops_the_recorded_past() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 2);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        pred.floor = 12;
+        pred.last_ack = 20;
+        let old = assertion_from(&pred, own, 20);
+        assert!(pred.depth() > 0);
+        pred.restart(GEN + 1);
+        assert_eq!(pred.depth(), 0);
+        assert_eq!((pred.floor, pred.last_ack), (0, 0));
+        assert!(pred.contacts.is_empty());
+        assert_eq!(
+            go2(&mut app, &mut pred, own, &old, &[], 30),
+            Outcome::Skipped(Skip::OtherGeneration)
+        );
+    }
+
     /// The recorded impairment of a reset contact body at `tick`.
     fn remote_impairment(pred: &OwnPrediction, remote: Entity, tick: u64) -> Option<f32> {
         recorded(pred, tick, remote).impairment

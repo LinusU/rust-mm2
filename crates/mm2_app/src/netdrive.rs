@@ -7011,12 +7011,9 @@ mod tests {
         assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 2);
     }
 
-    /// The host reset the local seat: the pose and velocity are the host's
-    /// fresh continuation, and nothing of the previous life's drivetrain
-    /// stays in the car. A snapshot of the same epoch afterwards leaves the
-    /// state alone (reconciliation never zeroes it).
-    #[test]
-    fn an_authority_reset_of_the_own_seat_starts_a_new_life() {
+    /// A predicted client in a running remote-authority session with its
+    /// own seat (wire 1) at epoch 0.
+    fn own_seat_app() -> (App, Entity) {
         let mut session = Session::new();
         session
             .begin(mm2_game::SessionConfig {
@@ -7038,8 +7035,12 @@ mod tests {
             .init_resource::<BangerPool>()
             .init_resource::<ResultLedger>()
             .add_systems(Update, apply_snapshots);
-        let own = app
-            .world_mut()
+        let own = spawn_own_seat(&mut app);
+        (app, own)
+    }
+
+    fn spawn_own_seat(app: &mut App) -> Entity {
+        app.world_mut()
             .spawn((
                 NetPlayer(1),
                 Player {
@@ -7051,17 +7052,48 @@ mod tests {
                 Rotation(Quat::IDENTITY),
                 vehicle_bundle(&VehicleConfig::default()),
             ))
-            .id();
+            .id()
+    }
+
+    /// The previous life's drivetrain, tyre and gyro state.
+    fn dirty_life(app: &mut App, own: Entity) {
         app.world_mut()
             .entity_mut(own)
             .insert(LinearVelocity(Vec3::new(20.0, 0.0, 0.0)));
-        {
-            let mut state = app.world_mut().get_mut::<VehicleState>(own).unwrap();
-            state.forward_speed = 20.0;
-            state.steer_angle = 0.4;
-            state.gear = 3;
-            state.gyro_spins = 2;
-        }
+        let mut state = app.world_mut().get_mut::<VehicleState>(own).unwrap();
+        state.forward_speed = 20.0;
+        state.steer_angle = 0.4;
+        state.gear = 3;
+        state.gyro_spins = 2;
+    }
+
+    fn push_own_snap(app: &mut App, generation: u64, tick: u64, epoch: u8) {
+        let mut entry = snap_entry();
+        entry.epoch = epoch;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            generation,
+            tick,
+            vec![entry],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        app.update();
+    }
+
+    fn own_life(app: &App, own: Entity) -> (f32, f32, usize) {
+        let s = app.world().get::<VehicleState>(own).unwrap();
+        (s.forward_speed, s.steer_angle, s.gear)
+    }
+
+    /// The host reset the local seat: the pose and velocity are the host's
+    /// fresh continuation, and nothing of the previous life's drivetrain
+    /// stays in the car. A snapshot of the same epoch afterwards leaves the
+    /// state alone (reconciliation never zeroes it).
+    #[test]
+    fn an_authority_reset_of_the_own_seat_starts_a_new_life() {
+        let (mut app, own) = own_seat_app();
+        dirty_life(&mut app, own);
         let mut entry = snap_entry();
         entry.epoch = 1;
         app.world_mut().resource_mut::<RemoteSnaps>().push(
@@ -7100,6 +7132,85 @@ mod tests {
             app.world().get::<VehicleState>(own).unwrap().forward_speed,
             7.0
         );
+    }
+
+    /// A joiner (late join, or a rejoin after a disconnect) spawns its seat
+    /// at epoch 0 while the host's copy has been reset three times: the
+    /// first snapshot is a reset to the joiner, so the seat starts a clean
+    /// life at the host's pose exactly once and the later same-epoch
+    /// snapshots leave its state alone.
+    #[test]
+    fn a_joiner_behind_the_hosts_epoch_starts_clean_once() {
+        let (mut app, own) = own_seat_app();
+        dirty_life(&mut app, own);
+        push_own_snap(&mut app, 1, 40, 3);
+        assert_eq!(own_life(&app, own), (0.0, 0.0, 0));
+        assert_eq!(app.world().get::<ResetEpoch>(own).unwrap().0, 3);
+        assert_eq!(app.world().resource::<NetDriveReport>().own_resets, 1);
+        app.world_mut()
+            .get_mut::<VehicleState>(own)
+            .unwrap()
+            .forward_speed = 7.0;
+        push_own_snap(&mut app, 1, 41, 3);
+        assert_eq!(own_life(&app, own).0, 7.0);
+        assert_eq!(app.world().resource::<NetDriveReport>().own_resets, 1);
+    }
+
+    /// Rematch, city reload and a Cops & Robbers round change are one
+    /// boundary for the wire: the session tears down, the stream resets,
+    /// a new generation begins and the seats respawn at epoch 0 with
+    /// restarted ticks. Nothing of the old generation's reset epochs may
+    /// stale-drop the new life or make it look like a reset.
+    #[test]
+    fn a_new_session_generation_starts_its_seats_clean() {
+        let (mut app, old) = own_seat_app();
+        dirty_life(&mut app, old);
+        push_own_snap(&mut app, 1, 90, 2);
+        assert_eq!(app.world().resource::<NetDriveReport>().own_resets, 1);
+        for (generation, seed) in [(2, 0), (3, 7), (4, 8)] {
+            let previous = app
+                .world_mut()
+                .query_filtered::<Entity, With<NetPlayer>>()
+                .single(app.world())
+                .unwrap();
+            app.world_mut().despawn(previous);
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Unloading).unwrap();
+            session.transition(SessionPhase::Menu).unwrap();
+            session
+                .begin_generation(
+                    mm2_game::SessionConfig {
+                        authority: mm2_game::SessionAuthority::Remote,
+                        seed,
+                        ..mm2_game::SessionConfig::default()
+                    },
+                    generation,
+                )
+                .unwrap();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            app.world_mut().resource_mut::<RemoteSnaps>().reset();
+            let own = spawn_own_seat(&mut app);
+            let resets = app.world().resource::<NetDriveReport>().own_resets;
+            // The new life's first snapshot restarts at tick 1, epoch 0.
+            push_own_snap(&mut app, generation, 1, 0);
+            assert_eq!(app.world().get::<ResetEpoch>(own).unwrap().0, 0);
+            assert_eq!(
+                app.world().resource::<NetDriveReport>().own_resets,
+                resets,
+                "generation {generation}: a new session is not a reset"
+            );
+            assert_eq!(
+                app.world().resource::<RemoteSnaps>().applied(),
+                Some((generation, 1)),
+                "generation {generation}: the restarted ticks apply"
+            );
+            // And the epoch machinery works in the new life.
+            dirty_life(&mut app, own);
+            push_own_snap(&mut app, generation, 2, 1);
+            assert_eq!(own_life(&app, own), (0.0, 0.0, 0));
+            assert_eq!(app.world().get::<ResetEpoch>(own).unwrap().0, 1);
+        }
     }
 
     /// `reset` ends a stream at its authority boundary: the staged
