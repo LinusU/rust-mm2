@@ -749,6 +749,48 @@ all in the model; a delta was refused for a missing base once in the 20 %
 quiet run (never applied wrongly), because the sender only deltas against
 acknowledged baselines.
 
+### MTU and fragment failure (NETPLAY-10D-1)
+
+Measured with `cargo test -p mm2_net lane_mtu -- --nocapture` (real
+`Message::Snap` encodings, the UDP impairment proxy's `largest` counter):
+
+- **Eight-seat correction, quiet:** 957 B encoded, one datagram of 989 B
+  (32 B lane header). **With the 64-impact burst:** 4605 B, four fragments;
+  the proxy saw no datagram over `MAX_DATAGRAM` (1200 B) and a path limited
+  to exactly 1200 B delivers both (`mtu_dropped == 0`). Overhead per
+  fragment is 44 B (32 lane + 12 fragment header).
+- **Fragmentation amplification:** wire bytes / payload is 1.03 (quiet) and
+  1.04 (burst), so bandwidth is not the cost; loss is. A tick of `n`
+  fragments survives with `(1 - p)^n` (burst: four fragments, 0.81 at 5 %
+  loss), which is the whole-tick column in the cadence table above. At 60 Hz
+  the burst offers 240 datagrams/s (about 287 kB/s) against 60 (59 kB/s)
+  quiet.
+- **Selective oversize drops** (`selective_oversize_drops_cost_only_the_snapshots_that_need_fragments`):
+  with the downlink limited to 600 B, a snapshot that fits still arrives; a
+  fragmented one delivers nothing (never half-assembled), any short tail
+  fragment that crosses is expired by `FRAGMENT_TTL`, and when the limit is
+  lifted the same snapshot arrives whole. At the assembler
+  (`a_size_threshold_that_eats_full_fragments_starves_assembly_boundedly`):
+  200 ticks with every full-size fragment eaten complete only the
+  one-datagram group, hold at most `MAX_ASSEMBLIES` ticks, and expire or evict
+  the rest.
+- **The join already proves the path** (probes and echoes are padded to
+  `MAX_DATAGRAM`, `LaneTimeout` names the MTU). A path that degrades
+  *after* the join used to lose fragments silently. The established client
+  now sends a full-size probe every `PATH_PROBE_INTERVAL` (1 s) whatever
+  else it sends, the host echoes it at full size, and
+  `Client::lane_path_failure()` returns `NetError::LanePathFailed` once no
+  echo has arrived for `PATH_FAILURE_AFTER` (5 s, below the host's 8 s
+  liveness reap), clearing again on the next echo
+  (`a_path_whose_mtu_collapses_after_the_join_is_a_surfaced_failure_that_heals`,
+  both directions). The failure is surfaced, not repaired: no refresh can
+  help when no fragment-sized datagram crosses. Acting on it (leaving the
+  session with the message, or falling back to TCP-only play) belongs to
+  `mm2_app`, which does not poll it yet.
+- Usable cadence when it does work: a one-datagram correction (the owner
+  group) tracks `1 - loss`; refresh after missing baselines is the existing
+  `REFRESH_TICKS` (one second) full state.
+
 ### Not done / open
 
 - The app does not yet produce grouped or delta snapshots (the client now

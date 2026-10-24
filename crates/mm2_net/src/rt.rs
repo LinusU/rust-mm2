@@ -92,6 +92,17 @@ fn probe_padding() -> Vec<u8> {
 }
 
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+/// How often an established client sends a full-size probe whatever else
+/// it is sending: the host echoes it at full size, so an echo proves the
+/// path still carries [`MAX_DATAGRAM`] bytes both ways (a path MTU that
+/// drops after the join would otherwise lose every fragment silently).
+pub const PATH_PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// A client that has heard no echo for this long reports
+/// [`NetError::LanePathFailed`]: about five full-size probes in a row
+/// lost, which no usable path does by accident. Shorter than the host's
+/// `HOST_LIVENESS_TIMEOUT`, so the client names the cause before the host
+/// reaps the seat.
+pub const PATH_FAILURE_AFTER: Duration = Duration::from_secs(5);
 /// Socket read timeout and queue wait: how often a lane thread notices
 /// its stop flag.
 const POLL: Duration = Duration::from_millis(50);
@@ -1877,6 +1888,11 @@ pub(crate) struct ClientLane {
     started: AtomicU64,
     inbox: Arc<Inbox>,
     assembler: Mutex<Assembler>,
+    /// When the host's last probe echo arrived (path-health clock).
+    last_echo: Mutex<Instant>,
+    /// Probe interval and failure bound in milliseconds (test seam).
+    probe_every_ms: AtomicU64,
+    fail_after_ms: AtomicU64,
     /// One assembler per [`WorldKind`] (indexed by it): each kind has its
     /// own tick domain.
     world: [Mutex<Assembler>; 2],
@@ -1910,6 +1926,9 @@ impl ClientLane {
             started: AtomicU64::new(0),
             inbox,
             assembler: Mutex::new(Assembler::new()),
+            last_echo: Mutex::new(Instant::now()),
+            probe_every_ms: AtomicU64::new(PATH_PROBE_INTERVAL.as_millis() as u64),
+            fail_after_ms: AtomicU64::new(PATH_FAILURE_AFTER.as_millis() as u64),
             world: [Mutex::new(Assembler::new()), Mutex::new(Assembler::new())],
             rel: Mutex::new(ReliableChannel::new(MAX_RELIABLE_BODY)),
             clock: ReliableClock::new(),
@@ -1939,6 +1958,7 @@ impl ClientLane {
                     match lane.check(&buf[..n], from, &mut window) {
                         Ok((header, _)) if header.tag == LaneTag::Probe => {
                             Counters::bump(&lane.counters.accepted);
+                            lane.note_echo();
                             break;
                         }
                         Ok(_) => Counters::bump(&lane.counters.unexpected),
@@ -2035,8 +2055,12 @@ impl ClientLane {
                 }
             };
             match header.tag {
-                // A late duplicate echo of the establishing probe.
-                LaneTag::Probe => Counters::bump(&self.counters.accepted),
+                // The echo of a path probe (or a late one of the
+                // establishing probe): the path carries full datagrams.
+                LaneTag::Probe => {
+                    Counters::bump(&self.counters.accepted);
+                    self.note_echo();
+                }
                 LaneTag::Data => match Message::decode(payload) {
                     Ok(msg) if host_lane_generation(&msg) == Some(header.generation) => {
                         Counters::bump(&self.counters.accepted);
@@ -2157,6 +2181,37 @@ impl ClientLane {
         }
     }
 
+    fn note_echo(&self) {
+        *self.last_echo.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    /// How long the host's probe echoes have been missing, once that
+    /// exceeds the failure bound: the real-time path cannot carry
+    /// full-size datagrams (or any), so fragmented snapshots are not
+    /// arriving. `None` while the path is healthy.
+    pub(crate) fn path_failure(&self) -> Option<NetError> {
+        let silent = self
+            .last_echo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed();
+        (silent > Duration::from_millis(self.fail_after_ms.load(Ordering::Relaxed))).then_some(
+            NetError::LanePathFailed {
+                host: self.host,
+                silent,
+            },
+        )
+    }
+
+    /// Test seam: probe cadence and failure bound.
+    #[cfg(test)]
+    pub(crate) fn set_path_bounds(&self, probe_every: Duration, fail_after: Duration) {
+        self.probe_every_ms
+            .store(probe_every.as_millis() as u64, Ordering::Relaxed);
+        self.fail_after_ms
+            .store(fail_after.as_millis() as u64, Ordering::Relaxed);
+    }
+
     /// Fragment reassembly counters, including expiry.
     pub(crate) fn assembly_stats(&self) -> AssemblerStats {
         self.assembler
@@ -2186,7 +2241,7 @@ impl ClientLane {
         // so an idle client — a lobby, a paused session — sends a probe
         // (which the host authenticates and echoes) when nothing else left
         // for a keepalive interval.
-        let mut last_sent = Instant::now();
+        let mut last_probe = Instant::now();
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
             let due = self
@@ -2202,12 +2257,15 @@ impl ClientLane {
             while let Some(item) = self.out.queue.pop() {
                 let header = self.header(item.tag, item.generation);
                 flush(socket, self.host, &header, &item.payload, &self.counters);
-                last_sent = Instant::now();
             }
-            if last_sent.elapsed() >= crate::lobby::KEEPALIVE_INTERVAL {
+            // Probe on a fixed cadence, busy or idle: it keeps the host's
+            // liveness fed and is the client's evidence the path still
+            // carries full-size datagrams.
+            let every = Duration::from_millis(self.probe_every_ms.load(Ordering::Relaxed));
+            if last_probe.elapsed() >= every {
                 let header = self.header(LaneTag::Probe, 0);
                 flush(socket, self.host, &header, &probe_padding(), &self.counters);
-                last_sent = Instant::now();
+                last_probe = Instant::now();
             }
         }
     }

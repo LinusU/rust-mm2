@@ -291,7 +291,7 @@ fn input_windows_and_snaps_ride_the_lane_and_not_tcp_twice() {
     assert_eq!(host.lane_counts().sent, sent + 1);
 }
 
-fn big_snap(generation: u64, tick: u64) -> Message {
+pub(crate) fn big_snap(generation: u64, tick: u64) -> Message {
     Message::Snap {
         generation,
         tick,

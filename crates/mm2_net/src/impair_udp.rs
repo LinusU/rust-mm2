@@ -79,6 +79,9 @@ pub struct UdpStats {
     pub burst_dropped: u64,
     /// Datagrams dropped by [`UdpImpair::blackhole`].
     pub blackholed: u64,
+    /// The largest datagram the proxy read in this direction, whether it
+    /// forwarded or dropped it: the measured wire size, header included.
+    pub largest: usize,
 }
 
 /// Datagrams are tallied by the lane-tag byte of the header (offset 5);
@@ -370,6 +373,7 @@ fn classify(
     let i = dir as usize;
     let recipe = shared.params.lock().unwrap_or_else(|e| e.into_inner())[i];
     tags[i].0[tag_of(datagram)].0 += 1;
+    extra[i].largest = extra[i].largest.max(datagram.len());
     if recipe.blackhole {
         extra[i].blackholed += 1;
         lanes[i].drop_frame(datagram);

@@ -1621,6 +1621,23 @@ impl Client {
         self.lane.as_ref().map(|l| l.lane.0.assembly_stats())
     }
 
+    /// A surfaced connection failure when the lane's full-size path died
+    /// after the join ([`NetError::LanePathFailed`]); `None` while healthy
+    /// or without a lane. Callers poll it and tear the session down (or
+    /// fall back to TCP-only play) instead of waiting on snapshots that
+    /// cannot arrive.
+    pub fn lane_path_failure(&self) -> Option<NetError> {
+        self.lane.as_ref().and_then(|l| l.lane.0.path_failure())
+    }
+
+    /// Test seam: tighten the path probe cadence and failure bound.
+    #[cfg(test)]
+    pub(crate) fn set_path_bounds(&self, probe_every: Duration, fail_after: Duration) {
+        if let Some(l) = &self.lane {
+            l.lane.0.set_path_bounds(probe_every, fail_after);
+        }
+    }
+
     /// [`ClientCtl::reliable_send`], from the `Client` itself.
     pub fn reliable_send(
         &self,

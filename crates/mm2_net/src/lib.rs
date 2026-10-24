@@ -79,6 +79,8 @@ mod lane_impair_tests;
 #[cfg(test)]
 mod lane_lobby_tests;
 #[cfg(test)]
+mod lane_mtu_tests;
+#[cfg(test)]
 mod lane_pace_tests;
 #[cfg(test)]
 mod lane_reliable_tests;
@@ -189,6 +191,22 @@ pub enum NetError {
         host: std::net::SocketAddr,
         /// How long we probed.
         waited: std::time::Duration,
+    },
+    /// The lane was up but the host's full-size probe echoes stopped: the
+    /// real-time path no longer carries full datagrams, so fragmented
+    /// snapshots cannot arrive (an MTU that dropped, a filter that eats
+    /// large datagrams, a dead path).
+    #[error(
+        "the UDP lane to {host} carried no full-size ({} byte) echo for {silent:?}: the path's \
+         MTU dropped below that or UDP is blocked; the real-time path cannot work — see \
+         docs/multiplayer-reachability.md",
+        crate::rt::MAX_DATAGRAM
+    )]
+    LanePathFailed {
+        /// The host's UDP endpoint.
+        host: std::net::SocketAddr,
+        /// How long no echo arrived.
+        silent: std::time::Duration,
     },
     /// A caller configuration the wire cannot represent — e.g.
     /// `HostConfig::max_clients` above [`MAX_PLAYERS`].

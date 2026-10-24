@@ -659,6 +659,68 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_out_of_order_ticks_with_losses_deliver_only_what_is_whole() {
+        let mut asm = Assembler::new();
+        let t = now();
+        let data: Vec<Vec<u8>> = (1..=3).map(|k| blob(3000, k)).collect();
+        let mut frags: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (k, d) in data.iter().enumerate() {
+            let tick = 10 + k as u64;
+            for f in split(tick, &[d]).unwrap() {
+                frags.push((tick, f));
+            }
+        }
+        // Tick 11 loses its middle fragment; the rest arrives reversed
+        // and interleaved across ticks.
+        frags.retain(|(tick, f)| !(*tick == 11 && f[10] == 1));
+        frags.reverse();
+        let mut done = Vec::new();
+        for (_, f) in &frags {
+            if let Some(c) = asm.accept(f, t).unwrap() {
+                done.push((c.tick, c.data));
+            }
+        }
+        done.sort();
+        assert_eq!(done, vec![(10, data[0].clone()), (12, data[2].clone())]);
+        assert_eq!(asm.in_flight(), 1, "only the broken tick is still held");
+        assert_eq!(asm.expire(t + FRAGMENT_TTL), 1);
+        assert_eq!(asm.in_flight(), 0);
+    }
+
+    /// A path that drops every datagram over a size threshold: with the
+    /// threshold under a full fragment, no multi-fragment group ever
+    /// completes, and the assembler stays bounded and counts the expiry
+    /// instead of holding the leftovers.
+    #[test]
+    fn a_size_threshold_that_eats_full_fragments_starves_assembly_boundedly() {
+        let threshold = FRAG_HEADER + FRAG_DATA - 1;
+        let mut asm = Assembler::new();
+        let mut t = now();
+        let big = blob(3 * FRAG_DATA - 5, 9);
+        let small = blob(100, 4);
+        let mut small_done = 0;
+        for tick in 1..=200u64 {
+            // Group 0 is the big one, group 1 the one-datagram one.
+            for f in split(tick, &[&big, &small]).unwrap() {
+                if f.len() > threshold {
+                    continue;
+                }
+                small_done += asm.accept(&f, t).unwrap().is_some_and(|c| c.group == 1) as u64;
+            }
+            assert!(asm.in_flight() <= MAX_ASSEMBLIES);
+            t += Duration::from_millis(16);
+        }
+        let st = asm.stats();
+        assert_eq!(small_done, 200, "the one-datagram group is unaffected");
+        assert_eq!(st.groups_completed, 200, "the big group never completes");
+        assert_eq!(st.ticks_completed, 0);
+        assert!(asm.in_flight() <= MAX_ASSEMBLIES);
+        // 200 ticks x 16 ms outlives the TTL many times over: held
+        // leftovers were expired or evicted, never accumulated.
+        assert!(st.expired + st.evicted >= 200 - MAX_ASSEMBLIES as u64);
+    }
+
+    #[test]
     fn assembly_is_bounded_and_newer_ticks_evict_the_oldest() {
         let mut asm = Assembler::new();
         let t = now();
