@@ -792,6 +792,41 @@ Measured with `cargo test -p mm2_net lane_mtu -- --nocapture` (real
   group) tracks `1 - loss`; refresh after missing baselines is the existing
   `REFRESH_TICKS` (one second) full state.
 
+### Redundant input history under clustered loss (NETPLAY-10D-3)
+
+Measured with `cargo test -p mm2_net clustered_bursts -- --nocapture` (the
+seeded lockstep lane proxy; `drop_next` bursts of 3-6 datagrams at seeded
+positions, 400 ticks, a window every second tick, 11-12 bursts per run):
+
+| window | bursts | windows dropped of 200 | commands lost of 400 |
+|---|---|---|---|
+| 8 (production, 4 transmissions per command) | 11 | 47 | 28 |
+| 8 | 12 | 58 | 44 |
+| 16 (`MAX_INPUT_WINDOW`, 8 transmissions) | 11 | 46 | 0 |
+
+- **A command is lost iff every distinct datagram that carried it was
+  dropped.** The test models that per command and asserts the host's
+  `received` and `gap_finalized` counters equal the model exactly, so
+  redundancy spans separate packets and time, not window length.
+- **Finalization.** Every sequence `1..=400` finalizes exactly once and in
+  order; a recovered command is applied as the driver sent it
+  (`Source::Command`), a lost one expires into a substitute and is never
+  labelled a driver command. The ack walks over lost sequences.
+- **Not presentation state.** Input windows are not latest-wins: the host
+  counts `windows_received` equal to windows sent minus windows dropped, with
+  no overflow or rate limiting, whereas only snapshots coalesce.
+- **Quantization.** The pose in a correction is full `f32`; what is
+  quantized is the input (`u8` pedals, `i8` steer, `-127..=127`) and the
+  presentation tail, which has no authority over replay. Prediction, host and
+  replay all run on the decoded wire command, and
+  `netcmd::tests::quantizing_a_command_is_a_fixed_point_with_half_a_step_of_error`
+  proves every wire byte re-encodes to itself and a driver value is off by at
+  most half a step (1/510 pedals, 1/254 steering). The end-to-end
+  applied-equals-quantized check stays in `net_matrix`.
+- **Evidence level:** loopback with a seeded proxy; says nothing about a real
+  path. The 4+ burst cells at window 8 lose commands by design: only the
+  16-command window covers a 6-burst at this cadence.
+
 ### Not done / open
 
 - (Done in NETPLAY-10D-2, see "Baselined snapshot states per seat" below:

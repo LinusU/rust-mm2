@@ -443,6 +443,117 @@ fn redundancy_spans_distinct_transmissions_so_bursts_shorter_than_it_cost_nothin
     }
 }
 
+/// splitmix64: a seeded draw that does not depend on any crate's version.
+fn draw(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Several clustered bursts (3-6 consecutive datagrams each, at seeded
+/// positions) in one run at the production cadence. Each command must be
+/// applied as the driver sent it iff one of the distinct datagrams that
+/// carried it survived; the rest expire into a substitute, every sequence
+/// finalizes exactly once and in order, and a recovered command is never
+/// confused with a substitute. The input window is protocol state that
+/// rides its own datagrams, not latest-wins presentation state: nothing is
+/// coalesced away on the way (`gap_finalized` is exactly the model's loss).
+fn clustered_run(seed: u64, window_len: u64) {
+    const CADENCE: u64 = 2;
+    const TICKS: u64 = 400;
+    let rig = Rig::new(seed);
+    let mut rng = seed;
+    // (window index, burst length): at least 12 windows apart so the
+    // bursts are separate events.
+    let mut bursts = Vec::new();
+    let mut at = 6;
+    while at + 6 < TICKS / CADENCE - 4 {
+        let k = 3 + draw(&mut rng) % 4;
+        bursts.push((at, k));
+        at += 12 + draw(&mut rng) % 12;
+    }
+    assert!(bursts.len() >= 4, "{bursts:?}");
+    let mut survive = BTreeSet::new();
+    let mut finalized = Vec::new();
+    let (mut window, mut sent_windows, mut dropped_windows) = (0u64, 0u64, 0u64);
+    for t in 1..=TICKS {
+        if t % CADENCE == 0 {
+            window += 1;
+            if let Some(&(_, k)) = bursts.iter().find(|b| b.0 == window) {
+                rig.proxy.drop_next(LinkDir::Up, k);
+            }
+            let hit = bursts.iter().any(|&(s, k)| window >= s && window < s + k);
+            let (first, last) = ((t + 1).saturating_sub(window_len).max(1), t);
+            rig.send_window(first, last);
+            sent_windows += 1;
+            if hit {
+                dropped_windows += 1;
+            } else {
+                survive.extend(first..=last);
+            }
+        }
+        rig.settle(STEP);
+        if let Some((source, Some(seq), command)) = rig.consume(t) {
+            finalized.push((seq, source, command));
+        }
+        thread::sleep(TICK_PACE);
+    }
+    let mut t = TICKS;
+    while rig.inputs.command_ack(rig.id) < TICKS {
+        t += 1;
+        assert!(t <= TICKS + 3 * LEAD + 40, "the ack never converged");
+        if let Some((source, Some(seq), command)) = rig.consume(t) {
+            finalized.push((seq, source, command));
+        }
+    }
+    let label = format!("seed {seed} window {window_len} bursts {bursts:?}");
+    let lost: Vec<u64> = (1..=TICKS).filter(|s| !survive.contains(s)).collect();
+    let stats = rig.seat();
+    assert_eq!(
+        rig.proxy.stats(LinkDir::Up).burst_dropped,
+        dropped_windows,
+        "{label}"
+    );
+    assert_eq!(
+        rig.inputs.windows_received(rig.id),
+        sent_windows - dropped_windows,
+        "{label}"
+    );
+    assert_eq!(stats.received, survive.len() as u64, "{label}: {stats:?}");
+    assert_eq!(stats.gap_finalized, lost.len() as u64, "{label}: {stats:?}");
+    assert_eq!((stats.rate_limited, stats.overflow), (0, 0), "{label}");
+    let seqs: Vec<u64> = finalized.iter().map(|f| f.0).collect();
+    assert_eq!(seqs, (1..=TICKS).collect::<Vec<_>>(), "{label}");
+    for (seq, source, command) in finalized {
+        if lost.contains(&seq) {
+            assert_ne!(source, Source::Command, "{label}: seq {seq}");
+        } else {
+            assert_eq!(
+                (source, command),
+                (Source::Command, cmd(seq as u8)),
+                "{label}: seq {seq}"
+            );
+        }
+    }
+    println!(
+        "clustered loss seed {seed} window {window_len}: {} bursts, {} windows dropped of {sent_windows}, {} of {TICKS} commands lost",
+        bursts.len(),
+        dropped_windows,
+        lost.len()
+    );
+}
+
+#[test]
+fn clustered_bursts_of_three_to_six_lose_only_what_no_surviving_datagram_carried() {
+    // The production window (8 commands, every 2 ticks: 4 transmissions
+    // per command) and the protocol maximum (16: 8 transmissions).
+    for (seed, window_len) in [(0xC1u64, 8u64), (0xC2, 8), (0xC3, 16)] {
+        clustered_run(seed, window_len);
+    }
+}
+
 #[test]
 fn a_ninety_snapshot_burst_on_the_return_path_does_not_stall_ack_progress() {
     let mut rig = Rig::new(2);

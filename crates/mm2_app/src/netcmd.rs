@@ -610,4 +610,43 @@ mod tests {
         assert_eq!(sent[0], 1);
         assert!(handoff.wire.coalesced.load(Ordering::Relaxed) >= 1);
     }
+
+    /// The replay gate on the input schema: prediction, host and replay all
+    /// run on the decoded wire command, so quantizing must be a fixed point
+    /// (a replayed or redundantly resent command re-encodes to the same
+    /// bytes) and the driver's error is bounded by half a step.
+    #[test]
+    fn quantizing_a_command_is_a_fixed_point_with_half_a_step_of_error() {
+        let human = HumanDriver::default();
+        for b in 0..=u8::MAX {
+            let c = TickCommand {
+                throttle: b,
+                brake: 255 - b,
+                steer: b as i8,
+                handbrake: b,
+                auto_reverse: true,
+                forced_gear: None,
+            };
+            if c.steer == i8::MIN {
+                continue; // outside the -127..=127 contract; decode clamps it
+            }
+            let decoded = crate::netdrive::decode_tick_command(&c);
+            assert_eq!(tick_command(&decoded, Some(&human)), c, "byte {b}");
+        }
+        for i in 0..=2000 {
+            let v = i as f32 / 1000.0 - 1.0;
+            let input = VehicleInput {
+                throttle: v.abs(),
+                steering: v,
+                ..VehicleInput::default()
+            };
+            let c = tick_command(&input, Some(&human));
+            let back = crate::netdrive::decode_tick_command(&c);
+            assert!((back.steering - v).abs() <= 0.5 / 127.0 + 1e-6, "steer {v}");
+            assert!(
+                (back.throttle - v.abs()).abs() <= 0.5 / 255.0 + 1e-6,
+                "throttle {v}"
+            );
+        }
+    }
 }
