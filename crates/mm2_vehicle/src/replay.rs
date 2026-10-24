@@ -54,7 +54,9 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::capture::{RestoreError, VehicleCapture, restore_vehicle};
+use crate::capture::{
+    BodyModifiers, RestoreError, VehicleCapture, apply_modifiers, restore_vehicle,
+};
 use crate::lifetime::{LifetimeIssue, check_lifetimes, incarnation};
 use crate::physics_world::{RestoreReport, WorldCapture, restore_world, write_pose};
 use crate::vehicle::VehicleInput;
@@ -187,6 +189,11 @@ impl ReplayAppExt for App {
 #[derive(Clone, Debug, Default)]
 pub struct ReplayStep {
     pub inputs: Vec<(Entity, VehicleInput)>,
+    /// Modifiers that take effect at this tick (NETPLAY-08C): applied
+    /// before the step runs and then held, like a command, until a later
+    /// step changes them. A body with no entry keeps the modifiers the
+    /// restored capture (or an earlier step) gave it.
+    pub modifiers: Vec<(Entity, BodyModifiers)>,
 }
 
 /// Why a replay did not run. Nothing is written for any of these except
@@ -426,6 +433,9 @@ pub fn replay_from_observed(
     for (i, step) in steps.iter().enumerate() {
         world.resource_mut::<ReplayContext>().step = i + 1;
         gate.advance(world, history, from_tick + i as u64, true);
+        for (entity, modifiers) in &step.modifiers {
+            apply_modifiers(world, *entity, modifiers);
+        }
         for (entity, input) in &step.inputs {
             if let Some(mut slot) = world.get_mut::<VehicleInput>(*entity) {
                 *slot = *input;

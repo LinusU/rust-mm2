@@ -4731,6 +4731,10 @@ fn apply_snap_frame(
                 ang: Vec3::from(t.angvel),
             })
             .collect();
+        // Every seat's damage byte at the same host tick: the replay
+        // applies the authority's impairment at the compared tick, not
+        // the one the live world adopted when the byte arrived.
+        snaps.own_stage.damage = snap.entries.iter().map(|e| (e.player, e.damage)).collect();
         snaps.own_stage.own_wire = own_seat.map(|(_, w)| w);
         snaps.own_stage.remotes_at = Some((snap.generation, snap.tick));
     }

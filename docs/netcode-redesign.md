@@ -2011,6 +2011,43 @@ runs it over the real transport. No retail data, no rendered capture.
 **Open:** impact-driven camera shake (none exists), Cops & Robbers re-award
 and role swaps (N08-B), tick-correct modifiers (N08-C).
 
+## Tick-correct force-affecting modifiers (NETPLAY-08C, #1976)
+
+A replay restores the *recorded* capture of the compared tick, so the engine
+impairment, mass and inertia in it are the ones the client predicted then.
+The authority's word about them can arrive later and elsewhere (the damage
+byte, the Cops & Robbers frame); a replay that kept the recorded values, or
+the live world's of today, would rewrite the past with wrong forces.
+
+`netpredict::modifiers` turns that word into `Authored` values;
+`OwnPrediction::authored` holds them for one comparison and
+`modifier_changes` lists the bodies whose recorded `BodyModifiers` differ.
+Such a body is replayed even when every pose still agrees (the forces differ
+from the compared tick on), and the corrected capture is stamped with the
+authoritative value before `restore_world`, so the rewritten history carries
+one consistent past. `ReplayStep::modifiers` / `apply_modifiers`
+(`mm2_vehicle`) are the matching per-step primitive.
+
+| Modifier | Source | Tick it takes effect |
+| --- | --- | --- |
+| Engine impairment (damage) | the snapshot's damage byte, through `damage::impairment_factor` (the same rule `sync_impairment` applies live) | the snapshot's host tick = the compared ack: exact |
+| Mass, inertia (gold) | `CnrReplica` through `cnr::authored_load_kg`, applied to the unloaded base (`cnr::unloaded_body`) | the compared ack, the oldest rewritable tick. The frame carries the match clock, not the snapshot tick, so the pickup tick is not on the wire: a documented bounded refresh, lag = replica latency |
+| Trailer joint | the capture's own `hitches` | the tick's recorded hitch; the wire carries no joint change, so nothing is overridden |
+
+No impulse is ever reapplied: damage and load are state, written once into
+the capture; a contact's effect stays with the presentation ledger (08A) and
+the replayed physics, so a speculative false contact's obsolete force
+disappears with the rewritten past and a confirmed late one is committed by
+the replay once. A non-finite or non-physical modifier is refused
+(`BodyModifiers::is_valid`), never applied.
+
+Evidence level: synthetic integration (`netpredict::tests::a_late_impairment_*`,
+`a_speculative_impairment_*`, `a_late_gold_load_*`, `modifiers::tests`): the
+corrected client equals a twin world that had the damage at the historical
+tick. **Open:** a snapshot whose ack was already compared (`Skip::Seen`)
+cannot carry a new damage byte into the past; packet/fragment-burst and
+both-arrival-order tests over the lossy transport, and a retail-data run.
+
 ## Own-car correction smoothing (NETPLAY-07 slice 1, #1768)
 
 `mm2_app::netvisual`, behind the `NetplayTimeline` selector. When

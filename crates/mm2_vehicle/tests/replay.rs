@@ -186,6 +186,7 @@ fn steps(s: &Scene, from: u64, to: u64) -> Vec<ReplayStep> {
             let (a, b) = command(t);
             ReplayStep {
                 inputs: vec![(s.car, a), (s.other, b)],
+                ..Default::default()
             }
         })
         .collect()

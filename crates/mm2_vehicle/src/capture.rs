@@ -629,6 +629,81 @@ pub fn capture_vehicle(world: &World, entity: Entity, epoch: EpochRef) -> Option
     ))
 }
 
+/// The force-affecting modifiers a body carries into a step, apart from
+/// its pose and drivetrain: engine impairment (damage), mass and inertia
+/// (carried gold). A replay applies the authority's value for each replayed
+/// tick through [`apply_modifiers`] instead of leaving whatever the live
+/// world holds today (NETPLAY-08C).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BodyModifiers {
+    /// [`EngineImpairment`] factor; `None` removes the component.
+    pub impairment: Option<f32>,
+    pub mass: f32,
+    pub inertia_principal: [f32; 3],
+}
+
+impl BodyModifiers {
+    /// The modifiers a capture recorded.
+    pub fn of(capture: &VehicleCapture) -> Self {
+        Self {
+            impairment: capture.impairment,
+            mass: capture.body.mass,
+            inertia_principal: capture.body.inertia_principal,
+        }
+    }
+
+    /// Write these modifiers into a capture, so a restore puts them back.
+    pub fn stamp(&self, capture: &mut VehicleCapture) {
+        capture.impairment = self.impairment;
+        capture.body.mass = self.mass;
+        capture.body.inertia_principal = self.inertia_principal;
+    }
+
+    /// Whether every field is finite and the mass positive: a modifier set
+    /// that is not is never applied.
+    pub fn is_valid(&self) -> bool {
+        self.mass.is_finite()
+            && self.mass > 0.0
+            && self
+                .inertia_principal
+                .iter()
+                .all(|v| v.is_finite() && *v > 0.0)
+            && self
+                .impairment
+                .is_none_or(|f| f.is_finite() && (0.0..=1.0).contains(&f))
+    }
+}
+
+/// Put `modifiers` on a live vehicle body. Returns `false` and writes
+/// nothing when they are not [valid](BodyModifiers::is_valid) or the
+/// entity is not a vehicle body.
+pub fn apply_modifiers(world: &mut World, entity: Entity, modifiers: &BodyModifiers) -> bool {
+    if !modifiers.is_valid() {
+        return false;
+    }
+    let Ok(mut e) = world.get_entity_mut(entity) else {
+        return false;
+    };
+    if e.get::<Vehicle>().is_none() {
+        return false;
+    }
+    if let Some(mut m) = e.get_mut::<Mass>() {
+        m.0 = modifiers.mass;
+    }
+    if let Some(mut i) = e.get_mut::<AngularInertia>() {
+        i.principal = Vec3::from(modifiers.inertia_principal);
+    }
+    match modifiers.impairment {
+        Some(f) => {
+            e.insert(EngineImpairment(f));
+        }
+        None => {
+            e.remove::<EngineImpairment>();
+        }
+    }
+    true
+}
+
 /// Put a capture back. Validates first and writes nothing on error.
 /// Restores the body pose, velocities, mass properties, the command
 /// state, the vehicle state and `PreStepVelocity`; the

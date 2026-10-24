@@ -616,6 +616,28 @@ pub fn resolve_breakdown(
     }
 }
 
+/// The engine-output factor a car with this `damage` runs at: the one
+/// rule [`sync_impairment`] applies live and the netplay replay applies to
+/// the authority's damage at a historical tick (NETPLAY-08C), so the two
+/// can never disagree about what a damage total means.
+///
+/// A broken-down car's engine is dead, not merely limping. A predicted
+/// client never owns the episode; the wire's damage byte holding at the
+/// destruction bound is its signal, and in a Breakdown mode that bound
+/// *is* the breakdown (the authority repairs by dropping the byte).
+pub fn impairment_factor(session: &Session, damage: &VehicleDamage, broken_down: bool) -> f32 {
+    let predicted_breakdown = !session.authority_role().is_authority()
+        && session
+            .config()
+            .is_some_and(|c| disabled_outcome(&c.mode) == DisabledOutcome::Breakdown);
+    let wire_down = predicted_breakdown && damage.condition() == DamageTier::Disabled;
+    if broken_down || wire_down {
+        0.0
+    } else {
+        ImpairmentPolicy::default().factor(damage.total(), &damage.spec)
+    }
+}
+
 /// [`sync_impairment`]'s view of a car: its damage, its live impairment
 /// and whether a breakdown holds the engine dead. `RemoteReplica`
 /// copies are excluded — they are never stepped by the sim.
@@ -667,23 +689,8 @@ pub fn sync_impairment(
     if !session.is_playing() {
         return;
     }
-    let policy = ImpairmentPolicy::default();
-    let predicted_breakdown = !session.authority_role().is_authority()
-        && session
-            .config()
-            .is_some_and(|c| disabled_outcome(&c.mode) == DisabledOutcome::Breakdown);
     for (entity, damage, impairment, broken_down) in &mut cars {
-        // A broken-down car's engine is dead, not merely limping.
-        // A predicted client never owns the episode; the wire's damage
-        // byte holding at the destruction bound is its signal, and in a
-        // Breakdown mode that bound *is* the breakdown (the authority
-        // repairs by dropping the byte).
-        let wire_down = predicted_breakdown && damage.condition() == DamageTier::Disabled;
-        let factor = if broken_down || wire_down {
-            0.0
-        } else {
-            policy.factor(damage.total(), &damage.spec)
-        };
+        let factor = impairment_factor(&session, damage, broken_down);
         match impairment {
             Some(mut imp) => {
                 if factor >= 1.0 {

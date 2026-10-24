@@ -606,6 +606,43 @@ pub fn reconcile_gold_load(
     }
 }
 
+/// The load the host's replicated match gives `entity` right now, in kg
+/// (`0.0` for none), for the netplay replay (NETPLAY-08C). `None` when this
+/// process has no replica to ask — the authority, or a session that is not
+/// Cops & Robbers — so the recorded value stands.
+///
+/// The replica frame carries the match clock, not the snapshot tick, so the
+/// instant the load began is not on the wire. The replay therefore applies
+/// this value from the oldest tick it can still rewrite (the compared
+/// ack): a bounded refresh, not a guess at the pickup tick.
+pub fn authored_load_kg(world: &World, entity: Entity) -> Option<f32> {
+    if world.get_resource::<CnrHost>().is_some() {
+        return None;
+    }
+    let replica = world.get_resource::<CnrReplica>()?;
+    let session = world.get_resource::<Session>()?;
+    let id = participant_id(world.get::<Player>(entity)?, world.get::<NetPlayer>(entity));
+    let added = replicated_load(session, replica)
+        .filter(|(carrier, _)| *carrier == id)
+        .map_or(0.0, |(_, load)| load.added_mass_kg);
+    Some(if added.is_finite() && added > 0.0 {
+        added
+    } else {
+        0.0
+    })
+}
+
+/// The mass and inertia `entity` has without any gold: the recorded base
+/// while a load is on it, else what it carries now.
+pub fn unloaded_body(world: &World, entity: Entity) -> Option<(f32, Vec3)> {
+    if let Some(applied) = world.get::<GoldLoadApplied>(entity) {
+        return Some((applied.base_mass, applied.base_inertia));
+    }
+    let mass = world.get::<Mass>(entity)?.0;
+    let inertia = world.get::<AngularInertia>(entity)?.principal;
+    Some((mass, inertia))
+}
+
 /// Write `base + load` onto the body: the mass grows by the load and the
 /// inertia tensor scales with it, as a heavier body of the same shape.
 fn apply(record: &GoldLoadApplied, mass: &mut Mass, inertia: &mut AngularInertia) {

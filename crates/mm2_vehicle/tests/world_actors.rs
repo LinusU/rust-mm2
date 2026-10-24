@@ -151,6 +151,7 @@ fn steps(car: Entity, from: u64, to: u64) -> Vec<ReplayStep> {
     (from..to)
         .map(|_| ReplayStep {
             inputs: vec![(car, drive())],
+            ..Default::default()
         })
         .collect()
 }

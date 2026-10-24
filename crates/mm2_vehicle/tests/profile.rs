@@ -236,6 +236,7 @@ fn plan(c: &City, from: u64, to: u64) -> Vec<ReplayStep> {
                 .enumerate()
                 .map(|(n, e)| (*e, command(n, t)))
                 .collect(),
+            ..Default::default()
         })
         .collect()
 }

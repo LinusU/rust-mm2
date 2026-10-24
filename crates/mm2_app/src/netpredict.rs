@@ -63,8 +63,8 @@ use std::collections::VecDeque;
 use avian3d::prelude::{AngularVelocity, CollisionStart, LinearVelocity, Position, Rotation};
 use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
-use mm2_game::{PlayerVehicle, Session};
-use mm2_vehicle::capture::{EpochRef, VehicleCapture};
+use mm2_game::{PlayerVehicle, Session, VehicleDamage};
+use mm2_vehicle::capture::{BodyModifiers, EpochRef, VehicleCapture};
 use mm2_vehicle::physics_world::{WorldCapture, capture_world, restore_world};
 use mm2_vehicle::replay::{HistoryRing, MAX_REPLAY_STEPS, ReplayStep, replay_from_observed};
 use mm2_vehicle::{
@@ -80,6 +80,8 @@ use crate::netdrive::{
 };
 use crate::netplay_timeline::NetplayTimeline;
 use crate::netremote::RemoteFeed;
+
+pub use modifiers::{Authored, Load};
 
 /// Host ticks a contact divergence may keep being replayed before the host
 /// state is adopted outright (NETPLAY-05B-4). Designed, not original: the
@@ -164,6 +166,9 @@ pub struct OwnStage {
     /// The snapshot's trailer rows (`wire` is the towing seat's id), staged
     /// and gated exactly like `remotes`.
     pub trailers: Vec<RemoteAssertion>,
+    /// `(wire id, damage byte)` of every seat in that snapshot, staged and
+    /// gated exactly like `remotes`.
+    pub damage: Vec<(u16, u8)>,
     /// The own seat's wire id in that snapshot, so the own rig's trailer
     /// row can be found among `trailers`.
     pub own_wire: Option<u16>,
@@ -292,6 +297,13 @@ pub struct OwnPrediction {
     /// Contact starts a replay was the first to discover, raised in the
     /// live world by [`reconcile`] (their damage, sparks and audio).
     pub contacts_surfaced: u64,
+    /// What the authority has said about each body's force-affecting
+    /// modifiers, set by [`reconcile_own`] before each comparison
+    /// (NETPLAY-08C). Empty means "the recorded values stand".
+    pub authored: Vec<Authored>,
+    /// Bodies whose recorded modifiers were replaced by the authority's at
+    /// the compared tick.
+    pub modifier_corrections: u64,
 }
 
 /// Ticks a replayed contact start may differ from the raised one and still
@@ -338,6 +350,8 @@ impl Default for OwnPrediction {
             contacts: VecDeque::new(),
             contact_cursor: MessageCursor::default(),
             contacts_surfaced: 0,
+            authored: Vec::new(),
+            modifier_corrections: 0,
         }
     }
 }
@@ -712,6 +726,11 @@ fn classify_and_run(
     let entrants = entrants(past, req);
     remote_diverged |= !entrants.is_empty();
     lasting |= !entrants.is_empty();
+    // Damage, gold load: the authority's value for the compared tick
+    // replaces the recorded prediction, and a body whose modifiers differ
+    // is replayed even when the poses still agree (the forces differ from
+    // here on).
+    let changes = modifier_changes(pred, past);
     let complete_state = partners_complete(past, req);
     let mut deadline = false;
     if lasting {
@@ -727,7 +746,7 @@ fn classify_and_run(
         // Nothing disagrees beyond the replay residue: the clock stops.
         pred.deadline_start = None;
     }
-    if own_agrees && !remote_diverged {
+    if own_agrees && !remote_diverged && changes.is_empty() {
         return Outcome::Matched;
     }
     let depth = (req.newest - a.ack) as usize;
@@ -760,8 +779,11 @@ fn classify_and_run(
         req,
         (pos_error, rot_error),
         (remote_error, remote_diverged),
-        &entrants,
-        resets,
+        Fixups {
+            entrants: &entrants,
+            resets,
+            modifiers: &changes,
+        },
     );
     // The deadline gives up on the recorded past, not on the car's lead: the
     // host's state at the ack is stepped forward through the commands still
@@ -911,20 +933,56 @@ fn present(world: &World, own: Entity) -> Option<(Vec3, Quat)> {
     Some((world.get::<Position>(own)?.0, world.get::<Rotation>(own)?.0))
 }
 
+/// What a replay changes in the recorded capture before it restores it.
+struct Fixups<'a> {
+    /// Bodies that spawned after the compared tick.
+    entrants: &'a [Entity],
+    /// Bodies whose seat the host reset since.
+    resets: &'a [Entity],
+    /// Bodies whose force-affecting modifiers the authority overrides at
+    /// the compared tick.
+    modifiers: &'a [(Entity, BodyModifiers)],
+}
+
+/// The bodies of `past` whose recorded modifiers differ from what the
+/// authority said for that tick, with the authority's value.
+fn modifier_changes(pred: &OwnPrediction, past: &WorldCapture) -> Vec<(Entity, BodyModifiers)> {
+    pred.authored
+        .iter()
+        .filter_map(|authored| {
+            let (_, vc) = past.vehicles.iter().find(|(e, _)| *e == authored.body)?;
+            let recorded = BodyModifiers::of(vc);
+            let want = authored.resolve(&recorded);
+            (want.is_valid() && modifiers::differ(&recorded, &want))
+                .then_some((authored.body, want))
+        })
+        .collect()
+}
+
 fn replay(
     world: &mut World,
     pred: &mut OwnPrediction,
     req: &Request<'_>,
     (pos_error, rot_error): (f32, f32),
     (remote_error, remote_diverged): (f32, bool),
-    entrants: &[Entity],
-    resets: &[Entity],
+    fixups: Fixups<'_>,
 ) -> Outcome {
     let a = req.assertion;
+    let Fixups {
+        entrants,
+        resets,
+        modifiers,
+    } = fixups;
     let mut corrected = pred.ring.get(a.ack).expect("checked by the caller").clone();
     keep_live_mass(world, &mut corrected);
     seed_entrants(world, req, entrants, &mut corrected);
     renew_reset_bodies(world, resets, &mut corrected);
+    for (body, mods) in modifiers {
+        if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| e == body) {
+            mods.stamp(vc);
+            pred.modifier_corrections += 1;
+        }
+    }
     if let Some((_, vc)) = corrected.vehicles.iter_mut().find(|(e, _)| *e == req.own) {
         vc.body.position = a.pos.to_array();
         vc.body.rotation = a.rot.to_array();
@@ -999,7 +1057,10 @@ fn replay(
                     ));
                 }
             }
-            ReplayStep { inputs }
+            ReplayStep {
+                inputs,
+                ..Default::default()
+            }
         })
         .collect();
     // One replay over the whole window, against the recorded history with
@@ -1173,7 +1234,7 @@ pub fn reconcile_own(world: &mut World) {
     if !gate(world) {
         return;
     }
-    let (assertion, remote_states, trailer_states, own_wire, reset) = {
+    let (assertion, remote_states, trailer_states, damage_states, own_wire, reset) = {
         let Some(mut snaps) = world.get_resource_mut::<RemoteSnaps>() else {
             return;
         };
@@ -1182,19 +1243,21 @@ pub fn reconcile_own(world: &mut World) {
         let at = stage.remotes_at.take();
         let remotes = std::mem::take(&mut stage.remotes);
         let trailers = std::mem::take(&mut stage.trailers);
+        let damage = std::mem::take(&mut stage.damage);
         let own_wire = stage.own_wire.take();
         // The seats and trailers only travel with the assertion of their
         // own snapshot.
-        let (remotes, trailers) = match (assertion, at) {
+        let (remotes, trailers, damage) = match (assertion, at) {
             (Some(a), Some((g, t))) if a.generation == g && a.server_tick == t => {
-                (remotes, trailers)
+                (remotes, trailers, damage)
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
         };
         (
             assertion,
             remotes,
             trailers,
+            damage,
             own_wire,
             std::mem::take(&mut stage.reset),
         )
@@ -1230,6 +1293,7 @@ pub fn reconcile_own(world: &mut World) {
         let remotes = remote_drives(world, &assertion, &remote_states);
         let trailers = trailer_drives(world, own, own_wire, &trailer_states);
         let epoch = epoch_ref(world.resource::<Session>(), epoch);
+        pred.authored = authored_modifiers(world, own, own_wire, &damage_states);
         let before = present(world, own);
         let outcome = reconcile(
             world,
@@ -1244,6 +1308,7 @@ pub fn reconcile_own(world: &mut World) {
                 epoch,
             },
         );
+        pred.authored.clear();
         report(&assertion, outcome, before, present(world, own));
         // The body moved; what is drawn does not (it eases across). Only
         // the render path reads this, never `Position`/`Rotation`.
@@ -1265,6 +1330,53 @@ pub fn reconcile_own(world: &mut World) {
         }
     }
     world.insert_resource(pred);
+}
+
+/// What the authority said about the force-affecting modifiers of the own
+/// car and of each remote contact body: the impairment its damage byte
+/// gives, and (Cops & Robbers client) the gold load.
+fn authored_modifiers(
+    world: &mut World,
+    own: Entity,
+    own_wire: Option<u16>,
+    damage: &[(u16, u8)],
+) -> Vec<Authored> {
+    let mut bodies: Vec<(Entity, Option<u16>)> = vec![(own, own_wire)];
+    bodies.extend(
+        world
+            .query::<(Entity, &PredictedRemoteBody)>()
+            .iter(world)
+            .map(|(e, b)| (e, Some(b.wire))),
+    );
+    let session = world.resource::<Session>();
+    bodies
+        .into_iter()
+        .map(|(body, wire)| {
+            let byte = wire.and_then(|w| damage.iter().find(|(d, _)| *d == w).map(|(_, b)| *b));
+            // A body with no authored damage record has nothing to
+            // impair; the wire reads it as undamaged and says nothing.
+            let impairment = byte.and_then(|byte| {
+                let mut d = *world.get::<VehicleDamage>(body)?;
+                d.set_replicated(f32::from(byte) / 255.0);
+                let factor = crate::damage::impairment_factor(session, &d, false);
+                Some(modifiers::impairment_component(factor))
+            });
+            let load = crate::cnr::authored_load_kg(world, body).and_then(|added_kg| {
+                let (base_mass, base_inertia) = crate::cnr::unloaded_body(world, body)?;
+                Some(Load {
+                    added_kg,
+                    base_mass,
+                    base_inertia,
+                })
+            });
+            Authored {
+                body,
+                impairment,
+                load,
+            }
+        })
+        .filter(|a| a.impairment.is_some() || a.load.is_some())
+        .collect()
 }
 
 /// Every remote contact body with its host state (when the snapshot had
@@ -1533,6 +1645,169 @@ mod tests {
                 epoch: EPOCH,
             },
         )
+    }
+
+    /// What the authority simulated: the scripted commands to tick `n`,
+    /// with `change` applied to the car right after tick `at`. The
+    /// reference a corrected client must equal.
+    fn authority_with(at: u64, n: u64, change: impl Fn(&mut World, Entity)) -> (App, Entity) {
+        let (mut app, car) = app();
+        for seq in 1..=n {
+            live(&mut app, car, seq);
+            if seq == at {
+                change(app.world_mut(), car);
+            }
+        }
+        (app, car)
+    }
+
+    fn authored_impairment(car: Entity, v: Option<f32>) -> Authored {
+        Authored {
+            body: car,
+            impairment: Some(v),
+            load: None,
+        }
+    }
+
+    fn recorded(pred: &OwnPrediction, seq: u64, car: Entity) -> BodyModifiers {
+        let (_, vc) = pred
+            .ring
+            .get(seq)
+            .unwrap()
+            .vehicles
+            .iter()
+            .find(|(e, _)| *e == car)
+            .unwrap();
+        BodyModifiers::of(vc)
+    }
+
+    fn pos(app: &App, car: Entity) -> Vec3 {
+        app.world().get::<Position>(car).unwrap().0
+    }
+
+    /// NETPLAY-08C: damage the authority applied at tick 20 reaches a
+    /// client at tick 30. The pose at 20 still agrees (the impairment had
+    /// not acted yet), so only the modifier says the recorded past is
+    /// wrong. The replay puts it at tick 20, not at tick 30.
+    #[test]
+    fn a_late_impairment_takes_effect_at_the_compared_tick() {
+        let (reference, rcar) = authority_with(20, 30, |w, c| {
+            w.entity_mut(c).insert(EngineImpairment(0.5));
+        });
+        let (mut app, car) = app();
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 30);
+        let uncorrected = pos(&app, car);
+        let a = assertion_from(&pred, car, 20);
+        assert_eq!(recorded(&pred, 20, car).impairment, None);
+
+        pred.authored = vec![authored_impairment(car, Some(0.5))];
+        let outcome = go(&mut app, &mut pred, car, &a, 30);
+        assert!(matches!(outcome, Outcome::Replayed { .. }), "{outcome:?}");
+        assert_eq!(pred.modifier_corrections, 1);
+        assert_eq!(recorded(&pred, 20, car).impairment, Some(0.5));
+        assert_eq!(recorded(&pred, 30, car).impairment, Some(0.5));
+        assert!(
+            pos(&app, car).distance(uncorrected) > 1e-3,
+            "the damage changed nothing: the test proves nothing"
+        );
+        let want = pos(&reference, rcar);
+        assert!(
+            pos(&app, car).distance(want) < 1e-3,
+            "{:?} vs {want:?}",
+            pos(&app, car)
+        );
+    }
+
+    /// The same modifier already in the record is no correction.
+    #[test]
+    fn an_impairment_the_record_already_has_is_not_replayed() {
+        let (mut app, car) = app();
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 30);
+        let a = assertion_from(&pred, car, 20);
+        pred.authored = vec![authored_impairment(car, None)];
+        assert_eq!(go(&mut app, &mut pred, car, &a, 30), Outcome::Matched);
+        assert_eq!(pred.modifier_corrections, 0);
+    }
+
+    /// A speculative impairment (the client predicted damage the authority
+    /// never applied) is removed from the past, not kept.
+    #[test]
+    fn a_speculative_impairment_is_removed_from_the_past() {
+        let (reference, rcar) = authority_with(20, 30, |_, _| {});
+        let (mut app, car) = authority_with(20, 0, |_, _| {});
+        let mut pred = fresh();
+        for seq in 1..=30 {
+            live(&mut app, car, seq);
+            if seq == 20 {
+                app.world_mut()
+                    .entity_mut(car)
+                    .insert(EngineImpairment(0.5));
+            }
+            let cap = capture_world(app.world_mut(), EPOCH);
+            pred.ring.record(seq, cap);
+        }
+        let a = assertion_from(&pred, car, 20);
+        assert_eq!(recorded(&pred, 20, car).impairment, Some(0.5));
+        pred.authored = vec![authored_impairment(car, None)];
+        let outcome = go(&mut app, &mut pred, car, &a, 30);
+        assert!(matches!(outcome, Outcome::Replayed { .. }), "{outcome:?}");
+        assert_eq!(recorded(&pred, 20, car).impairment, None);
+        assert!(app.world().get::<EngineImpairment>(car).is_none());
+        assert!(pos(&app, car).distance(pos(&reference, rcar)) < 1e-3);
+    }
+
+    /// Gold the authority loaded onto the car at tick 20: the mass and
+    /// inertia are the loaded ones from the compared tick, from the
+    /// unloaded base, whatever the record held.
+    #[test]
+    fn a_late_gold_load_is_stamped_at_the_compared_tick_once() {
+        let (mut app, car) = app();
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 30);
+        let a = assertion_from(&pred, car, 20);
+        let base = recorded(&pred, 20, car);
+        let load = Load {
+            added_kg: 250.0,
+            base_mass: base.mass,
+            base_inertia: Vec3::from(base.inertia_principal),
+        };
+        pred.authored = vec![Authored {
+            body: car,
+            impairment: None,
+            load: Some(load),
+        }];
+        let outcome = go(&mut app, &mut pred, car, &a, 30);
+        assert!(matches!(outcome, Outcome::Replayed { .. }), "{outcome:?}");
+        let want = base.mass + 250.0;
+        for seq in [20, 25, 30] {
+            let m = recorded(&pred, seq, car);
+            assert!((m.mass - want).abs() < 1e-3, "tick {seq}: {}", m.mass);
+            let scale = want / base.mass;
+            assert!((m.inertia_principal[0] - base.inertia_principal[0] * scale).abs() < 1e-3);
+        }
+        // The next comparison finds the record agreeing: stamped once, not
+        // stacked, however many snapshots follow.
+        let a2 = assertion_from(&pred, car, 25);
+        assert!(matches!(
+            go(&mut app, &mut pred, car, &a2, 30),
+            Outcome::Matched
+        ));
+        assert_eq!(pred.modifier_corrections, 1);
+        assert!((recorded(&pred, 30, car).mass - want).abs() < 1e-3);
+    }
+
+    /// An authored value that is not a physical one is never applied.
+    #[test]
+    fn a_non_finite_authored_modifier_is_refused() {
+        let (mut app, car) = app();
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 30);
+        let a = assertion_from(&pred, car, 20);
+        pred.authored = vec![authored_impairment(car, Some(f32::NAN))];
+        assert_eq!(go(&mut app, &mut pred, car, &a, 30), Outcome::Matched);
+        assert_eq!(pred.modifier_corrections, 0);
     }
 
     #[test]
@@ -2214,6 +2489,7 @@ mod tests {
 mod contact_tests;
 #[cfg(test)]
 mod deadline_tests;
+mod modifiers;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]
