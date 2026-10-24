@@ -32,6 +32,11 @@ const BOT_B: u16 = BOT_A + 1;
 
 /// The retail Cops & Robbers host, bots to be set with `session
 /// bots=2` before it starts.
+///
+/// Every process runs `--paced`: an unpaced headless sim steps about 5x
+/// faster than wall clock and feeds the wall-clock rate controller 5x the
+/// demand a real 60 Hz player produces, so the lane budget is judged
+/// against traffic no player sends.
 fn host_proc(
     retail: &std::path::Path,
     city: &str,
@@ -44,10 +49,18 @@ fn host_proc(
     let at = args.iter().position(|a| a == "--seed").unwrap();
     args[at + 1] = SEED.to_string();
     args.extend(
-        ["--city", city, "--cnr", variant, "--cnr-limit", limit]
-            .into_iter()
-            .chain(extra.iter().copied())
-            .map(String::from),
+        [
+            "--city",
+            city,
+            "--cnr",
+            variant,
+            "--cnr-limit",
+            limit,
+            "--paced",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(String::from),
     );
     Proc::spawn(MM2_EXE, &args)
 }
@@ -120,9 +133,15 @@ fn play_to_results(city: &str, variant: &str) -> (String, String) {
     host.until("event=session_changed");
     let mut client_args = join_args(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
-        ["--parked", "--until-results", "--deadline", "900"]
-            .into_iter()
-            .map(String::from),
+        [
+            "--paced",
+            "--parked",
+            "--until-results",
+            "--deadline",
+            "900",
+        ]
+        .into_iter()
+        .map(String::from),
     );
     let client = Proc::spawn(MM2_EXE, &client_args);
     start_when_ready(&mut host, 1);
@@ -252,9 +271,16 @@ fn a_rematch_fields_the_same_bots_on_both_machines() {
     host.until("event=session_changed");
     let mut client_args = join_args(&retail, addr, "bob", HOST_FRAME_CEILING);
     client_args.extend(
-        ["--parked", "--until-snap-tick", "1500", "--deadline", "900"]
-            .into_iter()
-            .map(String::from),
+        [
+            "--paced",
+            "--parked",
+            "--until-snap-tick",
+            "1500",
+            "--deadline",
+            "900",
+        ]
+        .into_iter()
+        .map(String::from),
     );
     let client = Proc::spawn(MM2_EXE, &client_args);
     start_when_ready(&mut host, 1);
