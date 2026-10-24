@@ -1332,7 +1332,17 @@ fn report(
 /// Register the history and the two fixed-schedule systems.
 pub fn add_systems(app: &mut App) {
     app.init_resource::<OwnPrediction>()
-        .add_systems(FixedFirst, reconcile_own)
+        .add_systems(
+            FixedFirst,
+            // After the interpolation has put `Transform` back to last
+            // tick's end (it would undo the reconcile's pose in `Transform`,
+            // which avian then copies over `Position`, because the replay's
+            // own physics steps are newer than the reconcile's write), and
+            // before it records this tick's start.
+            reconcile_own
+                .after(avian3d::interpolation::TransformEasingSystems::Reset)
+                .before(avian3d::interpolation::TransformEasingSystems::UpdateStart),
+        )
         .add_systems(FixedLast, record_prediction);
 }
 
