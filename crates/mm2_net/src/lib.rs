@@ -85,6 +85,8 @@ mod lane_pace_tests;
 #[cfg(test)]
 mod lane_reliable_tests;
 #[cfg(test)]
+mod lane_state_tests;
+#[cfg(test)]
 mod lane_tests;
 #[cfg(test)]
 mod lane_world_tests;
@@ -106,8 +108,8 @@ pub use conn::{
 pub use frag::{
     Assembler, AssemblerStats, BASELINE_CAP, BaselineReceiver, BaselineSender, Completed,
     FRAG_DATA, FRAG_HEADER, FRAGMENT_TTL, FragRefuse, MAX_ASSEMBLIES, MAX_FRAGMENTS, MAX_GROUPS,
-    Plan, REFRESH_TICKS, SplitError, StateError, delta_apply, delta_encode,
-    split as split_fragments,
+    Plan, REFRESH_TICKS, STATE_FRAME, SplitError, StateError, decode_state_frame, delta_apply,
+    delta_encode, encode_state_frame, split as split_fragments,
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
@@ -141,7 +143,7 @@ pub use reliable::{
 pub use rt::{
     HEADER_LEN, Header, LANE_ECHO_TIMEOUT, LANE_VERSION, LaneAck, LaneCounts, LaneQueue, LaneTag,
     MAGIC, MAX_DATAGRAM, MAX_PAYLOAD, MAX_RELIABLE_BODY, MAX_RELIABLE_MESSAGE, PaceStats,
-    QUEUE_CAP, QueueStats, ReliableSendError, SEQ_WINDOW, SeqWindow, decode_datagram,
+    QUEUE_CAP, QueueStats, ReliableSendError, SEQ_WINDOW, SeqWindow, StateStats, decode_datagram,
     encode_datagram,
 };
 

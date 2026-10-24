@@ -30,7 +30,9 @@
 //! Fragment payload (little-endian, [`FRAG_HEADER`] bytes then data):
 //! `tick u64 | group u8 | groups u8 | index u8 | count u8`.
 //! State payload: `kind u8 (0 full, 1 delta) | base_tick u64 | body`.
-//! Ack payload: `epoch u8 | tick u64`.
+//! Ack payload: `epoch u8 | group u8 | tick u64`.
+//! State frame (a fragment group carrying a baselined state instead of a
+//! bare message): `STATE_FRAME u8 | group u8 | epoch u8 | state payload`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -323,16 +325,43 @@ impl Assembler {
     }
 }
 
-/// Encode an acknowledgement of the state at (`epoch`, `tick`).
-pub fn encode_ack(epoch: u8, tick: u64) -> Vec<u8> {
-    let mut p = vec![epoch];
+/// Encode an acknowledgement of the state of logical `group` at
+/// (`epoch`, `tick`).
+pub fn encode_ack(epoch: u8, group: u8, tick: u64) -> Vec<u8> {
+    let mut p = vec![epoch, group];
     p.extend_from_slice(&tick.to_le_bytes());
     p
 }
 
-/// Parse an acknowledgement payload.
-pub fn decode_ack(p: &[u8]) -> Option<(u8, u64)> {
-    (p.len() == 9).then(|| (p[0], u64::from_le_bytes(p[1..9].try_into().unwrap())))
+/// Parse an acknowledgement payload into `(epoch, group, tick)`. A group
+/// at or past [`MAX_GROUPS`] is malformed.
+pub fn decode_ack(p: &[u8]) -> Option<(u8, u8, u64)> {
+    (p.len() == 10 && usize::from(p[1]) < MAX_GROUPS)
+        .then(|| (p[0], p[1], u64::from_le_bytes(p[2..10].try_into().unwrap())))
+}
+
+/// The first byte of a fragment group that carries a baselined state
+/// ([`encode_state_frame`]) rather than a bare encoded message. Message
+/// tags are all below `0x80`, so the two never collide.
+pub const STATE_FRAME: u8 = 0xFE;
+
+/// Wrap a [`BaselineSender::encode`] payload for logical `group` of the
+/// reset `epoch` as the data of a fragment group.
+pub fn encode_state_frame(group: u8, epoch: u8, payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![STATE_FRAME, group, epoch];
+    f.extend_from_slice(payload);
+    f
+}
+
+/// Parse a state frame into `(group, epoch, payload)`; `None` when `data`
+/// is not one.
+pub fn decode_state_frame(data: &[u8]) -> Option<(u8, u8, &[u8])> {
+    match data {
+        [STATE_FRAME, group, epoch, payload @ ..] if usize::from(*group) < MAX_GROUPS => {
+            Some((*group, *epoch, payload))
+        }
+        _ => None,
+    }
 }
 
 /// Why a state or delta was refused.
@@ -1096,7 +1125,8 @@ mod tests {
 
     #[test]
     fn ack_roundtrips() {
-        assert_eq!(decode_ack(&encode_ack(3, 77)), Some((3, 77)));
+        assert_eq!(decode_ack(&encode_ack(3, 2, 77)), Some((3, 2, 77)));
+        assert_eq!(decode_ack(&encode_ack(3, MAX_GROUPS as u8, 77)), None);
         assert_eq!(decode_ack(&[1, 2]), None);
     }
 }

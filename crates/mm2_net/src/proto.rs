@@ -123,8 +123,11 @@ use crate::cmdbuf::Source;
 /// control stream (NETPLAY-10C-3): `Props` rides the lane's reliable
 /// channel and `Traffic` / `Signals` ride lane datagram tags 7 and 8 as
 /// bulk fragments; a v38 peer would count the tags malformed and never
-/// see them.
-pub const PROTOCOL_VERSION: u16 = 39;
+/// see them. v40: baselined snapshot states (NETPLAY-10D-2): a fragment
+/// group may carry a full or delta state frame instead of a bare `Snap`,
+/// and the lane's baseline ack names its snapshot group; a v39 peer would
+/// count the frames malformed and its acks as the wrong length.
+pub const PROTOCOL_VERSION: u16 = 40;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -3441,7 +3444,7 @@ mod tests {
 
     #[test]
     fn v39_rejects_older_and_newer_protocol_versions() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+        assert_eq!(PROTOCOL_VERSION, 40);
         for protocol in [38, 40] {
             let mut h = hello();
             h.protocol = protocol;

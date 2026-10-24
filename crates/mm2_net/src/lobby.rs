@@ -998,6 +998,11 @@ impl Host {
         self.lane.latest_ack(id)
     }
 
+    /// [`HostCtl::lane_group_ack`], from the `Host` itself.
+    pub fn lane_group_ack(&self, id: u16, group: u8) -> Option<crate::LaneAck> {
+        self.lane.group_ack(id, group)
+    }
+
     /// The data-plane mailbox every admitted peer's `Input` frames and
     /// `ResetRequest`s land in — the host-side consumer's view of the
     /// session data plane (F25-A/F25-B). Latest-wins per roster slot;
@@ -1287,6 +1292,100 @@ impl HostCtl {
     /// its lane (NETPLAY-06C), for a [`BaselineSender`](crate::BaselineSender).
     pub fn lane_ack(&self, player_id: u16) -> Option<crate::LaneAck> {
         self.lane.latest_ack(player_id)
+    }
+
+    /// The newest baseline acknowledgement `player_id`'s client sent for
+    /// logical snapshot `group`.
+    pub fn lane_group_ack(&self, player_id: u16, group: u8) -> Option<crate::LaneAck> {
+        self.lane.group_ack(player_id, group)
+    }
+
+    /// The seats whose datagram lane is established — the seats
+    /// [`send_snap_states_prio`](Self::send_snap_states_prio) can reach.
+    pub fn lane_players(&self) -> Vec<u16> {
+        self.lane
+            .established_outs()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// [`broadcast`](Self::broadcast) to only the seats **without** an
+    /// established lane (they are on the control stream); a producer that
+    /// sends each lane seat its own grouped states uses this for the rest.
+    pub fn broadcast_unlaned(&self, msg: &Message) -> Result<(), NetError> {
+        let ids = self.lane_players();
+        if ids.is_empty() {
+            self.send(LoopMsg::Broadcast(msg.clone()))
+        } else {
+            self.send(LoopMsg::BroadcastExcept(msg.clone(), ids))
+        }
+    }
+
+    /// Send one tick to `player_id` as **baselined groups** (NETPLAY-10D-2).
+    /// Each `(group, Snap)` is a complete `Snap` of `generation`/`tick`
+    /// (like [`send_snap_groups_prio`](Self::send_snap_groups_prio)) with a
+    /// stable logical `group` id below [`MAX_GROUPS`](crate::MAX_GROUPS):
+    /// the group's state is sent as a delta against the newest baseline the
+    /// client acknowledged for that group, or in full when there is none,
+    /// it is more than [`REFRESH_TICKS`](crate::REFRESH_TICKS) behind or
+    /// `epoch` changed. The client reconstructs the `Snap` and acknowledges
+    /// it; a lost group, ack or baseline therefore only costs a larger
+    /// state, never a wrongly applied one. Bump `epoch` to force full
+    /// states (a roster change, a teleport). `Ok(false)` when the seat has
+    /// no established lane.
+    pub fn send_snap_states_prio(
+        &self,
+        player_id: u16,
+        generation: u64,
+        tick: u64,
+        epoch: u8,
+        groups: &[(u8, Message)],
+        priorities: &[crate::Priority],
+    ) -> Result<bool, NetError> {
+        let mut encoded = Vec::with_capacity(groups.len());
+        for (group, g) in groups {
+            match g {
+                Message::Snap {
+                    generation: gg,
+                    tick: t,
+                    ..
+                } if *gg == generation && *t == tick && usize::from(*group) < crate::MAX_GROUPS => {
+                    encoded.push((*group, g.encode()?))
+                }
+                _ => {
+                    return Err(NetError::Unexpected(
+                        "snapshot state group must be a Snap of the tick with a valid group id",
+                    ));
+                }
+            }
+        }
+        if (1..encoded.len()).any(|i| encoded[..i].iter().any(|(g, _)| *g == encoded[i].0)) {
+            return Err(NetError::Unexpected("duplicate snapshot state group id"));
+        }
+        let Some(out) = self.lane.established_out(player_id) else {
+            return Ok(false);
+        };
+        let Some(frames) = self
+            .lane
+            .encode_states(player_id, generation, epoch, tick, &encoded)
+        else {
+            return Ok(false);
+        };
+        out.note_tick(tick, Instant::now());
+        let slices: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+        let frags = crate::frag::split(tick, &slices).map_err(oversize_snap)?;
+        if priorities.is_empty() {
+            out.push_fragments(generation, frags);
+        } else {
+            out.push_fragments_prio(generation, frags, priorities);
+        }
+        Ok(true)
+    }
+
+    /// Host-side baselined-state counters (full against delta, bytes).
+    pub fn lane_states(&self) -> crate::StateStats {
+        self.lane.state_stats()
     }
 
     /// [`Host::lane_counts`], from any thread.
@@ -1696,6 +1795,11 @@ impl Client {
             .is_some_and(|l| l.lane.0.send_ack(generation, epoch, tick))
     }
 
+    /// [`ClientCtl::lane_states`], from the `Client` itself.
+    pub fn lane_states(&self) -> Option<crate::StateStats> {
+        self.lane.as_ref().map(|l| l.lane.0.state_stats())
+    }
+
     /// The lane's counters (accepted datagrams and every kind of drop);
     /// `None` on a TCP-only client.
     pub fn lane_counts(&self) -> Option<LaneCounts> {
@@ -2013,6 +2117,12 @@ impl ClientCtl {
         self.lane
             .as_ref()
             .is_some_and(|l| l.send_ack(generation, epoch, tick))
+    }
+
+    /// Client-side baselined-state counters (applied, refused for a
+    /// missing base); `None` on a TCP-only client.
+    pub fn lane_states(&self) -> Option<crate::StateStats> {
+        self.lane.as_ref().map(|l| l.state_stats())
     }
 
     /// The lane's outbound queue bounds, age and drop counters; `None` on

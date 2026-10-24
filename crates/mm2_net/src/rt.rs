@@ -49,7 +49,10 @@ use crate::congest::{
     Adapt, CONGESTED_ACK_AGE, Claim, DEFAULT_PEER_CEILING, Feedback, PeerController, Quantiles,
     Uplink, effective_rate, wire_bytes,
 };
-use crate::frag::{Assembler, AssemblerStats, decode_ack, encode_ack};
+use crate::frag::{
+    Assembler, AssemblerStats, BaselineReceiver, BaselineSender, MAX_GROUPS, Plan, StateError,
+    decode_ack, decode_state_frame, encode_ack, encode_state_frame,
+};
 use crate::lobby::{PeerMail, RemoteInputs};
 use crate::pace::{
     BULK_MAX_AGE, BULK_QUEUE_CAP, Budget, MOVEMENT_MAX_AGE, MOVEMENT_QUEUE_CAP, PEER_BURST_BYTES,
@@ -450,6 +453,9 @@ pub struct LaneAck {
     pub generation: u64,
     /// The reset epoch the state belongs to.
     pub epoch: u8,
+    /// The logical snapshot group the state belongs to (each group keeps
+    /// its own baselines).
+    pub group: u8,
     /// The server tick of the acknowledged state.
     pub tick: u64,
 }
@@ -1173,10 +1179,50 @@ pub(crate) struct LaneSeat {
     heard: Instant,
     window: SeqWindow,
     out: Arc<SeatOut>,
-    ack: Option<LaneAck>,
-    /// When `ack` last advanced.
+    /// The newest acknowledgement per logical snapshot group.
+    acks: [Option<LaneAck>; MAX_GROUPS],
+    /// When an `acks` entry last advanced.
     ack_at: Option<Instant>,
+    /// The seat's baselines, one sender per logical group. Born with the
+    /// lane seat, so a client that rejoins under the same id starts from
+    /// full states instead of deltas against a baseline it never held.
+    baselines: Arc<Mutex<SeatBaselines>>,
     rel: ReliableChannel,
+}
+
+/// The client's baselines and counters.
+#[derive(Debug, Default)]
+struct ClientStates {
+    receivers: [BaselineReceiver; MAX_GROUPS],
+    stats: StateStats,
+}
+
+/// What the host holds to delta one seat's snapshot groups against.
+#[derive(Debug, Default)]
+pub(crate) struct SeatBaselines {
+    senders: [BaselineSender; MAX_GROUPS],
+}
+
+/// Counters for baselined snapshot states (NETPLAY-10D-2), on either end
+/// of a lane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StateStats {
+    /// Host: groups sent as a full state.
+    pub sent_full: u64,
+    /// Host: groups sent as a delta against an acknowledged baseline.
+    pub sent_delta: u64,
+    /// Host: bytes of state payload sent.
+    pub sent_bytes: u64,
+    /// Host: bytes the same groups would have taken as full states.
+    pub raw_bytes: u64,
+    /// Client: states applied and acknowledged.
+    pub applied: u64,
+    /// Client: deltas refused because their base is not held.
+    pub missing_base: u64,
+    /// Client: states refused as stale (a duplicate or reordered group).
+    pub stale: u64,
+    /// Client: states that did not parse.
+    pub malformed: u64,
 }
 
 /// Every seat's lane plus the generation datagrams must name. Lives
@@ -1348,18 +1394,25 @@ fn ingest(
             None => Verdict::Dropped(Refuse::Malformed),
         },
         LaneTag::Ack => match decode_ack(payload) {
-            Some((epoch, tick)) => {
-                let newer = seat
-                    .ack
-                    .is_none_or(|a| a.generation != h.generation || a.tick < tick);
+            Some((epoch, group, tick)) => {
+                let slot = &mut seat.acks[usize::from(group)];
+                let newer = slot.is_none_or(|a| a.generation != h.generation || a.tick < tick);
                 if newer {
-                    seat.ack = Some(LaneAck {
+                    *slot = Some(LaneAck {
                         generation: h.generation,
                         epoch,
+                        group,
                         tick,
                     });
                     seat.ack_at = Some(now);
                     seat.out.on_ack(tick, now);
+                    // The sender judges scope and retention itself; an
+                    // ack it cannot match is simply not a baseline.
+                    seat.baselines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .senders[usize::from(group)]
+                    .ack(h.generation, epoch, tick);
                 }
                 Verdict::Accepted
             }
@@ -1379,6 +1432,7 @@ pub(crate) struct HostLane {
     clock: ReliableClock,
     /// The host's aggregate uplink, shared by every seat's sender.
     uplink: Arc<Mutex<Uplink>>,
+    states: Mutex<StateStats>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -1396,6 +1450,7 @@ impl HostLane {
             wake: Arc::new(Wake::default()),
             clock: ReliableClock::new(),
             uplink: Arc::new(Mutex::new(Uplink::new(uplink_cap, Instant::now()))),
+            states: Mutex::new(StateStats::default()),
             threads: Mutex::new(Vec::new()),
         });
         let recv = {
@@ -1455,8 +1510,9 @@ impl HostLane {
                     Some(self.uplink.clone()),
                     Instant::now(),
                 )),
-                ack: None,
+                acks: [None; MAX_GROUPS],
                 ack_at: None,
+                baselines: Arc::default(),
                 rel: ReliableChannel::new(MAX_RELIABLE_BODY),
             },
         );
@@ -1503,7 +1559,63 @@ impl HostLane {
     /// The newest acknowledgement `id`'s client sent.
     pub(crate) fn latest_ack(&self, id: u16) -> Option<LaneAck> {
         let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
-        mail.lane.seats.get(&id).and_then(|s| s.ack)
+        mail.lane
+            .seats
+            .get(&id)
+            .and_then(|s| s.acks.iter().flatten().max_by_key(|a| a.tick).copied())
+    }
+
+    /// The newest acknowledgement `id`'s client sent for `group`.
+    pub(crate) fn group_ack(&self, id: u16, group: u8) -> Option<LaneAck> {
+        let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.lane
+            .seats
+            .get(&id)
+            .and_then(|s| s.acks.get(usize::from(group)).copied().flatten())
+    }
+
+    /// Baselined state counters of the host side.
+    pub(crate) fn state_stats(&self) -> StateStats {
+        *self.states.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Encode each `(group, snapshot bytes)` of `id`'s tick against the
+    /// baselines its client acknowledged, as the data of fragment groups.
+    /// `None` when the seat has no established lane. Nothing is queued.
+    pub(crate) fn encode_states(
+        &self,
+        id: u16,
+        generation: u64,
+        epoch: u8,
+        tick: u64,
+        groups: &[(u8, Vec<u8>)],
+    ) -> Option<Vec<Vec<u8>>> {
+        let baselines = {
+            let mail = self.inputs.inner.lock().unwrap_or_else(|e| e.into_inner());
+            mail.lane
+                .seats
+                .get(&id)
+                .filter(|s| s.established)
+                .map(|s| s.baselines.clone())?
+        };
+        let mut baselines = baselines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stats = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        Some(
+            groups
+                .iter()
+                .map(|(group, bytes)| {
+                    let (payload, plan) = baselines.senders[usize::from(*group)]
+                        .encode(generation, epoch, tick, bytes);
+                    match plan {
+                        Plan::Full => stats.sent_full += 1,
+                        Plan::Delta(_) => stats.sent_delta += 1,
+                    }
+                    stats.sent_bytes += payload.len() as u64;
+                    stats.raw_bytes += bytes.len() as u64;
+                    encode_state_frame(*group, epoch, &payload)
+                })
+                .collect(),
+        )
     }
 
     pub(crate) fn is_established(&self, id: u16) -> bool {
@@ -1888,6 +2000,9 @@ pub(crate) struct ClientLane {
     started: AtomicU64,
     inbox: Arc<Inbox>,
     assembler: Mutex<Assembler>,
+    /// The receiving end of the host's baselined groups, one per logical
+    /// group, and the client-side counters.
+    receivers: Mutex<ClientStates>,
     /// When the host's last probe echo arrived (path-health clock).
     last_echo: Mutex<Instant>,
     /// Probe interval and failure bound in milliseconds (test seam).
@@ -1929,6 +2044,7 @@ impl ClientLane {
             started: AtomicU64::new(0),
             inbox,
             assembler: Mutex::new(Assembler::new()),
+            receivers: Mutex::new(ClientStates::default()),
             last_echo: Mutex::new(Instant::now()),
             probe_every_ms: AtomicU64::new(PATH_PROBE_INTERVAL.as_millis() as u64),
             fail_after_ms: AtomicU64::new(PATH_FAILURE_AFTER.as_millis() as u64),
@@ -2143,6 +2259,9 @@ impl ClientLane {
             .accept(payload, Instant::now());
         match done {
             Ok(None) => Counters::bump(&self.counters.accepted),
+            Ok(Some(group)) if decode_state_frame(&group.data).is_some() => {
+                self.on_state(header, group.tick, &group.data)
+            }
             Ok(Some(group)) => match Message::decode(&group.data) {
                 Ok(msg @ Message::Snap { generation, .. }) if generation == header.generation => {
                     Counters::bump(&self.counters.accepted);
@@ -2154,6 +2273,52 @@ impl ClientLane {
             },
             Err(_) => self.counters.drop_for(Refuse::Malformed),
         }
+    }
+
+    /// A completed group that carries a baselined state: reconstruct it,
+    /// hand the `Snap` to the game and acknowledge the tick. A delta whose
+    /// base is not held is refused and *not* acknowledged, so the host
+    /// keeps sending against the baseline it still believes in until its
+    /// refresh sends a full state.
+    fn on_state(&self, header: &Header, tick: u64, data: &[u8]) {
+        let Some((group, epoch, payload)) = decode_state_frame(data) else {
+            return self.counters.drop_for(Refuse::Malformed);
+        };
+        let applied = {
+            let mut st = self.receivers.lock().unwrap_or_else(|e| e.into_inner());
+            let r = st.receivers[usize::from(group)].apply(header.generation, epoch, tick, payload);
+            match &r {
+                Ok(_) => st.stats.applied += 1,
+                Err(StateError::MissingBase(_)) => st.stats.missing_base += 1,
+                Err(StateError::Stale) => st.stats.stale += 1,
+                Err(_) => st.stats.malformed += 1,
+            }
+            r
+        };
+        match applied {
+            Ok(bytes) => match Message::decode(&bytes) {
+                Ok(msg @ Message::Snap { generation, .. }) if generation == header.generation => {
+                    Counters::bump(&self.counters.accepted);
+                    // Acknowledged only once applied, and queued before the
+                    // game can see the snapshot.
+                    self.send_ack_group(header.generation, epoch, group, tick);
+                    self.inbox.push_lane(msg);
+                }
+                Ok(Message::Snap { .. }) => self.counters.drop_for(Refuse::WrongGeneration),
+                Ok(_) => self.counters.drop_for(Refuse::Unexpected),
+                Err(_) => self.counters.drop_for(Refuse::Malformed),
+            },
+            Err(StateError::Stale) => self.counters.drop_for(Refuse::Replayed),
+            Err(_) => self.counters.drop_for(Refuse::Malformed),
+        }
+    }
+
+    /// Baselined state counters of the client side.
+    pub(crate) fn state_stats(&self) -> StateStats {
+        self.receivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats
     }
 
     /// One fragment of a world-state frame: reassembled by its kind's own
@@ -2235,6 +2400,11 @@ impl ClientLane {
     /// host. Unreliable like everything on the lane: the caller repeats
     /// it with each newer tick.
     pub(crate) fn send_ack(&self, generation: u64, epoch: u8, tick: u64) -> bool {
+        self.send_ack_group(generation, epoch, 0, tick)
+    }
+
+    /// [`send_ack`](Self::send_ack) for logical snapshot `group`.
+    pub(crate) fn send_ack_group(&self, generation: u64, epoch: u8, group: u8, tick: u64) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return false;
         }
@@ -2242,7 +2412,7 @@ impl ClientLane {
             LaneTag::Ack,
             Priority::Movement,
             generation,
-            encode_ack(epoch, tick),
+            encode_ack(epoch, group, tick),
         );
         true
     }
