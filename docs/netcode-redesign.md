@@ -2230,11 +2230,43 @@ bounds and teleport clear; yaw across +-pi takes the 0.1 rad arc; alternating
 yaw settles; non-finite clears; the PostUpdate systems leave `Transform`
 unchanged and do not accumulate over repeated frames.
 
-Open (not claimed): snapshot-buffer sampling for non-predicted distant
-replicas and the arrival-gap-driven `RemoteLerp` (AC5); trailers/wheels of the
+Open (not claimed): trailers/wheels of the
 corrected car beyond the carried subtree (trailer is a separate body); the
 physics-versus-rendered developer overlay; rendered captures and 30/60/144 FPS
 route runs (AC1, AC3); input-to-render latency measurement.
+
+## Host-timestamped snapshot buffer (NETPLAY-07B, #2006)
+
+`mm2_app::netinterp::SnapBuffer`, on the collider-less visual copy of a remote
+human (the `Predicted` copy whose contact body is a separate dynamic entity).
+`apply_snap_frame` pushes each seat row keyed by the host tick time
+(`tick / RACE_TICK_HZ`); `drive_remote_lerp` samples it instead of the
+arrival-gap `RemoteLerp` blend, so jitter changes buffer occupancy, not the
+speed of the drawn body.
+
+- Clock: `base` = floor of `arrival - host_time` (drops at once, creeps up
+  1%); render time = `now - base - delay`.
+- Delay: `0.05 s + 3 * jitter` (RFC 3550 mean deviation of the arrival
+  delay), capped at 0.25 s, slewed at 0.1 s/s (<= 10% playback-speed change).
+- Sampling: interpolate between the bracketing samples (short-arc slerp);
+  past the newest, extrapolate along the sample velocity for at most 0.1 s
+  then hold; before the oldest, hold. At most 32 samples; non-finite and
+  non-increasing samples are refused (`SnapBuffer::refused`). A teleport
+  (epoch change or > `CORRECTION_SNAP_DIST`) clears the history.
+- Never writes a colliding body: the copy has no collider, and the close
+  predicted body keeps the NETPLAY-05 policy untouched. Numbers are designed.
+
+Evidence (synthetic, `cargo test -p mm2_app --lib netinterp`): steady stream
+plays at the host speed; +-15 ms jitter keeps speed within 3 m/s of 20 m/s;
+jitter raises the target delay, a clean stream does not; delay slew bound;
+extrapolation bound; capacity and refusal; clear on teleport; short-arc
+rotation.
+
+Open: kinematic copies that *are* the collider (host-planned bots, the
+non-timeline path) still use the arrival-gap blend, since smoothing their
+`Position` would write the colliding body; they need a separate render pose.
+Trailer copies keep the arrival-gap blend. No rendered or lossy-transport
+run (AC3/AC5 jitter matrix) yet.
 
 ## NETPLAY-10A: nonblocking bounded I/O handoff
 

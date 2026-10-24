@@ -2365,6 +2365,12 @@ fn spawn_remote(
         // the legacy kinematic copy.
         if dynamic && bot.is_none() {
             commands.entity(vehicle).remove::<Collider>();
+            // The collider-less visual follows the host-timestamped
+            // snapshot buffer instead of the arrival-gap blend
+            // (NETPLAY-07B); nothing collides from its pose.
+            commands
+                .entity(vehicle)
+                .insert(crate::netinterp::SnapBuffer::default());
             contact_body = Some(spawn_contact_body(
                 commands, &cfg, wire, vehicle, pos, yaw, owner,
             ));
@@ -4091,7 +4097,12 @@ pub fn apply_snapshots(
     // v16 surface tail — the copy's `SurfaceContact` the replicated
     // class/slip/speed lands on. Queried apart from `SnapTargetRow` —
     // the row already sits at Bevy's 15-element query-tuple cap.
-    mut surfaces: Query<&mut SurfaceContact>,
+    // Paired with the drawn-only copies' snapshot buffers (NETPLAY-07B)
+    // to stay inside Bevy's 16-parameter system limit.
+    mut replica_tails: (
+        Query<&mut SurfaceContact>,
+        Query<&mut crate::netinterp::SnapBuffer>,
+    ),
     // Every trailer — remote copies key off `RemoteTrailer::owner`, the
     // own rig's trailer off `Trailer::towing` == the local seat entity.
     mut trailers: Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
@@ -4153,7 +4164,8 @@ pub fn apply_snapshots(
             &time,
             &mut commands,
             &mut players,
-            &mut surfaces,
+            &mut replica_tails.0,
+            &mut replica_tails.1,
             &mut trailers,
             &mut mirror,
             &mut texel,
@@ -4425,6 +4437,7 @@ fn apply_snap_frame(
     commands: &mut Commands,
     players: &mut Query<SnapTargetRow<'_>, SnapTargetFilter>,
     surfaces: &mut Query<&mut SurfaceContact>,
+    buffers: &mut Query<&mut crate::netinterp::SnapBuffer>,
     trailers: &mut Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
     mirror: &mut RaceMirror,
     texel: &mut crate::texel_fx::TexelRepair,
@@ -4732,9 +4745,10 @@ fn apply_snap_frame(
                     report.surfaces_applied += 1;
                 }
             }
+            let teleport = authority_reset || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST;
             match lerp {
                 Some(mut lerp) => {
-                    if authority_reset || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST {
+                    if teleport {
                         // A teleport, not motion — the authority's
                         // reset/recovery moved the car. Snap rather
                         // than blend a slide through the world.
@@ -4757,6 +4771,20 @@ fn apply_snap_frame(
                     *pos = Position(to_pos);
                     *rot = Rotation(to_rot);
                 }
+            }
+            // A drawn-only copy plays its host-timestamped history back
+            // (NETPLAY-07B); a teleport drops the old life's samples.
+            if let Ok(mut buf) = buffers.get_mut(entity) {
+                if teleport {
+                    buf.clear();
+                }
+                buf.push(
+                    snap.tick as f64 / f64::from(mm2_game::RACE_TICK_HZ),
+                    now,
+                    to_pos,
+                    to_rot,
+                    Vec3::from(entry.vel),
+                );
             }
             if authority_reset {
                 commands.entity(entity).insert(Teleported);
@@ -5118,6 +5146,7 @@ type LerpRow<'a> = (
     &'a RemoteLerp,
     Option<&'a mut VehicleState>,
     Option<&'a RemoteDrive>,
+    Option<&'a mut crate::netinterp::SnapBuffer>,
 );
 
 /// Advance remote copies along their [`RemoteLerp`] blend — one blend
@@ -5134,11 +5163,22 @@ pub fn drive_remote_lerp(
 ) {
     let now = time.elapsed_secs_f64();
     let dt = time.delta_secs();
-    for (mut pos, mut rot, lerp, state, drive) in &mut remotes {
-        let span = (lerp.end - lerp.start).max(f64::EPSILON);
-        let t = ((now - lerp.start) / span).clamp(0.0, 1.0) as f32;
-        pos.0 = lerp.from_pos.lerp(lerp.to_pos, t);
-        rot.0 = wire_quat(lerp.from_rot.slerp(lerp.to_rot, t).to_array());
+    for (mut pos, mut rot, lerp, state, drive, buffer) in &mut remotes {
+        // A drawn-only copy samples its snapshot buffer; with nothing
+        // buffered yet (or no buffer: a copy that is also the collider)
+        // the arrival-gap blend stands.
+        match buffer.and_then(|mut b| b.sample(now)) {
+            Some((p, r)) => {
+                pos.0 = p;
+                rot.0 = r;
+            }
+            None => {
+                let span = (lerp.end - lerp.start).max(f64::EPSILON);
+                let t = ((now - lerp.start) / span).clamp(0.0, 1.0) as f32;
+                pos.0 = lerp.from_pos.lerp(lerp.to_pos, t);
+                rot.0 = wire_quat(lerp.from_rot.slerp(lerp.to_rot, t).to_array());
+            }
+        }
         let (Some(mut state), Some(drive)) = (state, drive) else {
             continue;
         };

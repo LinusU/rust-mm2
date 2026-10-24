@@ -53,6 +53,7 @@ pub mod navarrow3d;
 pub mod net;
 pub mod netcmd;
 pub mod netdrive;
+pub mod netinterp;
 pub mod netlead;
 pub mod netpace;
 pub mod netplay_timeline;
