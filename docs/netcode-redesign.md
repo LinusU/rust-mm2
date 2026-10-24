@@ -2053,8 +2053,11 @@ watermark, which dropped the second group as stale. It now judges freshness
 per row:
 
 - **Freshness is per seat.** `seat_marks` holds the newest `(generation,
-  tick)` staged or applied for each seat, `trailer_marks` the same per
-  towing seat. A row at or behind its mark is stale; a `Snap` whose every row
+  tick)` *applied* for each seat, `trailer_marks` the same per towing seat;
+  a row is judged against that and against the rows still staged for the
+  seat. (Marks move at apply, after the session's generation gate, so a
+  dropped foreign-generation frame never poisons a seat.) A row at or behind
+  either is stale; a `Snap` whose every row
   is stale is one counted `snaps_staled` drop (a duplicate of a group, or a
   reordered straggler); a partly stale one keeps its fresh rows. Both maps
   and the per-row blend-arrival map are bounded (`MAX_FRESHNESS_KEYS`, 4 x

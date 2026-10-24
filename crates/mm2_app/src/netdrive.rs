@@ -404,11 +404,6 @@ const TRAILER_KEY: u32 = 1 << 16;
 /// naming ids outside the roster, and the oldest mark retires first.
 const MAX_FRESHNESS_KEYS: usize = 4 * mm2_net::MAX_PLAYERS as usize;
 
-/// Whether a row for `seat` at `frame` is newer than the seat's mark.
-fn fresh_row(marks: &HashMap<u16, (u64, u64)>, seat: u16, frame: (u64, u64)) -> bool {
-    marks.get(&seat).is_none_or(|m| frame > *m)
-}
-
 /// Record `frame` as `seat`'s newest, retiring the oldest mark past the bound.
 fn note_mark(marks: &mut HashMap<u16, (u64, u64)>, seat: u16, frame: (u64, u64)) {
     marks.insert(seat, frame);
@@ -574,8 +569,11 @@ pub struct RemoteSnaps {
     /// staged group (a newer row strips it from an older one), so the
     /// list is bounded by the seat count.
     staged: Vec<Snap>,
-    /// Per-seat freshness: the newest `(generation, tick)` of a seat row
-    /// staged or applied. A row at or behind it is stale. A seat a group
+    /// Per-seat freshness of *applied* rows: the newest `(generation,
+    /// tick)` applied for each seat; together with the rows still staged
+    /// it gates `push` (a row at or behind either is stale). Set at apply
+    /// only, so a frame the session gate drops (a foreign generation)
+    /// never poisons a seat's mark. A seat a group
     /// does not name keeps its mark — absent is "not in this group",
     /// never "left". Bounded by [`MAX_FRESHNESS_KEYS`].
     seat_marks: HashMap<u16, (u64, u64)>,
@@ -952,7 +950,7 @@ impl RemoteSnaps {
     /// The newest `(generation, tick)` of a row staged or applied for
     /// wire `seat` — its freshness mark (`None` before its first row).
     pub fn seat_mark(&self, seat: u16) -> Option<(u64, u64)> {
-        self.seat_marks.get(&seat).copied()
+        self.newest_seat_row(seat)
     }
 
     /// Groups staged and not yet applied (bounded by the seat count).
@@ -990,8 +988,8 @@ impl RemoteSnaps {
     ) {
         let frame = (generation, tick);
         let had_rows = !entries.is_empty() || !trailers.is_empty();
-        entries.retain(|e| fresh_row(&self.seat_marks, e.player, frame));
-        trailers.retain(|t| fresh_row(&self.trailer_marks, t.owner, frame));
+        entries.retain(|e| self.newest_seat_row(e.player).is_none_or(|m| frame > m));
+        trailers.retain(|t| self.newest_trailer_row(t.owner).is_none_or(|m| frame > m));
         let stale = if had_rows {
             entries.is_empty() && trailers.is_empty()
         } else {
@@ -1029,6 +1027,29 @@ impl RemoteSnaps {
         self.queue_impacts(generation, impacts);
     }
 
+    /// The newest `(generation, tick)` known for `seat`: the applied mark
+    /// or a row still staged, whichever is later.
+    fn newest_seat_row(&self, seat: u16) -> Option<(u64, u64)> {
+        let staged = self
+            .staged
+            .iter()
+            .filter(|g| g.entries.iter().any(|e| e.player == seat))
+            .map(|g| (g.generation, g.tick))
+            .max();
+        staged.max(self.seat_marks.get(&seat).copied())
+    }
+
+    /// [`newest_seat_row`](Self::newest_seat_row) for the trailer a seat tows.
+    fn newest_trailer_row(&self, owner: u16) -> Option<(u64, u64)> {
+        let staged = self
+            .staged
+            .iter()
+            .filter(|g| g.trailers.iter().any(|t| t.owner == owner))
+            .map(|g| (g.generation, g.tick))
+            .max();
+        staged.max(self.trailer_marks.get(&owner).copied())
+    }
+
     /// Stage a group whose rows already passed the freshness check: its
     /// rows take their seats' marks, strip those seats from any older
     /// staged group (latest-wins per seat), and a group of the same tick
@@ -1036,12 +1057,6 @@ impl RemoteSnaps {
     /// repeated seat was stale).
     fn stage_group(&mut self, group: Snap) {
         let frame = (group.generation, group.tick);
-        for e in &group.entries {
-            note_mark(&mut self.seat_marks, e.player, frame);
-        }
-        for t in &group.trailers {
-            note_mark(&mut self.trailer_marks, t.owner, frame);
-        }
         // A group the strip empties has nothing left to apply; a
         // row-less frame never had anything to lose and stays.
         self.staged.retain_mut(|older| {
@@ -4141,6 +4156,13 @@ fn apply_snap_frame(
     // The newest tick any group reached: a group of an older tick can
     // still apply after a newer one (other seats), so this only rises.
     snaps.applied = snaps.applied.max(Some((snap.generation, snap.tick)));
+    let frame = (snap.generation, snap.tick);
+    for e in &snap.entries {
+        note_mark(&mut snaps.seat_marks, e.player, frame);
+    }
+    for t in &snap.trailers {
+        note_mark(&mut snaps.trailer_marks, t.owner, frame);
+    }
     report.note_bot_poses(snap.generation, snap.tick, snap.entries.iter());
     let now = time.elapsed_secs_f64();
     // The blend interval is each seat's observed arrival gap, clamped
@@ -6246,16 +6268,22 @@ mod tests {
     }
 
     /// The freshness state is roster-bounded: ids a host invents retire
-    /// the oldest mark instead of growing the map.
+    /// the oldest mark instead of growing the map. Staged groups stay
+    /// bounded by the seat count however many ticks arrive unapplied.
+
     #[test]
     fn freshness_state_is_bounded() {
         let mut snaps = RemoteSnaps::default();
         for seat in 0..1000u16 {
-            push_seats(&mut snaps, u64::from(seat) + 1, &[seat]);
-            snaps.staged.clear();
+            note_mark(&mut snaps.seat_marks, seat, (1, u64::from(seat) + 1));
         }
         assert!(snaps.seat_marks.len() <= MAX_FRESHNESS_KEYS);
         assert!(snaps.staged.len() <= 1);
+        for tick in 1..200 {
+            push_seats(&mut snaps, tick, &[1]);
+            push_seats(&mut snaps, tick, &[2, 3]);
+        }
+        assert_eq!(snaps.staged.len(), 1);
         let now = 1.0;
         for key in 0..1000u32 {
             snaps.blend_interval(key, now + f64::from(key));
@@ -6485,6 +6513,7 @@ mod tests {
         assert_eq!(snaps.staged.last().unwrap().tick, 11);
         // The applied watermark gates too — nothing staged needed.
         snaps.applied = Some((1, 11));
+        snaps.seat_marks.insert(1, (1, 11));
         snaps.staged.clear();
         snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new(), None);
         assert!(snaps.staged.is_empty());
