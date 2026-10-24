@@ -2252,6 +2252,59 @@ mod tests {
         assert_eq!(speed_of(&pred, own, 20), own_before);
     }
 
+    /// The recorded impairment of a reset contact body at `tick`.
+    fn remote_impairment(pred: &OwnPrediction, remote: Entity, tick: u64) -> Option<f32> {
+        recorded(pred, tick, remote).impairment
+    }
+
+    /// Damage across a reset, repaired: the seat was limping before the
+    /// host reset it and the same snapshot's damage byte reads repaired, so
+    /// the corrected history has the repaired engine from the compared tick
+    /// (what the host's `damage.reset()` next to its `ResetVehicle` did).
+    #[test]
+    fn a_reset_that_repaired_the_body_drops_its_recorded_impairment() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        app.world_mut()
+            .entity_mut(remote)
+            .insert(EngineImpairment(0.5));
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        assert_eq!(remote_impairment(&pred, remote, 20), Some(0.5));
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 1;
+        let r = drive(remote, Some(ra), 21, 30);
+        pred.authored = vec![authored_impairment(remote, None)];
+        go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        assert_eq!(remote_impairment(&pred, remote, 20), None);
+        assert_eq!(remote_impairment(&pred, remote, 30), None);
+        assert!(app.world().get::<EngineImpairment>(remote).is_none());
+    }
+
+    /// Damage across a reset, carried over: a reset that did not repair
+    /// (the damage byte still reads damaged) keeps the impairment the
+    /// authority says, on the new life, at the compared tick.
+    #[test]
+    fn a_reset_that_kept_the_damage_carries_the_authored_impairment() {
+        let (mut app, own, remote) = two_cars();
+        tracked(&mut app, remote, 0);
+        let mut pred = fresh();
+        run2(&mut app, own, remote, &mut pred, 30);
+        assert_eq!(remote_impairment(&pred, remote, 20), None);
+        let a = assertion_from(&pred, own, 20);
+        let mut ra = remote_assertion_from(&pred, remote, 20);
+        ra.epoch = 1;
+        let r = drive(remote, Some(ra), 21, 30);
+        pred.authored = vec![authored_impairment(remote, Some(0.25))];
+        go2(&mut app, &mut pred, own, &a, std::slice::from_ref(&r), 30);
+        let past = pred.ring.get(20).unwrap();
+        let (_, vc) = past.vehicles.iter().find(|(e, _)| *e == remote).unwrap();
+        assert_eq!(vc.forward_speed, 0.0, "a new life");
+        assert_eq!(remote_impairment(&pred, remote, 20), Some(0.25));
+        assert_eq!(remote_impairment(&pred, remote, 30), Some(0.25));
+    }
+
     /// A remote state older than the body's epoch is dropped whatever its
     /// pose says: it can neither trigger a replay nor be written back over
     /// the reset.
