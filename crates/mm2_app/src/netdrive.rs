@@ -3743,9 +3743,10 @@ pub const WORLD_GROUP_RANGE_M: f32 = f32::INFINITY;
 
 /// The seats of one `Snap` partitioned into contact islands: seats whose
 /// bodies (car or trailer) lie within [`CONTACT_ISLAND_RADIUS_M`] plus
-/// their speeds times [`CONTACT_ISLAND_HORIZON_S`] of each other, or that struck each other this frame, are transitively one
-/// island. The partition depends only on the frame's data, so it is
-/// deterministic, and an island is never split across groups.
+/// their speeds times [`CONTACT_ISLAND_HORIZON_S`] of each other, or that
+/// struck each other this frame, are transitively one island. The partition
+/// depends only on the frame's data, so it is deterministic, and an island
+/// is never split across groups.
 struct ContactIslands {
     island: BTreeMap<u16, usize>,
     /// The islands holding at least one human seat.
