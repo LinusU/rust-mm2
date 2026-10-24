@@ -793,12 +793,9 @@ Measured with `cargo test -p mm2_net lane_mtu -- --nocapture` (real
 
 ### Not done / open
 
-- The app does not yet produce grouped or delta snapshots (the client now
-  accepts them: see "Partial same-tick Snap groups"): `mm2_app`
-  still broadcasts one `Snap`, which now fragments as a single group. Choosing
-  the owner/contact grouping and engaging `BaselineSender` per seat belongs
-  with the send-cadence and prioritisation work (NETPLAY-06D) and the app
-  correction path (NETPLAY-04).
+- The app produces grouped snapshots (NETPLAY-10C-2, see "Snapshot groups
+  per seat" under NETPLAY-06D) but does not engage `BaselineSender` per seat
+  yet: every group is a full-state `Snap`, not a delta.
 - The simulation has no jitter or reordering beyond the fixed ack RTT, and
   loopback tests prove the code, not WAN behaviour.
 
@@ -1013,13 +1010,53 @@ movement group each tick.
 App level (`playing_snapshots_leave_at_the_snapshot_rate_not_the_update_rate`):
 a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
 
+### Snapshot groups per seat (NETPLAY-10C-2)
+
+`netdrive::publish_snapshots` no longer broadcasts one `Snap`. For each
+rostered seat with an established lane it calls
+`HostCtl::send_snap_groups_prio` with groups of the same `(generation, tick)`:
+
+- **Group 0, `Movement`:** the seat's own entry, every island that holds a
+  human seat (the seat's own island included), their trailers, the impact
+  rows naming them, and the race row.
+- **Group 1, `Bulk`:** the islands made only of bots and farther than
+  `WORLD_GROUP_RANGE_M` from every human body, with their trailers and
+  impact rows. Omitted when empty; the race row is not repeated.
+  **`WORLD_GROUP_RANGE_M` is infinite today, so group 1 is never sent**
+  (see "Why nothing is `Bulk` yet").
+
+A contact island is the transitive closure of "a body (car or trailer) of
+one seat is within `CONTACT_ISLAND_RADIUS_M` (20 m) plus both speeds times
+`CONTACT_ISLAND_HORIZON_S` (1 s) of a body of the other" and "the two seats
+were participants of one `ImpactEvent` this frame" (distances inferred from
+the physics scale, not original values). It depends only on the frame's
+data, so it is deterministic, and an island is never split across groups.
+
+**Why a distant human is not `Bulk`.** The first cut put every seat outside
+the receiver's island in `Bulk`. `net_contact`'s high-latency wall pile-up
+then failed (seats ended 10-170 m apart between the two clients): on a lossy
+link the congestion layer sheds `Bulk` outright, so a human who drove off was
+never updated. Humans are few and small.
+
+**Why nothing is `Bulk` yet.** With distant *bots* in `Bulk`, a retail
+Cops & Robbers match (`net_cnr_bots_mp`, 2 bots, loopback) collapsed the
+seat's lane: about tick 2550 the bulk queue stopped draining while movement
+was idle, movement datagrams started to expire, and the controller fell from
+131072 to 12288 bytes/s (`decreases` 437, 4188 movement datagrams expired,
+`adapt.bulk` false) for the rest of the match, so the client's bots froze
+(0 sampled ticks in common with the host). The same run with every row in
+group 0 keeps 131072 and sheds nothing. The partition and the per-group
+counters are in place and unit-tested; `WORLD_GROUP_RANGE_M` stays infinite
+until that lane collapse is understood.
+
+The unit tests `contact_islands_*` cover the partition; the lane-level
+behaviour of a lost or delayed `Bulk` group is in `lane_pace_tests`.
+
 ### Not done / open
 
-- The app still sends one `Snap` per tick through `broadcast`: it does not
-  yet split owner/world into groups or mark world catch-up (props, signals,
-  ambient cars) `Bulk`, nor engage `BaselineSender` per seat. The mechanism
-  and its bounds are in place and tested; choosing the grouping belongs with
-  the correction path (NETPLAY-04) and congestion work (NETPLAY-10).
+- `BaselineSender` is not engaged per seat; snapshots are full state. The
+  snapshot grouping and `Bulk` marking are done: see "Snapshot groups per
+  seat" above.
 - World catch-up no longer rides TCP for a seat with a lane (NETPLAY-10C-3,
   protocol v39); TCP stays only for seats without one:
   - `Props` (`HostCtl::send_props`) takes the lane's **reliable channel**,

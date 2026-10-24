@@ -126,7 +126,7 @@
 //! per-part launch impulse never rides the wire (named gaps, not
 //! silent behavior).
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
@@ -143,7 +143,7 @@ use mm2_game::{
     VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
-    Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE,
+    Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, Priority, RemoteInputs, SNAP_FLAG_BRAKE,
     SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry,
     SnapImpact, SnapProp, SnapRace, SnapTrailer, Source as CommandSource, TickCommand, VehiclePick,
 };
@@ -1314,6 +1314,11 @@ pub struct NetDriveReport {
     pub inputs_limited: u64,
     /// `Snap` frames the host broadcast.
     pub snaps_sent: u64,
+    /// Owner/interaction (`Movement`) snapshot groups the host sent over a
+    /// seat's lane — one per seat per published snapshot.
+    pub snap_groups_owner: u64,
+    /// World (`Bulk`) snapshot groups the host sent over a seat's lane.
+    pub snap_groups_world: u64,
     /// Updates whose snapshot the cadence deferred (NETPLAY-06D).
     pub snaps_skipped: u64,
     /// Snapshot frames the client applied to its remote copies.
@@ -3334,6 +3339,9 @@ pub fn publish_snapshots(
     // snapshot it is measured from.
     clocks: CadenceClocks,
     mut pace: Local<PublishPace>,
+    // The seats a snapshot is addressed to; absent, the whole roster is
+    // broadcast one full `Snap`.
+    lobby: Option<Res<LobbyState>>,
 ) {
     // The reader drains every run — including gated-out phases — so a
     // pre-`Start` or post-session stream never replays stale hits into
@@ -3534,6 +3542,19 @@ pub fn publish_snapshots(
     // `generation` field below is the wire namespace.
     let generation = session.generation();
     let wire_generation = session.wire_generation();
+    // Seats that struck each other this frame are one contact island
+    // whatever their distance (a fast hit can separate them again before
+    // the next frame).
+    let hit_pairs: Vec<(u16, u16)> = drained
+        .iter()
+        .filter(|e| e.generation == generation)
+        .filter_map(|e| {
+            Some((
+                *oid_wires.get(&e.participants.0)?,
+                *oid_wires.get(&e.participants.1)?,
+            ))
+        })
+        .collect();
     let mut impact_rows: Vec<SnapImpact> = Vec::new();
     for e in drained.into_iter().filter(|e| e.generation == generation) {
         // `ImpactEvent::normal` points from participant.0 toward
@@ -3624,24 +3645,61 @@ pub fn publish_snapshots(
         .filter(|e| e.player >= crate::cnr_bots::NET_BOT_PLAYER_BASE)
         .copied()
         .collect();
-    if host
-        .ctl()
-        .broadcast(&Message::Snap {
-            generation: wire_generation,
-            tick: session.tick(),
-            entries,
-            trailers: trailer_rows,
-            impacts: impact_rows,
-            // The race resource's own generation is the *local*
-            // namespace — `is_stale` compares it that way (teardown
-            // can leave a resource briefly while the wire id has
-            // already moved).
-            race: race
-                .filter(|r| !r.is_stale(session.generation()))
-                .map(|r| encode_race(&r)),
-        })
-        .is_ok()
-    {
+    let race_row = race
+        .filter(|r| !r.is_stale(session.generation()))
+        .map(|r| encode_race(&r));
+    let full = Message::Snap {
+        generation: wire_generation,
+        tick: session.tick(),
+        entries,
+        trailers: trailer_rows,
+        impacts: impact_rows,
+        // The race resource's own generation is the *local* namespace —
+        // `is_stale` compares it that way (teardown can leave a resource
+        // briefly while the wire id has already moved).
+        race: race_row,
+    };
+    let sent_ok = match lobby.as_ref() {
+        Some(lobby) => {
+            let islands = ContactIslands::new(&full, &hit_pairs, WORLD_GROUP_RANGE_M);
+            let mut any = lobby.roster.is_empty();
+            for seat in lobby.roster.iter().map(|e| e.player_id) {
+                let groups = islands.groups_for(&full, seat);
+                let prios: Vec<Priority> = groups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        if i == 0 {
+                            Priority::Movement
+                        } else {
+                            Priority::Bulk
+                        }
+                    })
+                    .collect();
+                let sent = match host.ctl().send_snap_groups_prio(
+                    seat,
+                    wire_generation,
+                    session.tick(),
+                    &groups,
+                    &prios,
+                ) {
+                    Ok(true) => {
+                        report.snap_groups_owner += 1;
+                        report.snap_groups_world += groups.len().saturating_sub(1) as u64;
+                        true
+                    }
+                    // No established lane: the one full Snap over the
+                    // existing path.
+                    Ok(false) => host.ctl().send_to(seat, &full).is_ok(),
+                    Err(_) => false,
+                };
+                any |= sent;
+            }
+            any
+        }
+        None => host.ctl().broadcast(&full).is_ok(),
+    };
+    if sent_ok {
         let sent = published
             .filter(|&(last, _)| last == key)
             .map_or(0, |(_, sent)| sent);
@@ -3654,6 +3712,192 @@ pub fn publish_snapshots(
         report.note_bot_poses(wire_generation, session.tick(), bot_rows.iter());
         report.impacts_sent += sent_rows;
         report.surfaces_sent += sent_surfaces;
+    }
+}
+
+/// How close two bodies must be, in metres, to count as one contact
+/// island for snapshot grouping (NETPLAY-10C-2). A car with a trailer is
+/// several bodies; a few car lengths covers the contact manifold a client
+/// predicts plus a frame of closing speed. Inferred from the physics
+/// scale, not an original-game value.
+pub const CONTACT_ISLAND_RADIUS_M: f32 = 20.0;
+
+/// How far ahead, in seconds, a body's speed extends its reach for
+/// [`CONTACT_ISLAND_RADIUS_M`]: the `Bulk` lane lags `Movement` by up to its
+/// queue age, so a fast body must join the island before it arrives.
+pub const CONTACT_ISLAND_HORIZON_S: f32 = 1.0;
+
+/// How far from every human body, in metres, an island must be to ride the
+/// `Bulk` group. Within it the opponent is on a client's screen.
+///
+/// **Infinite for now: nothing rides `Bulk` yet.** Measured on a retail
+/// Cops & Robbers match (`net_cnr_bots_mp`, 2 bots, loopback): with distant
+/// bots in a `Bulk` group the seat's lane drops to the controller's floor
+/// (`rate` 131072 -> 12288, `decreases` 437, 4188 movement datagrams
+/// expired) and sheds `Bulk` for the rest of the match, so the client
+/// freezes the bots; with every row in group 0 the same run holds
+/// 131072 and sheds nothing. The grouping is in place and unit-tested; a
+/// finite range waits on that lane collapse (see the follow-up task named
+/// in `docs/netcode-redesign.md`). Designed, not an original-game value.
+pub const WORLD_GROUP_RANGE_M: f32 = f32::INFINITY;
+
+/// The seats of one `Snap` partitioned into contact islands: seats whose
+/// bodies (car or trailer) lie within [`CONTACT_ISLAND_RADIUS_M`] plus
+/// their speeds times [`CONTACT_ISLAND_HORIZON_S`] of each other, or that struck each other this frame, are transitively one
+/// island. The partition depends only on the frame's data, so it is
+/// deterministic, and an island is never split across groups.
+struct ContactIslands {
+    island: BTreeMap<u16, usize>,
+    /// The islands holding at least one human seat.
+    human: BTreeSet<usize>,
+}
+
+impl ContactIslands {
+    fn new(snap: &Message, hit_pairs: &[(u16, u16)], world_range: f32) -> Self {
+        let Message::Snap {
+            entries, trailers, ..
+        } = snap
+        else {
+            return Self {
+                island: BTreeMap::new(),
+                human: BTreeSet::new(),
+            };
+        };
+        // (seat, position) of every body.
+        let speed = |v: [f32; 3]| v.iter().map(|c| c * c).sum::<f32>().sqrt();
+        let mut bodies: Vec<(u16, [f32; 3], f32)> = entries
+            .iter()
+            .map(|e| (e.player, e.pos, speed(e.vel)))
+            .collect();
+        bodies.extend(trailers.iter().map(|t| (t.owner, t.pos, speed(t.vel))));
+        let seats: Vec<u16> = entries.iter().map(|e| e.player).collect();
+        let index = |seat: u16| seats.iter().position(|&s| s == seat);
+        let mut parent: Vec<usize> = (0..seats.len()).collect();
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let union = |parent: &mut Vec<usize>, a: usize, b: usize| {
+            let (ra, rb) = (find(parent, a), find(parent, b));
+            // The smaller root wins, so the island id is order-independent.
+            parent[ra.max(rb)] = ra.min(rb);
+        };
+        for (i, &(sa, pa, va)) in bodies.iter().enumerate() {
+            for &(sb, pb, vb) in &bodies[i + 1..] {
+                let d2: f32 = (0..3).map(|k| (pa[k] - pb[k]).powi(2)).sum();
+                // The reach grows with the closing speed bound, so a car
+                // about to arrive is already on the `Movement` group.
+                let reach = CONTACT_ISLAND_RADIUS_M + (va + vb) * CONTACT_ISLAND_HORIZON_S;
+                // A non-finite pose is never "near" anything.
+                if sa != sb
+                    && d2 <= reach * reach
+                    && let (Some(a), Some(b)) = (index(sa), index(sb))
+                {
+                    union(&mut parent, a, b);
+                }
+            }
+        }
+        for &(a, b) in hit_pairs {
+            if let (Some(a), Some(b)) = (index(a), index(b)) {
+                union(&mut parent, a, b);
+            }
+        }
+        let island: BTreeMap<u16, usize> = seats
+            .iter()
+            .enumerate()
+            .map(|(i, &seat)| (seat, find(&mut parent, i)))
+            .collect();
+        let is_human = |seat: u16| seat < crate::cnr_bots::NET_BOT_PLAYER_BASE;
+        let mut human: BTreeSet<usize> = island
+            .iter()
+            .filter(|&(&seat, _)| is_human(seat))
+            .map(|(_, &i)| i)
+            .collect();
+        // A bot island within sight of a human is not world catch-up
+        // either: the opponent is on that client's screen.
+        let range2 = world_range * world_range;
+        for &(seat, pos, _) in &bodies {
+            let Some(&isl) = island.get(&seat) else {
+                continue;
+            };
+            if human.contains(&isl) {
+                continue;
+            }
+            let seen = bodies.iter().any(|&(other, q, _)| {
+                is_human(other) && (0..3).map(|k| (pos[k] - q[k]).powi(2)).sum::<f32>() <= range2
+            });
+            if seen {
+                human.insert(isl);
+            }
+        }
+        Self { island, human }
+    }
+
+    /// The groups `seat` receives: group 0 is its own island plus every
+    /// island holding a human seat (their entries, trailers, the impact
+    /// rows naming them, and the race row); group 1 is the remaining
+    /// bot-only islands, omitted when empty. Human seats are never
+    /// `Bulk`: a distant human is the one thing a client compares against
+    /// the host at rest, and the congestion layer sheds `Bulk` entirely
+    /// on a lossy link.
+    fn groups_for(&self, snap: &Message, seat: u16) -> Vec<Message> {
+        let Message::Snap {
+            generation,
+            tick,
+            entries,
+            trailers,
+            impacts,
+            race,
+        } = snap
+        else {
+            return Vec::new();
+        };
+        let mine = self.island.get(&seat).copied();
+        let near = |s: u16| {
+            self.island
+                .get(&s)
+                .is_some_and(|i| Some(*i) == mine || self.human.contains(i))
+        };
+        let owner = Message::Snap {
+            generation: *generation,
+            tick: *tick,
+            entries: entries.iter().filter(|e| near(e.player)).copied().collect(),
+            trailers: trailers.iter().filter(|t| near(t.owner)).copied().collect(),
+            impacts: impacts.iter().filter(|i| near(i.seat)).copied().collect(),
+            race: *race,
+        };
+        let world = (
+            entries
+                .iter()
+                .filter(|e| !near(e.player))
+                .copied()
+                .collect::<Vec<_>>(),
+            trailers
+                .iter()
+                .filter(|t| !near(t.owner))
+                .copied()
+                .collect::<Vec<_>>(),
+            impacts
+                .iter()
+                .filter(|i| !near(i.seat))
+                .copied()
+                .collect::<Vec<_>>(),
+        );
+        let mut groups = vec![owner];
+        if !(world.0.is_empty() && world.1.is_empty() && world.2.is_empty()) {
+            groups.push(Message::Snap {
+                generation: *generation,
+                tick: *tick,
+                entries: world.0,
+                trailers: world.1,
+                impacts: world.2,
+                race: None,
+            });
+        }
+        groups
     }
 }
 
@@ -5375,6 +5619,118 @@ mod tests {
         apply_seat(&mut solo, Some(&def), 0);
         assert_eq!(solo.position, Vec3::new(10.0, 0.0, 0.0));
         assert!((solo.yaw - 90f32.to_radians()).abs() < 1e-4);
+    }
+
+    fn island_snap(poses: &[(u16, f32)], impacts: &[u16]) -> Message {
+        Message::Snap {
+            generation: 3,
+            tick: 9,
+            entries: poses
+                .iter()
+                .map(|&(player, x)| SnapEntry {
+                    player,
+                    pos: [x, 0.0, 0.0],
+                    ..SnapEntry::default()
+                })
+                .collect(),
+            trailers: poses
+                .iter()
+                .map(|&(owner, x)| SnapTrailer {
+                    owner,
+                    pos: [x, 0.0, 5.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0; 3],
+                    angvel: [0.0; 3],
+                    spin: 0,
+                    flags: 0,
+                })
+                .collect(),
+            impacts: impacts
+                .iter()
+                .map(|&seat| SnapImpact {
+                    seat,
+                    id: 0,
+                    tick: 9,
+                    epoch: 0,
+                    ordinal: 0,
+                    point: [0.0; 3],
+                    normal: [0.0, 1.0, 0.0],
+                    severity: 1.0,
+                    audio_id: 0,
+                })
+                .collect(),
+            race: None,
+        }
+    }
+
+    fn group_seats(m: &Message) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
+        let Message::Snap {
+            entries,
+            trailers,
+            impacts,
+            ..
+        } = m
+        else {
+            panic!("not a Snap")
+        };
+        (
+            entries.iter().map(|e| e.player).collect(),
+            trailers.iter().map(|t| t.owner).collect(),
+            impacts.iter().map(|i| i.seat).collect(),
+        )
+    }
+
+    /// Group 0 is the receiver's contact island plus every island with a
+    /// human seat — chained proximity and a struck pair join it, with
+    /// trailers and impact rows — and group 1 the bot-only islands; no
+    /// seat is in both.
+    #[test]
+    fn contact_islands_never_split_and_keep_the_owner_group_whole() {
+        let bot = |n: u16| crate::cnr_bots::NET_BOT_PLAYER_BASE + n;
+        // 1—2—3 chain by proximity (15 m steps); bots 4 and 5 hit each
+        // other far from everyone; bot 6 is alone; bot 7 stands by
+        // human 1.
+        let snap = island_snap(
+            &[
+                (1, 0.0),
+                (2, 15.0),
+                (3, 30.0),
+                (bot(4), 500.0),
+                (bot(5), 900.0),
+                (bot(6), 2000.0),
+                (bot(7), 40.0),
+            ],
+            &[3, bot(5)],
+        );
+        let islands = ContactIslands::new(&snap, &[(bot(4), bot(5))], 300.0);
+        let groups = islands.groups_for(&snap, 1);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            group_seats(&groups[0]),
+            (vec![1, 2, 3, bot(7)], vec![1, 2, 3, bot(7)], vec![3])
+        );
+        assert_eq!(
+            group_seats(&groups[1]),
+            (
+                vec![bot(4), bot(5), bot(6)],
+                vec![bot(4), bot(5), bot(6)],
+                vec![bot(5)]
+            )
+        );
+        // A bot receiver's own island is group 0 whoever it is.
+        let for_five = islands.groups_for(&snap, bot(5));
+        assert_eq!(group_seats(&for_five[0]).0.len(), 6);
+        assert!(group_seats(&for_five[0]).0.contains(&bot(4)));
+        // A receiver with no entry still gets every human island first.
+        let stranger = islands.groups_for(&snap, 77);
+        assert_eq!(group_seats(&stranger[0]).0, vec![1, 2, 3, bot(7)]);
+    }
+
+    #[test]
+    fn a_lone_island_sends_only_the_owner_group() {
+        let snap = island_snap(&[(1, 0.0), (2, 5.0)], &[]);
+        let groups = ContactIslands::new(&snap, &[], 300.0).groups_for(&snap, 2);
+        assert_eq!(groups.len(), 1);
     }
 
     /// The v7 presentation tail encodes the sim's own aggregates: the
