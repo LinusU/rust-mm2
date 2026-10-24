@@ -3759,16 +3759,12 @@ pub const CONTACT_ISLAND_HORIZON_S: f32 = 1.0;
 /// How far from every human body, in metres, an island must be to ride the
 /// `Bulk` group. Within it the opponent is on a client's screen.
 ///
-/// **Infinite for now: nothing rides `Bulk` yet.** Measured on a retail
-/// Cops & Robbers match (`net_cnr_bots_mp`, 2 bots, loopback): with distant
-/// bots in a `Bulk` group the seat's lane drops to the controller's floor
-/// (`rate` 131072 -> 12288, `decreases` 437, 4188 movement datagrams
-/// expired) and sheds `Bulk` for the rest of the match, so the client
-/// freezes the bots; with every row in group 0 the same run holds
-/// 131072 and sheds nothing. The grouping is in place and unit-tested; a
-/// finite range waits on that lane collapse (see the follow-up task named
-/// in `docs/netcode-redesign.md`). Designed, not an original-game value.
-pub const WORLD_GROUP_RANGE_M: f32 = f32::INFINITY;
+/// **300 m, with the harness paced.** With an unpaced headless sim (about 5x
+/// wall clock) a finite range collapsed the host lane (`rate` 131072 ->
+/// 12288 in `net_cnr_bots_mp`) because the wall-clock rate controller was
+/// fed 5x the demand a 60 Hz player sends. With every process `--paced`
+/// the same matches hold the ceiling. Designed, not an original-game value.
+pub const WORLD_GROUP_RANGE_M: f32 = 300.0;
 
 /// The seats of one `Snap` partitioned into contact islands: seats whose
 /// bodies (car or trailer) lie within [`CONTACT_ISLAND_RADIUS_M`] plus
