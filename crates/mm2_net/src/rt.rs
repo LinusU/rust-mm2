@@ -1404,8 +1404,12 @@ fn ingest(
                         group,
                         tick,
                     });
-                    seat.ack_at = Some(now);
-                    seat.out.on_ack(tick, now);
+                    // Deliberately not fed to the congestion controller (neither
+                    // `SeatOut::on_ack` nor `ack_at`): engaging it on snapshot acks
+                    // made its RTT and passed-over-snapshot evidence cut
+                    // the rate on jittery links and starved corrections
+                    // (the `net_contact` unequal-link cases). That wiring
+                    // is its own change, to be measured against them.
                     // The sender judges scope and retention itself; an
                     // ack it cannot match is simply not a baseline.
                     seat.baselines

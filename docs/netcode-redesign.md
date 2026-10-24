@@ -859,8 +859,22 @@ the host sent 586 deltas against 14 full states and 53.6 kB of state payload
 against 293.4 kB as full states (18 %), with no `MissingBase`. The protocol
 is **v40** (state frames and the ack's group byte).
 
+### Congestion control is deliberately not fed by these acks
+
+The 10B `PeerController` was built to take RTT, passed-over-snapshot and
+ack-age evidence from snapshot acknowledgements, and until now none arrived.
+Wiring the new acks into it (`SeatOut::on_ack`, `ack_at`) was tried and made
+the `net_contact` unequal-link cases fail (`a_sustained_push_is_measured_on_unequal_links`:
+own-car correction 18-47 m, first motion 272 ticks late): on a jittery link
+the smoothed-RTT and passed-over evidence cut the peer's rate and thinned
+the corrections the contact deadlines depend on. So the baseline ack updates
+the baseline sender and the per-group `LaneAck` only. Feeding the controller
+from snapshot acks needs its own change with its own measurement against
+those cases.
+
 ### Not done / open
 
+- Feeding snapshot acks to the congestion controller (above).
 - The island criterion is not tuned against play (#2050); a group whose
   membership changes is a larger delta, never a wrong one. The group id is
   the group's index, which is stable because there are at most two.
