@@ -1047,7 +1047,7 @@ was idle, movement datagrams started to expire, and the controller fell from
 (0 sampled ticks in common with the host). The same run with every row in
 group 0 keeps 131072 and sheds nothing. The partition and the per-group
 counters are in place and unit-tested; `WORLD_GROUP_RANGE_M` stays infinite
-until that lane collapse is understood.
+until that lane collapse is understood (follow-up #2041).
 
 The unit tests `contact_islands_*` cover the partition; the lane-level
 behaviour of a lost or delayed `Bulk` group is in `lane_pace_tests`.
