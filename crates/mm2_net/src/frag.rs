@@ -557,6 +557,11 @@ impl BaselineSender {
 pub struct BaselineReceiver {
     scope: Scope,
     held: VecDeque<(u64, Vec<u8>)>,
+    /// The newest tick applied in the current generation, across epochs:
+    /// an older state of an earlier epoch that overtook the epoch change on
+    /// the wire must not move the scope back, or every delta of the new
+    /// epoch would be refused `MissingBase` until the sender's refresh.
+    newest: Option<u64>,
 }
 
 impl BaselineReceiver {
@@ -587,7 +592,7 @@ impl BaselineReceiver {
             return Err(StateError::Malformed);
         }
         let same = (Scope { generation, epoch }) == self.scope;
-        if same && self.held.back().is_some_and(|(t, _)| tick <= *t) {
+        if generation == self.scope.generation && self.newest.is_some_and(|n| tick <= n) {
             return Err(StateError::Stale);
         }
         let base_tick = u64::from_le_bytes(payload[1..9].try_into().unwrap());
@@ -607,6 +612,7 @@ impl BaselineReceiver {
             self.scope = Scope { generation, epoch };
             self.held.clear();
         }
+        self.newest = Some(tick);
         self.held.push_back((tick, state.clone()));
         while self.held.len() > BASELINE_CAP {
             self.held.pop_front();
@@ -896,6 +902,28 @@ mod tests {
             rx.apply(1, 0, 4, &tx.encode(1, 0, 4, &s).0),
             Err(StateError::Stale)
         );
+    }
+
+    /// A state of the previous epoch that overtakes the epoch change on the
+    /// wire is stale: it neither applies nor moves the scope back, so the
+    /// new epoch's deltas still find their base.
+    #[test]
+    fn an_old_epoch_state_arriving_late_does_not_move_the_scope_back() {
+        let (mut tx, mut rx) = (BaselineSender::new(), BaselineReceiver::new());
+        let mut s = blob(400, 1);
+        let old = tx.encode(1, 4, 10, &s).0;
+        s[3] = 9;
+        let new_full = tx.encode(1, 5, 11, &s).0;
+        rx.apply(1, 5, 11, &new_full).unwrap();
+        assert!(tx.ack(1, 5, 11));
+        assert_eq!(rx.apply(1, 4, 10, &old), Err(StateError::Stale));
+        s[4] = 7;
+        let (delta, plan) = tx.encode(1, 5, 12, &s);
+        assert_eq!(plan, Plan::Delta(11));
+        assert_eq!(rx.apply(1, 5, 12, &delta).unwrap(), s);
+        // A newer generation may restart the tick count.
+        let restart = BaselineSender::new().encode(2, 0, 1, &s).0;
+        assert_eq!(rx.apply(2, 0, 1, &restart).unwrap(), s);
     }
 
     #[test]
