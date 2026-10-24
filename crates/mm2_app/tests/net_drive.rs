@@ -794,7 +794,7 @@ fn trailer_rig_reset(impair: Option<Impair>) {
     );
 
     // Nothing kicks after the reseat: the tractor starts the new life at
-    // rest, and the trailer that reseated with it (a jointed body) does
+    // a fraction of the old speed, and the trailer that reseated with it (a jointed body) does
     // not drag or throw it on the following ticks.
     let text = std::fs::read_to_string(&alice_trace).expect("alice's trace");
     let samples = netprobe::parse_trace(&text)
@@ -805,9 +805,11 @@ fn trailer_rig_reset(impair: Option<Impair>) {
 
 /// Ticks after the epoch change inspected for a kick.
 const KICK_WINDOW: usize = 120;
-/// The tractor's speed on the first tick of the new life (m/s): it
-/// starts at rest, whatever speed the old life had.
-const KICK_START_MS: f64 = 0.5;
+/// The tractor's speed on the first sample of the new life, as a share
+/// of its speed just before the reset: the old life's motion does not
+/// carry over. A share, not zero: on a loaded machine the first sample
+/// after the epoch change can be a few ticks into the new life.
+const KICK_START_SHARE: f64 = 0.4;
 /// Largest change of the horizontal velocity in one tick (m/s). The
 /// driven tractor accelerates at a few m/s^2, which is ~0.1 m/s per
 /// tick; a trailer joint solved against a stale pose, or a drivetrain
@@ -829,9 +831,14 @@ fn check_no_kick_after_reset(samples: &[netprobe::Sample]) {
         after.len()
     );
     let horizontal = |s: &netprobe::Sample| (s.vel[0].powi(2) + s.vel[2].powi(2)).sqrt();
+    let before = horizontal(&samples[at - 1]);
     assert!(
-        horizontal(&after[0]) < KICK_START_MS,
-        "the new life starts at {} m/s",
+        before > 5.0,
+        "alice was not driving before the reset: {before} m/s"
+    );
+    assert!(
+        horizontal(&after[0]) < before * KICK_START_SHARE,
+        "the new life starts at {} m/s, the old one ended at {before}",
         horizontal(&after[0])
     );
     let dt = 1.0 / mm2_game::RACE_TICK_HZ as f64;

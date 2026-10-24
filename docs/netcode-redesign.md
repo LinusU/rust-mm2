@@ -1762,7 +1762,7 @@ The remainder (NETPLAY-08D-2, #1992), same evidence level:
 | Damage carried over a reset | `netpredict::tests::a_reset_that_kept_the_damage_carries_the_authored_impairment` |
 | Late join, disconnect and rejoin | `netdrive::tests::a_joiner_behind_the_hosts_epoch_starts_clean_once` (own seat at epoch 0 meets the host's epoch 3), `netpredict::tests::a_rejoined_body_behind_the_hosts_epoch_is_renewed_once` (contact body) |
 | Rematch, city reload, C&R round change | one boundary for the wire (stream reset, new generation, seats respawn at epoch 0, ticks restart): `netdrive::tests::a_new_session_generation_starts_its_seats_clean`, `netpredict::tests::a_new_generation_drops_the_recorded_past` |
-| Trailer rig reset over the transport | `net_drive::a_reset_trailer_rig_reseats_*` (three processes, retail `vpsemi`) now also read alice's `--net-trace` and require that the tractor starts the new life at rest and nothing jumps in velocity or position in the next 120 ticks |
+| Trailer rig reset over the transport | `net_drive::a_reset_trailer_rig_reseats_*` (three processes, retail `vpsemi`) now also read alice's `--net-trace` and require that the tractor's first sample of the new life is far below its old speed and nothing jumps in velocity or position in the next 120 ticks |
 
 A repair is only known from the damage byte of the snapshot that carries the
 reset. When that snapshot does not name the seat's damage (no entry for the
