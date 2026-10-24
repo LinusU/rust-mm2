@@ -1893,6 +1893,9 @@ pub(crate) struct ClientLane {
     /// Probe interval and failure bound in milliseconds (test seam).
     probe_every_ms: AtomicU64,
     fail_after_ms: AtomicU64,
+    /// Test seam: probe only after a quiet `probe_every_ms` (the pre-10D
+    /// keepalive), so a test that fixes datagram counts is not perturbed.
+    idle_probe_only: AtomicBool,
     /// One assembler per [`WorldKind`] (indexed by it): each kind has its
     /// own tick domain.
     world: [Mutex<Assembler>; 2],
@@ -1929,6 +1932,7 @@ impl ClientLane {
             last_echo: Mutex::new(Instant::now()),
             probe_every_ms: AtomicU64::new(PATH_PROBE_INTERVAL.as_millis() as u64),
             fail_after_ms: AtomicU64::new(PATH_FAILURE_AFTER.as_millis() as u64),
+            idle_probe_only: AtomicBool::new(false),
             world: [Mutex::new(Assembler::new()), Mutex::new(Assembler::new())],
             rel: Mutex::new(ReliableChannel::new(MAX_RELIABLE_BODY)),
             clock: ReliableClock::new(),
@@ -2203,6 +2207,13 @@ impl ClientLane {
         )
     }
 
+    /// Test seam: probe only when idle for `probe_every` (the keepalive
+    /// behaviour), keeping wall-clock probes out of exact datagram counts.
+    #[cfg(test)]
+    pub(crate) fn set_idle_probe_only(&self) {
+        self.idle_probe_only.store(true, Ordering::Relaxed);
+    }
+
     /// Test seam: probe cadence and failure bound.
     #[cfg(test)]
     pub(crate) fn set_path_bounds(&self, probe_every: Duration, fail_after: Duration) {
@@ -2242,6 +2253,7 @@ impl ClientLane {
         // (which the host authenticates and echoes) when nothing else left
         // for a keepalive interval.
         let mut last_probe = Instant::now();
+        let mut last_sent = Instant::now();
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
             let due = self
@@ -2257,15 +2269,19 @@ impl ClientLane {
             while let Some(item) = self.out.queue.pop() {
                 let header = self.header(item.tag, item.generation);
                 flush(socket, self.host, &header, &item.payload, &self.counters);
+                last_sent = Instant::now();
             }
             // Probe on a fixed cadence, busy or idle: it keeps the host's
             // liveness fed and is the client's evidence the path still
             // carries full-size datagrams.
             let every = Duration::from_millis(self.probe_every_ms.load(Ordering::Relaxed));
-            if last_probe.elapsed() >= every {
+            let quiet =
+                !self.idle_probe_only.load(Ordering::Relaxed) || last_sent.elapsed() >= every;
+            if last_probe.elapsed() >= every && quiet {
                 let header = self.header(LaneTag::Probe, 0);
                 flush(socket, self.host, &header, &probe_padding(), &self.counters);
                 last_probe = Instant::now();
+                last_sent = last_probe;
             }
         }
     }

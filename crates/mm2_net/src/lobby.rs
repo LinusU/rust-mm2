@@ -1630,6 +1630,15 @@ impl Client {
         self.lane.as_ref().and_then(|l| l.lane.0.path_failure())
     }
 
+    /// Test seam: probe only when idle, as the keepalive did before the
+    /// path probe, so exact datagram counts are not perturbed.
+    #[cfg(test)]
+    pub(crate) fn set_idle_probe_only(&self) {
+        if let Some(l) = &self.lane {
+            l.lane.0.set_idle_probe_only();
+        }
+    }
+
     /// Test seam: tighten the path probe cadence and failure bound.
     #[cfg(test)]
     pub(crate) fn set_path_bounds(&self, probe_every: Duration, fail_after: Duration) {

@@ -65,6 +65,11 @@ impl Rig {
             Client::join_lane_routed(host.addr(), &hello_for("alice"), WAIT, Some(proxy.route()))
                 .unwrap();
         client.set_timeout(Some(WAIT)).unwrap();
+        // The client's wall-clock path probe (NETPLAY-10D-1) would put an
+        // extra datagram through the relay every second of a busy run and
+        // shift the seeded fates these tests fix exactly, so it falls back
+        // to the idle-only keepalive; `lane_mtu_tests` exercises it.
+        client.set_idle_probe_only();
         // `Start` rides the reliable channel (NETPLAY-06E-2b): a manual
         // clock keeps its repeats out of the datagram counts these tests
         // fix exactly.
