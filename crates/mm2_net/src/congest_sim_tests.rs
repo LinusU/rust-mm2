@@ -70,6 +70,9 @@ struct Sim {
     peers: Vec<Peer>,
     host_wire: u64,
     rotate: usize,
+    /// Movement datagrams per snapshot and their payload size, when a
+    /// test models a multi-fragment movement group.
+    movement_shape: Option<(usize, usize)>,
 }
 
 impl Sim {
@@ -104,6 +107,7 @@ impl Sim {
             peers,
             host_wire: 0,
             rotate: 0,
+            movement_shape: None,
         }
     }
 
@@ -134,13 +138,25 @@ impl Sim {
             }
             let len = SNAP_BYTES * adapt.relevance_percent as usize / 100;
             p.out.note_tick(tick, now);
-            p.out.push_tagged_at(
-                now,
-                LaneTag::Data,
-                Priority::Movement,
-                1,
-                Self::payload(tick, self.now, len),
-            );
+            if let Some((frags, bytes)) = self.movement_shape {
+                for _ in 0..frags {
+                    p.out.push_tagged_at(
+                        now,
+                        LaneTag::Data,
+                        Priority::Movement,
+                        1,
+                        Self::payload(tick, self.now, bytes),
+                    );
+                }
+            } else {
+                p.out.push_tagged_at(
+                    now,
+                    LaneTag::Data,
+                    Priority::Movement,
+                    1,
+                    Self::payload(tick, self.now, len),
+                );
+            }
             if adapt.bulk {
                 for _ in 0..BULK_FRAGMENTS {
                     p.out.push_tagged_at(
@@ -574,5 +590,25 @@ fn congest_sim_links_dipping_to_a_fifth_and_back() {
             1,
             "peer {i} never recovered full cadence"
         );
+    }
+}
+
+/// Bulk catch-up fragments must not cost the movement group its rate
+/// (NETPLAY-10C-2b): for every movement size that fits the ceiling on its
+/// own, adding four bulk fragments per snapshot leaves the controller at
+/// the ceiling with nothing expired, because bulk only spends the credit
+/// above its reserve.
+#[test]
+fn congest_sim_bulk_fragments_leave_multi_fragment_movement_its_rate() {
+    for (frags, bytes) in [(1, 900), (2, 1400), (3, 1250), (3, 1350), (4, 1000)] {
+        let mut sim = Sim::new(1, 40 * MBIT, f64::from(10 * MBIT));
+        sim.movement_shape = Some((frags, bytes));
+        sim.run(Duration::from_secs(20));
+        let s = sim.peers[0].out.pace_stats_at(sim.at(sim.now));
+        assert_eq!(s.rate, s.ceiling, "{frags}x{bytes}: {s:?}");
+        assert_eq!(s.decreases, 0, "{frags}x{bytes}: {s:?}");
+        assert_eq!(s.movement.expired, 0, "{frags}x{bytes}: {s:?}");
+        assert!(s.adapt.bulk, "{frags}x{bytes}: {s:?}");
+        assert!(s.bulk_sent > 0, "bulk still flows at {frags}x{bytes}");
     }
 }
