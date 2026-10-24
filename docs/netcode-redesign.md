@@ -2259,6 +2259,49 @@ unchanged and do not accumulate over repeated frames.
 Open (not claimed): the audio emitter ordering above; rendered captures and
 30/60/144 FPS
 route runs (AC1, AC3); input-to-render latency measurement.
+=======
+### Frame-rate route evidence (NETPLAY-07D, #2008)
+
+`cargo test -p mm2_app --lib frame_rate -- --nocapture` (`netpredict/frame_rate_tests.rs`).
+A host and a client car on the production step run `--net-route`'s `Route`
+(slalom and accel); the host car takes an unpredicted 1.2 m/s sideways kick
+and 0.5 rad/s spin at ticks 90/210/330; the client reconciles against host
+state 6 ticks late (3 ticks one way) with the real `reconcile` and feeds each
+replay into a `CorrectionOffset` that decays on a render clock of its own.
+
+| route, render rate | corrections | worst body shift | slowest settle | worst view slip |
+|---|---|---|---|---|
+| slalom 30 fps | 3 | 0.119 m | 0.567 s | 0.029 m |
+| slalom 60 fps | 3 | 0.119 m | 0.567 s | 0.015 m |
+| slalom 144 fps | 3 | 0.119 m | 0.560 s | 0.007 m |
+| accel 30 / 60 / 144 fps | 3 | 0.095 m | 0.533 / 0.533 / 0.532 s | 0.023 / 0.012 / 0.005 m |
+| slalom, no smoothing (any rate) | 3 | 0.119 m | - | 0.119 m |
+
+"View slip" is the largest displacement the drawn pose takes that the car's
+motion does not explain: one frame's decay with smoothing, the whole shift
+without. The body (`final_error` 0.000 m against the host's record) is
+bit-identical with smoothing on or off. Two seats at unequal caps (30 and 144
+fps) settle within 0.15 s of each other and take identical corrections.
+
+Input timing: the client consumes command seq `k` on its tick `k` online and
+offline alike (the brake response onset is tick 481 in both, with a
+correction every tick online), so the network adds no input latency to the
+own car. Under the frame model (input sampled once per frame, ticks due by
+the frame run before it submits) the press-to-step and press-to-render
+-submission times are 17.0 ms mean / 33.3 ms worst at 30 fps, 8.3 / 16.6 ms at
+60 fps and 8.7 / 20.7 ms at 144 fps; they coincide because the step and the
+submission share a frame.
+
+Evidence level: synthetic integration. Frame times are the model's, not
+measured from a window system: driver/display latency is not included. **Open:**
+rendered before/after captures from both non-host perspectives (AC1) and the
+human comfort judgement stay with OWNER #1249; AC2 (a rendered
+physics-versus-drawn overlay) is not produced.
+
+Open (not claimed): trailers/wheels of the
+corrected car beyond the carried subtree (trailer is a separate body); the
+physics-versus-rendered developer overlay; rendered captures.
+>>>>>>> d80f5e3d (Measure own-car correction smoothing and input timing at 30/60/144 FPS on a route)
 
 ## Host-timestamped snapshot buffer (NETPLAY-07B, #2006)
 

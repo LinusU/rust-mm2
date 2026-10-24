@@ -2592,6 +2592,8 @@ mod tests {
 mod contact_tests;
 #[cfg(test)]
 mod deadline_tests;
+#[cfg(test)]
+mod frame_rate_tests;
 mod modifiers;
 #[cfg(test)]
 mod multi_tests;
