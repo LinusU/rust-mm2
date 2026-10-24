@@ -993,8 +993,11 @@ a host updating every ~1 ms for 600 ms publishes at most 30/s + 2.
     fragments on their own lane tags (`WorldCars` 7, `WorldSignals` 8) with
     one assembler per kind (their tick domains differ from `Snap`'s and
     each other's). The client admits a completed frame only as its own kind
-    and only under the datagram's generation. They spend the bulk byte
-    budget and are shed first; nothing repeats them.
+    and only under the datagram's generation. They are shed before
+    anything else but spend their own allowance (a quarter of the peer's rate,
+    `PaceStats::world_sent`) rather than the movement/bulk credit, which a
+    busy snapshot stream can hold at zero (a retail two-process run starved
+    them completely under the shared bucket); nothing repeats them.
   Tested through the seeded lossy relay (`lane_world_tests`): a late-join
   `Props` run completes once each and in order, cars and lights recover on
   the next frame, a reliable `Impacts` completes once beside four full

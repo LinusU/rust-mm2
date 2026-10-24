@@ -486,6 +486,9 @@ pub struct PaceStats {
     pub movement_sent: u64,
     /// Bulk datagrams sent.
     pub bulk_sent: u64,
+    /// Of those, the world-state datagrams (ambient cars, signals) that
+    /// spent the separate world allowance.
+    pub world_sent: u64,
     /// Payload bytes sent, both priorities.
     pub bytes_sent: u64,
     /// Times the bulk queue's head waited for budget credit.
@@ -733,6 +736,12 @@ const WAIT_SAMPLES: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct PaceState {
     budget: Budget,
+    /// The world-state allowance (NETPLAY-10C-3): ambient cars and signals
+    /// spend this instead of `budget`, so movement using the whole peer
+    /// budget cannot starve them, and they cannot spend the movement
+    /// credit. A quarter of the peer's rate.
+    world: Budget,
+    world_sent: u64,
     ctl: PeerController,
     /// The uplink share last granted (wire bytes per second).
     share: u32,
@@ -759,6 +768,13 @@ pub(crate) struct PaceState {
 /// wait behind it.
 const BULK_RESERVE_BYTES: usize = 2048;
 
+/// The world-state allowance is this fraction (1/n) of the peer's rate.
+const WORLD_SHARE_DIV: u32 = 4;
+
+fn is_world_tag(tag: LaneTag) -> bool {
+    WorldKind::from_tag(tag).is_some()
+}
+
 /// Unacknowledged snapshot ticks remembered per seat.
 const TICK_LOG_CAP: usize = 64;
 
@@ -771,6 +787,12 @@ impl SeatOut {
             uplink,
             pace: Mutex::new(PaceState {
                 budget: Budget::new(PEER_BYTES_PER_SEC, PEER_BURST_BYTES, now),
+                world: Budget::new(
+                    PEER_BYTES_PER_SEC / WORLD_SHARE_DIV,
+                    PEER_BURST_BYTES / WORLD_SHARE_DIV,
+                    now,
+                ),
+                world_sent: 0,
                 ctl: PeerController::new(DEFAULT_PEER_CEILING, now),
                 share: DEFAULT_PEER_CEILING,
                 movement_sent: 0,
@@ -916,10 +938,29 @@ impl SeatOut {
             // Low-priority traffic is shed, not queued, at a low rate.
             return None;
         }
-        let PaceState { budget, .. } = &mut *pace;
+        let PaceState { budget, world, .. } = &mut *pace;
         let mut blocked = false;
         let got = self.bulk.pop_gated(now, BULK_MAX_AGE, |i| {
             let wire = wire_bytes(i.payload.len());
+            if is_world_tag(i.tag) {
+                // Its own allowance: the uplink is asked only once that
+                // covers the datagram.
+                if world.credit(now) < wire as i64 {
+                    blocked = true;
+                    return false;
+                }
+                if let Some(up) = uplink
+                    && !up
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .try_spend(wire, now)
+                {
+                    blocked = true;
+                    return false;
+                }
+                world.spend(wire, now);
+                return true;
+            }
             if budget.credit(now) < (wire + BULK_RESERVE_BYTES) as i64 {
                 blocked = true;
                 return false;
@@ -941,6 +982,9 @@ impl SeatOut {
         }
         let (item, _) = got?;
         pace.bulk_sent += 1;
+        if is_world_tag(item.tag) {
+            pace.world_sent += 1;
+        }
         pace.wire_sent += wire_bytes(item.payload.len()) as u64;
         pace.last_sent = Some(now);
         Some(item)
@@ -1014,6 +1058,11 @@ impl SeatOut {
         pace.ctl.on_feedback(fb, now);
         let rate = effective_rate(pace.ctl.rate(), pace.share);
         pace.budget.retune(rate, PEER_BURST_BYTES, now);
+        pace.world.retune(
+            rate / WORLD_SHARE_DIV,
+            PEER_BURST_BYTES / WORLD_SHARE_DIV,
+            now,
+        );
     }
 
     /// The rate the peer wants from the uplink.
@@ -1031,6 +1080,11 @@ impl SeatOut {
         pace.share = share;
         let rate = effective_rate(pace.ctl.rate(), share);
         pace.budget.retune(rate, PEER_BURST_BYTES, now);
+        pace.world.retune(
+            rate / WORLD_SHARE_DIV,
+            PEER_BURST_BYTES / WORLD_SHARE_DIV,
+            now,
+        );
     }
 
     /// How the traffic to this peer should adapt now.
@@ -1060,6 +1114,7 @@ impl SeatOut {
             bulk: self.bulk.stats_at(now),
             movement_sent: pace.movement_sent,
             bulk_sent: pace.bulk_sent,
+            world_sent: pace.world_sent,
             bytes_sent: pace.budget.spent(),
             bulk_deferred: pace.bulk_deferred,
             max_debt: pace.max_debt,

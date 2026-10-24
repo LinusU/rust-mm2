@@ -176,7 +176,7 @@ fn the_props_late_join_snapshot_completes_exactly_once_under_loss_and_reorder() 
 
 #[test]
 fn traffic_and_signals_recover_from_loss_on_the_next_frame() {
-    const FRAMES: u64 = 40;
+    const FRAMES: u64 = 24;
     let mut lobby = rig(0xB22, 0.3);
     let (id, g) = (lobby.id, lobby.generation);
     let ctl = lobby.host.ctl();
@@ -187,13 +187,15 @@ fn traffic_and_signals_recover_from_loss_on_the_next_frame() {
         round(&lobby);
         got.extend(drain(&mut lobby));
         // The pacer's byte budget refills on the wall clock: offer at
-        // the cadence the game does (one frame per 60 Hz tick, here
-        // every fourth) rather than all at once.
-        thread::sleep(Duration::from_millis(66));
+        // the cadence the game does (here a frame every 120 ms, inside
+        // the world allowance) rather than all at once.
+        thread::sleep(Duration::from_millis(120));
     }
     // The link heals; one more frame of each lands whole.
     lobby.set_both(crate::UdpImpair::default());
     lobby.settle(Duration::from_secs(1));
+    // Let the world allowance refill before the frames that must land.
+    thread::sleep(Duration::from_millis(400));
     ctl.send_world_state(id, &traffic(g, FRAMES + 1)).unwrap();
     ctl.broadcast_world_state(&signals(g, 1000 + FRAMES + 1))
         .unwrap();
@@ -298,6 +300,7 @@ fn movement_is_unaffected_by_a_world_catch_up_in_flight() {
     );
     let after = lobby.host.lane_pace(id).unwrap();
     assert!(after.bulk_sent > before.bulk_sent, "{after:?}");
+    assert!(after.world_sent > before.world_sent, "{after:?}");
     assert_eq!(
         after.movement.dropped + after.movement.expired,
         before.movement.dropped + before.movement.expired,

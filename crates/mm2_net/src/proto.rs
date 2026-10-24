@@ -3440,15 +3440,15 @@ mod tests {
     }
 
     #[test]
-    fn v38_rejects_older_and_newer_protocol_versions() {
+    fn v39_rejects_older_and_newer_protocol_versions() {
         assert_eq!(PROTOCOL_VERSION, 39);
-        for protocol in [37, 39] {
+        for protocol in [38, 40] {
             let mut h = hello();
             h.protocol = protocol;
             let Err((RejectCode::VersionMismatch, why)) = admit(&h, 0xdead_beef) else {
                 panic!("protocol {protocol} must be refused");
             };
-            assert!(why.contains("38"), "{why}");
+            assert!(why.contains("39"), "{why}");
         }
     }
 
