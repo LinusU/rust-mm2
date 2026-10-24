@@ -1752,9 +1752,24 @@ is local to one peer and reaches the host only as quantized commands, so it
 cannot diverge between peers and is left alone (whether retail clears it on
 a reset is unknown). Tests: `netdrive::tests::an_authority_reset_of_the_own_seat_starts_a_new_life`,
 `netpredict::tests::a_reset_remote_body_continues_from_a_fresh_state`.
-Evidence level: synthetic integration. Not covered: damage repair,
-rematch/city reload/late join/disconnect/round change interplay and a real
-transport run with a trailer rig.
+Evidence level: synthetic integration.
+
+The remainder (NETPLAY-08D-2, #1992), same evidence level:
+
+| Item | Test |
+|---|---|
+| Damage repaired by the reset | `netpredict::tests::a_reset_that_repaired_the_body_drops_its_recorded_impairment`: the damage byte of the reset snapshot overrides the impairment recorded before the teleport |
+| Damage carried over a reset | `netpredict::tests::a_reset_that_kept_the_damage_carries_the_authored_impairment` |
+| Late join, disconnect and rejoin | `netdrive::tests::a_joiner_behind_the_hosts_epoch_starts_clean_once` (own seat at epoch 0 meets the host's epoch 3), `netpredict::tests::a_rejoined_body_behind_the_hosts_epoch_is_renewed_once` (contact body) |
+| Rematch, city reload, C&R round change | one boundary for the wire (stream reset, new generation, seats respawn at epoch 0, ticks restart): `netdrive::tests::a_new_session_generation_starts_its_seats_clean`, `netpredict::tests::a_new_generation_drops_the_recorded_past` |
+| Trailer rig reset over the transport | `net_drive::a_reset_trailer_rig_reseats_*` (three processes, retail `vpsemi`) now also read alice's `--net-trace` and require that the tractor starts the new life at rest and nothing jumps in velocity or position in the next 120 ticks |
+
+A repair is only known from the damage byte of the snapshot that carries the
+reset. When that snapshot does not name the seat's damage (no entry for the
+seat), the contact body keeps the impairment it recorded: whether the host
+repaired is not on the wire in that case. Not covered: bob's view of alice's
+tractor and trailer pose in the trace (the trace records the own car only; bob
+is covered by the `trl=` reseat counters), and a run on the UDP lane.
 
 ### Re-entering seats (NETPLAY-05E, #1933)
 

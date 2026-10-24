@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use crate::support;
 
+use mm2_app::netprobe;
 use mm2_net::{Impair, ImpairProxy, LinkDir, LinkStats};
 use support::Proc;
 
@@ -674,7 +675,16 @@ fn trailer_rig_reset(impair: Option<Impair>) {
     let addr = listening_addr(&host);
     let proxy = impair.map(|_| ImpairProxy::loopback_seeded(addr, 0xAC05).unwrap());
     let addr = proxy.as_ref().map_or(addr, ImpairProxy::addr);
+    let trace_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/captures/netcode-trailer-reset");
+    std::fs::create_dir_all(&trace_dir).unwrap();
+    let alice_trace = trace_dir.join(if impair.is_some() {
+        "alice-impaired.jsonl"
+    } else {
+        "alice.jsonl"
+    });
     let mut alice_args = join_args(&retail, addr, "alice", 6000);
+    alice_args.extend(["--net-trace", alice_trace.to_str().unwrap()].map(String::from));
     alice_args.extend(
         [
             "--car",
@@ -782,6 +792,61 @@ fn trailer_rig_reset(impair: Option<Impair>) {
         host_live, 0,
         "the authority kept alice's trailer: {host_rec}"
     );
+
+    // Nothing kicks after the reseat: the tractor starts the new life at
+    // rest, and the trailer that reseated with it (a jointed body) does
+    // not drag or throw it on the following ticks.
+    let text = std::fs::read_to_string(&alice_trace).expect("alice's trace");
+    let samples = netprobe::parse_trace(&text)
+        .expect("alice's trace parses")
+        .samples;
+    check_no_kick_after_reset(&samples);
+}
+
+/// Ticks after the epoch change inspected for a kick.
+const KICK_WINDOW: usize = 120;
+/// The tractor's speed on the first tick of the new life (m/s): it
+/// starts at rest, whatever speed the old life had.
+const KICK_START_MS: f64 = 0.5;
+/// Largest change of the horizontal velocity in one tick (m/s). The
+/// driven tractor accelerates at a few m/s^2, which is ~0.1 m/s per
+/// tick; a trailer joint solved against a stale pose, or a drivetrain
+/// that kept the old life's state, changes it by whole m/s.
+const KICK_DV_MS: f64 = 1.0;
+/// Largest one-tick position step beyond what the velocity explains (m).
+const KICK_STEP_M: f64 = 1.0;
+
+fn check_no_kick_after_reset(samples: &[netprobe::Sample]) {
+    let at = samples
+        .windows(2)
+        .position(|w| w[1].epoch > w[0].epoch)
+        .map(|i| i + 1)
+        .expect("alice's trace never changed epoch: the reset did not arrive");
+    let after = &samples[at..(at + KICK_WINDOW).min(samples.len())];
+    assert!(
+        after.len() >= 30,
+        "only {} ticks after the reset",
+        after.len()
+    );
+    let horizontal = |s: &netprobe::Sample| (s.vel[0].powi(2) + s.vel[2].powi(2)).sqrt();
+    assert!(
+        horizontal(&after[0]) < KICK_START_MS,
+        "the new life starts at {} m/s",
+        horizontal(&after[0])
+    );
+    let dt = 1.0 / mm2_game::RACE_TICK_HZ as f64;
+    for w in after.windows(2).filter(|w| w[1].tick == w[0].tick + 1) {
+        let dv = ((w[1].vel[0] - w[0].vel[0]).powi(2) + (w[1].vel[2] - w[0].vel[2]).powi(2)).sqrt();
+        assert!(
+            dv < KICK_DV_MS,
+            "velocity jumped {dv} m/s at tick {}",
+            w[1].tick
+        );
+        let step = ((w[1].pos[0] - w[0].pos[0] - w[0].vel[0] * dt).powi(2)
+            + (w[1].pos[2] - w[0].pos[2] - w[0].vel[2] * dt).powi(2))
+        .sqrt();
+        assert!(step < KICK_STEP_M, "jumped {step} m at tick {}", w[1].tick);
+    }
 }
 
 /// The `trl=` field's fourth cell, `turn<k>` — the rows that carried a
