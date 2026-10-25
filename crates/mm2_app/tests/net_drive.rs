@@ -2066,10 +2066,16 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
     };
     let mut host_args = host_args(&retail, HOST_FRAME_CEILING);
     host_args.retain(|a| a != "--dev-world");
-    host_args.extend(["--city".into(), "sf".into()]);
+    // Both processes run `--paced`: an unpaced headless sim steps about
+    // 4x faster than wall clock and feeds the wall-clock rate controller
+    // that much more demand than a real 60 Hz player produces; it then
+    // sheds the bulk lane the cars ride, and the client's copies expire.
+    host_args.extend(["--city".into(), "sf".into(), "--paced".into()]);
     let mut host = Proc::spawn(MM2_EXE, &host_args);
     let addr = listening_addr(&host);
-    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "bob", 1000));
+    let mut client_args = join_args(&retail, addr, "bob", 1000);
+    client_args.push("--paced".into());
+    let client = Proc::spawn(MM2_EXE, &client_args);
     start_when_ready(&mut host, 1);
 
     let rec = client.until("smoke=headless-physics");
