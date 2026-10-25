@@ -449,6 +449,40 @@ fn fork_report(run: &Run, seat: u16, records: &[&String; 2]) -> String {
     out
 }
 
+/// The distance seat `id` can have covered between the two clients'
+/// records: the authority ticks they last applied for it, apart, times the
+/// seat's top speed over the tail of its own process's trace. Zero when the
+/// ticks agree or either is unknown.
+fn tick_gap_travel(run: &Run, id: u16, records: [&String; 2]) -> f64 {
+    // A client's own seat carries no mark: its newest applied snapshot is
+    // the last one its trace saw.
+    let applied = |who: usize| -> Option<u64> {
+        let from_mark = records[who]
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("marks="))
+            .and_then(|m| m.split('/').find_map(|c| c.strip_prefix(&format!("{id}:"))))
+            .and_then(|t| t.parse().ok());
+        from_mark.or_else(|| {
+            (usize::from(id) == who + 1)
+                .then(|| run.traces[who + 1].last().and_then(|s| s.snap_tick))
+                .flatten()
+        })
+    };
+    let (Some(a), Some(b)) = (applied(0), applied(1)) else {
+        return 0.0;
+    };
+    let Some(trace) = run.traces.get(usize::from(id)) else {
+        return 0.0;
+    };
+    let tail = trace.last().map_or(0, |s| s.tick.saturating_sub(600));
+    let top = trace
+        .iter()
+        .filter(|s| s.tick >= tail)
+        .map(|s| s.vel[0].hypot(s.vel[2]))
+        .fold(0.0_f64, f64::max);
+    a.abs_diff(b) as f64 / mm2_game::RACE_TICK_HZ as f64 * top
+}
+
 fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
     let seats = ["host", "alice", "bob"];
     let rammer = case.actor;
@@ -535,8 +569,15 @@ fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
         }
         let bounded =
             case.contact_certain || case.roles.get(usize::from(id)) == Some(&Role::Parked);
-        if bounded && apart > worst_bounded.1 {
-            worst_bounded = (id, apart);
+        // The clients stop at the first authority tick each applies past
+        // the settle tick, and alice then stays seated until bob leaves, so
+        // her record can be taken many ticks after his on a loaded machine.
+        // A seat still moving then differs by what it travelled in between:
+        // charge the bound that, and nothing for a seat at rest or a pair
+        // of records taken at the same authority tick.
+        let excess = tick_gap_travel(run, id, [alice, bob]);
+        if bounded && apart - excess > worst_bounded.1 {
+            worst_bounded = (id, apart - excess);
         }
         compared += 1;
     }
