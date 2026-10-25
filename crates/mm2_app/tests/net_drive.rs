@@ -2073,12 +2073,16 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
     host_args.extend(["--city".into(), "sf".into(), "--paced".into()]);
     let mut host = Proc::spawn(MM2_EXE, &host_args);
     let addr = listening_addr(&host);
-    let mut client_args = join_args(&retail, addr, "bob", 1000);
-    client_args.push("--paced".into());
+    // The client waits for the replica it asserts on, not for a frame
+    // count: a loaded machine delivers the cable car late, and the
+    // wall-clock deadline is the bound on one that never comes.
+    let mut client_args = join_args(&retail, addr, "bob", 6000);
+    client_args.extend(["--paced", "--until-scenery-copies", "--deadline", "90"].map(String::from));
     let client = Proc::spawn(MM2_EXE, &client_args);
     start_when_ready(&mut host, 1);
 
     let rec = client.until("smoke=headless-physics");
+    assert_eq!(field(&rec, "stop"), "scenery-copies", "{rec}");
     assert_eq!(field(&rec, "status"), "pass", "{rec}");
     let (_, _, _live, landed, mismatched) = cars_field(&rec);
     assert!(landed > 0, "no traffic row landed on the client: {rec}");

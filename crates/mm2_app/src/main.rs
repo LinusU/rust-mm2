@@ -473,6 +473,14 @@ struct Cli {
     #[arg(long, requires = "headless")]
     until_results: bool,
 
+    /// End a `--headless` client run once it holds a cable car copy and
+    /// has landed a traffic row and a world-clock frame from the host —
+    /// the scenery replica a loaded link may deliver late, once the
+    /// authority's clock is past tick 600. The record
+    /// prints `stop=scenery-copies`.
+    #[arg(long, requires = "headless")]
+    until_scenery_copies: bool,
+
     /// Wall-clock bound, in seconds, on a `--headless` run's
     /// `--until-*` condition: the run ends when it passes, whether or
     /// not the condition came. The record prints `stop=deadline`.
@@ -1574,6 +1582,7 @@ fn main() {
                 hold_peer_left: cli.hold_until_peer_left,
                 opponents_done: cli.until_opponents,
                 results: cli.until_results,
+                scenery_copies: cli.until_scenery_copies,
                 deadline: cli.deadline.map(Duration::from_secs),
             },
             paced: cli.paced,

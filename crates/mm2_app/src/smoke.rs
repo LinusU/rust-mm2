@@ -219,6 +219,12 @@ pub struct StopWhen {
     /// client that waits for the authority's verdict instead of running
     /// out a frame budget the match may outlast.
     pub results: bool,
+    /// Stop once a client holds a cable car copy and has landed both a
+    /// traffic row and a world-clock frame — the whole host-owned scenery
+    /// replica, whenever a loaded link delivers it — and the authority's
+    /// clock has passed [`SCENERY_COPIES_MIN_TICK`], so the record still
+    /// reads a car that settled and drove.
+    pub scenery_copies: bool,
     /// Stop once this much wall-clock time has passed since the first
     /// update — the bound on a condition that never comes.
     pub deadline: Option<Duration>,
@@ -246,6 +252,7 @@ impl StopWhen {
             || self.hold_peer_left
             || self.opponents_done
             || self.results
+            || self.scenery_copies
             || self.snap_tick.is_some()
             || self.deadline.is_some()
     }
@@ -402,6 +409,11 @@ impl PaceClock {
     }
 }
 
+/// Authority tick before which a `scenery_copies` stop never fires: the
+/// replica can land within a few ticks, but the record's pass criteria
+/// (grounded, moved) need the `Hold` driver's 2 s settle and some driving.
+const SCENERY_COPIES_MIN_TICK: u64 = 600;
+
 /// The record's `stop=` value when a [`StopWhen`] condition ended the
 /// run, in the order [`StopWatch::fired`] checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,6 +425,7 @@ enum StopReason {
     SnapTick,
     Opponents,
     Results,
+    SceneryCopies,
     Deadline,
 }
 
@@ -426,6 +439,7 @@ impl StopReason {
             Self::SnapTick => "snap-tick",
             Self::Opponents => "opponents",
             Self::Results => "results",
+            Self::SceneryCopies => "scenery-copies",
             Self::Deadline => "deadline",
         }
     }
@@ -593,6 +607,17 @@ impl StopWatch {
             {
                 return Some(StopReason::Results);
             }
+        }
+        if self.stop.scenery_copies
+            && report.is_some_and(|r| {
+                r.cable_live > 0
+                    && r.cars_landed > 0
+                    && r.world_landed > 0
+                    && r.last_snap_tick
+                        .is_some_and(|t| t >= SCENERY_COPIES_MIN_TICK)
+            })
+        {
+            return Some(StopReason::SceneryCopies);
         }
         match self.stop.deadline {
             Some(limit) if self.started.elapsed() >= limit => Some(StopReason::Deadline),
@@ -3508,6 +3533,43 @@ mod tests {
         let mut idle = StopWatch::new(StopWhen::default());
         assert!(!StopWhen::default().is_armed());
         assert_eq!(idle.fired(&applied(99)), None);
+    }
+
+    #[test]
+    fn a_scenery_stop_waits_for_every_part_of_the_replica() {
+        let mut watch = StopWatch::new(StopWhen {
+            scenery_copies: true,
+            ..default()
+        });
+        assert!(
+            StopWhen {
+                scenery_copies: true,
+                ..default()
+            }
+            .needs_wire()
+        );
+        let held = |cable_live, cars_landed, world_landed| {
+            world_with(crate::netdrive::NetDriveReport {
+                cable_live,
+                cars_landed,
+                world_landed,
+                last_snap_tick: Some(SCENERY_COPIES_MIN_TICK),
+                ..default()
+            })
+        };
+        assert_eq!(watch.fired(&held(0, 5, 5)), None);
+        // The replica is whole but the authority's clock is too young.
+        let young = world_with(crate::netdrive::NetDriveReport {
+            cable_live: 1,
+            cars_landed: 5,
+            world_landed: 5,
+            last_snap_tick: Some(SCENERY_COPIES_MIN_TICK - 1),
+            ..default()
+        });
+        assert_eq!(watch.fired(&young), None);
+        assert_eq!(watch.fired(&held(1, 0, 5)), None);
+        assert_eq!(watch.fired(&held(1, 5, 0)), None);
+        assert_eq!(watch.fired(&held(1, 5, 5)), Some(StopReason::SceneryCopies));
     }
 
     #[test]
