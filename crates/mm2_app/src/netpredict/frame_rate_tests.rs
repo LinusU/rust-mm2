@@ -399,5 +399,6 @@ fn online_consumes_each_command_on_the_tick_offline_does() {
     let offline = response(false);
     let online = response(true);
     println!("brake response onset: offline tick {offline}, online tick {online}");
+    assert!(offline > 0, "the route never started braking");
     assert_eq!(offline, online);
 }
