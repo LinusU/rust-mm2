@@ -556,6 +556,26 @@ mod tests {
     }
 
     #[test]
+    fn a_jittery_round_trip_without_a_standing_queue_is_not_congestion() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(100_000, t0);
+        let mut t = t0;
+        // 180 ms +-45 ms, as a quarter-delay jitter on a 90 ms link gives.
+        for i in 0..200u64 {
+            t += Duration::from_millis(33);
+            let ms = [135, 225, 160, 200, 180, 150][(i % 6) as usize];
+            c.on_feedback(
+                Feedback {
+                    rtt: Some(Duration::from_millis(ms)),
+                    ..Feedback::default()
+                },
+                t,
+            );
+        }
+        assert_eq!(c.decreases(), 0, "jitter alone cut the rate");
+    }
+
+    #[test]
     fn a_standing_queue_in_the_round_trip_time_is_congestion_before_loss() {
         let t0 = Instant::now();
         let mut c = PeerController::new(100_000, t0);

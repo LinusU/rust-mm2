@@ -910,6 +910,94 @@ the host sent 586 deltas against 14 full states and 53.6 kB of state payload
 against 293.4 kB as full states (18 %), with no `MissingBase`. The protocol
 is **v40** (state frames and the ack's group byte).
 
+### Congestion control takes the round trip from these acks
+
+The 10B `PeerController` takes its round-trip evidence from the group acks
+(`SeatOut::on_group_ack`): one sample per tick (the first group acked; the
+tick leaves the log), measured from when the tick was queued. Three
+decisions, each from a failed `net_contact` run of the first wiring
+(`a_sustained_push_is_measured_on_unequal_links`: own-car correction 18-47 m,
+first motion 272 ticks late):
+
+- **No passed-over count.** A tick carries only the groups that changed, so
+  an unacknowledged older tick is not loss; older ticks are dropped from the
+  log without `skipped`.
+- **No ack age.** A quiet scene sends no group, so no ack, and the
+  controller would read that silence as congestion. `ack_at` stays unset.
+- **Tick 0 is no sample.** It is acknowledged in about 2 ms on a 90 ms link
+  (cause not established), which as the lowest-RTT baseline made every real
+  sample look like a standing queue. And the standing-queue test allows
+  four mean deviations of the samples (`rttvar`) above the 50 ms slack, since
+  quarter-delay jitter spreads samples above the minimum without any queue.
+
+### Not done / open
+
+- (Done in NETPLAY-10D-2, see "Baselined snapshot states per seat" below:
+  the app sends each `Playing` snapshot group, split by contact island
+  (NETPLAY-10C-2), as a baselined state and the client engages
+  `BaselineReceiver`.)
+- The simulation has no jitter or reordering beyond the fixed ack RTT, and
+  loopback tests prove the code, not WAN behaviour.
+
+## Baselined snapshot states per seat (NETPLAY-10D-2, #2028)
+
+Evidence level: **code checks and synthetic integration** (unit tests and
+loopback lane tests through the seeded `UdpImpairProxy`). No WAN, retail or
+rendered level.
+
+### What the app sends
+
+`mm2_app::netdrive::publish_snapshots` builds the one frame as before and,
+in the `Playing` phase only, sends it per seat:
+
+- **`Playing` frames** take the groups of "Snapshot groups per seat"
+  (`ContactIslands::groups_for`: group 0 owner and human islands, group 1
+  `Bulk` bot-only islands, empty groups omitted) and send each as a
+  baselined state with the group's index as its logical group id, so the
+  two groups keep independent baselines. The priorities are the existing
+  ones (`Movement` / `Bulk`).
+- **Seats without a lane** keep the whole frame over the control stream.
+  Every non-`Playing` frame (`Ready`, `Countdown`, `Results` and its
+  repeats) keeps the plain `send_snap_groups_prio` path: those frames repeat
+  a tick or carry rows every seat must see, which a baselined
+  (stale-by-tick) state would not allow.
+
+`HostCtl::send_snap_states_prio(seat, generation, tick, epoch, &[(group,
+Snap)], priorities)` encodes each group with that seat's per-group
+`BaselineSender` and sends the result as a **state frame**
+(`0xFE | group | epoch | state payload`, `frag::encode_state_frame`) in a
+fragment group. The senders live in the host's `LaneSeat`, so a client that
+rejoins under the same id starts from full states.
+
+### Receiving and acknowledging
+
+The client lane reassembles the group, sees the state frame, applies it with
+its per-group `BaselineReceiver`, hands the reconstructed `Snap` to the game
+exactly as an unbaselined one and **then** acknowledges it. The ack
+(`LaneTag::Ack`) is now `epoch u8 | group u8 | tick u64`; the host keeps the
+newest per group (`Host::lane_group_ack`) and feeds it to that group's
+sender. Nothing in `mm2_app` changed on the receiving side.
+
+### Failure handling
+
+| Fault | Behaviour |
+|---|---|
+| baseline lost on the way down | never acked, so never a delta base; the next tick is a full state (`a_lost_baseline_is_never_deltaed_against`) |
+| ack lost | the sender keeps the older acked baseline; a delta against it applies because the client holds it; the next ack supersedes (`a_lost_ack_costs_a_full_state_and_the_next_ack_recovers`) |
+| acked baseline too old | more than `REFRESH_TICKS` (60) behind: full state (`a_baseline_older_than_the_refresh_bound_is_replaced_by_a_full_state`) |
+| baseline evicted at the receiver | `MissingBase`: nothing stored, nothing acked, counted (`StateStats::missing_base`); the sender's refresh recovers (unit tests in `frag`) |
+| reset / roster change | `PublishPace::baseline_epoch` moves when the seat set or any seat's wire reset epoch changes; the next state is full for every seat and an old-epoch ack names nothing (`an_epoch_bump_forces_a_full_state_and_retires_old_acks`) |
+| generation change | the sender's scope changes: full state; the receiver drops its baselines |
+| group not sent a tick | each group has its own baselines (`groups_keep_independent_baselines`) |
+| refused send (oversize group) | counted (`snap_states_refused`); the next tick is a fresh full state |
+
+Seeded 20 % loss / 10 % duplication / 10 % reordering, 300 ticks, two
+groups (`a_seeded_lossy_run_reconstructs_every_applied_group_exactly`):
+every group the client applied equals what was sent for that tick and group;
+the host sent 586 deltas against 14 full states and 53.6 kB of state payload
+against 293.4 kB as full states (18 %), with no `MissingBase`. The protocol
+is **v40** (state frames and the ack's group byte).
+
 ### Congestion control is deliberately not fed by these acks
 
 The 10B `PeerController` was built to take RTT, passed-over-snapshot and
@@ -925,7 +1013,6 @@ those cases.
 
 ### Not done / open
 
-- Feeding snapshot acks to the congestion controller (above).
 - The island criterion is not tuned against play (#2050); a group whose
   membership changes is a larger delta, never a wrong one. The group id is
   the group's index, which is stable because there are at most two.

@@ -1031,6 +1031,7 @@ impl SeatOut {
 
     /// The peer acknowledged the state of `tick`: take a round-trip
     /// sample from it and count every older snapshot it passed over.
+    #[cfg(test)]
     pub(crate) fn on_ack(&self, tick: u64, now: Instant) {
         self.take_ack(tick, now, true);
     }
@@ -1057,6 +1058,13 @@ impl SeatOut {
             } else if count_skipped {
                 pace.skipped += 1;
             }
+        }
+        // Tick 0 is acknowledged within about 2 ms even on a 90 ms link
+        // (measured on the net_contact proxies): not a round trip, and as
+        // the lowest-RTT baseline it would read every real sample as a
+        // standing queue. Cause not established.
+        if tick == 0 {
+            sample = None;
         }
         if sample.is_some() {
             pace.rtt = sample;
@@ -1417,10 +1425,9 @@ fn ingest(
                         group,
                         tick,
                     });
-                    // The controller takes the round trip and the ack's age
-                    // from it (see docs/netcode-redesign.md).
+                    // The controller takes the round trip from it, not the
+                    // ack's age: a quiet scene sends no group to acknowledge.
                     let now = Instant::now();
-                    seat.ack_at = Some(now);
                     seat.out.on_group_ack(tick, now);
                     // The sender judges scope and retention itself; an
                     // ack it cannot match is simply not a baseline.
