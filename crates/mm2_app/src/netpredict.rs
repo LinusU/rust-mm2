@@ -2586,6 +2586,149 @@ mod tests {
         assert!((rotation_error(r, Quat::IDENTITY) - 0.01).abs() < 1e-5);
         assert!(rotation_error(r, -r) < 1e-6, "q and -q are one rotation");
     }
+
+    /// A one-gate `AnyOrder` race with its gate at `centre`; clearing it
+    /// finishes the participant, so one crossing is one recorded result.
+    fn gate_definition(centre: Vec3) -> mm2_game::RaceDefinition {
+        mm2_game::RaceDefinition {
+            checkpoints: vec![mm2_game::Checkpoint {
+                center: centre,
+                radius: 2.0,
+                height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
+                heading_deg: 0.0,
+                require_direction: false,
+            }],
+            finish: None,
+            rule: mm2_game::CheckpointRule::AnyOrder,
+            laps: 0,
+            time_limit_ticks: None,
+            params: mm2_game::EventParams::default(),
+            countdown_ticks: 1,
+            start_slots: Vec::new(),
+        }
+    }
+
+    /// The scripted car's world with a racing participant on it and the
+    /// production `advance_race` in `FixedLast`, for a session run by
+    /// `authority`.
+    fn gate_world(authority: mm2_game::SessionAuthority, gate: Vec3) -> (App, Entity) {
+        let (mut app, car) = app();
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority,
+                    ..mm2_game::SessionConfig::default()
+                },
+                GEN,
+            )
+            .unwrap();
+        session.transition(mm2_game::SessionPhase::Ready).unwrap();
+        session.transition(mm2_game::SessionPhase::Playing).unwrap();
+        let def = gate_definition(gate);
+        let mut race = mm2_game::RaceState::new(def.clone(), session.generation());
+        race.phase = mm2_game::RacePhase::Running;
+        let mut progress = mm2_game::RaceProgress::new(&def);
+        progress.state = mm2_game::ParticipantState::Racing;
+        app.insert_resource(session)
+            .insert_resource(race)
+            .init_resource::<mm2_game::ResultLedger>()
+            .add_message::<mm2_game::RaceStarted>()
+            .add_systems(FixedLast, crate::race::advance_race);
+        app.world_mut().entity_mut(car).insert((
+            mm2_game::Player {
+                id: mm2_game::PlayerId(1),
+                control: mm2_game::PlayerControl::Local,
+            },
+            progress,
+        ));
+        (app, car)
+    }
+
+    fn standing(app: &App, car: Entity) -> (u32, usize, mm2_game::ParticipantState) {
+        let p = app.world().get::<mm2_game::RaceProgress>(car).unwrap();
+        (p.crossings, p.cleared_count(), p.state.clone())
+    }
+
+    /// NETPLAY-08E: the own car drives through a gate while two
+    /// successive corrections replay it. The gate rule is not in the
+    /// physics schedule a replay runs, and a predicted client does not
+    /// run it live either (the host's v14 tail is its only progress
+    /// truth), so the client's standing and ledger do not move; the
+    /// authority counts the same crossing once, however often it is
+    /// corrected. The impairment byte the host re-sends with both
+    /// corrections is stamped into the recorded past once.
+    #[test]
+    fn a_replayed_gate_crossing_awards_nothing_on_a_predicted_client() {
+        use mm2_game::{ParticipantState, ResultLedger, SessionAuthority};
+
+        // The gate sits where the scripted car is at tick 120, 10 m down the road.
+        let (mut probe, pcar) = app();
+        for seq in 1..=120 {
+            live(&mut probe, pcar, seq);
+        }
+        let gate = pos(&probe, pcar);
+
+        // The authority drives the whole script: one crossing, one result.
+        let (mut host, hcar) = gate_world(SessionAuthority::Local, gate);
+        for seq in 1..=150 {
+            live(&mut host, hcar, seq);
+        }
+        let (crossings, cleared, state) = standing(&host, hcar);
+        assert_eq!((crossings, cleared), (1, 1));
+        assert!(
+            matches!(state, ParticipantState::Finished { .. }),
+            "{state:?}"
+        );
+        assert_eq!(host.world().resource::<ResultLedger>().len(), 1);
+
+        // The predicted client drives it too, then takes two corrections
+        // whose replays both run through the gate.
+        let (mut app, car) = gate_world(SessionAuthority::Remote, gate);
+        let mut pred = fresh();
+        run(&mut app, car, &mut pred, 150);
+        let before = standing(&app, car);
+        assert_eq!(before, (0, 0, ParticipantState::Racing));
+        pred.authored = vec![authored_impairment(car, Some(0.5))];
+
+        let mut replayed = Vec::new();
+        for ack in [90, 105] {
+            let mut a = assertion_from(&pred, car, ack);
+            a.pos += Vec3::new(0.05, 0.0, 0.0);
+            let Outcome::Replayed { steps, .. } = go(&mut app, &mut pred, car, &a, 150) else {
+                panic!("expected a replay at ack {ack}, got {:?}", pred.last);
+            };
+            assert_eq!(steps as u64, 150 - ack);
+            replayed.push(steps);
+        }
+        assert_eq!(
+            replayed,
+            [60usize, 45],
+            "both corrections replayed the gate"
+        );
+
+        // The corrected past really passes the gate: the rule, fed that
+        // path, would have credited it.
+        let def = gate_definition(gate);
+        let mut probe = mm2_game::RaceProgress::new(&def);
+        probe.state = ParticipantState::Racing;
+        let credited = (90..=150).any(|seq| {
+            let (p, ..) = own_body(pred.ring.get(seq).unwrap(), car).unwrap();
+            probe.advance(&def, p) == mm2_game::ProgressOutcome::Finished
+        });
+        assert!(credited, "the replayed path never crossed the gate");
+
+        // ... and the client still holds no standing it did not receive.
+        assert_eq!(standing(&app, car), before);
+        assert!(app.world().resource::<ResultLedger>().is_empty());
+
+        // The impairment byte arrived with both corrections: applied once.
+        assert_eq!(pred.modifier_corrections, 1);
+        assert_eq!(recorded(&pred, 150, car).impairment, Some(0.5));
+        // The authority is unmoved by any of it.
+        assert_eq!(standing(&host, hcar).0, 1);
+        assert_eq!(host.world().resource::<ResultLedger>().len(), 1);
+    }
 }
 
 #[cfg(test)]

@@ -8263,6 +8263,123 @@ mod tests {
         assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
     }
 
+    /// NETPLAY-08E: the gate crossing the host counted reaches the
+    /// predicted client's own seat as a progress row. Redelivering it
+    /// (the same tick, a later tick repeating it, an older tick after
+    /// it, a row of an older generation) leaves the cleared set, lap,
+    /// crossings and the `ResultLedger` as the first delivery set them:
+    /// one award, however the corrections and datagrams interleave.
+    #[test]
+    fn a_redelivered_gate_row_is_one_award() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let mut race = RaceState::new(def.clone(), generation);
+        race.phase = RacePhase::Running;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(race)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let own = app
+            .world_mut()
+            .spawn((
+                NetPlayer(8),
+                Player {
+                    id: mm2_game::PlayerId(11),
+                    control: PlayerControl::Local,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+                RaceProgress::new(&def),
+            ))
+            .id();
+        let push = |app: &mut App, generation: u64, tick: u64, row: SnapEntry| {
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                generation,
+                tick,
+                vec![row],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            app.update();
+        };
+        let standing = |app: &App| {
+            let p = app.world().get::<RaceProgress>(own).unwrap();
+            (
+                p.state.clone(),
+                p.cleared_mask(),
+                p.lap,
+                p.crossings,
+                p.route_clears,
+                app.world().resource::<ResultLedger>().len(),
+            )
+        };
+
+        // The host's crossing, then its finish.
+        let mut crossed = snap_entry();
+        crossed.player = 8;
+        crossed.prog_state = SNAP_PROG_RACING;
+        crossed.prog_cleared = 0b1;
+        crossed.prog_crossings = 1;
+        push(&mut app, generation, 20, crossed);
+        assert_eq!(
+            standing(&app),
+            (ParticipantState::Racing, 0b1, 0, 1, 0, 0),
+            "the crossing lands once"
+        );
+        let mut finished = crossed;
+        finished.prog_state = SNAP_PROG_FINISHED;
+        finished.prog_ticks = 900;
+        push(&mut app, generation, 21, finished);
+        let landed = standing(&app);
+        assert!(matches!(landed.0, ParticipantState::Finished { .. }));
+        assert_eq!((landed.1, landed.3, landed.5), (0b1, 1, 1));
+        let applied = app.world().resource::<NetDriveReport>().progress_applied;
+
+        // The same tick again, a later tick repeating the row, an older
+        // tick that predates the crossing, and an older generation.
+        let mut before_gate = crossed;
+        before_gate.prog_state = SNAP_PROG_RACING;
+        before_gate.prog_cleared = 0;
+        before_gate.prog_crossings = 0;
+        let mut other_result = finished;
+        other_result.prog_ticks = 100;
+        push(&mut app, generation, 21, finished);
+        push(&mut app, generation, 22, finished);
+        push(&mut app, generation, 19, before_gate);
+        push(&mut app, generation - 1, 99, other_result);
+        push(&mut app, generation, 20, crossed);
+
+        assert_eq!(standing(&app), landed, "one award, nothing rewritten");
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.progress_applied, applied);
+        assert!(report.snaps_staled >= 4, "{}", report.snaps_staled);
+    }
+
     /// The v14 client leg's ordering edge, repaired (F25-B): one snap
     /// can carry the local seat's terminal tail *and* the race row
     /// that releases the session — the owed `Results`-phase frame a

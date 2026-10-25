@@ -1805,6 +1805,26 @@ repaired is not on the wire in that case. Not covered: bob's view of alice's
 tractor and trailer pose in the trace (the trace records the own car only; bob
 is covered by the `trl=` reseat counters), and a run on the UDP lane.
 
+### A replayed gate crossing never awards on a client (NETPLAY-08E, #2093)
+
+A checkpoint is the gate rule's (`advance_race`, `FixedLast`) business, not
+the physics schedule's. Two proofs, synthetic integration on the production
+systems:
+
+| Claim | Test |
+|---|---|
+| A client whose own car passes a gate inside two successive replays (60 and 45 steps) keeps its `RaceProgress` (crossings, cleared, state) and `ResultLedger` as they were; the same script on the authority counts the crossing once and records one result; the corrected path does cross the gate (the rule fed that path finishes) | `netpredict::tests::a_replayed_gate_crossing_awards_nothing_on_a_predicted_client` |
+| The impairment byte the host re-sends with both corrections is stamped into the recorded past once (`modifier_corrections == 1`) | same test |
+| The host's progress row for the crossing and the finish, redelivered on the same tick, a later tick, an older tick, or an older generation, leaves cleared/lap/crossings/route clears, state and the ledger unchanged and applies no second row | `netdrive::tests::a_redelivered_gate_row_is_one_award` |
+
+The client does not run `advance_race` live either (it is authority-gated),
+so the first test shows the replay path adds nothing, not that the gate rule
+was suppressed inside it. Not covered: a process-level run over the
+transport (the CNR authority test covers gold/score, not a checkpoint), and a
+row of an older *reset* epoch with a newer tick for a seat that is still
+racing (the mirror takes the authority's counters verbatim; whether retail
+ever lowers them is unknown). Evidence level: synthetic integration.
+
 ### Re-entering seats (NETPLAY-05E, #1933)
 
 A contact body that spawns after the compared tick is not in the recorded
