@@ -186,6 +186,8 @@ pub struct PeerController {
     decreases: u64,
     min_rtt: Option<(Duration, Instant)>,
     srtt: Option<Duration>,
+    /// Smoothed mean deviation of the round-trip samples: the path's jitter.
+    rttvar: Duration,
     /// The clean wait before the next step up (backs off after a cut).
     increase_every: Duration,
 }
@@ -207,6 +209,7 @@ impl PeerController {
             decreases: 0,
             min_rtt: None,
             srtt: None,
+            rttvar: Duration::ZERO,
             increase_every: INCREASE_INTERVAL,
         }
     }
@@ -240,6 +243,9 @@ impl PeerController {
     /// queue (smoothed RTT well above the baseline).
     fn take_rtt(&mut self, sample: Option<Duration>, now: Instant) -> bool {
         if let Some(r) = sample {
+            if let Some(s) = self.srtt {
+                self.rttvar = (self.rttvar * 3 + s.abs_diff(r)) / 4;
+            }
             self.srtt = Some(self.srtt.map_or(r, |s| (s * 7 + r) / 8));
             match self.min_rtt {
                 Some((m, at))
@@ -248,7 +254,9 @@ impl PeerController {
             }
         }
         match (self.srtt, self.min_rtt) {
-            (Some(s), Some((m, _))) => s > m + RTT_SLACK,
+            // A jittery path spreads its samples above the minimum
+            // without any queue: the slack grows with the deviation seen.
+            (Some(s), Some((m, _))) => s > m + RTT_SLACK + self.rttvar * 4,
             _ => false,
         }
     }

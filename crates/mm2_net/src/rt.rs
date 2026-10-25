@@ -1031,11 +1031,20 @@ impl SeatOut {
 
     /// The peer acknowledged the state of `tick`: take a round-trip
     /// sample from it and count every older snapshot it passed over.
-    // Not called while snapshot acks stay out of the congestion controller
-    // (see the baseline ack in `ingest`); kept for the change that feeds
-    // it, which has to be measured against `net_contact` first.
-    #[allow(dead_code)]
     pub(crate) fn on_ack(&self, tick: u64, now: Instant) {
+        self.take_ack(tick, now, true);
+    }
+
+    /// A baselined group of `tick` was acknowledged: one round-trip
+    /// sample per tick (the first group acked; the tick leaves the log, so
+    /// its other group gives none). Older ticks are dropped, not counted
+    /// as passed over: a tick carries only the groups that changed, so a
+    /// tick without an ack is no evidence of loss.
+    pub(crate) fn on_group_ack(&self, tick: u64, now: Instant) {
+        self.take_ack(tick, now, false);
+    }
+
+    fn take_ack(&self, tick: u64, now: Instant, count_skipped: bool) {
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
         let mut sample = None;
         while let Some(&(t, at)) = pace.ticks.front() {
@@ -1045,7 +1054,7 @@ impl SeatOut {
             pace.ticks.pop_front();
             if t == tick {
                 sample = Some(now.saturating_duration_since(at));
-            } else {
+            } else if count_skipped {
                 pace.skipped += 1;
             }
         }
@@ -1408,12 +1417,11 @@ fn ingest(
                         group,
                         tick,
                     });
-                    // Deliberately not fed to the congestion controller (neither
-                    // `SeatOut::on_ack` nor `ack_at`): engaging it on snapshot acks
-                    // made its RTT and passed-over-snapshot evidence cut
-                    // the rate on jittery links and starved corrections
-                    // (the `net_contact` unequal-link cases). That wiring
-                    // is its own change, to be measured against them.
+                    // The controller takes the round trip and the ack's age
+                    // from it (see docs/netcode-redesign.md).
+                    let now = Instant::now();
+                    seat.ack_at = Some(now);
+                    seat.out.on_group_ack(tick, now);
                     // The sender judges scope and retention itself; an
                     // ack it cannot match is simply not a baseline.
                     seat.baselines
