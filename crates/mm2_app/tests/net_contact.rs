@@ -401,8 +401,17 @@ fn fork_report(run: &Run, seat: u16, records: &[&String; 2]) -> String {
             .into_iter()
             .find(|(i, ..)| *i == seat)
             .map(|(_, x, z)| format!("({x:.1}, {z:.1})"));
+        // The newest authority tick this process applied for the seat.
+        let mark = rec
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("marks="))
+            .and_then(|m| {
+                m.split('/')
+                    .find_map(|c| c.strip_prefix(&format!("{seat}:")))
+            })
+            .unwrap_or("none");
         out += &format!(
-            "  {who}'s record holds seat {seat} at {}\n",
+            "  {who}'s record holds seat {seat} at {}, last authority tick applied {mark}\n",
             held.unwrap_or_else(|| "nowhere".into())
         );
     }

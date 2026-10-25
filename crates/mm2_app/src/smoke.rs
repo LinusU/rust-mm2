@@ -444,7 +444,23 @@ fn seats_detail(world: &mut World) -> String {
             .iter()
             .map(|(id, at)| format!("{id}:{:.1},{:.1}", at.x, at.z))
             .collect();
-        format!(" seats={}", rows.join("/"))
+        // The newest authority tick applied or staged for each seat (#2118):
+        // a copy that sits still while its mark is old stopped being fed.
+        let marks: Vec<String> = world
+            .get_resource::<crate::netdrive::RemoteSnaps>()
+            .map(|snaps| {
+                seats
+                    .iter()
+                    .filter_map(|(id, _)| snaps.seat_mark(*id).map(|(_, t)| format!("{id}:{t}")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let marks = if marks.is_empty() {
+            String::new()
+        } else {
+            format!(" marks={}", marks.join("/"))
+        };
+        format!(" seats={}{marks}", rows.join("/"))
     }
 }
 
