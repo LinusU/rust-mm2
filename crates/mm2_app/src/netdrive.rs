@@ -143,7 +143,7 @@ use mm2_game::{
     VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
-    Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, Priority, RemoteInputs, SNAP_FLAG_BRAKE,
+    Adapt, Cadence, DriveInput, MAX_SNAP_IMPACTS, Message, Priority, RemoteInputs, SNAP_FLAG_BRAKE,
     SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry,
     SnapImpact, SnapProp, SnapRace, SnapTrailer, Source as CommandSource, TickCommand, VehiclePick,
 };
@@ -1332,6 +1332,15 @@ pub struct NetDriveReport {
     pub snap_states_refused: u64,
     /// Updates whose snapshot the cadence deferred (NETPLAY-06D).
     pub snaps_skipped: u64,
+    /// Snapshots sent per seat (the wire id), over its lane or the
+    /// control stream.
+    pub seat_snaps: BTreeMap<u16, u64>,
+    /// Per-seat snapshots withheld because the seat's congestion
+    /// divisor did not select the tick (NETPLAY-10B follow-up).
+    pub snaps_seat_divided: u64,
+    /// Seat frames sent without the world group: the seat's `Adapt`
+    /// turned bulk off.
+    pub snaps_bulk_omitted: u64,
     /// Snapshot frames the client applied to its remote copies.
     pub snaps_applied: u64,
     /// Pose frames the client dropped stale at [`RemoteSnaps::push`] —
@@ -3405,6 +3414,9 @@ pub fn publish_snapshots(
         .collect();
     seats.sort_unstable();
     let roster_changed = pace.seats.as_ref() != Some(&seats);
+    // A frame that carries impacts or a seat-set / reset change goes to
+    // every seat whatever its congestion divisor says.
+    let forced = !drained.is_empty() || roster_changed;
     if *session.phase() == SessionPhase::Playing && drained.is_empty() && !roster_changed {
         let tick_hz = clocks
             .fixed
@@ -3682,12 +3694,45 @@ pub fn publish_snapshots(
     // terminal rows every seat must see, so they keep the plain groups.
     let baselined = *session.phase() == SessionPhase::Playing;
     let epoch = pace.baseline_epoch(&seats);
+    let mut all_divided = false;
     let sent_ok = match lobby.as_ref() {
         Some(lobby) => {
-            let islands = ContactIslands::new(&full, &hit_pairs, WORLD_GROUP_RANGE_M);
+            let mut islands: Vec<(u32, ContactIslands)> = Vec::new();
             let mut any = lobby.roster.is_empty();
+            let mut attempted = lobby.roster.is_empty();
+            let playing = *session.phase() == SessionPhase::Playing;
             for seat in lobby.roster.iter().map(|e| e.player_id) {
-                let groups = islands.groups_for(&full, seat);
+                // Only a `Playing` stream is thinned: Ready, Countdown and
+                // Results frames carry one-shot rows every seat must see.
+                let adapt = if playing {
+                    host.ctl().peer_adapt(seat).unwrap_or_default()
+                } else {
+                    Adapt::default()
+                };
+                if playing && !forced {
+                    let skipped = pace.divided.entry(seat).or_insert(0);
+                    if *skipped + 1 < adapt.snapshot_divisor {
+                        *skipped += 1;
+                        report.snaps_seat_divided += 1;
+                        continue;
+                    }
+                }
+                pace.divided.insert(seat, 0);
+                attempted = true;
+                let percent = adapt.relevance_percent.min(100);
+                let idx = match islands.iter().position(|(p, _)| *p == percent) {
+                    Some(i) => i,
+                    None => {
+                        let range = WORLD_GROUP_RANGE_M * percent as f32 / 100.0;
+                        islands.push((percent, ContactIslands::new(&full, &hit_pairs, range)));
+                        islands.len() - 1
+                    }
+                };
+                let mut groups = islands[idx].1.groups_for(&full, seat);
+                if !adapt.bulk && groups.len() > 1 {
+                    groups.truncate(1);
+                    report.snaps_bulk_omitted += 1;
+                }
                 let prios: Vec<Priority> = groups
                     .iter()
                     .enumerate()
@@ -3736,12 +3781,22 @@ pub fn publish_snapshots(
                         false
                     }
                 };
+                if sent {
+                    *report.seat_snaps.entry(seat).or_default() += 1;
+                }
                 any |= sent;
             }
+            // Every seat deliberately skipped: the tick still counts as
+            // published for the cadence.
+            all_divided = !attempted;
             any
         }
         None => host.ctl().broadcast(&full).is_ok(),
     };
+    if all_divided && *session.phase() == SessionPhase::Playing {
+        pace.last = Some((session.tick(), wall));
+        pace.seats = Some(seats.clone());
+    }
     if sent_ok {
         let sent = published
             .filter(|&(last, _)| last == key)
@@ -3963,6 +4018,9 @@ pub struct PublishPace {
     seats: Option<Vec<(u16, u8)>>,
     /// The seat set the baseline epoch was last minted for, and the epoch.
     baseline: Option<(Vec<(u16, u8)>, u8)>,
+    /// Per seat, the snapshots withheld since it last got one — its
+    /// congestion divisor counts against this.
+    divided: BTreeMap<u16, u32>,
 }
 
 impl PublishPace {

@@ -1103,6 +1103,16 @@ pub struct HostCtl {
 }
 
 impl HostCtl {
+    /// [`Host::peer_adapt`], from the control handle a producer holds.
+    pub fn peer_adapt(&self, id: u16) -> Option<crate::Adapt> {
+        self.lane.established_out(id).map(|o| o.adapt())
+    }
+
+    /// [`Host::set_uplink_cap`], from the control handle.
+    pub fn set_uplink_cap(&self, bytes_per_sec: u32) {
+        self.lane.set_uplink_cap(bytes_per_sec);
+    }
+
     fn send(&self, msg: LoopMsg) -> Result<(), NetError> {
         // Never waits: a full queue is an explicit error to the caller
         // (the loop is wedged or flooded), not a stall of the game thread.
