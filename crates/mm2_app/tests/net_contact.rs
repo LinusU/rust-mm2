@@ -365,7 +365,22 @@ fn starvation(run: &Run) -> (bool, usize) {
 /// attempt that breaks one on a machine that starved its processes (see
 /// [`STARVED_TICKS`]) is run again, and one that breaks one on a machine
 /// that did not fails the test, as does the last attempt.
+///
+/// `MM2_CONTACT_REPEAT=N` runs the case N times in a row (#2118: the stale
+/// resting copy showed once on CI and never locally, so a CI job sets it to
+/// loop the pileup until a failure prints its `marks=`).
 fn contact_case(case: Case) {
+    let repeat = std::env::var("MM2_CONTACT_REPEAT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    for _ in 0..repeat {
+        contact_case_once(case);
+    }
+}
+
+fn contact_case_once(case: Case) {
     let dir = report_dir();
     for attempt in 1..=ATTEMPTS {
         let run = run(case, &dir);
