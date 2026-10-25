@@ -2259,7 +2259,7 @@ unchanged and do not accumulate over repeated frames.
 Open (not claimed): the audio emitter ordering above; rendered captures and
 30/60/144 FPS
 route runs (AC1, AC3); input-to-render latency measurement.
-=======
+
 ### Frame-rate route evidence (NETPLAY-07D, #2008)
 
 `cargo test -p mm2_app --lib frame_rate -- --nocapture` (`netpredict/frame_rate_tests.rs`).
@@ -2301,7 +2301,6 @@ physics-versus-drawn overlay) is not produced.
 Open (not claimed): trailers/wheels of the
 corrected car beyond the carried subtree (trailer is a separate body); the
 physics-versus-rendered developer overlay; rendered captures.
->>>>>>> d80f5e3d (Measure own-car correction smoothing and input timing at 30/60/144 FPS on a route)
 
 ## Host-timestamped snapshot buffer (NETPLAY-07B, #2006)
 
