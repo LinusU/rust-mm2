@@ -708,6 +708,21 @@ No WAN, retail-data or rendered level.
   NETPLAY-10D-2) and the acknowledged one outlives newer unacknowledged ones. `Client::lane_ack` sends the ack; `Host::lane_ack`
   reports the newest per seat (an ack for another generation is refused at
   the door as `wrong_generation`).
+- **A resting body is refreshed, not omitted (#2118).** The host sends every
+  group of every `Playing` snapshot (a seat is thinned only by its congestion
+  divisor, at most 3), and the tick inside a group's bytes moves even when no
+  body does, so a state is never withheld as unchanged. A lost last change
+  therefore costs the receiver the next delivered frame: a delta against the
+  acknowledged baseline when that is held, a full state otherwise, and a
+  full state at the latest `REFRESH_TICKS` (60) after the last ack. Human
+  seats always ride group 0 (`ContactIslands::groups_for`), which `Bulk`
+  omission never drops. The bound is pinned over every loss pattern of six
+  data frames crossed with six acks by
+  `a_body_that_rests_as_its_last_change_is_lost_reaches_the_receiver`. The smoke
+  record prints `marks=<seat>:<tick>` (the newest authority tick applied or
+  staged per seat) and the `net_contact` fork report echoes it, so a copy
+  that sits still while its mark is old is a receive gap and one whose mark is
+  current is an apply or presentation gap.
 - **Lossless deltas.** `delta_encode` is a byte-run diff, so a continuation
   field (velocity, accumulator, `input_ack`) is reproduced exactly; there is
   no field list that could omit one. The simulation asserts byte equality of

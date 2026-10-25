@@ -1211,4 +1211,56 @@ mod tests {
         assert_eq!(decode_ack(&encode_ack(3, MAX_GROUPS as u8, 77)), None);
         assert_eq!(decode_ack(&[1, 2]), None);
     }
+
+    /// #2118: a body that comes to rest just as its last changed state is
+    /// lost still reaches the receiver. The host sends every group every
+    /// snapshot, so an unchanged state is not omitted: only the tick in
+    /// it moves. Every loss pattern of the six data frames from the rest tick on, crossed with every loss pattern of the acks
+    /// they would have produced, ends with the receiver holding the final
+    /// pose within `REST_BOUND` ticks of the window's end.
+    #[test]
+    fn a_body_that_rests_as_its_last_change_is_lost_reaches_the_receiver() {
+        const ACK_DELAY: u64 = 4;
+        const WINDOW: u64 = 6;
+        // The window of loss ends at `rest + WINDOW`; the next frame sent
+        // is delivered. The sender then needs at most one more tick, either
+        // as a delta against an acked baseline that is held, or a full.
+        const REST_BOUND: u64 = WINDOW + 1;
+        let rest = 100;
+        let state = |tick: u64| {
+            let mut v = tick.to_le_bytes().to_vec();
+            v.extend_from_slice(&blob(300, tick.min(rest) as u8));
+            v
+        };
+        for data_lost in 0..1u32 << WINDOW {
+            for ack_lost in 0..1u32 << WINDOW {
+                let (mut tx, mut rx) = (BaselineSender::new(), BaselineReceiver::new());
+                let mut acks: Vec<(u64, u64)> = Vec::new();
+                let mut held_pose: Option<Vec<u8>> = None;
+                for tick in 1..=rest + WINDOW + REST_BOUND + 2 * REFRESH_TICKS {
+                    for (_, t) in acks.iter().filter(|(due, _)| *due == tick) {
+                        tx.ack(1, 0, *t);
+                    }
+                    let (payload, _) = tx.encode(1, 0, tick, &state(tick));
+                    let slot = tick.checked_sub(rest).filter(|k| *k < WINDOW);
+                    let lost = slot.is_some_and(|k| data_lost >> k & 1 == 1);
+                    if !lost && let Ok(got) = rx.apply(1, 0, tick, &payload) {
+                        assert_eq!(got, state(tick), "reconstruction at {tick}");
+                        held_pose = Some(got[8..].to_vec());
+                        let ack_dropped = slot.is_some_and(|k| ack_lost >> k & 1 == 1);
+                        if !ack_dropped {
+                            acks.push((tick + ACK_DELAY, tick));
+                        }
+                    }
+                    if tick == rest + WINDOW + REST_BOUND {
+                        assert_eq!(
+                            held_pose.as_deref(),
+                            Some(&state(rest)[8..]),
+                            "data {data_lost:06b} acks {ack_lost:06b}: still stale at {tick}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
