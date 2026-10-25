@@ -388,6 +388,43 @@ fn contact_case(case: Case) {
     }
 }
 
+/// Where a diverged seat's own process last moved it (#2103): the final
+/// pose in each client's record, and on the seat's own trace the last tick
+/// its car was more than 1 m from where it ended, with that tick's
+/// authority tick and wall time, next to the trace's last tick and wall
+/// time. A seat that kept moving until the very end of its run (its
+/// neighbour's copy gone, say) shows a fork tick close to the last one.
+fn fork_report(run: &Run, seat: u16, records: &[&String; 2]) -> String {
+    let mut out = String::new();
+    for (who, rec) in ["alice", "bob"].iter().zip(records) {
+        let held = seat_poses(rec)
+            .into_iter()
+            .find(|(i, ..)| *i == seat)
+            .map(|(_, x, z)| format!("({x:.1}, {z:.1})"));
+        out += &format!(
+            "  {who}'s record holds seat {seat} at {}\n",
+            held.unwrap_or_else(|| "nowhere".into())
+        );
+    }
+    let Some(trace) = run.traces.get(usize::from(seat)) else {
+        return out;
+    };
+    if let Some(last) = trace.last() {
+        let fork = trace
+            .iter()
+            .rev()
+            .find(|s| {
+                ((s.pos[0] - last.pos[0]).powi(2) + (s.pos[2] - last.pos[2]).powi(2)).sqrt() > 1.0
+            })
+            .map(|s| (s.tick, s.snap_tick, s.wall_ms));
+        out += &format!(
+            "  seat {seat}'s own trace ends at tick {} ({:.0} ms), x = {:.1}; last more than 1 m from it at {fork:?} (tick, authority tick, wall ms)\n",
+            last.tick, last.wall_ms, last.pos[0]
+        );
+    }
+    out
+}
+
 fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
     let seats = ["host", "alice", "bob"];
     let rammer = case.actor;
@@ -489,10 +526,11 @@ fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
     let bound = if case.contact_certain { 1.0 } else { 10.0 };
     assert!(
         worst_bounded.1 < bound,
-        "{}: seat {} diverged by {:.2} m:\n {alice}\n {bob}",
+        "{}: seat {} diverged by {:.2} m:\n {alice}\n {bob}\n{}",
         case.name,
         worst_bounded.0,
-        worst_bounded.1
+        worst_bounded.1,
+        fork_report(run, worst_bounded.0, &[alice, bob])
     );
 
     let per_seat: Vec<Value> = seats
