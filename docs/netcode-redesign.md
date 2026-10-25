@@ -2650,3 +2650,6 @@ and `net_partial_snaps` (a real lane through the seeded `UdpImpairProxy`:
 15 % loss, 20 % duplication, 30 % reordering; the outcome equals an
 independent model of the freshness rule). Evidence level: synthetic
 integration.
+
+
+The standing-queue verdict (smoothed RTT above the baseline plus slack) only counts once it has held for 500 ms (`STANDING_QUEUE_HOLD`): a scheduler stall on a loaded machine inflates a few samples and must not cut the rate and starve corrections.

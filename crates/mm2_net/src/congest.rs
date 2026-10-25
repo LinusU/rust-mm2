@@ -64,6 +64,9 @@ pub const CONGESTED_ACK_AGE: Duration = Duration::from_millis(500);
 /// Round-trip time above the lowest recently seen by more than this is a
 /// standing queue somewhere on the path: congestion before any loss.
 pub const RTT_SLACK: Duration = Duration::from_millis(50);
+/// A standing queue must hold this long before it counts: a scheduler
+/// stall on either end inflates a few samples, and a real queue outlasts it.
+const STANDING_QUEUE_HOLD: Duration = Duration::from_millis(500);
 /// The lowest-RTT baseline is re-taken this often, so a route change
 /// that raises the floor is not read as congestion forever.
 const RTT_BASELINE_WINDOW: Duration = Duration::from_secs(10);
@@ -188,6 +191,8 @@ pub struct PeerController {
     srtt: Option<Duration>,
     /// Smoothed mean deviation of the round-trip samples: the path's jitter.
     rttvar: Duration,
+    /// Since when the smoothed RTT has stood above the baseline's slack.
+    queue_since: Option<Instant>,
     /// The clean wait before the next step up (backs off after a cut).
     increase_every: Duration,
 }
@@ -210,6 +215,7 @@ impl PeerController {
             min_rtt: None,
             srtt: None,
             rttvar: Duration::ZERO,
+            queue_since: None,
             increase_every: INCREASE_INTERVAL,
         }
     }
@@ -253,12 +259,18 @@ impl PeerController {
                 _ => self.min_rtt = Some((r, now)),
             }
         }
-        match (self.srtt, self.min_rtt) {
-            // A jittery path spreads its samples above the minimum
-            // without any queue: the slack grows with the deviation seen.
+        // A jittery path spreads its samples above the minimum without any
+        // queue: the slack grows with the deviation seen.
+        let above = match (self.srtt, self.min_rtt) {
             (Some(s), Some((m, _))) => s > m + RTT_SLACK + self.rttvar * 4,
             _ => false,
+        };
+        if !above {
+            self.queue_since = None;
+            return false;
         }
+        let since = *self.queue_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= STANDING_QUEUE_HOLD
     }
 
     /// Fold in the sender's counters at `now` and return the new rate.
@@ -589,7 +601,7 @@ mod tests {
             c.on_feedback(rtt(40), t);
         }
         assert_eq!(c.rate(), 100_000, "a steady RTT is not congestion");
-        for _ in 0..40 {
+        for _ in 0..80 {
             t += Duration::from_millis(33);
             c.on_feedback(rtt(300), t);
         }
