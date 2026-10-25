@@ -553,12 +553,17 @@ const SWIPE_ALONGSIDE: (f32, f32) = (8.0, 1.0);
 /// runner is steered back onto the line after the spawn jostle.
 const WALL_AIM: f32 = 40.0;
 
-/// Updates into play at which a pushing car (`push`) lets go and parks
-/// (40 s at the 60 Hz tick). The push is sustained for most of the run, but
-/// a car held against another one never rests: the own seat's prediction
-/// then saw-tooths against the authority (up to 3.3 m at 400 ms links
-/// before each deadline recovery), so a comparison at an arbitrary stop
-/// tick measures the phase of that cycle rather than convergence.
+/// Updates into play at which a pushing car (`push`) or a wall runner
+/// (`wall`) lets go and parks (40 s at the 60 Hz tick). The push is
+/// sustained for most of the run, but a car held against another one never
+/// rests: the own seat's prediction then saw-tooths against the authority
+/// (up to 3.3 m at 400 ms links before each deadline recovery), so a
+/// comparison at an arbitrary stop tick measures the phase of that cycle
+/// rather than convergence. A wall runner pinned behind another has a
+/// second problem: when that car's process leaves (the clients stop one
+/// after the other) its copy vanishes and the throttle carries the runner
+/// the one car length (4.4 m) it was held back by, so a record taken after
+/// the departure differs by that much from one taken before (#2103).
 const PUSH_UNTIL: u64 = 2400;
 
 /// [`contact_drive`]'s per-session memory.
@@ -679,7 +684,9 @@ pub fn contact_drive(
         let from = at.translation();
         let target = nearest_ram_target(from, &others).map(|(_, t)| t);
         let speed = vel.length();
-        *vi = if drive.0 == ContactScript::Push && state.ticks > PUSH_UNTIL {
+        let released = matches!(drive.0, ContactScript::Push | ContactScript::Wall)
+            && state.ticks > PUSH_UNTIL;
+        *vi = if released {
             // Released: park, so the field comes to rest and the clients'
             // end-of-run comparison is of settled poses, not of a predicted
             // car caught mid-creep against a car it is still pushing.
