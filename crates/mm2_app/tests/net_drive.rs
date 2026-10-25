@@ -4054,6 +4054,11 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
             "100pts",
             "--bot",
             "--bot-thief",
+            // Every process paced: an unpaced host runs its thief on a
+            // different clock from bob's speed-capped bot, so under load
+            // the ram can miss the host's copy of his car and no gold
+            // is ever knocked loose.
+            "--paced",
         ]
         .into_iter()
         .map(String::from),
@@ -4064,7 +4069,11 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
     let mut alice_args = join_args(&retail, addr, "alice", 60_000);
     // The match ends on the host's clock, so the clients end on the
     // verdict (the frame count is only the ceiling).
-    alice_args.extend(["--parked".into(), "--until-results".into()]);
+    alice_args.extend([
+        "--parked".into(),
+        "--until-results".into(),
+        "--paced".into(),
+    ]);
     let alice = Proc::spawn(MM2_EXE, &alice_args);
     host.until_within("ready=true", STEP);
     let mut bob_args = join_args(&retail, addr, "bob", 60_000);
@@ -4073,6 +4082,7 @@ fn a_robbed_carrier_is_run_down_and_the_gold_delivered_by_the_thief() {
         "--bot-speed".into(),
         "6".into(),
         "--until-results".into(),
+        "--paced".into(),
     ]);
     let bob = Proc::spawn(MM2_EXE, &bob_args);
     host.until_within("ready=true", STEP);
