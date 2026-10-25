@@ -26,6 +26,7 @@
 //!
 //! See `docs/netcode-redesign.md`, "NETPLAY-10B".
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::pace::{Budget, PEER_BYTES_PER_SEC};
@@ -64,8 +65,9 @@ pub const CONGESTED_ACK_AGE: Duration = Duration::from_millis(500);
 /// Round-trip time above the lowest recently seen by more than this is a
 /// standing queue somewhere on the path: congestion before any loss.
 pub const RTT_SLACK: Duration = Duration::from_millis(50);
-/// A standing queue must hold this long before it counts: a scheduler
-/// stall on either end inflates a few samples, and a real queue outlasts it.
+/// Every round-trip sample over this long must stand above the baseline
+/// before a standing queue counts: a scheduler stall on either end
+/// inflates a few samples, and a real queue lifts all of them.
 const STANDING_QUEUE_HOLD: Duration = Duration::from_millis(500);
 /// The lowest-RTT baseline is re-taken this often, so a route change
 /// that raises the floor is not read as congestion forever.
@@ -189,10 +191,8 @@ pub struct PeerController {
     decreases: u64,
     min_rtt: Option<(Duration, Instant)>,
     srtt: Option<Duration>,
-    /// Smoothed mean deviation of the round-trip samples: the path's jitter.
-    rttvar: Duration,
-    /// Since when the smoothed RTT has stood above the baseline's slack.
-    queue_since: Option<Instant>,
+    /// The round-trip samples of the last `STANDING_QUEUE_HOLD`.
+    recent_rtts: VecDeque<(Instant, Duration)>,
     /// The clean wait before the next step up (backs off after a cut).
     increase_every: Duration,
 }
@@ -214,8 +214,7 @@ impl PeerController {
             decreases: 0,
             min_rtt: None,
             srtt: None,
-            rttvar: Duration::ZERO,
-            queue_since: None,
+            recent_rtts: VecDeque::new(),
             increase_every: INCREASE_INTERVAL,
         }
     }
@@ -246,12 +245,10 @@ impl PeerController {
     }
 
     /// Fold in a round-trip sample; whether the path shows a standing
-    /// queue (smoothed RTT well above the baseline).
+    /// queue (every recent sample well above the baseline).
     fn take_rtt(&mut self, sample: Option<Duration>, now: Instant) -> bool {
         if let Some(r) = sample {
-            if let Some(s) = self.srtt {
-                self.rttvar = (self.rttvar * 3 + s.abs_diff(r)) / 4;
-            }
+            self.recent_rtts.push_back((now, r));
             self.srtt = Some(self.srtt.map_or(r, |s| (s * 7 + r) / 8));
             match self.min_rtt {
                 Some((m, at))
@@ -259,18 +256,21 @@ impl PeerController {
                 _ => self.min_rtt = Some((r, now)),
             }
         }
-        // A jittery path spreads its samples above the minimum without any
-        // queue: the slack grows with the deviation seen.
-        let above = match (self.srtt, self.min_rtt) {
-            (Some(s), Some((m, _))) => s > m + RTT_SLACK + self.rttvar * 4,
-            _ => false,
-        };
-        if !above {
-            self.queue_since = None;
-            return false;
+        while let Some(&(at, _)) = self.recent_rtts.front() {
+            if now.saturating_duration_since(at) <= STANDING_QUEUE_HOLD {
+                break;
+            }
+            self.recent_rtts.pop_front();
         }
-        let since = *self.queue_since.get_or_insert(now);
-        now.saturating_duration_since(since) >= STANDING_QUEUE_HOLD
+        // A queue lifts every sample; a stall or jitter lifts some. So the
+        // lowest recent sample, not the smoothed mean, must stand above the
+        // baseline, and the samples must span most of the hold.
+        let (Some((m, _)), Some(&(oldest, _))) = (self.min_rtt, self.recent_rtts.front()) else {
+            return false;
+        };
+        let lowest = self.recent_rtts.iter().map(|&(_, r)| r).min();
+        now.saturating_duration_since(oldest) >= STANDING_QUEUE_HOLD * 3 / 4
+            && lowest.is_some_and(|l| l > m + RTT_SLACK)
     }
 
     /// Fold in the sender's counters at `now` and return the new rate.

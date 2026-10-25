@@ -926,9 +926,10 @@ first motion 272 ticks late):
   controller would read that silence as congestion. `ack_at` stays unset.
 - **Tick 0 is no sample.** It is acknowledged in about 2 ms on a 90 ms link
   (cause not established), which as the lowest-RTT baseline made every real
-  sample look like a standing queue. And the standing-queue test allows
-  four mean deviations of the samples (`rttvar`) above the 50 ms slack, since
-  quarter-delay jitter spreads samples above the minimum without any queue.
+  sample look like a standing queue. And the standing-queue test
+  looks at the lowest sample of the last 500 ms, not the smoothed mean,
+  since quarter-delay jitter and stalls spread some samples above the minimum
+  without any queue.
 
 ### Not done / open
 
@@ -2652,4 +2653,4 @@ independent model of the freshness rule). Evidence level: synthetic
 integration.
 
 
-The standing-queue verdict (smoothed RTT above the baseline plus slack) only counts once it has held for 500 ms (`STANDING_QUEUE_HOLD`): a scheduler stall on a loaded machine inflates a few samples and must not cut the rate and starve corrections.
+The standing-queue verdict needs the lowest round-trip sample of the last 500 ms (`STANDING_QUEUE_HOLD`) to stand above the baseline plus slack: a scheduler stall on a loaded machine or link jitter inflates some samples, a queue lifts all of them, and a stall must not cut the rate and starve corrections.
