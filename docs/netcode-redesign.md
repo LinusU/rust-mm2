@@ -2585,6 +2585,23 @@ Real sockets: `the_aggregate_uplink_cap_holds_across_two_real_lanes` (two lane
 clients, 40 kB/s cap, ~108 kB/s offered) admits 159 kB in 3.7 s against 223 kB
 allowed, every admitted byte attributed to a seat, movement wait <= 100 ms.
 
+### Bounded recovery after a join-time loss burst (#2126)
+
+A few reliable retransmits around join time (roster/Props catch-up) cut the
+rate 0.7 x each, and every cut doubled the clean wait before the next step up
+(up to 4 s). Two or three cuts put the rate under half the ceiling, so
+`Adapt::for_rate` switched bulk off, and the doubled wait kept it off for
+seconds (9.75 s to near-ceiling in the sim). Retransmits are still counted as
+congestion (they are the only loss evidence the host has); instead, while the
+rate is below the last one that worked (`last_good`), the wait is capped at
+`MAX_RECOVERY_INTERVAL` (500 ms). The back-off keeps spacing probes *above*
+`last_good`, which is what it exists for.
+
+`congest_sim_join_time_retransmit_burst_recovers_bulk`: three retransmits
+300 ms apart on an adequate link, then clean. Bulk is back 0.75 s after the
+burst and the rate is within 90% of the ceiling after 2.25 s; the test bounds
+both at 3 s.
+
 ### Evidence and open
 
 Evidence level: code checks and synthetic integration (virtual clock and one

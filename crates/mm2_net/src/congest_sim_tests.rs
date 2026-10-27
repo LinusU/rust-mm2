@@ -612,3 +612,47 @@ fn congest_sim_bulk_fragments_leave_multi_fragment_movement_its_rate() {
         assert!(s.bulk_sent > 0, "bulk still flows at {frags}x{bytes}");
     }
 }
+
+/// A join-time burst of reliable retransmits on an adequate link (#2126):
+/// the roster/Props catch-up is lost a few times as the client connects,
+/// which cuts the rate below half the ceiling and switches bulk off. Once
+/// the link is clean the controller must be back at bulk and near the
+/// ceiling within `JOIN_BURST_RECOVERY`.
+#[test]
+fn congest_sim_join_time_retransmit_burst_recovers_bulk() {
+    let mut sim = Sim::new(1, 40 * MBIT, f64::from(10 * MBIT));
+    sim.run(Duration::from_secs(1));
+    // Retransmits at 0.0, 0.3 and 0.6 s into the burst: three cuts.
+    for _ in 0..3 {
+        sim.peers[0].retransmits += 1;
+        sim.run(Duration::from_millis(300));
+    }
+    let burst_end = sim.now;
+    let s = sim.peers[0].out.pace_stats_at(sim.at(sim.now));
+    println!("after burst: {s:?}");
+    assert!(!s.adapt.bulk, "the burst should have cut bulk: {s:?}");
+    let mut bulk_back = None;
+    let mut near_ceiling = None;
+    while sim.now < burst_end + Duration::from_secs(30) {
+        sim.run(Duration::from_millis(50));
+        let s = sim.peers[0].out.pace_stats_at(sim.at(sim.now));
+        if bulk_back.is_none() && s.adapt.bulk {
+            bulk_back = Some(sim.now - burst_end);
+        }
+        if near_ceiling.is_none() && u64::from(s.rate) * 10 >= u64::from(s.ceiling) * 9 {
+            near_ceiling = Some(sim.now - burst_end);
+        }
+    }
+    println!("bulk back after {bulk_back:?}, near ceiling after {near_ceiling:?}");
+    let bound = JOIN_BURST_RECOVERY;
+    assert!(
+        bulk_back.is_some_and(|d| d <= bound),
+        "bulk back {bulk_back:?}"
+    );
+    assert!(
+        near_ceiling.is_some_and(|d| d <= bound),
+        "ceiling {near_ceiling:?}"
+    );
+}
+
+const JOIN_BURST_RECOVERY: Duration = Duration::from_secs(3);

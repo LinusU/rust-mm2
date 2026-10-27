@@ -53,6 +53,11 @@ pub const INCREASE_INTERVAL: Duration = Duration::from_millis(250);
 /// Every decrease doubles that wait, up to this: a rate that was cut
 /// right after probing upward is not probed again at once.
 pub const MAX_INCREASE_INTERVAL: Duration = Duration::from_secs(4);
+/// While the rate is below the last one that worked, the wait before a
+/// step up is at most this, whatever the back-off: a short loss burst on
+/// an adequate link (a join-time retransmit) must not keep bulk off for
+/// seconds (#2126). The back-off still spaces the probes above it.
+pub const MAX_RECOVERY_INTERVAL: Duration = Duration::from_millis(500);
 /// A peer clean this long is trusted again and probes at the base
 /// interval.
 const TRUST_AFTER: Duration = Duration::from_secs(10);
@@ -333,7 +338,12 @@ impl PeerController {
         if clean >= TRUST_AFTER {
             self.increase_every = INCREASE_INTERVAL;
         }
-        if since >= self.increase_every && clean >= self.increase_every {
+        let every = if self.rate < self.last_good {
+            self.increase_every.min(MAX_RECOVERY_INTERVAL)
+        } else {
+            self.increase_every
+        };
+        if since >= every && clean >= every {
             // A rate is only raised while it is in use (RFC 8085 3.1.6)
             // or while the traffic is shed to fit it: at a degraded level
             // the demand is below the rate by design, and only a higher
