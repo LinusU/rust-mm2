@@ -83,6 +83,8 @@ mod lane_lobby_tests;
 #[cfg(test)]
 mod lane_mtu_tests;
 #[cfg(test)]
+mod lane_multigroup_tests;
+#[cfg(test)]
 mod lane_pace_tests;
 #[cfg(test)]
 mod lane_rate_tests;

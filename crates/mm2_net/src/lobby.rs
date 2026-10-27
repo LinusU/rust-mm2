@@ -1108,6 +1108,11 @@ impl HostCtl {
         self.lane.established_out(id).map(|o| o.adapt())
     }
 
+    /// [`Host::lane_pace`], from the control handle a producer holds.
+    pub fn lane_pace(&self, id: u16) -> Option<crate::PaceStats> {
+        self.lane.established_out(id).map(|o| o.pace_stats())
+    }
+
     /// [`Host::set_uplink_cap`], from the control handle.
     pub fn set_uplink_cap(&self, bytes_per_sec: u32) {
         self.lane.set_uplink_cap(bytes_per_sec);
