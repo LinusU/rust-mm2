@@ -15,6 +15,10 @@
 //! - **effective MTU** — [`UdpImpair::mtu`] drops every datagram larger
 //!   than the limit, the way an undersized path does: silently.
 //! - **black hole** — [`UdpImpair::blackhole`] drops everything.
+//! - **bandwidth cap** — [`UdpImpair::rate`] serialises a direction
+//!   through a drop-tail link (NETPLAY-10E): datagrams queue behind the
+//!   bytes ahead of them, wait their turn, and are dropped when the
+//!   modelled buffer is full.
 //!
 //! Each direction ([`LinkDir::Up`]: client to host, [`LinkDir::Down`]:
 //! host to client) has its own recipe, its own seeded draw stream and its
@@ -64,7 +68,38 @@ pub struct UdpImpair {
     pub mtu: Option<usize>,
     /// Drop every datagram.
     pub blackhole: bool,
+    /// A bandwidth cap: the direction behaves as a drop-tail link.
+    pub rate: Option<LinkRate>,
 }
+
+/// A drop-tail bottleneck link (NETPLAY-10E). Each datagram is charged its
+/// length plus 28 bytes of IP and UDP header, the same accounting the
+/// host's congestion controller uses for wire bytes, and leaves the link
+/// once the bytes queued ahead of it have been sent at `bytes_per_sec`.
+/// A datagram that would push the bytes held on the link (the one being
+/// sent included) past `buffer_bytes` is dropped; an idle link always
+/// accepts one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinkRate {
+    /// Link speed, bytes per second.
+    pub bytes_per_sec: u32,
+    /// Bytes the link holds at most, the datagram in service included.
+    pub buffer_bytes: u32,
+}
+
+impl LinkRate {
+    /// A link of `kbit` kilobits per second whose buffer holds `buffer`.
+    pub fn kbit(kbit: u32, buffer: Duration) -> Self {
+        let bytes_per_sec = kbit.saturating_mul(125).max(1);
+        Self {
+            bytes_per_sec,
+            buffer_bytes: (u64::from(bytes_per_sec) * buffer.as_millis() as u64 / 1000) as u32,
+        }
+    }
+}
+
+/// IP and UDP header bytes a link is charged per datagram.
+const WIRE_OVERHEAD: u64 = 28;
 
 /// What a direction did, extending [`LinkStats`] with the datagram-only
 /// drop causes. `link.dropped` counts **every** drop; the fields below
@@ -79,6 +114,8 @@ pub struct UdpStats {
     pub burst_dropped: u64,
     /// Datagrams dropped by [`UdpImpair::blackhole`].
     pub blackholed: u64,
+    /// Datagrams dropped because the [`UdpImpair::rate`] buffer was full.
+    pub rate_dropped: u64,
     /// The largest datagram the proxy read in this direction, whether it
     /// forwarded or dropped it: the measured wire size, header included.
     pub largest: usize,
@@ -270,6 +307,8 @@ fn relay(front: &UdpSocket, back: &UdpSocket, target: SocketAddr, seed: u64, sha
         Lane::new(seed.rotate_left(32) ^ 0xaaaa_5555_aaaa_5555, MAX_QUEUED),
     ];
     let mut extra = [UdpStats::default(); 2];
+    // When each direction's bottleneck link finishes what it holds.
+    let mut busy: [Option<Instant>; 2] = [None; 2];
     let mut tags = [TagCounts::default(), TagCounts::default()];
     // The client's socket, learned from the first datagram on the front.
     let mut peer: Option<SocketAddr> = None;
@@ -310,6 +349,7 @@ fn relay(front: &UdpSocket, back: &UdpSocket, target: SocketAddr, seed: u64, sha
                         shared,
                         &mut lanes,
                         &mut extra,
+                        &mut busy,
                         &mut tags,
                         LinkDir::Up,
                         &buf[..n],
@@ -324,6 +364,7 @@ fn relay(front: &UdpSocket, back: &UdpSocket, target: SocketAddr, seed: u64, sha
                     shared,
                     &mut lanes,
                     &mut extra,
+                    &mut busy,
                     &mut tags,
                     LinkDir::Down,
                     &buf[..n],
@@ -366,6 +407,7 @@ fn classify(
     shared: &Shared,
     lanes: &mut [Lane; 2],
     extra: &mut [UdpStats; 2],
+    busy: &mut [Option<Instant>; 2],
     tags: &mut [TagCounts; 2],
     dir: LinkDir,
     datagram: &[u8],
@@ -384,7 +426,24 @@ fn classify(
         extra[i].burst_dropped += 1;
         lanes[i].drop_frame(datagram);
     } else {
-        lanes[i].offer(&recipe.link, shared.now(), datagram.to_vec());
+        let now = shared.now();
+        let mut link = recipe.link;
+        if let Some(rate) = recipe.rate {
+            let wire = datagram.len() as u64 + WIRE_OVERHEAD;
+            let free = busy[i].map_or(now, |b| b.max(now));
+            let queued =
+                (free - now).as_nanos() as u64 * u64::from(rate.bytes_per_sec) / 1_000_000_000;
+            if queued > 0 && queued + wire > u64::from(rate.buffer_bytes) {
+                extra[i].rate_dropped += 1;
+                lanes[i].drop_frame(datagram);
+                return;
+            }
+            let done =
+                free + Duration::from_nanos(wire * 1_000_000_000 / u64::from(rate.bytes_per_sec));
+            busy[i] = Some(done);
+            link.delay += done - now;
+        }
+        lanes[i].offer(&link, now, datagram.to_vec());
     }
 }
 

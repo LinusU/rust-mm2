@@ -83,6 +83,8 @@ mod lane_mtu_tests;
 #[cfg(test)]
 mod lane_pace_tests;
 #[cfg(test)]
+mod lane_rate_tests;
+#[cfg(test)]
 mod lane_reliable_tests;
 #[cfg(test)]
 mod lane_state_tests;
@@ -113,7 +115,7 @@ pub use frag::{
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
-pub use impair_udp::{UdpImpair, UdpImpairProxy, UdpStats};
+pub use impair_udp::{LinkRate, UdpImpair, UdpImpairProxy, UdpStats};
 pub use lobby::{
     Client, ClientCtl, HOST_LIVENESS_TIMEOUT, Host, HostConfig, HostCtl, HostEvent, INPUT_BURST,
     INPUT_RATE_HZ, KEEPALIVE_INTERVAL, LIFECYCLE_RESEND_WINDOW, LaneRoute, LateJoin, LeaveCause,
