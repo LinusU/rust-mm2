@@ -1341,6 +1341,14 @@ pub struct NetDriveReport {
     /// Seat frames sent without the world group: the seat's `Adapt`
     /// turned bulk off.
     pub snaps_bulk_omitted: u64,
+    /// The lowest congestion-controller rate (wire bytes per second) any
+    /// seat's lane showed right after a snapshot was sent over it; `None`
+    /// until one was. Below `lane_ceiling` means the host throttled a seat.
+    pub lane_rate_min: Option<u32>,
+    /// The rate ceiling of the lane that showed `lane_rate_min`.
+    pub lane_ceiling: u32,
+    /// The most rate cuts any seat's lane has made.
+    pub lane_decreases: u64,
     /// Snapshot frames the client applied to its remote copies.
     pub snaps_applied: u64,
     /// Pose frames the client dropped stale at [`RemoteSnaps::push`] —
@@ -3783,6 +3791,13 @@ pub fn publish_snapshots(
                 };
                 if sent {
                     *report.seat_snaps.entry(seat).or_default() += 1;
+                    if let Some(p) = host.ctl().lane_pace(seat) {
+                        if report.lane_rate_min.is_none_or(|m| p.rate < m) {
+                            report.lane_rate_min = Some(p.rate);
+                            report.lane_ceiling = p.ceiling;
+                        }
+                        report.lane_decreases = report.lane_decreases.max(p.decreases);
+                    }
                 }
                 any |= sent;
             }

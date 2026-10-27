@@ -170,6 +170,25 @@ fn assert_machines_agree(host: &str, client: &str) {
         assert_eq!(cnr_cell(rec, "ref"), Some(0), "{rec}");
     }
     assert!(cnr_cell(client, "landed").unwrap() > 0, "{client}");
+    // The host's lane held its rate ceiling all match (#2085, #2101): a
+    // collapse here means the controller read the sim's demand as
+    // congestion.
+    let lane = field(host, "lane");
+    let mut cells = lane.split('/');
+    let (min, ceiling, cuts) = (
+        cells.next().unwrap().parse::<u32>().unwrap(),
+        cells.next().unwrap().parse::<u32>().unwrap(),
+        cells
+            .next()
+            .unwrap()
+            .trim_end_matches('c')
+            .parse::<u64>()
+            .unwrap(),
+    );
+    assert!(
+        min == ceiling && cuts == 0,
+        "host lane left its ceiling: {host}"
+    );
     // The same four seats, bots under the reserved ids, on the same
     // teams, with the same points and the same gold holder and winner.
     for key in ["sides=", "pts=", "gold="] {

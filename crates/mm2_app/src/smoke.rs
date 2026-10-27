@@ -1970,6 +1970,17 @@ fn run_headless(
             }
         })
         .unwrap_or_default();
+    // ` lane=<min rate>/<ceiling>/<cuts>c`: the host's lowest lane rate
+    // against its ceiling and the most rate cuts (#2101). Absent until a
+    // snapshot went out over a lane, so every other record is unchanged.
+    let net_detail = net_detail
+        + &world_ecs
+            .get_resource::<crate::netdrive::NetDriveReport>()
+            .and_then(|r| {
+                r.lane_rate_min
+                    .map(|min| format!(" lane={min}/{}/{}c", r.lane_ceiling, r.lane_decreases))
+            })
+            .unwrap_or_default();
     // NETPLAY-05J: ` rcmd=<seat>:<stored>s/<consumed>c/<conflicts>x,...` —
     // the host's `RemoteCommands` a client absorbed per remote seat.
     // Absent until a frame was stored, so every other record is unchanged.
