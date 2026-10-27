@@ -822,10 +822,11 @@ Measured with `cargo test -p mm2_net lane_mtu -- --nocapture` (real
   loop stood still (`LOCAL_STALL`, a descheduled or suspended process) and
   needs `PATH_FAILURE_PROBES` full-size probes *sent* and unanswered, so a
   loaded machine that stopped probing is not reported as a dead path. Any
-  full-size datagram from the host counts as an echo too: the host's echo
-  shares the seat's movement queue, which drops what waited over 100 ms for
-  credit, and a busy seat's echoes went missing for 5 s in the lossy
-  Cops & Robbers tests while its full fragments kept arriving. A
+  full-size datagram from the host counts as an echo too. The host's echo
+  is owed rather than queued (ahead of movement, charged to the seat's
+  budget, never aged out): in the queue it was evicted and aged out behind
+  snapshots, and a busy seat's echoes went missing for 5 s in the lossy
+  Cops & Robbers tests while small snapshots kept arriving. A
   stall of the *host* is not discounted: it looks the same as a dead path
   from here, and 5 s of it is already past what the pacing keeps.
   Falling back to TCP-only play is not done.
