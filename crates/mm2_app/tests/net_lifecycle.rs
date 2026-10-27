@@ -152,3 +152,51 @@ fn a_late_joiner_behind_a_lossy_lane_is_handed_the_live_session() {
     assert!(host.until("event=left").contains("cause=quit"));
     quit_and_assert_host_drove(host);
 }
+
+/// The path's MTU collapses after the join, mid-session: the downlink
+/// carries no full-size echo, so fragmented snapshots would vanish
+/// silently. The client names the cause (`Client::lane_path_failure`,
+/// polled by `drive_lobby` while a session plays) and leaves, instead of
+/// driving a frozen world until the host reaps it.
+#[test]
+fn a_client_whose_path_mtu_collapses_mid_session_leaves_naming_the_mtu() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), HOST_FRAME_CEILING));
+    let listening = host.until("listening=");
+    let addr: SocketAddr = field(&listening, "listening").parse().unwrap();
+    let lane_port: u16 = field(&listening, "lane_port").parse().unwrap();
+    let proxy =
+        UdpImpairProxy::loopback_seeded(SocketAddr::new(addr.ip(), lane_port), 0x2092).unwrap();
+    let route = proxy.route();
+
+    let mut args = join_args(install.path(), addr, "squeezed", 600_000);
+    args.extend([
+        "--lane-via".to_string(),
+        format!("{}/{}", route.dial, route.advertise_port),
+        "--deadline".into(),
+        "120".into(),
+    ]);
+    let client = Proc::spawn(MM2_EXE, &args);
+    host.until("ready=true");
+    host.cmd("start");
+    host.until("event=started generation=1");
+    host.until("remote participant spawned");
+
+    // Healthy for a while first: the detector must not fire on a clean lane.
+    std::thread::sleep(Duration::from_secs(2));
+    let squeeze = UdpImpair {
+        mtu: Some(mm2_net::MAX_DATAGRAM - 1),
+        ..UdpImpair::default()
+    };
+    proxy.set(LinkDir::Down, squeeze);
+
+    let rec = client.until_within("smoke=headless-physics", Duration::from_secs(60));
+    assert_eq!(field(&rec, "status"), "fail", "{rec}");
+    assert!(
+        rec.contains("lost the host") && rec.contains("MTU"),
+        "the failure names the host and the MTU: {rec}"
+    );
+    assert!(proxy.stats(LinkDir::Down).mtu_dropped >= 1);
+    host.until_within("event=left", LOST_BOUND);
+    drop(host);
+}

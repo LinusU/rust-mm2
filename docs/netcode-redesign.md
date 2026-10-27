@@ -813,9 +813,22 @@ Measured with `cargo test -p mm2_net lane_mtu -- --nocapture` (real
   liveness reap), clearing again on the next echo
   (`a_path_whose_mtu_collapses_after_the_join_is_a_surfaced_failure_that_heals`,
   both directions). The failure is surfaced, not repaired: no refresh can
-  help when no fragment-sized datagram crosses. Acting on it (leaving the
-  session with the message, or falling back to TCP-only play) belongs to
-  `mm2_app`, which does not poll it yet.
+  help when no fragment-sized datagram crosses. `mm2_app::net::drive_lobby`
+  polls it (`ClientCtl::lane_path_failure`, since the pump thread owns the
+  `Client`) while a session is playing and tears the link down like a
+  closed host: `lost the host: ... MTU ...`, exit 1
+  (`a_client_whose_path_mtu_collapses_mid_session_leaves_naming_the_mtu`).
+  Silence alone is not a verdict: the lane discounts time its own receive
+  loop stood still (`LOCAL_STALL`, a descheduled or suspended process) and
+  needs `PATH_FAILURE_PROBES` full-size probes *sent* and unanswered, so a
+  loaded machine that stopped probing is not reported as a dead path. Any
+  full-size datagram from the host counts as an echo too: the host's echo
+  shares the seat's movement queue, which drops what waited over 100 ms for
+  credit, and a busy seat's echoes went missing for 5 s in the lossy
+  Cops & Robbers tests while its full fragments kept arriving. A
+  stall of the *host* is not discounted: it looks the same as a dead path
+  from here, and 5 s of it is already past what the pacing keeps.
+  Falling back to TCP-only play is not done.
 - Usable cadence when it does work: a one-datagram correction (the owner
   group) tracks `1 - loss`; refresh after missing baselines is the existing
   `REFRESH_TICKS` (one second) full state.

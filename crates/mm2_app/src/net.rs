@@ -968,28 +968,7 @@ pub fn drive_lobby(
                     }
                 }
             }
-            LobbyEvent::Closed(reason) => {
-                link.closed = true;
-                // The snap stream died with the link — its watermarks
-                // and ledgers belong to the dead authority's
-                // `(generation, tick)` sequence, which a new authority
-                // restarts. Clear the inbox now rather than let a
-                // staged frame or a stale watermark reach into the
-                // next session.
-                snaps.reset();
-                if link.leaving() {
-                    // The expected end of our own `Leave`.
-                    lobby.pending_exit.get_or_insert(0);
-                } else {
-                    lobby.roster.clear();
-                    lobby.advertised = None;
-                    lobby.generation = None;
-                    lobby.host_pick = None;
-                    lobby.pending_start = None;
-                    lobby.notice = Some(format!("lost the host: {reason}"));
-                    lobby.pending_exit.get_or_insert(1);
-                }
-            }
+            LobbyEvent::Closed(reason) => host_lost(&mut link, &mut lobby, &mut snaps, &reason),
             // Variants a client never receives (`Hello`/`Accept`/
             // `Reject`/`Welcome` are the handshake; `SetReady`/
             // `SetVehicle`/`Leave` are client→host) — a hostile host
@@ -997,6 +976,19 @@ pub fn drive_lobby(
             // here must not invent meaning.
             LobbyEvent::Message(_) => {}
         }
+    }
+
+    // The lane's full-size path died under a running session: snapshots
+    // cannot reach us, so name the cause and leave rather than play on a
+    // frozen world until the host reaps the seat. Silence caused by this
+    // process (or the host) standing still is the lane's to discount.
+    if session.is_playing()
+        && !link.closed
+        && !link.leaving()
+        && let Some(why) = link.ctl.lane_path_failure()
+    {
+        host_lost(&mut link, &mut lobby, &mut snaps, &why.to_string());
+        link.leave();
     }
 
     // Our `Leave` is a frame with no reply: repeat it until the pump's
@@ -1046,6 +1038,35 @@ pub fn drive_lobby(
             lobby.exit_sent = Some(code);
             exit.write(AppExit::from_code(code));
         }
+    }
+}
+
+/// The link to the host ended (`Closed`) or its lane path failed: the
+/// snapshot stream died with it, and unless the end is our own `Leave`
+/// the app exits with the cause.
+fn host_lost(
+    link: &mut LobbyLink,
+    lobby: &mut LobbyState,
+    snaps: &mut crate::netdrive::RemoteSnaps,
+    reason: &str,
+) {
+    link.closed = true;
+    // The snap stream died with the link — its watermarks and ledgers
+    // belong to the dead authority's `(generation, tick)` sequence, which
+    // a new authority restarts. Clear the inbox now rather than let a
+    // staged frame or a stale watermark reach into the next session.
+    snaps.reset();
+    if link.leaving() {
+        // The expected end of our own `Leave`.
+        lobby.pending_exit.get_or_insert(0);
+    } else {
+        lobby.roster.clear();
+        lobby.advertised = None;
+        lobby.generation = None;
+        lobby.host_pick = None;
+        lobby.pending_start = None;
+        lobby.notice = Some(format!("lost the host: {reason}"));
+        lobby.pending_exit.get_or_insert(1);
     }
 }
 
