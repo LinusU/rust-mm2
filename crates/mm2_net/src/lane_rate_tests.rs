@@ -41,14 +41,15 @@ impl Pipe {
     /// Send `n` datagrams and wait until the relay has read them all.
     fn offer(&self, n: u64) {
         let base = self.proxy.stats(LinkDir::Up);
-        let seen = base.link.frames_in + base.link.dropped;
+        let seen = base.link.frames_in;
         for _ in 0..n {
             self.client.send(&[0u8; PAYLOAD]).unwrap();
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let s = self.proxy.stats(LinkDir::Up);
-            if s.link.frames_in + s.link.dropped >= seen + n {
+            // `frames_in` counts a dropped datagram too.
+            if s.link.frames_in >= seen + n {
                 return;
             }
             assert!(Instant::now() < deadline, "the relay never read {n}");
