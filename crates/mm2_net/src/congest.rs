@@ -69,6 +69,13 @@ pub const RTT_SLACK: Duration = Duration::from_millis(50);
 /// before a standing queue counts: a scheduler stall on either end
 /// inflates a few samples, and a real queue lifts all of them.
 const STANDING_QUEUE_HOLD: Duration = Duration::from_millis(500);
+/// Whether a standing queue in the round-trip time cuts the rate. Off:
+/// the controller's verdict rests on loss, expiry, queue age and
+/// passed-over snapshots. On a loaded shared-CPU runner a stall at either
+/// end lifts every ack sample together, which the verdict cannot tell
+/// from a queue, and it starved corrections in the net_contact cases
+/// (#2049, #2137). The samples are still taken and reported.
+const RTT_VERDICT: bool = false;
 /// The lowest-RTT baseline is re-taken this often, so a route change
 /// that raises the floor is not read as congestion forever.
 const RTT_BASELINE_WINDOW: Duration = Duration::from_secs(10);
@@ -195,6 +202,8 @@ pub struct PeerController {
     recent_rtts: VecDeque<(Instant, Duration)>,
     /// The clean wait before the next step up (backs off after a cut).
     increase_every: Duration,
+    /// Whether `take_rtt`'s standing-queue verdict counts as congestion.
+    rtt_verdict: bool,
 }
 
 impl PeerController {
@@ -216,7 +225,15 @@ impl PeerController {
             srtt: None,
             recent_rtts: VecDeque::new(),
             increase_every: INCREASE_INTERVAL,
+            rtt_verdict: RTT_VERDICT,
         }
+    }
+
+    /// Let the RTT standing-queue verdict cut the rate (off by default).
+    #[cfg(test)]
+    fn with_rtt_verdict(mut self) -> Self {
+        self.rtt_verdict = true;
+        self
     }
 
     /// The current send rate in wire bytes per second.
@@ -286,7 +303,8 @@ impl PeerController {
         let slow_queue = fb.queue_age >= CONGESTED_QUEUE_AGE && !at_floor;
         let silent = fb.ack_age.is_some_and(|a| a >= CONGESTED_ACK_AGE);
         let skipped = fb.skipped > self.seen.skipped;
-        let delayed = self.take_rtt(fb.rtt, now);
+        let standing_queue = self.take_rtt(fb.rtt, now);
+        let delayed = self.rtt_verdict && standing_queue;
         self.interval_sent += fb.wire_sent.saturating_sub(self.seen.wire_sent);
         self.seen = fb;
 
@@ -570,7 +588,7 @@ mod tests {
     #[test]
     fn a_jittery_round_trip_without_a_standing_queue_is_not_congestion() {
         let t0 = Instant::now();
-        let mut c = PeerController::new(100_000, t0);
+        let mut c = PeerController::new(100_000, t0).with_rtt_verdict();
         let mut t = t0;
         // 180 ms +-45 ms, as a quarter-delay jitter on a 90 ms link gives.
         for i in 0..200u64 {
@@ -588,9 +606,29 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_queue_in_the_round_trip_time_is_congestion_before_loss() {
+    fn the_round_trip_verdict_is_off_by_default() {
         let t0 = Instant::now();
         let mut c = PeerController::new(100_000, t0);
+        let mut t = t0;
+        for ms in std::iter::repeat_n(40, 20).chain(std::iter::repeat_n(300, 80)) {
+            t += Duration::from_millis(33);
+            c.on_feedback(
+                Feedback {
+                    rtt: Some(Duration::from_millis(ms)),
+                    ..Feedback::default()
+                },
+                t,
+            );
+        }
+        assert_eq!(c.decreases(), 0, "RTT alone cut the rate");
+        assert!(c.srtt().is_some(), "the samples are still reported");
+    }
+
+    /// Tests the verdict with it enabled; it is off in production.
+    #[test]
+    fn a_standing_queue_in_the_round_trip_time_is_congestion_before_loss() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(100_000, t0).with_rtt_verdict();
         let rtt = |ms| Feedback {
             rtt: Some(Duration::from_millis(ms)),
             ..Feedback::default()

@@ -1,3 +1,16 @@
+  sample look like a standing queue.
+- **The round-trip verdict is off.** The samples feed `srtt` and the
+  lowest-RTT baseline and are reported, but a standing queue
+  (`RTT_VERDICT`, off) does not cut the rate. With it on, `net_contact`
+  failed on the 2-core CI runner in 3 of 5 runs on one commit (corrections of
+  49-210 m, other cases diverging by ~1.9 m) while main was green; with it
+  forced off every case passed. Both ends share the runner, so a stall lifts
+  every ack sample together, which a windowed-minimum verdict cannot tell
+  from a queue. The controller therefore decides on loss, expiry, queue age
+  and passed-over snapshots, as before. Making the RTT evidence robust (why
+  tick 0 acks in 2 ms, then re-enabling the verdict with A/B evidence) is
+  #2137.
+
 # Netcode redesign: shared contract, plan and baseline
 
 Owner: NETPLAY-01 (#1762) maintains this note; later NETPLAY tasks append
@@ -2651,6 +2664,3 @@ and `net_partial_snaps` (a real lane through the seeded `UdpImpairProxy`:
 15 % loss, 20 % duplication, 30 % reordering; the outcome equals an
 independent model of the freshness rule). Evidence level: synthetic
 integration.
-
-
-The standing-queue verdict needs the lowest round-trip sample of the last 500 ms (`STANDING_QUEUE_HOLD`) to stand above the baseline plus slack: a scheduler stall on a loaded machine or link jitter inflates some samples, a queue lifts all of them, and a stall must not cut the rate and starve corrections.
