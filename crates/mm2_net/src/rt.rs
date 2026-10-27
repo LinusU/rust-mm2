@@ -106,6 +106,14 @@ pub const PATH_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// `HOST_LIVENESS_TIMEOUT`, so the client names the cause before the host
 /// reaps the seat.
 pub const PATH_FAILURE_AFTER: Duration = Duration::from_secs(5);
+/// Full-size probes that must have been sent, and gone unanswered, before
+/// the path counts as failed: silence alone is not enough, because a
+/// process that was descheduled sent none (and heard none) either.
+const PATH_FAILURE_PROBES: u64 = 4;
+/// A gap this long between two turns of the receive loop (which turns at
+/// least every [`POLL`]) means this process was not running, not that the
+/// path was quiet; the gap is not counted as silence.
+const LOCAL_STALL: Duration = Duration::from_millis(500);
 /// Socket read timeout and queue wait: how often a lane thread notices
 /// its stop flag.
 const POLL: Duration = Duration::from_millis(50);
@@ -740,6 +748,11 @@ pub(crate) struct OutItem {
 pub(crate) struct SeatOut {
     queue: LaneQueue<OutItem>,
     bulk: LaneQueue<OutItem>,
+    wake: Arc<Wake>,
+    /// A probe echo is owed. Not a queue entry: the movement queue evicts
+    /// and ages out what waits, and a busy seat lost every echo for five
+    /// seconds that way, which the client reads as a dead path.
+    echo_due: AtomicBool,
     seq: AtomicU64,
     /// The host's aggregate uplink; `None` on a client, whose single
     /// peer is the host and whose traffic is small.
@@ -799,7 +812,9 @@ impl SeatOut {
     pub(crate) fn new(wake: Arc<Wake>, uplink: Option<Arc<Mutex<Uplink>>>, now: Instant) -> Self {
         Self {
             queue: LaneQueue::with_wake(MOVEMENT_QUEUE_CAP, wake.clone()),
-            bulk: LaneQueue::with_wake(BULK_QUEUE_CAP, wake),
+            bulk: LaneQueue::with_wake(BULK_QUEUE_CAP, wake.clone()),
+            wake,
+            echo_due: AtomicBool::new(false),
             seq: AtomicU64::new(0),
             uplink,
             pace: Mutex::new(PaceState {
@@ -897,6 +912,43 @@ impl SeatOut {
         }
     }
 
+    /// Owe the peer a full-size probe echo (one is enough: they are all
+    /// identical, and the client only needs the latest).
+    fn owe_echo(&self) {
+        self.echo_due.store(true, Ordering::Relaxed);
+        self.wake.notify();
+    }
+
+    /// The owed echo, once the seat's credit allows it: ahead of movement,
+    /// charged like any datagram, never aged out.
+    fn take_echo(&self, now: Instant) -> Option<OutItem> {
+        if !self.echo_due.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if pace.budget.credit(now) <= 0 {
+            return None;
+        }
+        let wire = wire_bytes(probe_padding().len());
+        if let Some(up) = self.uplink.as_deref()
+            && !up
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_spend(wire, now)
+        {
+            return None;
+        }
+        self.echo_due.store(false, Ordering::Relaxed);
+        pace.budget.spend(wire, now);
+        pace.wire_sent += wire as u64;
+        pace.last_sent = Some(now);
+        Some(OutItem {
+            tag: LaneTag::Probe,
+            generation: 0,
+            payload: probe_padding(),
+        })
+    }
+
     /// The next datagram to send, or `None` when nothing is due.
     fn next_to_send(&self) -> Option<OutItem> {
         self.next_to_send_at(Instant::now())
@@ -909,6 +961,9 @@ impl SeatOut {
     /// never replaced by an older one and is discarded when it outlives
     /// its queue age.
     pub(crate) fn next_to_send_at(&self, now: Instant) -> Option<OutItem> {
+        if let Some(echo) = self.take_echo(now) {
+            return Some(echo);
+        }
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
         let PaceState { budget, ctl, .. } = &mut *pace;
         let allow_bulk = ctl.adapt().bulk;
@@ -1009,7 +1064,7 @@ impl SeatOut {
 
     /// Whether anything is queued at either priority.
     fn has_pending(&self) -> bool {
-        self.queue.stats().len + self.bulk.stats().len > 0
+        self.echo_due.load(Ordering::Relaxed) || self.queue.stats().len + self.bulk.stats().len > 0
     }
 
     /// Note that the snapshot of `tick` was queued for this seat now: the
@@ -1368,11 +1423,7 @@ fn ingest(
     match h.tag {
         LaneTag::Probe => {
             // Echo every probe: the client may have lost the last echo.
-            seat.out.queue.push(OutItem {
-                tag: LaneTag::Probe,
-                generation: 0,
-                payload: probe_padding(),
-            });
+            seat.out.owe_echo();
             Verdict::Accepted
         }
         LaneTag::Data => match Message::decode(payload) {
@@ -2031,6 +2082,11 @@ pub(crate) struct ClientLane {
     /// Probe interval and failure bound in milliseconds (test seam).
     probe_every_ms: AtomicU64,
     fail_after_ms: AtomicU64,
+    /// Path probes sent since the last echo.
+    unanswered: AtomicU64,
+    /// Milliseconds since the last echo during which this process itself
+    /// stood still ([`LOCAL_STALL`]): not evidence about the path.
+    stalled_ms: AtomicU64,
     /// Test seam: probe only after a quiet `probe_every_ms` (the pre-10D
     /// keepalive), so a test that fixes datagram counts is not perturbed.
     idle_probe_only: AtomicBool,
@@ -2071,6 +2127,8 @@ impl ClientLane {
             last_echo: Mutex::new(Instant::now()),
             probe_every_ms: AtomicU64::new(PATH_PROBE_INTERVAL.as_millis() as u64),
             fail_after_ms: AtomicU64::new(PATH_FAILURE_AFTER.as_millis() as u64),
+            unanswered: AtomicU64::new(0),
+            stalled_ms: AtomicU64::new(0),
             idle_probe_only: AtomicBool::new(false),
             world: [Mutex::new(Assembler::new()), Mutex::new(Assembler::new())],
             rel: Mutex::new(ReliableChannel::new(MAX_RELIABLE_BODY)),
@@ -2171,7 +2229,14 @@ impl ClientLane {
 
     fn recv_loop(&self, socket: &UdpSocket, mut window: SeqWindow) {
         let mut buf = [0u8; MAX_DATAGRAM + 1];
+        let mut turned = Instant::now();
         while !self.stop.load(Ordering::Relaxed) {
+            let gap = turned.elapsed();
+            if gap >= LOCAL_STALL {
+                self.stalled_ms
+                    .fetch_add(gap.as_millis() as u64, Ordering::Relaxed);
+            }
+            turned = Instant::now();
             let (n, from) = match socket.recv_from(&mut buf) {
                 Ok(r) => r,
                 Err(e) if is_timeout(&e) => {
@@ -2197,6 +2262,15 @@ impl ClientLane {
                     continue;
                 }
             };
+            // A full-size datagram that got here is the same proof as an
+            // echo, and the better one under load: the host's echo shares
+            // the seat's movement queue, which discards anything that
+            // waited past `MOVEMENT_MAX_AGE` for credit, so a busy seat's
+            // echoes can go missing for seconds while its full fragments
+            // keep arriving.
+            if n >= MAX_DATAGRAM {
+                self.note_echo();
+            }
             match header.tag {
                 // The echo of a path probe (or a late one of the
                 // establishing probe): the path carries full datagrams.
@@ -2375,24 +2449,36 @@ impl ClientLane {
 
     fn note_echo(&self) {
         *self.last_echo.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        self.unanswered.store(0, Ordering::Relaxed);
+        self.stalled_ms.store(0, Ordering::Relaxed);
     }
 
     /// How long the host's probe echoes have been missing, once that
     /// exceeds the failure bound: the real-time path cannot carry
     /// full-size datagrams (or any), so fragmented snapshots are not
     /// arriving. `None` while the path is healthy.
+    ///
+    /// Silence only counts while this process was running and probing: time
+    /// its receive loop stood still is subtracted, and at least
+    /// [`PATH_FAILURE_PROBES`] probes must have been sent since the last
+    /// echo. A descheduled process (a loaded machine, a suspended laptop)
+    /// is therefore never reported as a dead path; loss alone needs that
+    /// many round trips to fail in a row.
     pub(crate) fn path_failure(&self) -> Option<NetError> {
-        let silent = self
+        let since = self
             .last_echo
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .elapsed();
-        (silent > Duration::from_millis(self.fail_after_ms.load(Ordering::Relaxed))).then_some(
-            NetError::LanePathFailed {
-                host: self.host,
-                silent,
-            },
-        )
+        let silent = since.saturating_sub(Duration::from_millis(
+            self.stalled_ms.load(Ordering::Relaxed),
+        ));
+        let failed = silent > Duration::from_millis(self.fail_after_ms.load(Ordering::Relaxed))
+            && self.unanswered.load(Ordering::Relaxed) >= PATH_FAILURE_PROBES;
+        failed.then_some(NetError::LanePathFailed {
+            host: self.host,
+            silent,
+        })
     }
 
     /// Test seam: probe only when idle for `probe_every` (the keepalive
@@ -2473,6 +2559,7 @@ impl ClientLane {
             if last_probe.elapsed() >= every && quiet {
                 let header = self.header(LaneTag::Probe, 0);
                 flush(socket, self.host, &header, &probe_padding(), &self.counters);
+                self.unanswered.fetch_add(1, Ordering::Relaxed);
                 last_probe = Instant::now();
                 last_sent = last_probe;
             }

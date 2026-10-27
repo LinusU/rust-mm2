@@ -2019,6 +2019,12 @@ fn reliable_lobby_send(lane: &ClientLane, msg: &Message) -> bool {
 }
 
 impl ClientCtl {
+    /// [`Client::lane_path_failure`], from any thread: the pump owns the
+    /// `Client`, the app polls this.
+    pub fn lane_path_failure(&self) -> Option<NetError> {
+        self.lane.as_ref().and_then(|l| l.path_failure())
+    }
+
     fn send(&self, msg: &Message) -> Result<(), NetError> {
         // A poisoned mutex only means a send panicked mid-write — the
         // socket is still usable, so recover the guard rather than

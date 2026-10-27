@@ -576,8 +576,8 @@ fn the_outbound_queue_holds_its_bound_and_counts_drops() {
     let rel = host.reliable_stats(raw.seat).unwrap().sender;
     assert_eq!(
         s.pushed,
-        2001 + rel.queued + rel.retransmits,
-        "2000 snaps plus the probe echo and the reliable roster: {s:?} {rel:?}"
+        2000 + rel.queued + rel.retransmits,
+        "2000 snaps plus the reliable roster (the probe echo is not queued): {s:?} {rel:?}"
     );
     eventually("the queue to drain", || {
         host.lane_queue(raw.seat).unwrap().len == 0
@@ -586,8 +586,8 @@ fn the_outbound_queue_holds_its_bound_and_counts_drops() {
     assert!(s.max_wait > Duration::ZERO, "queue age is reported: {s:?}");
     assert_eq!(
         host.lane_counts().sent + host.lane_counts().send_errors,
-        s.pushed - s.dropped,
-        "every non-dropped entry was sent: {s:?}"
+        s.pushed - s.dropped + 1,
+        "every non-dropped entry, and the unqueued probe echo, was sent: {s:?}"
     );
 }
 
