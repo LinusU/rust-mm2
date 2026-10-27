@@ -71,6 +71,8 @@ mod reliable;
 mod rt;
 
 #[cfg(test)]
+mod congest_qual_tests;
+#[cfg(test)]
 mod congest_sim_tests;
 #[cfg(test)]
 mod io_backpressure_tests;
