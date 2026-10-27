@@ -163,6 +163,27 @@ fn a_stalled_link_never_accumulates_obsolete_state() {
     assert!(p.bulk.expired > 0 || p.bulk_deferred > 0, "{p:?}");
 }
 
+/// The uplink's admitted bytes and the seats' `wire_sent` total, read
+/// consistently. A seat records `wire_sent` under the same lock that
+/// covers its uplink spend, so if the uplink total is unchanged across
+/// the seat reads, no datagram (a probe echo, say) was admitted between
+/// the two and the sums describe one moment.
+fn uplink_and_seats(host: &crate::Host, ids: &[u16]) -> (u64, u64) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, before) = host.uplink();
+        let seats: u64 = ids
+            .iter()
+            .map(|id| host.lane_pace(*id).unwrap().wire_sent)
+            .sum();
+        let (_, after) = host.uplink();
+        if before == after {
+            return (after, seats);
+        }
+        assert!(Instant::now() < deadline, "the uplink never went quiet");
+    }
+}
+
 /// NETPLAY-10B on real sockets: the host's aggregate uplink holds across
 /// seats, counts every byte it admits, and old movement is discarded
 /// rather than queued when the offered load exceeds it.
@@ -181,11 +202,7 @@ fn the_aggregate_uplink_cap_holds_across_two_real_lanes() {
     for id in ids {
         eventually("the lane", || host.lane_established(id));
     }
-    let (_, spent_before) = host.uplink();
-    let wire_before: u64 = ids
-        .iter()
-        .map(|id| host.lane_pace(*id).unwrap().wire_sent)
-        .sum();
+    let (spent_before, wire_before) = uplink_and_seats(&host, &ids);
 
     // ~54 kB/s offered to each of two seats against a 40 kB/s cap.
     const TICKS: u64 = 180;
@@ -205,14 +222,10 @@ fn the_aggregate_uplink_cap_holds_across_two_real_lanes() {
     let elapsed = started.elapsed();
     thread::sleep(MOVEMENT_MAX_AGE * 2);
 
-    let (cap, spent) = host.uplink();
-    assert_eq!(cap, CAP);
+    assert_eq!(host.uplink().0, CAP);
+    let (spent, wire) = uplink_and_seats(&host, &ids);
     let admitted = spent - spent_before;
-    let seats: u64 = ids
-        .iter()
-        .map(|id| host.lane_pace(*id).unwrap().wire_sent)
-        .sum::<u64>()
-        - wire_before;
+    let seats = wire - wire_before;
     assert_eq!(admitted, seats, "every admitted byte belongs to a seat");
     let allowed = u64::from(CAP) * (elapsed + MOVEMENT_MAX_AGE * 2).as_millis() as u64 / 1000
         + u64::from(crate::UPLINK_BURST_BYTES);
