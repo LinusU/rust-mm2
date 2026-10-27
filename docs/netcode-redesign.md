@@ -2736,7 +2736,7 @@ three host ticks old on arrival. Gates:
 | bulk | about 2990 sent and 1930 expired unsent per seat; movement deferred 47-271 polls per seat, all by the aggregate cap |
 | recovery legs | usable correction 0-56 ms after every leg; queue steady 23-30 ms after every leg |
 
-Gate result: PASS, on the runs recorded in this note (the report with every
+Gate result: PASS on each of the three runs made while writing this note (the report with every
 number is `target/captures/netcode-qualification/congestion.txt`, not
 committed). The numbers are one machine's; the gates were not tuned to them.
 

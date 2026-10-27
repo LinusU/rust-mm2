@@ -44,13 +44,13 @@
 //! cargo test -p mm2_net --release congest_qual -- --ignored --nocapture
 //! ```
 //!
-//! It writes `target/captures/netcode-qualification/congestion.txt`.
+//! The report goes to stderr; `scripts/netcode-qualification.sh` keeps a copy
+//! under `target/captures/netcode-qualification/`.
 //! Evidence level: synthetic integration over loopback. No WAN, no real
 //! NAT, no retail data, no rendered or audio result.
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -777,9 +777,5 @@ fn congest_qual_eight_seats_under_caps_loss_and_recovery_legs() {
         let _ = writeln!(report, "  {f}");
     }
     eprintln!("{report}");
-    let dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/captures/netcode-qualification");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("congestion.txt"), &report).unwrap();
     assert!(failures.is_empty(), "{failures:#?}");
 }
