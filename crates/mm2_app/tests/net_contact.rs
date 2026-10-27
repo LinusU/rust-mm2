@@ -425,8 +425,16 @@ fn fork_report(run: &Run, seat: u16, records: &[&String; 2]) -> String {
                     .find_map(|c| c.strip_prefix(&format!("{seat}:")))
             })
             .unwrap_or("none");
+        let body = rec
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("bodies="))
+            .and_then(|m| {
+                m.split('/')
+                    .find_map(|c| c.strip_prefix(&format!("{seat}:")))
+            })
+            .map_or_else(|| "none".into(), |b| format!("({})", b.replace(',', ", ")));
         out += &format!(
-            "  {who}'s record holds seat {seat} at {}, last authority tick applied {mark}\n",
+            "  {who}'s record holds seat {seat} at {} (contact body {body}), last authority tick applied {mark}\n",
             held.unwrap_or_else(|| "nowhere".into())
         );
     }
@@ -449,38 +457,55 @@ fn fork_report(run: &Run, seat: u16, records: &[&String; 2]) -> String {
     out
 }
 
-/// The distance seat `id` can have covered between the two clients'
-/// records: the authority ticks they last applied for it, apart, times the
-/// seat's top speed over the tail of its own process's trace. Zero when the
-/// ticks agree or either is unknown.
-fn tick_gap_travel(run: &Run, id: u16, records: [&String; 2]) -> f64 {
-    // A client's own seat carries no mark: its newest applied snapshot is
-    // the last one its trace saw.
-    let applied = |who: usize| -> Option<u64> {
-        let from_mark = records[who]
-            .split_whitespace()
-            .find_map(|t| t.strip_prefix("marks="))
-            .and_then(|m| m.split('/').find_map(|c| c.strip_prefix(&format!("{id}:"))))
-            .and_then(|t| t.parse().ok());
-        from_mark.or_else(|| {
+/// The newest authority tick client `who` (0 alice, 1 bob) applied for seat
+/// `id`: its record's mark, or for the client's own seat (which carries no
+/// mark) the last snapshot its trace saw.
+fn applied_tick(run: &Run, id: u16, who: usize, record: &str) -> Option<u64> {
+    record
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("marks="))
+        .and_then(|m| m.split('/').find_map(|c| c.strip_prefix(&format!("{id}:"))))
+        .and_then(|t| t.parse().ok())
+        .or_else(|| {
             (usize::from(id) == who + 1)
                 .then(|| run.traces[who + 1].last().and_then(|s| s.snap_tick))
                 .flatten()
         })
-    };
-    let (Some(a), Some(b)) = (applied(0), applied(1)) else {
-        return 0.0;
-    };
-    let Some(trace) = run.traces.get(usize::from(id)) else {
-        return 0.0;
-    };
-    let tail = trace.last().map_or(0, |s| s.tick.saturating_sub(600));
-    let top = trace
+}
+
+/// Farthest the nearest trace sample may be from the asked tick (ticks).
+const TRACE_MATCH_TICKS: u64 = 30;
+
+/// Where seat `id`'s own process had its car at session tick `tick`.
+fn own_pose_at(run: &Run, id: u16, tick: u64) -> Option<(f64, f64)> {
+    run.traces
+        .get(usize::from(id))?
         .iter()
-        .filter(|s| s.tick >= tail)
-        .map(|s| s.vel[0].hypot(s.vel[2]))
-        .fold(0.0_f64, f64::max);
-    a.abs_diff(b) as f64 / mm2_game::RACE_TICK_HZ as f64 * top
+        .min_by_key(|s| s.tick.abs_diff(tick))
+        .filter(|s| s.tick.abs_diff(tick) <= TRACE_MATCH_TICKS)
+        .map(|s| (s.pos[0], s.pos[2]))
+}
+
+/// How far each client's held pose of seat `id` is from the seat's OWN
+/// trace at that client's applied tick (#2133), the larger of the two. The
+/// clients' records end at different simulated times (120 s against 62 s on
+/// CI run 40186613799), so comparing one's mid-settle pose with the
+/// other's final one measured the gap in time, not a stale copy; this
+/// compares each copy with the truth at the tick it reflects. `None` when
+/// either tick or trace sample is unknown.
+fn matched_divergence(
+    run: &Run,
+    id: u16,
+    poses: [(f64, f64); 2],
+    records: [&String; 2],
+) -> Option<f64> {
+    let mut worst = 0.0_f64;
+    for who in 0..2 {
+        let tick = applied_tick(run, id, who, records[who])?;
+        let (rx, rz) = own_pose_at(run, id, tick)?;
+        worst = worst.max(((poses[who].0 - rx).powi(2) + (poses[who].1 - rz).powi(2)).sqrt());
+    }
+    Some(worst)
 }
 
 fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
@@ -572,12 +597,12 @@ fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
         // The clients stop at the first authority tick each applies past
         // the settle tick, and alice then stays seated until bob leaves, so
         // her record can be taken many ticks after his on a loaded machine.
-        // A seat still moving then differs by what it travelled in between:
-        // charge the bound that, and nothing for a seat at rest or a pair
-        // of records taken at the same authority tick.
-        let excess = tick_gap_travel(run, id, [alice, bob]);
-        if bounded && apart - excess > worst_bounded.1 {
-            worst_bounded = (id, apart - excess);
+        // Each copy is therefore held against the seat's own trace at the
+        // tick that copy reflects, not against the other client's record.
+        let measured =
+            matched_divergence(run, id, [(x, z), (*bx, *bz)], [alice, bob]).unwrap_or(apart);
+        if bounded && measured > worst_bounded.1 {
+            worst_bounded = (id, measured);
         }
         compared += 1;
     }

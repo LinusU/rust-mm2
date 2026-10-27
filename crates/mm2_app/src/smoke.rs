@@ -474,7 +474,22 @@ fn seats_detail(world: &mut World) -> String {
         } else {
             format!(" marks={}", marks.join("/"))
         };
-        format!(" seats={}{marks}", rows.join("/"))
+        // The pose of each seat's contact body (#2133): a right body under
+        // a stale visual points at the interpolation buffer, a stale body at
+        // the reconcile.
+        let mut bq = world.query::<(&crate::netdrive::PredictedRemoteBody, &Position)>();
+        let mut bodies: Vec<(u16, Vec3)> = bq.iter(world).map(|(b, p)| (b.wire, p.0)).collect();
+        bodies.sort_by_key(|(id, _)| *id);
+        let bodies = if bodies.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<String> = bodies
+                .iter()
+                .map(|(id, at)| format!("{id}:{:.1},{:.1}", at.x, at.z))
+                .collect();
+            format!(" bodies={}", rows.join("/"))
+        };
+        format!(" seats={}{marks}{bodies}", rows.join("/"))
     }
 }
 
