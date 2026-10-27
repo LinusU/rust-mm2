@@ -39,6 +39,16 @@ in with real results.
   middlebox — fails the join with the same `no UDP lane echo` error
   (which names the MTU) instead of establishing and then silently losing
   every full-size `Snap`. Loopback proof: `lane_impair_tests`.
+- **Bandwidth the lane assumes** (designed, NETPLAY-10B/10E): a host
+  uplink budget of 5 Mbit/s shared by every client, at most 1 Mbit/s to
+  one client and 256 kbit/s back from it. A slower link is not an error:
+  the host's congestion controller cuts that client's rate (30 -> 15 ->
+  10 Hz snapshots, world catch-up shed first) rather than queueing old
+  state. The datagram lane carries wire bytes of payload + 32 B lane
+  header + 28 B IP/UDP. The loopback qualification of these numbers
+  (8 seats, capped links, recovery legs) is `scripts/netcode-qualification.sh`,
+  see `docs/netcode-redesign.md` "NETPLAY-10E"; it proves the mechanism on
+  one machine, not that any real link carries them.
 - **Evidence level:** loopback tests (`crates/mm2_net/src/lane_tests.rs`)
   prove the code path only. They say nothing about whether UDP crosses a
   real LAN, router or the Internet; that stays an OWNER measurement
@@ -178,6 +188,23 @@ NAT/firewall behaviour observed (silent drop, refusal, prompt):
 Time to failure when blocked:
 Gaps / not run:
 ```
+
+## Evidence kit
+
+What exists, and which scope it belongs to:
+
+| tool | scope | what it shows |
+|---|---|---|
+| `scripts/netcode-baseline.sh` | loopback, three `mm2` processes | continuous-motion metrics of the production path (NETPLAY-01) |
+| `scripts/netcode-qualification.sh` | loopback, 8 seats, capped relay | congestion gates and recovery legs (NETPLAY-10E) |
+| the rows and report template above | LAN / Internet, two machines | reachability (OWNER #1240) |
+| a play session with real peers | LAN / Internet, humans | driving feel (OWNER #1249) |
+
+The first two never substitute for the last two. The `mm2` binaries do not
+yet print the host's per-seat pacing record, so an owner run today records
+reachability and the lane counters on the `connected=` line, not measured
+rates or queue age; add the field to the report template when the app
+prints it.
 
 ## Claims
 

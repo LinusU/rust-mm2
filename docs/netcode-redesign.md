@@ -2681,3 +2681,85 @@ and `net_partial_snaps` (a real lane through the seeded `UdpImpairProxy`:
 15 % loss, 20 % duplication, 30 % reordering; the outcome equals an
 independent model of the freshness rule). Evidence level: synthetic
 integration.
+
+## NETPLAY-10E: congestion qualification run (#2015)
+
+`scripts/netcode-qualification.sh` (`mm2_net::congest_qual_tests`, `#[ignore]`d
+because its gates are real-time and it needs a quiet machine; the pure
+analysis has CI tests). A real `Host` and seven real lane clients (eight seats
+with the host's own) over loopback sockets, the production send path
+(`send_snap_states_prio`, baselined groups, `peer_adapt` cadence and bulk
+switch, the 5 Mbit/s aggregate cap, the controller). It uses the datagram
+impairment boundary, which gained a **bandwidth cap**: `UdpImpair::rate`
+(`LinkRate`) serialises a direction through a drop-tail link charged
+payload + 28 B IP/UDP, so queueing delay and tail loss come from the link and
+not from a loss dice. Each client sits behind its own relay: 1 Mbit/s down,
+256 kbit/s up, 150 ms of buffer, 20 ms one way. `lane_rate_tests` check the
+link arithmetic on the virtual clock.
+
+Roles are fixed in the source before the run: seats 0-4 healthy, seat 5 has
+clustered loss (6 % loss, 3 % reordering both ways), seat 6 does not read for
+10 s. The host cap is 5 -> 2 -> 5 Mbit/s (7 s / 6 s / 7 s) inside the ordinary
+window (3 s to 23 s; the first 3 s are a declared warm-up). Then six
+**recovery legs**, tagged and kept out of the ordinary gates only for the seat
+they hit: 250 and 100 ms process pauses (the client neither reads nor sends),
+500 and 250 ms blackouts (both ways), a 6 and a 3 datagram burst. Nothing else
+is excluded: a spontaneous stall of the host, the relay or the machine counts
+against the gate (the report prints the number of producer ticks that ran
+more than 10 ms late).
+
+A *usable correction* is a snapshot carrying the seat's own row that is at most
+three host ticks old on arrival. Gates:
+
+| gate | bound | applies to |
+|---|---|---|
+| usable correction gap p95 | <= 2 snapshot periods (66 ms) | healthy seats, ordinary window |
+| usable correction gap max | <= 250 ms | same |
+| movement-queue wait p95 | <= one send period (33 ms) | same, host pacing stats |
+| movement-queue wait max | <= 100 ms | same |
+| usable correction after a leg | <= 1 s | each leg |
+| movement queue steady (age <= 33 ms, <= 2 datagrams, three polls) | <= 2 s | each leg |
+
+### Measured (macOS, Apple silicon, release, loopback, other agents' load on the machine)
+
+| quantity | result |
+|---|---|
+| healthy seats, 6623 gaps pooled | p95 43 ms, max 60 ms (gates 66 / 250) |
+| healthy movement-queue wait | p95 <= 3 ms, max <= 24 ms (gates 33 / 100) |
+| clustered-loss seat | gap p95 61 ms, max 106 ms (not a gate: loss is its own condition) |
+| non-reading seat | one 10 s gap while it did not read, 44 ms p95 otherwise |
+| host uplink at 5 Mbit/s | 3501 kbit/s admitted, 30 % headroom |
+| host uplink at 2 Mbit/s | 2076 kbit/s admitted, headroom -3.8 % (the 64 KiB bucket burst on the cut) |
+| host uplink back at 5 Mbit/s | 4974 kbit/s admitted, 0.5 % headroom (bulk takes what movement leaves) |
+| per-seat downlink | about 590 of 1000 kbit/s used (the host cap, not the client links, is the binding limit with seven peers), no relay buffer drops |
+| per-seat uplink | 22 of 256 kbit/s |
+| bulk | about 2990 sent and 1930 expired unsent per seat; movement deferred 47-271 polls per seat, all by the aggregate cap |
+| recovery legs | usable correction 0-56 ms after every leg; queue steady 23-30 ms after every leg |
+
+Gate result: PASS, on the runs recorded in this note (the report with every
+number is `target/captures/netcode-qualification/congestion.txt`, not
+committed). The numbers are one machine's; the gates were not tuned to them.
+
+### Evidence level and what this does not show
+
+Synthetic integration over loopback: real sockets and threads, a modelled
+bottleneck. It says nothing about a real WAN (queue disciplines other than
+drop-tail, bufferbloat, NAT rebinding, path MTU, jitter), nothing about
+`mm2` processes (the clients are `mm2_net` lane clients in threads, with no
+render, vehicle simulation or prediction; the producer is a miniature of
+`publish_snapshots`, not the app's), and nothing about how it feels. **No
+Rocket League parity claim is made**; OWNER #1249 stays the human gate for
+driving feel and OWNER #1240 for reachability on real networks.
+
+Known limits of the harness, stated rather than hidden:
+
+- The non-reading seat does not call `recv`, but the client's TCP pump and
+  lane receive thread still run, so the host sees a healthy peer. A peer
+  that stops reading its *socket* is NETPLAY-10A's `io_backpressure_tests`.
+- The "process pause" stalls the client thread, not an OS process (`SIGSTOP`);
+  a paused host is not exercised beyond the producer-lateness counter.
+- Clustered loss is random loss plus reordering on one seat; the burst legs
+  are the consecutive-loss cases.
+- The windowed/headless `mm2` app prints no `lane_pace` record, so a LAN or
+  Internet run of the runbook cannot yet report actual rates, queue age or
+  headroom; filed as a follow-up.
