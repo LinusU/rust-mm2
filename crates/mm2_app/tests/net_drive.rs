@@ -517,9 +517,15 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
         alice_net.inputs_sent > 0 && alice_net.snaps_applied > 0,
         "alice streamed inputs and applied snapshots: {alice_rec}"
     );
-    assert_eq!(
-        alice_net.requests_sent, 1,
-        "--reset-at asked once, not once per update: {alice_rec}"
+    // A retry is legitimate when the loaded host is slow to answer: the
+    // ask cadence is session ticks (`RESET_RETRY_TICKS`), and a headless
+    // client ticks faster than wall clock. So the count is a floor plus
+    // a bound well under the ask budget (one ask per update would hit
+    // it); the exact single-ask accounting is asserted below only for a
+    // run that did not stall.
+    assert!(
+        (1..mm2_app::netdrive::MAX_RESET_ASKS as u64).contains(&alice_net.requests_sent),
+        "--reset-at asked, but not once per update: {alice_rec}"
     );
     assert!(
         alice_net.resets >= 1,
@@ -540,11 +546,21 @@ fn a_scheduled_reset_crosses_two_processes_and_comes_back() {
 
     assert_eq!(field(&host_rec, "status"), "pass", "{host_rec}");
     let host_net = net_field(&host_rec);
-    assert_eq!(
-        (host_net.requests_granted, host_net.requests_dropped),
-        (1, 0),
-        "the host granted alice's one ask and dropped nothing: {host_rec}"
+    assert!(
+        host_net.requests_granted >= 1,
+        "the host granted alice's ask: {host_rec}"
     );
+    assert!(
+        host_net.requests_granted + host_net.requests_dropped <= alice_net.requests_sent,
+        "the host answered no more asks than alice sent: {host_rec}"
+    );
+    if alice_net.requests_sent == 1 {
+        assert_eq!(
+            (host_net.requests_granted, host_net.requests_dropped),
+            (1, 0),
+            "the host granted alice's one ask and dropped nothing: {host_rec}"
+        );
+    }
     assert!(
         host_net.resets >= 1,
         "the grant bumped the seat's wire epoch on the host: {host_rec}"
