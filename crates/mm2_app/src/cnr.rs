@@ -795,7 +795,30 @@ pub fn sync_cnr_markers(
     cars: Query<(&Player, Option<&NetPlayer>, &Transform), Without<CnrMarker>>,
     mut markers: Query<(&CnrMarker, &mut Transform, &mut Visibility)>,
     mut announced: Local<Option<String>>,
+    mut frames: Local<u32>,
 ) {
+    // The authority's view of every seat, about every 10 s: a client's
+    // own log shows its predicted car, which can differ from this one
+    // by hundreds of metres on a lossy link (#2182).
+    if host.is_some() {
+        *frames += 1;
+        if (*frames).is_multiple_of(600) {
+            let seats: Vec<String> = cars
+                .iter()
+                .map(|(player, net, t)| {
+                    let at = t.translation;
+                    format!(
+                        "p{}@{:.0},{:.0},{:.0}",
+                        participant_id(player, net).0,
+                        at.x,
+                        at.y,
+                        at.z
+                    )
+                })
+                .collect();
+            eprintln!("event=host_seats frame={} {}", *frames, seats.join(" "));
+        }
+    }
     let (sites, gold, carrier) = match (&host, &replica) {
         (Some(host), _) => (
             host.game.sites(),
