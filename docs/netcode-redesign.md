@@ -2774,10 +2774,35 @@ Known limits of the harness, stated rather than hidden:
   a paused host is not exercised beyond the producer-lateness counter.
 - Clustered loss is random loss plus reordering on one seat; the burst legs
   are the consecutive-loss cases.
-- The windowed/headless `mm2` app prints no `lane_pace` record, so a LAN or
-  Internet run of the runbook cannot yet report actual rates, queue age or
-  headroom; filed as a follow-up. (Partly done: see "Real-process
-  qualification" below.)
+- The `mm2` app prints the `event=lane_pace` record (see "The `lane_pace`
+  record" below), so a LAN or Internet run of the runbook reports actual
+  rates, queue age and headroom. Only loopback evidence exists; real-WAN
+  numbers stay with OWNER #1240/#1249.
+
+### The `lane_pace` record
+
+`mm2 --host` and `mm2 --join` (windowed or headless) print one
+`event=lane_pace` line per lane seat every 2 s of wall clock (host) or one
+line (client), from `mm2_app::lanepace`. Rates are over the window since
+the previous line (`win_ms`); the first sample is only the baseline.
+
+Host, per established seat (kbit/s are wire bits, as the uplink cap counts):
+
+| field | meaning |
+|---|---|
+| `rate_kbit` `ceil_kbit` `share_kbit` | the seat's congestion rate, its ceiling, its share of the uplink |
+| `sent_kbit` | this seat's admitted wire rate over the window |
+| `up_cap_kbit` `up_sent_kbit` `headroom_kbit` | aggregate cap, whole-uplink admitted rate, cap minus admitted |
+| `wait_p50_ms` `wait_p95_ms` `wait_max_ms` | movement-queue wait of sent datagrams (recent history) |
+| `age_ms` | age of the oldest queued movement datagram now |
+| `deferred` `denied` | window counts: polls the movement head waited; of those, refused by the uplink |
+| `expired` `dropped` | window counts of datagrams discarded unsent for age / for a newer one (both queues) |
+| `rtx` `rtx_pct` `in_flight` | reliable retransmissions in the window, their share of reliable pieces queued, unacked now |
+| `adapt` | snapshot divisor the seat is thinned to |
+
+Client: `tx_dps` `rx_dps` `accepted_dps` (datagrams per second) and
+`dropped` (received and refused in the window). Test:
+`mm2_app` `net_lane_pace`.
 
 ### Real-process qualification (#2158)
 

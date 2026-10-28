@@ -1862,6 +1862,20 @@ impl HostLink {
             .lane_port()
     }
 
+    /// The aggregate uplink's cap (wire bytes per second) and the wire
+    /// bytes admitted so far ([`Host::uplink`]).
+    pub fn uplink(&self) -> (u32, u64) {
+        self.host.lock().unwrap_or_else(|e| e.into_inner()).uplink()
+    }
+
+    /// Counters of `id`'s reliable channel ([`Host::reliable_stats`]).
+    pub fn reliable_stats(&self, id: u16) -> Option<mm2_net::ReliableStats> {
+        self.host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reliable_stats(id)
+    }
+
     /// The host loop's control handle (`start`/`cancel`/`shutdown`).
     pub fn ctl(&self) -> &HostCtl {
         &self.ctl

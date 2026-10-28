@@ -37,6 +37,7 @@ pub mod hud;
 pub mod hudmap;
 pub mod impact_presentation;
 pub mod input;
+pub mod lanepace;
 pub mod layers;
 pub mod leafnet;
 pub mod lesson;

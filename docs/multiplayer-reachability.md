@@ -167,6 +167,11 @@ shown by a "what is my IP" site: forwarding cannot work), and IPv4/IPv6.
 | I5 | as I1, drop the client's network mid-lobby | — | `left ... cause=lost` within ~8 s (host-side silence bound) | | |
 | I6 | as I1, client from a different NAT behind Wi-Fi hotspot | `mm2-join` | joined | | |
 
+Both the host and the joining `mm2` print an `event=lane_pace` line every
+2 s while the lane is up (rates, queue age, headroom against the uplink
+cap, drops, retransmits); paste a few into the report. Field list:
+`docs/netcode-redesign.md`, "The `lane_pace` record".
+
 ## Report template
 
 Copy this block into the task or a PR. Fill every field; leave "not

@@ -95,7 +95,7 @@ fn wire_race_def(countdown: u32) -> mm2_game::RaceDefinition {
 /// A loopback host advertising `config`, plus a joined `LobbyLink` and
 /// the VFS the app checks sessions against. `fp` is this side's own
 /// gameplay fingerprint — the in-process host simply trusts it.
-fn host_and_link(
+pub(crate) fn host_and_link(
     dir: &std::path::Path,
     config: &SessionConfig,
     driver: &str,

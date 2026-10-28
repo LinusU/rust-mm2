@@ -37,6 +37,7 @@ struct JoinedReconcile;
 pub fn add_client_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + Clone) {
     // NETPLAY-02C: the fixed-tick command stream (behind the selector).
     crate::netcmd::add_systems(app);
+    crate::lanepace::add_client_systems(app);
     // NETPLAY-02F: the lead controller drives the same stream's tick rate.
     crate::netpace::add_systems(app);
     app.add_systems(
@@ -127,6 +128,7 @@ pub fn add_host_systems<M>(app: &mut App, capturing: impl SystemCondition<M> + C
     // NETPLAY-02B: one command per remote seat per fixed step, ahead of
     // the physics schedule; only under the fixed-tick selector.
     crate::netremote::add_host_systems(app);
+    crate::lanepace::add_host_systems(app);
     app.add_systems(
         FixedUpdate,
         netdrive::consume_seat_commands
