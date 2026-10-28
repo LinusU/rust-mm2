@@ -278,11 +278,20 @@ fn nav_replan(wait: &mut u32, plan: impl FnOnce() -> Option<ScriptedRoute>) -> N
 /// handling-derived pace apply unchanged. Only an evidence driver
 /// plans this (a Cops & Robbers objective has no authored line; the
 /// straight line to a gold site crosses buildings). `None` when the
-/// graph cannot connect the endpoints — the caller falls back to the
+/// graph cannot connect the endpoints on the objective's own level
+/// ([`crate::cnr_bot_drive::GOAL_LEVEL`]: a Cops & Robbers pickup and
+/// bank are 3D triggers, so a flyover lane above the bank leads the
+/// car to a place it cannot deliver from) — the caller falls back to the
 /// straight aim rather than inventing connectivity.
 pub fn plan_nav_route(graph: &NavGraph, from: Vec3, to: Vec3) -> Option<OpponentRoute> {
     let line = graph
-        .drive_line(from, to, &RouteOptions::default(), NAV_ROUTE_STEP)
+        .drive_line_at_level(
+            from,
+            to,
+            &RouteOptions::default(),
+            NAV_ROUTE_STEP,
+            crate::cnr_bot_drive::GOAL_LEVEL,
+        )
         .ok()?;
     (line.len() >= 2).then(|| OpponentRoute {
         points: line
