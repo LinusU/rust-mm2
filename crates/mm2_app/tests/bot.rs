@@ -1742,3 +1742,27 @@ fn repeated_closed_guide_start_keeps_its_real_straight_heading() {
         "a repeated start is not a zero-heading corner"
     );
 }
+
+#[test]
+fn a_nav_planned_line_that_ends_beside_its_start_is_still_a_one_way_trip() {
+    // A road line out along a ramp and back round to the objective: its
+    // last point is 8 m (XZ) from its first, so `route_is_closed` calls it
+    // a lap and the objective "behind" the car.
+    let route = route_of(&[
+        (0.0, 50.0, 0.0),
+        (0.0, 50.0, 100.0),
+        (100.0, 40.0, 100.0),
+        (100.0, 30.0, 0.0),
+        (8.0, 25.0, 0.0),
+    ]);
+    let gate = Vec3::new(8.0, 25.0, 0.0);
+    let pos = Vec3::new(0.0, 50.0, 5.0);
+    let (_, lap_aim) = scripted::planned_route_aim(&route, 1, pos, gate, 10.0);
+    assert_eq!(lap_aim, gate, "read as a lap, the guide aims at the gate");
+    let (next, aim) = scripted::planned_open_route_aim(&route, 1, pos, gate, 10.0);
+    assert_eq!(next, 1);
+    assert!(
+        aim.z > 5.0 && aim.x.abs() < 1e-3,
+        "aims down the line: {aim:?}"
+    );
+}

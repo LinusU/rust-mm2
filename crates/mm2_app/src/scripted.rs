@@ -429,7 +429,8 @@ pub fn pick_bot_route(roster: &OpponentRoster, spawn: Vec3) -> Option<OpponentRo
 ///
 /// Returns the updated `next` and this frame's aim point.
 pub fn route_aim(route: &OpponentRoute, next: usize, pos: Vec3, gate: Vec3) -> (usize, Vec3) {
-    route_aim_at_distance(route, next, pos, gate, ROUTE_LOOKAHEAD, false)
+    let closed = route_is_closed(route);
+    route_aim_at_distance(route, next, pos, gate, ROUTE_LOOKAHEAD, false, closed)
 }
 
 /// Guided evidence driving uses the AI planner's speed-scaled pursuit distance
@@ -441,7 +442,25 @@ pub fn planned_route_aim(
     gate: Vec3,
     speed: f32,
 ) -> (usize, Vec3) {
-    route_aim_at_distance(route, next, pos, gate, aim_distance(speed), true)
+    let closed = route_is_closed(route);
+    route_aim_at_distance(route, next, pos, gate, aim_distance(speed), true, closed)
+}
+
+/// [`planned_route_aim`] for a nav-planned line ([`plan_nav_route`]),
+/// which is a one-way trip to its objective and never a circuit. Its
+/// endpoints are not apart by construction: a road line that climbs a
+/// ramp and comes back round can end within [`route_is_closed`]'s
+/// 40 m of where it began (the sf upper deck, 25 m above its bank), and
+/// reading that as a lap made the objective "behind" the car, which
+/// then drove straight at it off the deck's edge.
+pub fn planned_open_route_aim(
+    route: &OpponentRoute,
+    next: usize,
+    pos: Vec3,
+    gate: Vec3,
+    speed: f32,
+) -> (usize, Vec3) {
+    route_aim_at_distance(route, next, pos, gate, aim_distance(speed), true, false)
 }
 
 fn route_aim_at_distance(
@@ -451,6 +470,7 @@ fn route_aim_at_distance(
     gate: Vec3,
     distance: f32,
     project: bool,
+    closed: bool,
 ) -> (usize, Vec3) {
     let n = route.points.len();
     if n == 0 {
@@ -459,7 +479,6 @@ fn route_aim_at_distance(
     if next >= n {
         next = n - 1;
     }
-    let closed = route_is_closed(route);
     // A road can occur more than once in a legitimate itinerary. Equal
     // geometric matches must follow route progress, not the first visit.
     let progress_distance = |i: usize| {
@@ -1261,7 +1280,11 @@ pub fn scripted_drive(
                 rs.recoveries = 0;
             }
             let speed = vstate.forward_speed;
-            let (next, aim) = planned_route_aim(&rs.route, rs.next, pos.0, gate, speed);
+            let (next, aim) = if rs.goal.is_some() {
+                planned_open_route_aim(&rs.route, rs.next, pos.0, gate, speed)
+            } else {
+                planned_route_aim(&rs.route, rs.next, pos.0, gate, speed)
+            };
             rs.next = next;
             target = aim;
             let limits = *rs

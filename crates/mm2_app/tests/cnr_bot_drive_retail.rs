@@ -1000,3 +1000,71 @@ fn retail_human_carriers_are_robbed_by_enemy_bots_and_robbing_them() {
         assert!(delivered_runs > 0, "{city}: the person never took the gold");
     }
 }
+
+/// Task #2190: the scripted carrier that ended circling the sf upper
+/// road 325 deck at (-1843, 49, -331), 24 m above the seed-1291 hideout.
+/// Starts a carrier there (the gold is handed over through the host's
+/// own pickup verdict, at the gold's site) and runs the production
+/// `scripted_drive` with physics. Before the fix the planned line,
+/// which ends 7.7 m (XZ) from where it starts, read as a closed lap,
+/// the hideout counted as "behind" the car and the car aimed straight at
+/// it off the deck, circling for the whole budget.
+#[test]
+fn a_scripted_carrier_leaves_the_sf_upper_deck_and_delivers_to_the_hideout() {
+    use mm2_app::scripted::scripted_drive;
+    use mm2_game::gold::Contact;
+    use mm2_game::{Mm2Vfs, PlayerVehicle};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let (mut app, _) = city_app(&retail, "sf", 1291, false, CnrVariant::FreeForAll);
+    let vfs = mount(&retail);
+    app.insert_resource(Mm2Vfs(vfs));
+    app.add_systems(FixedUpdate, scripted_drive.before(cnr_bot_drive));
+    let sites = app.world().resource::<CnrHost>().game.sites();
+    let start = Vec3::new(-1843.0, 49.0, -331.0);
+    // The failing run's heading is not recorded: face the hideout.
+    let yaw = f32::atan2(-(sites.hideout.x - start.x), -(sites.hideout.z - start.z));
+    let bots = spawn(
+        &mut app,
+        vec![BotSlot {
+            position: start,
+            yaw,
+        }],
+    );
+    let (bot, id) = bots[0];
+    app.world_mut()
+        .entity_mut(bot)
+        .remove::<CnrBotDriver>()
+        .insert(PlayerVehicle);
+    for _ in 0..3 {
+        app.update();
+    }
+    let round = app.world().resource::<CnrHost>().game.round();
+    let verdicts = app
+        .world_mut()
+        .resource_mut::<CnrHost>()
+        .game
+        .resolve_pickups(&[Contact {
+            player: id,
+            round,
+            position: sites.gold,
+        }]);
+    eprintln!("pickup {verdicts:?}");
+    let mut best = f32::MAX;
+    for _ in 0..(HZ * 240) {
+        app.update();
+        let p = pos(&app, bot);
+        best = best.min(p.distance(sites.hideout));
+        if p.distance(sites.hideout) <= mm2_game::cnr_options::DELIVERY_RADIUS_M {
+            break;
+        }
+    }
+    assert!(
+        best <= mm2_game::cnr_options::DELIVERY_RADIUS_M,
+        "closest approach {best} m to {:?}",
+        sites.hideout
+    );
+}
