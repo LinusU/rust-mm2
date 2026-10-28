@@ -81,6 +81,11 @@ pub struct ScriptedBot {
     /// Frames to wait before the planner is asked again after it found
     /// no road line to the objective ([`NAV_REPLAN_FRAMES`]).
     pub plan_wait: u32,
+    /// Escapes fired since the nav guide was last planned. A car that
+    /// keeps failing them is wedged off the line (a ledge above the road,
+    /// say), so [`GUIDE_REPLAN_ESCAPES`] of them drop the guide and the
+    /// route is planned again from where the car really is.
+    pub escapes_since_plan: u32,
 }
 
 impl Default for ScriptedBot {
@@ -91,6 +96,7 @@ impl Default for ScriptedBot {
             turn_frames: 0,
             recovery_side: 1.0,
             escapes: 0,
+            escapes_since_plan: 0,
             plan_wait: 0,
         }
     }
@@ -210,6 +216,11 @@ const NAV_REPLAN_FRAMES: u32 = 120;
 fn guide_stale(guide: Option<&ScriptedRoute>, objective: Vec3) -> bool {
     guide.is_none_or(|rs| rs.goal.is_some_and(|g| g.distance(objective) > 2.0))
 }
+
+/// Failed escapes after which a nav-planned guide is dropped and planned
+/// again from the car's current pose. The line cannot see walls, so a
+/// wedged car otherwise chases the same `route_next` forever.
+const GUIDE_REPLAN_ESCAPES: u32 = 4;
 
 /// What one frame of Cops & Robbers re-planning did.
 enum NavReplan {
@@ -1003,6 +1014,11 @@ pub fn scripted_drive(
             commands.entity(entity).remove::<ScriptedRoute>();
             bot_route = None;
         }
+        if bot.escapes_since_plan >= GUIDE_REPLAN_ESCAPES && bot_route.is_some() {
+            commands.entity(entity).remove::<ScriptedRoute>();
+            bot_route = None;
+            bot.escapes_since_plan = 0;
+        }
         if race.is_none()
             && cnr_view.is_some()
             && !ramming
@@ -1224,6 +1240,7 @@ pub fn scripted_drive(
             scripted_input(bot, bearing, vstate.forward_speed, vstate.grounded)
         };
         if bot.escapes > escapes_before {
+            bot.escapes_since_plan += bot.escapes - escapes_before;
             info!(
                 tick = session.tick(),
                 escapes = bot.escapes,
