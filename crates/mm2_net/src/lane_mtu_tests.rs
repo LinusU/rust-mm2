@@ -225,7 +225,7 @@ fn a_path_whose_mtu_collapses_after_the_join_is_a_surfaced_failure_that_heals() 
 
 /// Loss alone is never a path failure: probes and echoes both cross a
 /// lossy relay, and however many round trips fail the verdict stays off.
-/// The probe cadence is compressed (20 ms, about 3 000 probes over the
+/// The probe cadence is compressed (20 ms, about 400 probes per seed over the
 /// run) so it covers far more round trips than a minute of real play.
 #[test]
 fn heavy_random_loss_never_reads_as_a_path_failure() {
