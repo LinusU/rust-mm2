@@ -1981,6 +1981,29 @@ fn run_headless(
                     .map(|min| format!(" lane={min}/{}/{}c", r.lane_ceiling, r.lane_decreases))
             })
             .unwrap_or_default();
+    // ` qwait=<seat>:<p95>/<max>,...` (host, microseconds) and
+    // ` corr=<n>/<p95>/<max>` (client, ms): the NETPLAY-10 queue-wait and
+    // usable-correction-gap readings a process-level run gates on.
+    // Absent until measured, so every other record is unchanged.
+    let net_detail = net_detail
+        + &world_ecs
+            .get_resource::<crate::netdrive::NetDriveReport>()
+            .map(|r| {
+                let mut out = String::new();
+                if !r.lane_wait_us.is_empty() {
+                    let seats: Vec<String> = r
+                        .lane_wait_us
+                        .iter()
+                        .map(|(seat, (p95, max))| format!("{seat}:{p95}/{max}"))
+                        .collect();
+                    out += &format!(" qwait={}", seats.join(","));
+                }
+                if let Some((n, p95, max)) = r.own_corrections.summary() {
+                    out += &format!(" corr={n}/{p95}/{max}");
+                }
+                out
+            })
+            .unwrap_or_default();
     // NETPLAY-05J: ` rcmd=<seat>:<stored>s/<consumed>c/<conflicts>x,...` —
     // the host's `RemoteCommands` a client absorbed per remote seat.
     // Absent until a frame was stored, so every other record is unchanged.

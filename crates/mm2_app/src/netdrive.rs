@@ -1349,6 +1349,12 @@ pub struct NetDriveReport {
     pub lane_ceiling: u32,
     /// The most rate cuts any seat's lane has made.
     pub lane_decreases: u64,
+    /// Per seat (the wire id), the host movement queue's wait of sent
+    /// datagrams as read after the seat's latest snapshot: 95th
+    /// percentile and maximum, in microseconds (NETPLAY-10 gate).
+    pub lane_wait_us: BTreeMap<u16, (u64, u64)>,
+    /// Client side: gaps between usable own-row corrections.
+    pub own_corrections: CorrectionGaps,
     /// Snapshot frames the client applied to its remote copies.
     pub snaps_applied: u64,
     /// Pose frames the client dropped stale at [`RemoteSnaps::push`] —
@@ -3797,6 +3803,10 @@ pub fn publish_snapshots(
                             report.lane_ceiling = p.ceiling;
                         }
                         report.lane_decreases = report.lane_decreases.max(p.decreases);
+                        report.lane_wait_us.insert(
+                            seat,
+                            (p.wait_p95.as_micros() as u64, p.wait_max.as_micros() as u64),
+                        );
                     }
                 }
                 any |= sent;
@@ -3825,6 +3835,46 @@ pub fn publish_snapshots(
         report.note_bot_poses(wire_generation, session.tick(), bot_rows.iter());
         report.impacts_sent += sent_rows;
         report.surfaces_sent += sent_surfaces;
+    }
+}
+
+/// A snapshot row at most this many host ticks behind the newest tick
+/// the client has seen counts as a usable correction (the qualification
+/// harness's freshness bound, `mm2_net::congest_qual_tests`).
+pub const USABLE_CORRECTION_TICKS: u64 = 3;
+
+/// Wall-clock gaps between a client's usable own-row corrections, in
+/// milliseconds, capped so a long run stays bounded.
+#[derive(Debug, Clone, Default)]
+pub struct CorrectionGaps {
+    last: Option<std::time::Instant>,
+    gaps_ms: Vec<u32>,
+}
+
+impl CorrectionGaps {
+    const CAP: usize = 100_000;
+
+    /// A usable correction arrived at `at`.
+    pub fn note(&mut self, at: std::time::Instant) {
+        if let Some(last) = self.last
+            && self.gaps_ms.len() < Self::CAP
+        {
+            let ms = at.saturating_duration_since(last).as_millis();
+            self.gaps_ms.push(u32::try_from(ms).unwrap_or(u32::MAX));
+        }
+        self.last = Some(at);
+    }
+
+    /// `(count, 95th percentile, maximum)` of the gaps in ms; `None`
+    /// before the second correction.
+    pub fn summary(&self) -> Option<(usize, u32, u32)> {
+        if self.gaps_ms.is_empty() {
+            return None;
+        }
+        let mut sorted = self.gaps_ms.clone();
+        sorted.sort_unstable();
+        let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
+        Some((sorted.len(), p95, *sorted.last()?))
     }
 }
 
@@ -4667,6 +4717,15 @@ fn apply_snap_frame(
             // presentation fields stay ignored — the local sim's
             // `VehicleState`/`VehicleInput` is already the truth here.
             if player.control == PlayerControl::Local {
+                // The row is a usable correction when it is at most
+                // `USABLE_CORRECTION_TICKS` behind the newest tick this
+                // client has seen (NETPLAY-10 gate, same freshness as
+                // `congest_qual_tests`, judged against the stream here
+                // since a client has no host clock).
+                let newest = snaps.applied.map_or(snap.tick, |(_, t)| t);
+                if newest.saturating_sub(snap.tick) <= USABLE_CORRECTION_TICKS {
+                    report.own_corrections.note(std::time::Instant::now());
+                }
                 let asserted_vel = Vec3::from(entry.vel);
                 let replaying = snaps.own_stage.enabled;
                 let settled = !replaying
@@ -5267,6 +5326,22 @@ pub fn drive_remote_lerp(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn correction_gaps_summarise_p95_and_max_of_the_intervals() {
+        use std::time::{Duration, Instant};
+        let mut gaps = CorrectionGaps::default();
+        assert_eq!(gaps.summary(), None);
+        let t0 = Instant::now();
+        gaps.note(t0);
+        assert_eq!(gaps.summary(), None, "one correction has no gap yet");
+        let mut at = t0;
+        for ms in std::iter::repeat_n(30u64, 99).chain([400]) {
+            at += Duration::from_millis(ms);
+            gaps.note(at);
+        }
+        assert_eq!(gaps.summary(), Some((100, 30, 400)));
+    }
+
     #[test]
     fn a_local_contact_matches_by_seat_window_and_point() {
         use super::*;

@@ -1401,6 +1401,10 @@ pub enum HostCommand {
     Cancel,
     /// Shut the lobby down and exit the app.
     Quit,
+    /// Retune the host's aggregate uplink budget to this many kilobits
+    /// per second (the stdin `uplink <kbit>` word): the qualification
+    /// run's 5 -> 2 -> 5 Mbit/s dip on a real process (NETPLAY-10).
+    Uplink(u32),
 }
 
 /// The operator-facing edit of a hosted lobby's next-round session —
@@ -1652,6 +1656,13 @@ pub fn stdin_commands(tx: Sender<HostCommand>) {
                     Some("start") => HostCommand::Start,
                     Some("cancel") => HostCommand::Cancel,
                     Some("quit") => HostCommand::Quit,
+                    Some("uplink") => match words.next().and_then(|k| k.parse::<u32>().ok()) {
+                        Some(kbit) if kbit > 0 => HostCommand::Uplink(kbit),
+                        _ => {
+                            eprintln!("error: uplink: expected a positive kbit/s number");
+                            continue;
+                        }
+                    },
                     Some("session") => match SessionChange::parse(words) {
                         Ok(change) => HostCommand::Change(change),
                         Err(e) => {
@@ -2058,6 +2069,12 @@ pub fn drive_host(
             HostCommand::Quit => {
                 link.leave();
                 lobby.pending_exit.get_or_insert(0);
+            }
+            HostCommand::Uplink(kbit) => {
+                link.ctl.set_uplink_cap(kbit.saturating_mul(125));
+                if link.log_events {
+                    println!("event=uplink kbit={kbit}");
+                }
             }
         }
     }
