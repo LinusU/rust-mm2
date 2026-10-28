@@ -106,10 +106,20 @@ pub const PATH_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// `HOST_LIVENESS_TIMEOUT`, so the client names the cause before the host
 /// reaps the seat.
 pub const PATH_FAILURE_AFTER: Duration = Duration::from_secs(5);
+/// How often a client re-probes while the last probe is still unanswered
+/// (never slower than its normal cadence): an unanswered probe is either
+/// loss or a dead path, and probing faster is what tells them apart.
+const PATH_REPROBE_INTERVAL: Duration = Duration::from_millis(250);
 /// Full-size probes that must have been sent, and gone unanswered, before
 /// the path counts as failed: silence alone is not enough, because a
-/// process that was descheduled sent none (and heard none) either.
-const PATH_FAILURE_PROBES: u64 = 4;
+/// process that was descheduled sent none (and heard none) either. Sized
+/// so that loss alone cannot do it: a round trip survives a link losing
+/// 30% each way only 49% of the time, so twenty in a row all failing is
+/// about 1 in 700 000 per window (roughly 1 in 6 000 over a minute), and
+/// far rarer at realistic loss. The re-probe cadence puts that many probes
+/// a little past [`PATH_FAILURE_AFTER`], so the probe count, not the
+/// clock, is the binding bound on a lossy link.
+const PATH_FAILURE_PROBES: u64 = 20;
 /// A gap this long between two turns of the receive loop (which turns at
 /// least every [`POLL`]) means this process was not running, not that the
 /// path was quiet; the gap is not counted as silence.
@@ -2553,7 +2563,10 @@ impl ClientLane {
             // Probe on a fixed cadence, busy or idle: it keeps the host's
             // liveness fed and is the client's evidence the path still
             // carries full-size datagrams.
-            let every = Duration::from_millis(self.probe_every_ms.load(Ordering::Relaxed));
+            let mut every = Duration::from_millis(self.probe_every_ms.load(Ordering::Relaxed));
+            if self.unanswered.load(Ordering::Relaxed) > 0 {
+                every = every.min(PATH_REPROBE_INTERVAL);
+            }
             let quiet =
                 !self.idle_probe_only.load(Ordering::Relaxed) || last_sent.elapsed() >= every;
             if last_probe.elapsed() >= every && quiet {

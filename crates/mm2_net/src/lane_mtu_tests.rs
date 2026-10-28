@@ -222,3 +222,36 @@ fn a_path_whose_mtu_collapses_after_the_join_is_a_surfaced_failure_that_heals() 
         }
     }
 }
+
+/// Loss alone is never a path failure: probes and echoes both cross a
+/// lossy relay, and however many round trips fail the verdict stays off.
+/// The probe cadence is compressed (20 ms, about 3 000 probes over the
+/// run) so it covers far more round trips than a minute of real play.
+#[test]
+fn heavy_random_loss_never_reads_as_a_path_failure() {
+    for seed in [1u64, 2, 3, 4, 5] {
+        let lossy = UdpImpair {
+            link: crate::Impair {
+                loss: 0.3,
+                ..crate::Impair::default()
+            },
+            ..UdpImpair::default()
+        };
+        let rig = Rig::new_with(seed, Some(lossy));
+        rig.client
+            .set_path_bounds(Duration::from_millis(20), Duration::from_millis(100));
+        let until = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < until {
+            rig.settle(STEP);
+            assert!(
+                rig.client.lane_path_failure().is_none(),
+                "seed {seed}: loss alone was reported as a failed path"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            rig.proxy.stats(LinkDir::Up).link.dropped >= 1,
+            "seed {seed}"
+        );
+    }
+}
