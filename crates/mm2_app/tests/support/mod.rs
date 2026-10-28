@@ -463,6 +463,15 @@ impl Proc {
         assert!(status.success(), "SIGSTOP of the child failed");
     }
 
+    /// SIGCONT the child: undo [`Proc::stop`]. Same PID, same scope.
+    pub fn cont(&self) {
+        let status = Command::new("kill")
+            .args(["-CONT", &self.child.id().to_string()])
+            .status()
+            .expect("failed to run kill");
+        assert!(status.success(), "SIGCONT of the child failed");
+    }
+
     /// Reap the child, bounded: the loss legs' claim is that the child
     /// exits *on its own* once the peer dies, so a child that outlives
     /// `bound` is killed and the leg fails rather than hanging the
