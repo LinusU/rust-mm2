@@ -1067,6 +1067,24 @@ mod legacy_tcp_frame_tests {
         }
     }
 
+    /// Like `stats_at_least`, but waits for `frames_out`: the writer
+    /// publishes emitted counts after the write, so the receiving end
+    /// can see a frame before its output stats exist.
+    fn stats_emitted_at_least(proxy: &ImpairProxy, dir: LinkDir, frames_out: u64) -> LinkStats {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let stats = proxy.stats(dir);
+            if stats.frames_out >= frames_out {
+                return stats;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "lane never emitted {frames_out} frames"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn a_clean_proxy_relays_frames_in_order() {
         let (target, in_rx, _out) = sink();
@@ -1076,7 +1094,7 @@ mod legacy_tcp_frame_tests {
             write_frame(&mut c, &frame(i)).unwrap();
         }
         assert_eq!(received(&in_rx, 4), [0, 1, 2, 3]);
-        let stats = stats_at_least(&proxy, LinkDir::Up, 4);
+        let stats = stats_emitted_at_least(&proxy, LinkDir::Up, 4);
         assert_eq!(stats.frames_out, 4);
         assert_eq!(stats.bytes_in, 16);
         assert_eq!(stats.bytes_out, 16, "each relayed frame's payload counted");
@@ -1123,7 +1141,7 @@ mod legacy_tcp_frame_tests {
             write_frame(&mut c, &frame(i)).unwrap();
         }
         assert_eq!(received(&in_rx, 4), [1, 0, 3, 2]);
-        let stats = stats_at_least(&proxy, LinkDir::Up, 4);
+        let stats = stats_emitted_at_least(&proxy, LinkDir::Up, 4);
         assert_eq!(stats.reordered, 2);
         assert_eq!(stats.bytes_out, 16, "a swap emits both payloads once");
         assert_eq!(
@@ -1148,7 +1166,7 @@ mod legacy_tcp_frame_tests {
             write_frame(&mut c, &frame(i)).unwrap();
         }
         assert_eq!(received(&in_rx, 6), [0, 0, 1, 1, 2, 2]);
-        let stats = stats_at_least(&proxy, LinkDir::Up, 3);
+        let stats = stats_emitted_at_least(&proxy, LinkDir::Up, 6);
         assert_eq!(stats.duplicated, 3);
         assert_eq!(
             stats.bytes_out, 24,
@@ -1211,7 +1229,10 @@ mod legacy_tcp_frame_tests {
             "the frame arrived faster than its release: {:?}",
             sent.elapsed()
         );
-        let stats = stats_at_least(&proxy, LinkDir::Up, 1);
+        // `frames_in` is published before the frame is released, and
+        // `frames_out` only after the write the sink already saw: wait
+        // for the emitted count, or the byte assertions race the writer.
+        let stats = stats_emitted_at_least(&proxy, LinkDir::Up, 1);
         assert_eq!(stats.delayed, 1, "the 60 ms hold counted");
         assert_eq!(stats.bytes_in, 4);
         assert_eq!(stats.bytes_out, 4);
