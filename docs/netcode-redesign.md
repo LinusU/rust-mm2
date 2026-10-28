@@ -2776,4 +2776,36 @@ Known limits of the harness, stated rather than hidden:
   are the consecutive-loss cases.
 - The windowed/headless `mm2` app prints no `lane_pace` record, so a LAN or
   Internet run of the runbook cannot yet report actual rates, queue age or
-  headroom; filed as a follow-up.
+  headroom; filed as a follow-up. (Partly done: see "Real-process
+  qualification" below.)
+
+### Real-process qualification (#2158)
+
+`scripts/netcode-qualification-mm2.sh` (`mm2_app` `net_qualify`, `#[ignore]`d,
+real-time) runs the same links against one headless `--paced` `mm2 --host`
+and seven headless `--paced` `mm2 --join` processes, each client's lane
+behind its own `UdpImpairProxy` (1 Mbit/s down, 256 kbit/s up, 150 ms buffer,
+20 ms one way). Producer, vehicle simulation and prediction are the app's.
+Three tests: the ordinary envelope (host stdin `uplink <kbit>` dips 5 -> 2 ->
+5 Mbit/s, seat 6 clustered loss, seat 7 `SIGSTOP`ped for 10 s), per-client
+recovery legs (`SIGSTOP` 250/100 ms, blackouts 500/250 ms, bursts of 6/3
+datagrams), and a 250 ms `SIGSTOP` of the host.
+
+The app now prints two cells in its final smoke record: client `corr=<n>/<p95
+ms>/<max ms>` (gaps between own-row corrections at most 3 ticks behind the
+newest tick the client has seen) and host `qwait=<seat>:<p95 us>/<max us>,...`
+(movement-queue wait per seat, the existing `PaceStats`).
+
+Reached: usable-correction gap p95/max and movement-queue wait p95/max on the
+healthy seats, with the cap dip, clustered-loss seat and a non-reading
+(stopped) seat in the same run; recovery of each leg as "largest gap <= leg +
+1 s"; process pause and host pause. One run on one loaded machine (the ordinary
+test, healthy seats): gap p95 36-51 ms, max 50-57 ms; queue wait p95 <= 0.2
+ms, max <= 0.4 ms; legs and the host pause each stayed under their bounds
+(largest gap 534 ms for the 500 ms blackout). A seat stopped for 10 s was
+reaped by the host (`mp=host(6p)`).
+
+Not reached: the "movement queue steady within 2 s of a leg" gate (the app
+records run-long distributions, not a time series); freshness against the
+host's clock (judged against the stream); a per-phase split of the host
+`lane=` rate (the cap-dip rate trace). No Rocket League parity claim.
