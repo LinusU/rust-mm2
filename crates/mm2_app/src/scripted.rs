@@ -1014,7 +1014,9 @@ pub fn scripted_drive(
             commands.entity(entity).remove::<ScriptedRoute>();
             bot_route = None;
         }
-        if bot.escapes_since_plan >= GUIDE_REPLAN_ESCAPES && bot_route.is_some() {
+        if bot.escapes_since_plan >= GUIDE_REPLAN_ESCAPES
+            && bot_route.as_deref().is_some_and(|rs| rs.goal.is_some())
+        {
             commands.entity(entity).remove::<ScriptedRoute>();
             bot_route = None;
             bot.escapes_since_plan = 0;
