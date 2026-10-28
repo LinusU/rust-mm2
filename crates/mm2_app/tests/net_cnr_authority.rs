@@ -246,8 +246,8 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
     alice.wait_success("alice", &alice_rec);
     bob.wait_success("bob", &bob_rec);
     host.cmd("quit");
-    host.until_within("smoke=headless-physics", BOUND);
-    eprintln!("alice  {alice_rec}\nbob    {bob_rec}");
+    let host_rec = host.until_within("smoke=headless-physics", BOUND);
+    eprintln!("alice  {alice_rec}\nbob    {bob_rec}\nhost   {host_rec}");
 
     let board = |rec: &str| {
         field(rec, "cnr")

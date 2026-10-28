@@ -1020,6 +1020,12 @@ pub fn scripted_drive(
             commands.entity(entity).remove::<ScriptedRoute>();
             bot_route = None;
             bot.escapes_since_plan = 0;
+            info!(
+                tick = session.tick(),
+                position = ?pos.0,
+                gate = ?gate,
+                "scripted player dropped its wedged nav guide to replan"
+            );
         }
         if race.is_none()
             && cnr_view.is_some()
