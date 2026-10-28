@@ -42,6 +42,7 @@ use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, corner_aim_distance, pace, plan_speed,
     sharp_corner_plan, steer_toward,
 };
+use mm2_game::cnr_options::DELIVERY_RADIUS_M;
 
 use crate::opponents::{
     REANCHOR_DIST, REANCHOR_FRAMES, aim_distance, initial_route_index, point_reached,
@@ -86,6 +87,12 @@ pub struct ScriptedBot {
     /// say), so [`GUIDE_REPLAN_ESCAPES`] of them drop the guide and the
     /// route is planned again from where the car really is.
     pub escapes_since_plan: u32,
+    /// Consecutive frames spent over or under the objective — inside its
+    /// radius on the ground plane, out of it in 3D. The pickup and the
+    /// delivery are 3D triggers, so a car on the road above the gate is
+    /// at the objective as far as the map is concerned and never takes
+    /// it ([`OFF_LEVEL_FRAMES`]).
+    pub off_level_frames: u32,
 }
 
 impl Default for ScriptedBot {
@@ -98,6 +105,7 @@ impl Default for ScriptedBot {
             escapes: 0,
             escapes_since_plan: 0,
             plan_wait: 0,
+            off_level_frames: 0,
         }
     }
 }
@@ -221,6 +229,20 @@ fn guide_stale(guide: Option<&ScriptedRoute>, objective: Vec3) -> bool {
 /// again from the car's current pose. The line cannot see walls, so a
 /// wedged car otherwise chases the same `route_next` forever.
 const GUIDE_REPLAN_ESCAPES: u32 = 4;
+
+/// Frames a car may circle over or under its objective before its guide
+/// is dropped and planned again from where it really is (~10 s: a car
+/// crossing the objective's disc on the right level is gone in a few
+/// seconds, and one on the wrong level is on a road that does not lead
+/// down to it).
+const OFF_LEVEL_FRAMES: u32 = 600;
+
+/// Whether `pos` is over or under `objective`: inside its trigger radius
+/// on the ground plane but out of it in 3D.
+fn over_objective(pos: Vec3, objective: Vec3) -> bool {
+    (pos.x - objective.x).hypot(pos.z - objective.z) <= DELIVERY_RADIUS_M
+        && pos.distance(objective) > DELIVERY_RADIUS_M
+}
 
 /// What one frame of Cops & Robbers re-planning did.
 enum NavReplan {
@@ -1027,6 +1049,25 @@ pub fn scripted_drive(
                 "scripted player dropped its wedged nav guide to replan"
             );
         }
+        bot.off_level_frames =
+            if race.is_none() && cnr_view.is_some() && !ramming && over_objective(pos.0, gate) {
+                bot.off_level_frames + 1
+            } else {
+                0
+            };
+        if bot.off_level_frames >= OFF_LEVEL_FRAMES
+            && bot_route.as_deref().is_some_and(|rs| rs.goal.is_some())
+        {
+            commands.entity(entity).remove::<ScriptedRoute>();
+            bot_route = None;
+            bot.off_level_frames = 0;
+            info!(
+                tick = session.tick(),
+                position = ?pos.0,
+                gate = ?gate,
+                "scripted player dropped its nav guide after circling over or under its objective"
+            );
+        }
         if race.is_none()
             && cnr_view.is_some()
             && !ramming
@@ -1484,6 +1525,14 @@ mod cnr_target_tests {
 
     /// A guide is replanned when it is missing or its objective moved
     /// more than 2 m; an authored guide (no goal) is never replanned.
+    #[test]
+    fn a_car_on_the_road_above_the_objective_is_over_it() {
+        let gate = Vec3::new(-1850.0, 25.6, -331.0);
+        assert!(over_objective(gate + Vec3::new(3.0, 22.0, 0.0), gate));
+        assert!(!over_objective(gate + Vec3::new(3.0, 2.0, 0.0), gate));
+        assert!(!over_objective(gate + Vec3::new(40.0, 22.0, 0.0), gate));
+    }
+
     #[test]
     fn a_guide_is_stale_only_when_its_objective_moved() {
         let objective = Vec3::new(10.0, 0.0, 10.0);
