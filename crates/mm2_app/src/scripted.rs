@@ -1555,8 +1555,6 @@ mod cnr_target_tests {
         assert_eq!(cnr_target(&carried_by_stranger, PlayerId(9)), None);
     }
 
-    /// A guide is replanned when it is missing or its objective moved
-    /// more than 2 m; an authored guide (no goal) is never replanned.
     #[test]
     fn a_car_on_the_road_above_the_objective_is_over_it() {
         let gate = Vec3::new(-1850.0, 25.6, -331.0);
@@ -1565,6 +1563,8 @@ mod cnr_target_tests {
         assert!(!over_objective(gate + Vec3::new(40.0, 22.0, 0.0), gate));
     }
 
+    /// A guide is replanned when it is missing or its objective moved
+    /// more than 2 m; an authored guide (no goal) is never replanned.
     #[test]
     fn a_guide_is_stale_only_when_its_objective_moved() {
         let objective = Vec3::new(10.0, 0.0, 10.0);
