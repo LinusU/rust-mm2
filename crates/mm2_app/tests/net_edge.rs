@@ -357,7 +357,12 @@ fn a_stopped_host_ends_a_parked_app_client() {
         MM2_EXE,
         &mm2_join_args(install.path(), addr, HOST_FRAME_CEILING),
     );
-    host.until("event=joined");
+    // `event=joined` is the host accepting the TCP hello; the client's UDP
+    // lane echo is still outstanding then, and a host stopped inside that
+    // 3 s handshake makes the client fail `join_failed` (LaneTimeout)
+    // instead of reporting the lost host. The client's `--ready` reaches
+    // the host only once its join, lane included, has completed.
+    host.until("event=ready id=1 ready=true");
 
     host.stop();
     let rec = client.until_within("smoke=", STOPPED_HOST_BOUND);
