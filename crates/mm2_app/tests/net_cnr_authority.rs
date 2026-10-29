@@ -16,7 +16,8 @@
 //! Asserted: the host's log is a legal gold history (nothing is picked
 //! while carried, only the carrier drops or delivers, a delivery frees
 //! the gold), the contested transfer happened between the two client
-//! seats (the knock, the recovery and the delivery are the thief's),
+//! seats (the knock and the recovery are the thief's; the delivery is
+//! whoever wins the race afterwards, the log and verdict agreeing),
 //! each client's replica reads the host's verdict and the *same* board,
 //! and that board is exactly the sum of the host's scoring events —
 //! a replayed contact that re-awarded anything on a client or on the
@@ -232,23 +233,29 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
                 && player_of(l) == thief),
             "the thief never recovered the gold"
         );
-        assert!(
-            events
-                .iter()
-                .any(|l| l.contains("Delivered {") && player_of(l) == thief),
-            "the thief never delivered"
-        );
+        // Who delivers is a race, not part of the authority contract:
+        // after the thief's knock the carrier may legally ram the gold
+        // back (and a lossy link decides who then reaches the marker
+        // first). The contract is that the host's verdict names the
+        // seat whose delivery its own log granted.
+        let delivery = events
+            .iter()
+            .rev()
+            .find(|l| l.contains("Delivered {"))
+            .expect("nobody delivered");
+        let winner = player_of(delivery);
+        assert!(winner == thief || winner == carrier, "{delivery}");
         let ended = events.last().unwrap();
         assert!(ended.contains("Ended("), "{ended}");
         assert!(ended.contains("reason: PointLimit"), "{ended}");
         assert!(
-            ended.contains(&format!("winner: Player(PlayerId({thief}))")),
+            ended.contains(&format!("winner: Player(PlayerId({winner}))")),
             "{ended}"
         );
 
-        awarded
+        (awarded, winner)
     }));
-    let awarded = checked.unwrap_or_else(|panic| {
+    let (awarded, winner) = checked.unwrap_or_else(|panic| {
         eprintln!("--- host (up to Ended) ---\n{}", lines.join("\n"));
         eprintln!("--- alice ---\n{}", alice.pending());
         eprintln!("--- bob ---\n{}", bob.pending());
@@ -281,7 +288,7 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
         assert!(
             field(rec, "cnr")
                 .split(',')
-                .any(|c| c == format!("win=p{thief}")),
+                .any(|c| c == format!("win=p{winner}")),
             "{who}'s winner differs from the host's: {rec}"
         );
         assert_eq!(field(rec, "phase"), "results", "{who}: {rec}");
