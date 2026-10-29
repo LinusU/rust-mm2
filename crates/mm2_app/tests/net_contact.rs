@@ -486,24 +486,46 @@ fn own_pose_at(run: &Run, id: u16, tick: u64) -> Option<(f64, f64)> {
         .map(|s| (s.pos[0], s.pos[2]))
 }
 
+/// The closest approach of the seat's own trace to `pose` among the samples
+/// within `window` ticks of `tick`, or `None` when the trace has none there.
+fn nearest_own_pose(run: &Run, id: u16, tick: u64, window: u64, pose: (f64, f64)) -> Option<f64> {
+    run.traces
+        .get(usize::from(id))?
+        .iter()
+        .filter(|s| s.tick.abs_diff(tick) <= window)
+        .map(|s| ((pose.0 - s.pos[0]).powi(2) + (pose.1 - s.pos[2]).powi(2)).sqrt())
+        .min_by(f64::total_cmp)
+}
+
 /// How far each client's held pose of seat `id` is from the seat's OWN
-/// trace at that client's applied tick (#2133), the larger of the two. The
-/// clients' records end at different simulated times (120 s against 62 s on
-/// CI run 40186613799), so comparing one's mid-settle pose with the
-/// other's final one measured the gap in time, not a stale copy; this
-/// compares each copy with the truth at the tick it reflects. `None` when
-/// either tick or trace sample is unknown.
+/// trace around that client's applied tick (#2133, #2194), the larger of
+/// the two. The clients' records end at different simulated times (120 s
+/// against 62 s on CI run 40186613799), so comparing one's mid-settle pose
+/// with the other's final one measured the gap in time, not a stale copy;
+/// this compares each copy with the truth at the tick it reflects.
+///
+/// A copy of a seat that was still sliding to rest is a moment off that
+/// tick: the client shows it one link delay (`delays_ms`, each way) behind
+/// or ahead of the stamped tick (CI run 40771278508: alice's copy of the
+/// host was taken 9 ticks after it last moved 1 m and was 1.27 m from
+/// where the host was *at* that tick, while the host never left the
+/// resting spot it ended on). So the copy is held against the closest
+/// pose the seat's own car occupied within that delay of the tick, which
+/// still fails a copy that is stale by more than the link's delay.
+/// `None` when either tick or trace sample is unknown.
 fn matched_divergence(
     run: &Run,
     id: u16,
     poses: [(f64, f64); 2],
     records: [&String; 2],
+    delays_ms: [u64; 2],
 ) -> Option<f64> {
     let mut worst = 0.0_f64;
     for who in 0..2 {
         let tick = applied_tick(run, id, who, records[who])?;
-        let (rx, rz) = own_pose_at(run, id, tick)?;
-        worst = worst.max(((poses[who].0 - rx).powi(2) + (poses[who].1 - rz).powi(2)).sqrt());
+        own_pose_at(run, id, tick)?;
+        let window = delays_ms[who] * 60 / 1000;
+        worst = worst.max(nearest_own_pose(run, id, tick, window, poses[who])?);
     }
     Some(worst)
 }
@@ -599,8 +621,8 @@ fn check_case(case: Case, dir: &std::path::Path, run: &Run) {
         // her record can be taken many ticks after his on a loaded machine.
         // Each copy is therefore held against the seat's own trace at the
         // tick that copy reflects, not against the other client's record.
-        let measured =
-            matched_divergence(run, id, [(x, z), (*bx, *bz)], [alice, bob]).unwrap_or(apart);
+        let measured = matched_divergence(run, id, [(x, z), (*bx, *bz)], [alice, bob], case.delays)
+            .unwrap_or(apart);
         if bounded && measured > worst_bounded.1 {
             worst_bounded = (id, measured);
         }
