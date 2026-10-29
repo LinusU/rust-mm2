@@ -1156,6 +1156,12 @@ pub fn scripted_drive(
                 let graph = routing_graph(&mut nav, vfs.as_deref(), &session)?;
                 let route = plan_nav_route(graph, pos.0, gate)?;
                 let mut guide = ScriptedRoute::new(route, pos.0, yaw);
+                // The line starts at the car, so its early anchors are the
+                // way out of wherever the car stands, not a staging
+                // overshoot to skip: a nose facing away from them must
+                // turn round to them, not chase the first anchor it
+                // faces — which on the sf hill is the far side of a wall.
+                guide.next = 0;
                 guide.goal = Some(gate);
                 Some(guide)
             });
