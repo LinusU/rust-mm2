@@ -70,6 +70,11 @@ pub const CONGESTED_ACK_AGE: Duration = Duration::from_millis(500);
 /// Round-trip time above the lowest recently seen by more than this is a
 /// standing queue somewhere on the path: congestion before any loss.
 pub const RTT_SLACK: Duration = Duration::from_millis(50);
+/// The slack grows by this many times the link's measured jitter: a path
+/// whose samples spread over 200 ms (quarter-delay jitter on a 400 ms
+/// link) puts its lowest recent sample well above its all-time lowest
+/// with no queue (#2137).
+const RTT_JITTER_FACTOR: u32 = 2;
 /// Every round-trip sample over this long must stand above the baseline
 /// before a standing queue counts: a scheduler stall on either end
 /// inflates a few samples, and a real queue lifts all of them.
@@ -79,7 +84,9 @@ const STANDING_QUEUE_HOLD: Duration = Duration::from_millis(500);
 /// passed-over snapshots. On a loaded shared-CPU runner a stall at either
 /// end lifts every ack sample together, which the verdict cannot tell
 /// from a queue, and it starved corrections in the net_contact cases
-/// (#2049, #2137). The samples are still taken and reported.
+/// (#2049, #2137). The slack scales with measured jitter; enabling it waits
+/// for the CI A/B in docs/netcode-redesign.md. The samples are still
+/// taken and reported.
 const RTT_VERDICT: bool = false;
 /// The lowest-RTT baseline is re-taken this often, so a route change
 /// that raises the floor is not read as congestion forever.
@@ -203,6 +210,9 @@ pub struct PeerController {
     decreases: u64,
     min_rtt: Option<(Duration, Instant)>,
     srtt: Option<Duration>,
+    /// Slow-moving mean deviation of the samples from `srtt`: the link's
+    /// own jitter, which the standing-queue slack must clear.
+    rtt_jitter: Duration,
     /// The round-trip samples of the last `STANDING_QUEUE_HOLD`.
     recent_rtts: VecDeque<(Instant, Duration)>,
     /// The clean wait before the next step up (backs off after a cut).
@@ -228,6 +238,7 @@ impl PeerController {
             decreases: 0,
             min_rtt: None,
             srtt: None,
+            rtt_jitter: Duration::ZERO,
             recent_rtts: VecDeque::new(),
             increase_every: INCREASE_INTERVAL,
             rtt_verdict: RTT_VERDICT,
@@ -271,6 +282,12 @@ impl PeerController {
     fn take_rtt(&mut self, sample: Option<Duration>, now: Instant) -> bool {
         if let Some(r) = sample {
             self.recent_rtts.push_back((now, r));
+            if let Some(s) = self.srtt {
+                // Slow (1/64), so a step up from a queue is not absorbed
+                // as jitter before the hold has run out.
+                let dev = r.abs_diff(s);
+                self.rtt_jitter = (self.rtt_jitter * 63 + dev) / 64;
+            }
             self.srtt = Some(self.srtt.map_or(r, |s| (s * 7 + r) / 8));
             match self.min_rtt {
                 Some((m, at))
@@ -292,7 +309,7 @@ impl PeerController {
         };
         let lowest = self.recent_rtts.iter().map(|&(_, r)| r).min();
         now.saturating_duration_since(oldest) >= STANDING_QUEUE_HOLD * 3 / 4
-            && lowest.is_some_and(|l| l > m + RTT_SLACK)
+            && lowest.is_some_and(|l| l > m + RTT_SLACK + self.rtt_jitter * RTT_JITTER_FACTOR)
     }
 
     /// Fold in the sender's counters at `now` and return the new rate.
@@ -604,6 +621,33 @@ mod tests {
         for i in 0..200u64 {
             t += Duration::from_millis(33);
             let ms = [135, 225, 160, 200, 180, 150][(i % 6) as usize];
+            c.on_feedback(
+                Feedback {
+                    rtt: Some(Duration::from_millis(ms)),
+                    ..Feedback::default()
+                },
+                t,
+            );
+        }
+        assert_eq!(c.decreases(), 0, "jitter alone cut the rate");
+    }
+
+    #[test]
+    fn a_link_whose_jitter_spans_two_hundred_ms_is_not_a_standing_queue() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(100_000, t0).with_rtt_verdict();
+        let mut t = t0;
+        // 800-1000 ms (a 400 ms link with quarter-delay jitter each way):
+        // a 9-step pattern with a rare low sample and slow stretches.
+        let pattern = [905, 840, 960, 925, 800, 975, 880, 935, 850];
+        for i in 0..600usize {
+            t += Duration::from_millis(33);
+            // Slow stretches: a dozen samples all above the middle.
+            let ms = if (i / 12) % 5 == 4 {
+                900 + pattern[i % 9] % 100
+            } else {
+                pattern[i % 9]
+            };
             c.on_feedback(
                 Feedback {
                     rtt: Some(Duration::from_millis(ms)),

@@ -951,12 +951,26 @@ first motion 272 ticks late):
   log without `skipped`.
 - **No ack age.** A quiet scene sends no group, so no ack, and the
   controller would read that silence as congestion. `ack_at` stays unset.
-- **Tick 0 is no sample.** It is acknowledged in about 2 ms on a 90 ms link
-  (cause not established), which as the lowest-RTT baseline made every real
-  sample look like a standing queue. And the standing-queue test
-  looks at the lowest sample of the last 500 ms, not the smoothed mean,
-  since quarter-delay jitter and stalls spread some samples above the minimum
-  without any queue.
+- **Tick 0 is no sample.** It is acknowledged in about 2 ms on a link meant
+  to be 90 ms (#2137). Cause, from logging every sample of the high-latency
+  `net_contact` cases: the matching is right, and the harness arms the link
+  delay only after the game is live (`until_live`), so tick 0 is acked on
+  the still-clean link. The later samples sit where the links put them:
+  500-625 ms on the 250 ms link, 830-965 ms on the 400 ms link (delay plus
+  up to a quarter-delay of jitter each way). A real session has no such
+  clean first sample, but the rule stays: the first tick is no baseline.
+  And the standing-queue test looks at the lowest sample of the last 500 ms,
+  not the smoothed mean, and its slack is `RTT_SLACK` plus twice the link's
+  measured jitter (a slow mean deviation of the samples), since a path whose
+  samples spread over 200 ms puts its recent minimum well above its
+  all-time minimum with no queue.
+
+The verdict is still **off** (`RTT_VERDICT`). With the jitter-scaled slack
+the high-latency cases passed 3 of 3 locally with it forced on, on an
+unloaded machine; the earlier CI failures were on loaded runners, where a
+stall lifts every sample together. The 5-runs-on / 5-runs-off CI comparison
+on one commit, and three green runs in a row, are still owed before it is
+enabled by default.
 
 ### Not done / open
 
