@@ -1046,6 +1046,48 @@ those cases.
   the group's index, which is stable because there are at most two.
 - No WAN, rendered or retail-city measurement of the saving.
 
+### Measured on a retail city (NETPLAY-10D-4, #2050)
+
+Evidence level: **original-content validation**, loopback, no impairment
+proxy. `mm2_app --test network a_host_and_a_client_read_the_same_free_for_all_with_bots`
+(retail `sf`, free-for-all, two lobby bots, host plus one *parked* client,
+300 s, 18 000 ticks, paced). The host record gained
+`grp=<full>/<delta>/<sent B>/<raw B>/<owner rows>/<world rows>
+flip=<flips>/<flaps>/<flip sends>/<flip B>/<flip fulls>/<calm sends>/<calm B>/<calm fulls>`
+(`NetDriveReport::{state_stats, group_rows, churn}`); a flip is a body
+entering or leaving a seat's owner group, a flap a flip within
+`FLAP_TICKS` (60, one second) of that body's previous flip at that seat.
+
+| Reading | Value |
+|---|---|
+| groups sent | 381 full, 18 397 delta |
+| state bytes sent / as full states | 2 602 725 / 4 906 893 (53 %) |
+| rows per send, owner group / world group | 2.08 / 1.93 (19 518 / 18 162 rows over 9 388 sends) |
+| lane rate | held its ceiling, 0 cuts (`lane=131072/131072/0c`) |
+| owner-group flips / flaps in 300 s | 8 / 0 |
+| bytes per send, flip sends / calm sends | 556 (8 sends, 16 full groups) / 277 (9 380 sends, 363 full groups) |
+| client own-row corrections | 9 137, gap p95 50 ms, max 116 ms |
+
+Reading it:
+
+- The saving on a real city is 47 %, against 82 % in the seeded lossy
+  synthetic run above: real poses change every field every tick, so a
+  delta is smaller than a full state but not tiny.
+- **Hysteresis: not warranted by this run.** 8 flips and no flap in five
+  minutes; a flip send costs one tick of roughly 2x bytes (both groups
+  re-sent full). Hysteresis would add code for 8 events. Revisit if a
+  crowded run flaps.
+- **World group stays `Bulk`.** It carries about half the rows; the lane
+  held its ceiling with it on. Its bytes are not counted separately (the
+  counters are per lane, not per group), so "how much Bulk saves under
+  loss" is not answered here.
+- **Not measured:** the client was parked, so a driven own car crossing
+  the radius and its correction regressions are untested; there was no
+  impairment proxy (the retail match tests spawn real processes without
+  `--lane-via`); the bots stayed 600 m or more from the humans, so the
+  crowded case (many islands merging near a human) did not occur.
+
+
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 
 Per-seat `input_ack` in `Snap` says how far the host has *finalized* a

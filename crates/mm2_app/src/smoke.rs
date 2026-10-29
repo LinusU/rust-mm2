@@ -1998,6 +1998,36 @@ fn run_headless(
                     .map(|min| format!(" lane={min}/{}/{}c", r.lane_ceiling, r.lane_decreases))
             })
             .unwrap_or_default();
+    // ` grp=<full>/<delta>/<sent B>/<raw B>/<owner rows>/<world rows>
+    // flip=<flips>/<flaps>/<flip sends>/<flip B>/<flip fulls>/<calm sends>/
+    // <calm B>/<calm fulls>` (NETPLAY-10D-4): the host's baselined-state
+    // saving, the group sizes and the owner group's membership churn.
+    // Absent until a baselined state was sent.
+    let net_detail = net_detail
+        + &world_ecs
+            .get_resource::<crate::netdrive::NetDriveReport>()
+            .filter(|r| r.state_stats.sent_full + r.state_stats.sent_delta > 0)
+            .map(|r| {
+                let (s, c) = (&r.state_stats, &r.churn);
+                format!(
+                    " grp={}/{}/{}/{}/{}/{} flip={}/{}/{}/{}/{}/{}/{}/{}",
+                    s.sent_full,
+                    s.sent_delta,
+                    s.sent_bytes,
+                    s.raw_bytes,
+                    r.group_rows[0],
+                    r.group_rows[1],
+                    c.flips,
+                    c.flaps,
+                    c.flip_sends,
+                    c.flip_bytes,
+                    c.flip_fulls,
+                    c.calm_sends,
+                    c.calm_bytes,
+                    c.calm_fulls
+                )
+            })
+            .unwrap_or_default();
     // ` qwait=<seat>:<p95>/<max>,...` (host, microseconds) and
     // ` corr=<n>/<p95>/<max>` (client, ms): the NETPLAY-10 queue-wait and
     // usable-correction-gap readings a process-level run gates on.

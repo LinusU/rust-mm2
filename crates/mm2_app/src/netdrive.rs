@@ -1349,6 +1349,16 @@ pub struct NetDriveReport {
     pub lane_ceiling: u32,
     /// The most rate cuts any seat's lane has made.
     pub lane_decreases: u64,
+    /// The host's lifetime baselined-state counters, read after the latest
+    /// snapshot (NETPLAY-10D-4): full against delta groups and the bytes
+    /// sent against what full states would have taken.
+    pub state_stats: mm2_net::StateStats,
+    /// Group rows the host put in the owner / world groups, summed over
+    /// seats and ticks (NETPLAY-10D-4): their mean per group is the group
+    /// size the island criterion produces.
+    pub group_rows: [u64; 2],
+    /// Membership churn of the owner group's other-seat rows (NETPLAY-10D-4).
+    pub churn: GroupChurn,
     /// Per seat (the wire id), the host movement queue's wait of sent
     /// datagrams as read after the seat's latest snapshot: 95th
     /// percentile and maximum, in microseconds (NETPLAY-10 gate).
@@ -3758,6 +3768,20 @@ pub fn publish_snapshots(
                         }
                     })
                     .collect();
+                let before = host.ctl().lane_states();
+                let members: BTreeSet<u16> = match groups.first() {
+                    Some(Message::Snap { entries, .. }) => entries
+                        .iter()
+                        .map(|e| e.player)
+                        .filter(|&p| p != seat)
+                        .collect(),
+                    _ => BTreeSet::new(),
+                };
+                for (i, g) in groups.iter().enumerate().take(2) {
+                    if let Message::Snap { entries, .. } = g {
+                        report.group_rows[i] += entries.len() as u64;
+                    }
+                }
                 let sent = if baselined {
                     let ids: Vec<(u8, Message)> = groups
                         .iter()
@@ -3797,6 +3821,39 @@ pub fn publish_snapshots(
                 };
                 if sent {
                     *report.seat_snaps.entry(seat).or_default() += 1;
+                    if baselined {
+                        let after = host.ctl().lane_states();
+                        let now = session.tick();
+                        let known = pace.owner_members.contains_key(&seat);
+                        let moved: Vec<u16> =
+                            pace.owner_members.get(&seat).map_or_else(Vec::new, |k| {
+                                k.symmetric_difference(&members).copied().collect()
+                            });
+                        for &body in &moved {
+                            let flap = pace
+                                .last_flip
+                                .insert((seat, body), now)
+                                .is_some_and(|t| now.saturating_sub(t) <= FLAP_TICKS);
+                            report.churn.flips += 1;
+                            report.churn.flaps += u64::from(flap);
+                        }
+                        let bytes = after.sent_bytes - before.sent_bytes;
+                        let fulls = after.sent_full - before.sent_full;
+                        if known {
+                            let c = &mut report.churn;
+                            if moved.is_empty() {
+                                c.calm_sends += 1;
+                                c.calm_bytes += bytes;
+                                c.calm_fulls += fulls;
+                            } else {
+                                c.flip_sends += 1;
+                                c.flip_bytes += bytes;
+                                c.flip_fulls += fulls;
+                            }
+                        }
+                        pace.owner_members.insert(seat, members);
+                        report.state_stats = after;
+                    }
                     if let Some(p) = host.ctl().lane_pace(seat) {
                         if report.lane_rate_min.is_none_or(|m| p.rate < m) {
                             report.lane_rate_min = Some(p.rate);
@@ -4061,6 +4118,30 @@ impl ContactIslands {
     }
 }
 
+/// How the owner group's membership moved between a seat's consecutive
+/// snapshots, and what those snapshots cost (NETPLAY-10D-4). A flip is a
+/// body joining or leaving a seat's owner group; a flap is a flip of a body
+/// that already flipped within [`FLAP_TICKS`] - the case a hysteresis
+/// would absorb.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupChurn {
+    pub flips: u64,
+    pub flaps: u64,
+    /// Sends (per seat) whose owner group changed membership, the state
+    /// bytes they carried and how many groups of them were full states.
+    pub flip_sends: u64,
+    pub flip_bytes: u64,
+    pub flip_fulls: u64,
+    /// The same for sends whose membership did not change.
+    pub calm_sends: u64,
+    pub calm_bytes: u64,
+    pub calm_fulls: u64,
+}
+
+/// A flip within this many host ticks (one second) of the body's last flip
+/// at the same seat counts as a flap.
+pub const FLAP_TICKS: u64 = 60;
+
 /// The snapshot rate the host publishes `Playing` snapshots at
 /// (NETPLAY-06D); absent, [`mm2_net::SNAPSHOT_HZ`].
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -4086,6 +4167,10 @@ pub struct PublishPace {
     /// Per seat, the snapshots withheld since it last got one — its
     /// congestion divisor counts against this.
     divided: BTreeMap<u16, u32>,
+    /// Per seat, the other seats in its owner group at its last snapshot.
+    owner_members: BTreeMap<u16, BTreeSet<u16>>,
+    /// Per (seat, body), the tick the body last flipped groups.
+    last_flip: BTreeMap<(u16, u16), u64>,
 }
 
 impl PublishPace {
