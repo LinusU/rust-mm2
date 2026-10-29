@@ -37,7 +37,7 @@ use tracing::info;
 use crate::cnr::{CnrHost, participant_id};
 use crate::cnrhud::match_view;
 use crate::cnrnet::CnrReplica;
-use crate::netdrive::NetPlayer;
+use crate::netdrive::{NetPlayer, RemoteSnaps};
 use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, corner_aim_distance, pace, plan_speed,
     sharp_corner_plan, steer_toward,
@@ -985,6 +985,7 @@ pub fn scripted_drive(
     water: Option<Res<crate::water::CityWater>>,
     cnr_host: Option<Res<CnrHost>>,
     cnr_replica: Option<Res<CnrReplica>>,
+    mut probe: WedgeProbe,
     vfs: Option<Res<Mm2Vfs>>,
     mut nav: Local<Option<(String, Option<NavGraph>)>>,
     mut cars: Query<
@@ -996,6 +997,7 @@ pub fn scripted_drive(
             &mut VehicleInput,
             &Position,
             &Rotation,
+            &LinearVelocity,
             &Vehicle,
             &VehicleState,
             Option<&RaceProgress>,
@@ -1040,6 +1042,7 @@ pub fn scripted_drive(
         mut input,
         pos,
         rot,
+        lin_vel,
         vehicle,
         vstate,
         progress,
@@ -1391,11 +1394,127 @@ pub fn scripted_drive(
                 aim = ?target,
                 "scripted player started a bounded escape after sustained low-speed throttle"
             );
+            if bot.escapes % WEDGE_DUMP_EVERY == 0 && *probe.dumps < WEDGE_DUMPS_MAX {
+                *probe.dumps += 1;
+                let host = if cnr_host.is_some() {
+                    "host"
+                } else if cnr_replica.is_some() {
+                    "client"
+                } else {
+                    "offline"
+                };
+                let host_copy = probe
+                    .snaps
+                    .as_deref()
+                    .and_then(|s| s.own_host_copy())
+                    .filter(|_| net.is_some() || cnr_replica.is_some());
+                dump_wedge(
+                    spatial.as_ref(),
+                    &probe.aabbs,
+                    &colliders,
+                    entity,
+                    host,
+                    (pos.0, rot.0, lin_vel.0),
+                    vehicle,
+                    vstate,
+                    host_copy,
+                    session.tick(),
+                    bot.escapes,
+                );
+            }
         }
         if let Some(limit) = session.config().and_then(|c| c.dev.bot_speed) {
             limit_evidence_speed(&mut input, vstate.forward_speed, limit);
         }
     }
+}
+
+/// What the wedge dump reads beyond the driver's own queries.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct WedgeProbe<'w, 's> {
+    snaps: Option<Res<'w, RemoteSnaps>>,
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
+    dumps: Local<'s, u32>,
+}
+
+/// Every this-many bounded escapes of one seat fire the wedge dump.
+const WEDGE_DUMP_EVERY: u32 = 3;
+
+/// Wedge dumps one process prints, so a long wedge cannot flood the log.
+const WEDGE_DUMPS_MAX: u32 = 8;
+
+/// Metres of margin around the chassis box in which the wedge dump
+/// lists colliders.
+const WEDGE_REACH: f32 = 2.0;
+
+/// One-shot diagnostic (#2231) for a seat that keeps escaping at one
+/// spot: what the car overlaps within [`WEDGE_REACH`], its velocity and
+/// wheel contacts, which side of the link this process is, and for a
+/// client the pose the host last asserted for the seat. Fires only at
+/// the 3rd, 6th... escape, so it is free on the ordinary path.
+#[allow(clippy::too_many_arguments)]
+fn dump_wedge(
+    spatial: Option<&SpatialQuery>,
+    aabbs: &Query<&ColliderAabb>,
+    colliders: &Query<&ColliderOf>,
+    entity: Entity,
+    side: &str,
+    (pos, rot, vel): (Vec3, Quat, Vec3),
+    vehicle: &Vehicle,
+    vstate: &VehicleState,
+    host_copy: Option<(u64, Vec3, Vec3)>,
+    tick: u64,
+    escapes: u32,
+) {
+    let half = Vec3::from(vehicle.config.chassis_size) * 0.5 + Vec3::splat(WEDGE_REACH);
+    let overlaps: Vec<String> = spatial
+        .map(|sq| {
+            let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+            sq.shape_intersections(
+                &Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
+                pos,
+                rot,
+                &filter,
+            )
+            .into_iter()
+            .map(|hit| {
+                let body = colliders.get(hit).map_or(hit, |c| c.body);
+                let (min, max) = aabbs
+                    .get(hit)
+                    .map_or((Vec3::NAN, Vec3::NAN), |a| (a.min, a.max));
+                format!("{hit:?} body={body:?} aabb={min:?}..{max:?}")
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    let wheels: Vec<String> = vstate
+        .wheels
+        .iter()
+        .map(|w| {
+            format!(
+                "{}@{:.2}/{:?}",
+                if w.grounded { "G" } else { "-" },
+                w.compression,
+                w.contact_entity
+            )
+        })
+        .collect();
+    let delta = host_copy.map(|(t, p, v)| (t, p, v, pos.distance(p)));
+    info!(
+        target: "wedge",
+        tick,
+        escapes,
+        side,
+        position = ?pos,
+        velocity = ?vel,
+        forward_speed = vstate.forward_speed,
+        grounded = vstate.grounded,
+        wheels = ?wheels,
+        overlaps = overlaps.len(),
+        colliders = ?overlaps,
+        host_copy = ?delta,
+        "wedge dump at a repeated bounded escape"
+    );
 }
 
 /// Reuse the AI's handling-derived steering and curvature pace for a guided

@@ -602,6 +602,10 @@ pub struct RemoteSnaps {
     own_settle: SettleWatch,
     /// The own seat's moving-drift count ([`DriftWatch`]).
     own_drift: DriftWatch,
+    /// The host's newest copy of the own seat as `(snap tick, position,
+    /// velocity)` — read only by the wedge diagnostic
+    /// ([`crate::scripted`]) to print the host-vs-local pose delta.
+    own_host_copy: Option<(u64, Vec3, Vec3)>,
     /// The own seat's staged host state for the fixed-tick prediction
     /// replay (NETPLAY-04, [`crate::netpredict`]); only filled behind the
     /// [`NetplayTimeline`] selector.
@@ -953,6 +957,12 @@ impl RemoteSnaps {
         self.newest_seat_row(seat)
     }
 
+    /// The host's newest copy of the own seat: `(snap tick, position,
+    /// velocity)`, `None` before the first own row.
+    pub fn own_host_copy(&self) -> Option<(u64, Vec3, Vec3)> {
+        self.own_host_copy
+    }
+
     /// Groups staged and not yet applied (bounded by the seat count).
     pub fn staged_groups(&self) -> usize {
         self.staged.len()
@@ -1234,6 +1244,7 @@ impl RemoteSnaps {
         self.pending.clear();
         self.own_settle = SettleWatch::default();
         self.own_drift = DriftWatch::default();
+        self.own_host_copy = None;
         self.own_stage.clear();
         self.repaired.clear();
         self.seen.clear();
@@ -4812,6 +4823,9 @@ fn apply_snap_frame(
                     report.own_corrections.note(std::time::Instant::now());
                 }
                 let asserted_vel = Vec3::from(entry.vel);
+                if snaps.own_host_copy.is_none_or(|(t, _, _)| snap.tick >= t) {
+                    snaps.own_host_copy = Some((snap.tick, to_pos, asserted_vel));
+                }
                 let replaying = snaps.own_stage.enabled;
                 let settled = !replaying
                     && !authority_reset
