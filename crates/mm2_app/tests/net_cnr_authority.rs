@@ -38,9 +38,13 @@ use crate::net_drive::{cnr_cell, field, host_args, join_args, until_live};
 use crate::support::{self, Proc};
 
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
-/// The retail `sf` seed the other contested-transfer tests use: the
-/// carrier is reached and the cycle completes within the point limit.
-const SEED: u64 = 1291;
+/// A retail `sf` seed whose gold lies ~340 m from the host's parked seat 0
+/// (the roam origin, -1319,221) with neither the gold-to-hideout nor the
+/// gold-to-bank leg running near it, so the parked host car cannot knock
+/// the gold loose or pick it up. Seed 1291 puts the gold ~40 m from that
+/// car, and the host occasionally scored ("the parked host seat scored").
+/// A hosted session rejects `--spawn`, so the seed is the only lever.
+const SEED: u64 = 49;
 const STEP: Duration = Duration::from_secs(60);
 const BOUND: Duration = Duration::from_secs(1200);
 
