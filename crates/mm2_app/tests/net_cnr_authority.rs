@@ -197,49 +197,64 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
         std::panic::resume_unwind(panic)
     });
     let events: Vec<String> = lines
-        .into_iter()
+        .iter()
         .filter(|l| l.contains("cops and robbers event"))
+        .cloned()
         .collect();
     for line in &events {
         eprintln!("host   {line}");
     }
-    let awarded = legal_history(&events);
+    // The history assertions run under a guard so a failure still shows
+    // what the children said (host_seats, nav replans), not only the
+    // events: a thief that never rams is diagnosed from those lines.
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let awarded = legal_history(&events);
 
-    let picked = &events[0];
-    assert_eq!(
-        player_of(picked),
-        carrier,
-        "the carrier picked first: {picked}"
-    );
-    assert!(picked.contains("recovered: false"), "{picked}");
-    let knock = events
-        .iter()
-        .find(|l| l.contains("Dropped {"))
-        .expect("the thief never knocked the gold loose");
-    assert_eq!(player_of(knock), carrier, "{knock}");
-    assert!(
-        knock.contains(&format!("cause: Knocked {{ by: Some(PlayerId({thief})) }}")),
-        "the gold was not rammed loose by the client thief: {knock}"
-    );
-    assert!(
-        events.iter().any(|l| l.contains("Picked {")
-            && l.contains("recovered: true")
-            && player_of(l) == thief),
-        "the thief never recovered the gold"
-    );
-    assert!(
-        events
+        let picked = &events[0];
+        assert_eq!(
+            player_of(picked),
+            carrier,
+            "the carrier picked first: {picked}"
+        );
+        assert!(picked.contains("recovered: false"), "{picked}");
+        let knock = events
             .iter()
-            .any(|l| l.contains("Delivered {") && player_of(l) == thief),
-        "the thief never delivered"
-    );
-    let ended = events.last().unwrap();
-    assert!(ended.contains("Ended("), "{ended}");
-    assert!(ended.contains("reason: PointLimit"), "{ended}");
-    assert!(
-        ended.contains(&format!("winner: Player(PlayerId({thief}))")),
-        "{ended}"
-    );
+            .find(|l| l.contains("Dropped {"))
+            .expect("the thief never knocked the gold loose");
+        assert_eq!(player_of(knock), carrier, "{knock}");
+        assert!(
+            knock.contains(&format!("cause: Knocked {{ by: Some(PlayerId({thief})) }}")),
+            "the gold was not rammed loose by the client thief: {knock}"
+        );
+        assert!(
+            events.iter().any(|l| l.contains("Picked {")
+                && l.contains("recovered: true")
+                && player_of(l) == thief),
+            "the thief never recovered the gold"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|l| l.contains("Delivered {") && player_of(l) == thief),
+            "the thief never delivered"
+        );
+        let ended = events.last().unwrap();
+        assert!(ended.contains("Ended("), "{ended}");
+        assert!(ended.contains("reason: PointLimit"), "{ended}");
+        assert!(
+            ended.contains(&format!("winner: Player(PlayerId({thief}))")),
+            "{ended}"
+        );
+
+        awarded
+    }));
+    let awarded = checked.unwrap_or_else(|panic| {
+        eprintln!("--- host (up to Ended) ---\n{}", lines.join("\n"));
+        eprintln!("--- alice ---\n{}", alice.pending());
+        eprintln!("--- bob ---\n{}", bob.pending());
+        eprintln!("--- host (rest) ---\n{}", host.pending());
+        std::panic::resume_unwind(panic)
+    });
 
     let alice_rec = alice.until_within("smoke=headless-physics", BOUND);
     let bob_rec = bob.until_within("smoke=headless-physics", BOUND);
