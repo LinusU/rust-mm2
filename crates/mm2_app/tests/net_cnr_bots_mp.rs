@@ -126,7 +126,16 @@ fn play_to_results(city: &str, variant: &str) -> (String, String) {
         city,
         variant,
         "5m",
-        &["--until-results", "--deadline", "900"],
+        &[
+            "--until-results",
+            // The host stays on its results screen until the client has
+            // read the verdict and left: a loaded client can lag the
+            // host's wall clock by more than the results hold, and a
+            // host that exits first reads as `lost the host` (#2193).
+            "--hold-until-peer-left",
+            "--deadline",
+            "900",
+        ],
     );
     let addr = listening_addr(&host);
     host.cmd(&format!("session bots=2 seed={SEED}"));

@@ -452,12 +452,13 @@ struct Cli {
     #[arg(long, value_name = "tick", requires = "headless")]
     until_snap_tick: Option<u64>,
 
-    /// With `--until-snap-tick`: keep this process seated past its own
-    /// stop tick until a peer leaves (or `--deadline` passes), then
-    /// report the original `stop=snap-tick`. A settled leg whose peer
-    /// takes its record uses this so the peer's record cannot race the
-    /// roster removal this process's exit triggers.
-    #[arg(long, requires_all = ["headless", "until_snap_tick"])]
+    /// With `--until-snap-tick` or `--until-results`: keep this process
+    /// seated past its own stop until a peer leaves (or `--deadline`
+    /// passes), then report the original `stop=`. A settled leg whose
+    /// peer takes its record uses this so the peer's record cannot race
+    /// the roster removal or the closed socket this process's exit
+    /// causes.
+    #[arg(long, requires = "headless")]
     hold_until_peer_left: bool,
 
     /// End a `--headless` run once every fielded opponent has finished

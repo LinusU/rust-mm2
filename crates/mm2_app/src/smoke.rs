@@ -202,7 +202,7 @@ pub struct StopWhen {
     /// the applied wire tick puts every process's record at the same
     /// point of the authority's sim, whatever its local step rate.
     pub snap_tick: Option<u64>,
-    /// With `snap_tick`: hold the stop until a remote copy this process
+    /// With `snap_tick` or `results`: hold the stop until a remote copy this process
     /// held is gone — the seat stays in the session past this process's
     /// own stop tick, so the *other* process can take its record with
     /// this seat still present. A settled leg whose record the peer
@@ -503,6 +503,9 @@ struct StopWatch {
     results_updates: u32,
     /// When the current stay on the results screen began.
     results_since: Option<std::time::Instant>,
+    /// The most players the lobby roster has held, for a `results`
+    /// hold to see one leave.
+    roster_peak: usize,
 }
 
 /// Updates a `results` stop holds on the results screen: the closing
@@ -525,6 +528,7 @@ impl StopWatch {
             peers_peak: 0,
             results_updates: 0,
             results_since: None,
+            roster_peak: 0,
         }
     }
 
@@ -618,7 +622,20 @@ impl StopWatch {
             if !on_results {
                 self.results_since = None;
             }
-            if self.results_updates >= RESULTS_HOLD_UPDATES && since.elapsed() >= RESULTS_HOLD_WALL
+            // A holding run stays on the results screen until its peer has
+            // left: a loaded client may still be replaying the verdict
+            // well past the wall-clock floor, and a host that exits first
+            // closes its socket under it (#2193). The departure is read
+            // off the lobby roster: the remote-copy count freezes once
+            // the session leaves its live phases.
+            let roster = world
+                .get_resource::<crate::net::LobbyState>()
+                .map_or(0, |l| l.roster.len());
+            self.roster_peak = self.roster_peak.max(roster);
+            let held = self.stop.hold_peer_left && roster >= self.roster_peak;
+            if self.results_updates >= RESULTS_HOLD_UPDATES
+                && since.elapsed() >= RESULTS_HOLD_WALL
+                && !held
             {
                 return Some(StopReason::Results);
             }
