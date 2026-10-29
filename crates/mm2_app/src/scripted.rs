@@ -93,7 +93,50 @@ pub struct ScriptedBot {
     /// at the objective as far as the map is concerned and never takes
     /// it ([`OFF_LEVEL_FRAMES`]).
     pub off_level_frames: u32,
+    /// Where the wedged-guide replan last fired and how many replans in
+    /// a row started within [`SAME_POSE_DIST`] of it. The planner is
+    /// deterministic, so a replan from the same pose draws the same
+    /// line and the same wedge; [`SAME_POSE_REPLANS`] of them switch
+    /// the guide off for [`UNGUIDED_FRAMES`].
+    pub replan_at: Option<Vec3>,
+    pub same_pose_replans: u32,
+    /// Frames left with the nav guide off — the car aims straight at its
+    /// objective and answers blocks with the ordinary escapes, which
+    /// approach the obstacle from another angle than the failed line.
+    pub unguided_frames: u32,
 }
+
+impl ScriptedBot {
+    /// Record a wedged-guide replan from `pos`. Returns whether the
+    /// replans have repeated from one pose, so the guide should be left
+    /// off for a while instead of planned yet again.
+    pub fn note_replan(&mut self, pos: Vec3) -> bool {
+        if self
+            .replan_at
+            .is_some_and(|at| at.distance(pos) <= SAME_POSE_DIST)
+        {
+            self.same_pose_replans += 1;
+        } else {
+            self.same_pose_replans = 1;
+        }
+        self.replan_at = Some(pos);
+        if self.same_pose_replans >= SAME_POSE_REPLANS {
+            self.same_pose_replans = 0;
+            self.unguided_frames = UNGUIDED_FRAMES;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Distance within which two wedged-guide replans count as the same pose.
+const SAME_POSE_DIST: f32 = 15.0;
+/// Same-pose replans after which the guide is left off.
+const SAME_POSE_REPLANS: u32 = 2;
+/// Frames (60 Hz, ~10 s) the guide stays off after repeated same-pose
+/// replans. Bounded: the guide returns from wherever the car got to.
+const UNGUIDED_FRAMES: u32 = 600;
 
 impl Default for ScriptedBot {
     fn default() -> Self {
@@ -106,6 +149,9 @@ impl Default for ScriptedBot {
             escapes_since_plan: 0,
             plan_wait: 0,
             off_level_frames: 0,
+            replan_at: None,
+            same_pose_replans: 0,
+            unguided_frames: 0,
         }
     }
 }
@@ -1070,13 +1116,17 @@ pub fn scripted_drive(
             commands.entity(entity).remove::<ScriptedRoute>();
             bot_route = None;
             bot.escapes_since_plan = 0;
+            let unguided = bot.note_replan(pos.0);
             info!(
                 tick = session.tick(),
                 position = ?pos.0,
                 gate = ?gate,
+                unguided,
                 "scripted player dropped its wedged nav guide to replan"
             );
         }
+        let guide_off = bot.unguided_frames > 0;
+        bot.unguided_frames = bot.unguided_frames.saturating_sub(1);
         bot.off_level_frames =
             if race.is_none() && cnr_view.is_some() && !ramming && over_objective(pos.0, gate) {
                 bot.off_level_frames + 1
@@ -1099,6 +1149,7 @@ pub fn scripted_drive(
         if race.is_none()
             && cnr_view.is_some()
             && !ramming
+            && !guide_off
             && guide_stale(bot_route.as_deref(), gate)
         {
             let replan = nav_replan(&mut bot.plan_wait, || {
@@ -1439,6 +1490,20 @@ mod cnr_target_tests {
             outcome: None,
             standings: vec![row(ME, me_side), row(OTHER, Side::Cops)],
         }
+    }
+
+    /// Replans from one pose repeat the same line, so the second one
+    /// switches the guide off; a replan from elsewhere starts over.
+    #[test]
+    fn repeated_same_pose_replans_leave_the_guide_off() {
+        let mut bot = ScriptedBot::default();
+        let wedge = Vec3::new(-1242.0, 85.5, 146.0);
+        assert!(!bot.note_replan(wedge));
+        assert!(!bot.note_replan(wedge + Vec3::new(100.0, 0.0, 0.0)));
+        assert!(!bot.note_replan(wedge));
+        assert!(bot.note_replan(wedge + Vec3::X * 3.0));
+        assert_eq!(bot.unguided_frames, UNGUIDED_FRAMES);
+        assert_eq!(bot.same_pose_replans, 0);
     }
 
     /// The thief lets the gold lie until someone takes it, chases the
