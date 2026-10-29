@@ -195,6 +195,14 @@ pub fn start_match(
         &[],
     )
     .map_err(|e| format!("Cops & Robbers cannot start in {city:?}: {e:?}"))?;
+    let opening = host.game.sites();
+    info!(
+        seed,
+        gold = ?opening.gold,
+        hideout = ?opening.hideout,
+        bank = ?opening.bank,
+        "cops and robbers opening sites"
+    );
     let report = spawn_cnr_markers(commands, vfs, &host, meshes, images, materials, owner);
     crate::cnrhud::spawn_cnr_scoreboard(commands, owner);
     // The announcer: every process voices its own calls (the authority
@@ -802,7 +810,7 @@ pub fn sync_cnr_markers(
     // by hundreds of metres on a lossy link (#2182).
     if host.is_some() {
         *frames += 1;
-        if (*frames).is_multiple_of(600) {
+        if *frames == 1 || (*frames).is_multiple_of(600) {
             let seats: Vec<String> = cars
                 .iter()
                 .map(|(player, net, t)| {
