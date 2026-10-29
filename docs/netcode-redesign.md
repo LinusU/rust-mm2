@@ -736,6 +736,17 @@ No WAN, retail-data or rendered level.
   staged per seat) and the `net_contact` fork report echoes it, so a copy
   that sits still while its mark is old is a receive gap and one whose mark is
   current is an apply or presentation gap.
+  Measured at matched ticks (`matched_divergence`: each client's copy of a
+  seat against the seat's own trace at the authority tick that copy last
+  applied), `a_three_car_pileup_against_a_wall_is_measured_on_high_latency_links`
+  and `..._on_unequal_links` passed 10 consecutive repeats each under
+  `MM2_CONTACT_REPEAT=10` on one local machine (plus 3 x 3 earlier), and
+  `net_edge::a_stopped_host_ends_a_parked_app_client` passed alongside. No
+  divergence was found, so the "stale resting car" of CI run 40186613799 is
+  most likely a measurement artefact (a copy compared with the seat's trace
+  at a later tick) rather than a receive or `SnapBuffer` fault. This is
+  local evidence only: the CI loop (about 50 runs) was not run, because
+  `.github/` is protected, so it stays open.
 - **Lossless deltas.** `delta_encode` is a byte-run diff, so a continuation
   field (velocity, accumulator, `input_ack`) is reproduced exactly; there is
   no field list that could omit one. The simulation asserts byte equality of
