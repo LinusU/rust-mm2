@@ -9,19 +9,47 @@
 //! over loopback without retail data and measure what a second group costs.
 //! Evidence level: synthetic integration over loopback.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::lane_tests::{eventually, hello_for, host, start_session};
-use crate::{Client, MAX_SNAP_IMPACTS, Message, PaceStats, Priority, SnapEntry, SnapImpact};
+use crate::{
+    Client, LinkDir, LinkRate, MAX_SNAP_IMPACTS, Message, PaceStats, Priority, SnapEntry,
+    SnapImpact, UdpImpair, UdpImpairProxy,
+};
 
 /// Drive one seat with `groups` groups per tick at `hz` for `secs`, a client
 /// reading throughout, and return the host's pacing stats for the seat.
 fn drive(groups: usize, hz: u32, secs: f64, heavy: bool) -> (PaceStats, u64) {
+    drive_via(groups, hz, secs, heavy, None)
+}
+
+/// [`drive`] with the client dialling through a wall-clock relay applying
+/// `(down, up)` recipes: `down` is host to client, `up` the client's acks
+/// back. `None` dials direct.
+fn drive_via(
+    groups: usize,
+    hz: u32,
+    secs: f64,
+    heavy: bool,
+    link: Option<(UdpImpair, UdpImpair)>,
+) -> (PaceStats, u64) {
     let host = host();
-    let mut client = Client::join_lane(host.addr(), &hello_for("multigroup")).unwrap();
+    let proxy = link.map(|(down, up)| {
+        let target = SocketAddr::new(host.addr().ip(), host.lane_port());
+        let proxy = UdpImpairProxy::loopback_seeded(target, 2163).unwrap();
+        (proxy, down, up)
+    });
+    let mut client = Client::join_lane_routed(
+        host.addr(),
+        &hello_for("multigroup"),
+        Duration::from_secs(5),
+        proxy.as_ref().map(|(p, ..)| p.route()),
+    )
+    .unwrap();
     let id = client.player_id();
     eventually("a lane", || host.lane_established(id));
     let generation = start_session(&host, &mut [&mut client]);
@@ -40,6 +68,13 @@ fn drive(groups: usize, hz: u32, secs: f64, heavy: bool) -> (PaceStats, u64) {
     let end = Instant::now() + Duration::from_secs_f64(secs);
     let mut next = Instant::now();
     let mut tick = 0u64;
+    // The lane is dialled and the session started over a clean relay (a
+    // blackholed ack path would never establish); the recipe bites from
+    // here on.
+    if let Some((proxy, down, up)) = &proxy {
+        proxy.set(LinkDir::Down, *down);
+        proxy.set(LinkDir::Up, *up);
+    }
     while Instant::now() < end {
         tick += 1;
         let ids: Vec<(u8, Message)> = (0..groups)
@@ -147,5 +182,82 @@ fn five_times_the_demand_does_not_collapse_a_lossless_lane() {
         p.ceiling,
         p.decreases
     );
+    assert!(p.rate * 2 >= p.ceiling, "rate collapsed: {p:?}");
+}
+
+fn ack_path(link: crate::Impair) -> (UdpImpair, UdpImpair) {
+    (
+        UdpImpair::default(),
+        UdpImpair {
+            link,
+            ..UdpImpair::default()
+        },
+    )
+}
+
+/// Heavy two-group demand at 150 Hz for `secs` through a relay applying
+/// `recipe` once the session runs; the seat's pacing stats.
+fn heavy_through(secs: f64, recipe: (UdpImpair, UdpImpair)) -> PaceStats {
+    let (p, ticks) = drive_via(2, 150, secs, true, Some(recipe));
+    eprintln!(
+        "{ticks} ticks, rate {} of {}, decreases {}",
+        p.rate, p.ceiling, p.decreases
+    );
+    p
+}
+
+// Why the lane alone does not reproduce the #2085 collapse
+// (net_cnr_bots_mp, 131072 -> 12288), measured here without retail data:
+// baselined group acks are deliberately no loss evidence (`on_group_ack`),
+// so 5x demand, a lossy or jittery ack path and a rate-capped host-to-client
+// link all leave the controller at its ceiling. Only the ack path going
+// silent (`CONGESTED_ACK_AGE`) cuts the rate, which is the first test below.
+
+#[test]
+fn a_silent_ack_path_collapses_the_rate_under_heavy_demand() {
+    let silent = UdpImpair {
+        blackhole: true,
+        ..UdpImpair::default()
+    };
+    let p = heavy_through(5.0, (UdpImpair::default(), silent));
+    assert!(p.rate * 2 < p.ceiling, "rate stayed up: {p:?}");
+    assert!(p.decreases >= 3, "{p:?}");
+}
+
+#[test]
+fn a_lossy_or_jittery_ack_path_does_not_collapse_the_rate_under_heavy_demand() {
+    let ms = Duration::from_millis;
+    for (what, link) in [
+        (
+            "50% ack loss",
+            crate::Impair {
+                loss: 0.5,
+                ..crate::Impair::default()
+            },
+        ),
+        (
+            "ack delay 150 ms, jitter 300 ms",
+            crate::Impair {
+                delay: ms(150),
+                jitter: ms(300),
+                ..crate::Impair::default()
+            },
+        ),
+    ] {
+        let p = heavy_through(3.0, ack_path(link));
+        assert!(p.rate * 2 >= p.ceiling, "{what}: rate collapsed: {p:?}");
+    }
+}
+
+#[test]
+fn a_capped_host_to_client_link_does_not_collapse_the_rate_under_heavy_demand() {
+    // 1 Mbit/s with 100 ms of buffer against ~1 MB/s offered: the link
+    // drops most of the stream. Baselined states recover on their own, so
+    // the controller sees no loss evidence and keeps the ceiling.
+    let down = UdpImpair {
+        rate: Some(LinkRate::kbit(1000, Duration::from_millis(100))),
+        ..UdpImpair::default()
+    };
+    let p = heavy_through(3.0, (down, UdpImpair::default()));
     assert!(p.rate * 2 >= p.ceiling, "rate collapsed: {p:?}");
 }
