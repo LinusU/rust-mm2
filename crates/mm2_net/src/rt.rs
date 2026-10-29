@@ -1360,6 +1360,12 @@ fn is_reliable_tag(tag: LaneTag) -> bool {
 fn generation_admits(h: &Header, running: u64) -> bool {
     match h.tag {
         LaneTag::Probe => true,
+        // An ack names a position in the session-independent channel, not
+        // a session: one for a generation that ended meanwhile (a cancel
+        // lands while the peer's ack is in flight) still retires what it
+        // covers. Refused, the sender repeats the retired message and the
+        // controller reads the repeat as loss.
+        LaneTag::ReliableAck => true,
         t if is_reliable_tag(t) && h.generation == LOBBY_SCOPE => true,
         _ => running != 0 && h.generation == running,
     }
@@ -2226,6 +2232,7 @@ impl ClientLane {
             return Err(Refuse::BadToken);
         }
         if h.tag != LaneTag::Probe
+            && h.tag != LaneTag::ReliableAck
             && !(is_reliable_tag(h.tag) && h.generation == LOBBY_SCOPE)
             && (h.generation == 0 || h.generation < self.started.load(Ordering::Relaxed))
         {
@@ -2717,6 +2724,19 @@ mod tests {
             token: 0xdead_beef_cafe,
             seq,
         }
+    }
+
+    #[test]
+    fn an_ack_is_admitted_whatever_generation_is_running() {
+        let ack = header(LaneTag::ReliableAck, 1);
+        for running in [0, 7, 8] {
+            assert!(generation_admits(&ack, running), "running {running}");
+        }
+        // Data still has to name the running generation.
+        let data = header(LaneTag::Reliable, 1);
+        assert!(generation_admits(&data, 7));
+        assert!(!generation_admits(&data, 0));
+        assert!(!generation_admits(&data, 8));
     }
 
     #[test]

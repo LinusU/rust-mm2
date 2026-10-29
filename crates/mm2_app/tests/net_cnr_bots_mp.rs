@@ -163,6 +163,27 @@ fn play_to_results(city: &str, variant: &str) -> (String, String) {
     (hrec, crec)
 }
 
+/// The host's lane held its rate ceiling all match: a cut means the
+/// controller read something other than congestion as congestion.
+fn assert_lane_held_ceiling(host: &str) {
+    let lane = field(host, "lane");
+    let mut cells = lane.split('/');
+    let (min, ceiling, cuts) = (
+        cells.next().unwrap().parse::<u32>().unwrap(),
+        cells.next().unwrap().parse::<u32>().unwrap(),
+        cells
+            .next()
+            .unwrap()
+            .trim_end_matches('c')
+            .parse::<u64>()
+            .unwrap(),
+    );
+    assert!(
+        min == ceiling && cuts == 0,
+        "host lane left its ceiling: {host}"
+    );
+}
+
 /// What the host and the client must read identically at the results
 /// screen, however the match went.
 fn assert_machines_agree(host: &str, client: &str) {
@@ -182,22 +203,7 @@ fn assert_machines_agree(host: &str, client: &str) {
     // The host's lane held its rate ceiling all match (#2085, #2101): a
     // collapse here means the controller read the sim's demand as
     // congestion.
-    let lane = field(host, "lane");
-    let mut cells = lane.split('/');
-    let (min, ceiling, cuts) = (
-        cells.next().unwrap().parse::<u32>().unwrap(),
-        cells.next().unwrap().parse::<u32>().unwrap(),
-        cells
-            .next()
-            .unwrap()
-            .trim_end_matches('c')
-            .parse::<u64>()
-            .unwrap(),
-    );
-    assert!(
-        min == ceiling && cuts == 0,
-        "host lane left its ceiling: {host}"
-    );
+    assert_lane_held_ceiling(host);
     // The same four seats, bots under the reserved ids, on the same
     // teams, with the same points and the same gold holder and winner.
     for key in ["sides=", "pts=", "gold="] {
@@ -328,6 +334,10 @@ fn a_rematch_fields_the_same_bots_on_both_machines() {
     let hrec = host.until_within("smoke=headless-physics", BOUND);
     eprintln!("host   {hrec}\nclient {crec}");
 
+    // The cancel lands while round 1's reliable acks are in flight; the
+    // host must still take them, or it repeats the retired messages and
+    // its lane controller reads the repeat as loss (#2162).
+    assert_lane_held_ceiling(&hrec);
     assert_eq!(field(&crec, "stop"), "snap-tick", "{crec}");
     assert_eq!(field(&crec, "mp"), "gen2", "round 2 never ran: {crec}");
     for seat in [BOT_A, BOT_B] {
