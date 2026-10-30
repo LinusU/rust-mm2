@@ -1288,6 +1288,51 @@ Reading it:
   differ between repeats, so read the pattern across the runs, not one cell.
 
 
+### The lane controller under 3 % random loss (NETPLAY-10D-8, #2238)
+
+Evidence level: synthetic integration plus **original-content validation**
+(the #2227 run again, `net_island_retail`, same seed and proxy recipe: 3 %
+loss, 2 % reorder, 20 ms each way, no rate cap). The controller now has the
+client's delivery report (#2235), which the #2227 numbers predate.
+
+Which signal cut the rate, from a temporary per-cut log of the trigger flags
+(not committed), 246 cuts in one 120 s run:
+
+| Trigger | Cuts |
+|---|---|
+| reliable retransmit alone | 235 |
+| retransmit and slow queue | 1 |
+| slow queue alone | 7 |
+| delivery report (>= 10 % lost) | 3 |
+
+- **Yes, the controller reads random loss as congestion, through
+  retransmits.** Every reliable retransmit is a cut (`lost` in
+  `PeerController::on_feedback`), held to one per 250 ms. At 3 % loss the
+  reliable channel retransmits constantly, so the rate sits at the 12 288 B/s
+  floor (cut 327, 147 and 159 times in three runs).
+- **Intended once, no longer needed.** #2126 kept retransmits as congestion
+  "because they are the only loss evidence the host has". The delivery
+  report is now a better one: it measures data-path loss against a 10 %
+  threshold and ignores the ack path. A retransmit under 3 % random loss
+  says nothing about the link being full.
+- **Data-path loss alone does not cut.**
+  `three_percent_random_loss_on_snapshots_alone_does_not_cut_the_rate`
+  (heavy two-group demand at 150 Hz, the same recipe both ways, 8 s) holds
+  the 131 072 B/s ceiling with 0 decreases.
+- **With the retransmit trigger switched off (experiment, reverted):** the
+  same run cut 3 times (all delivery-report), ended at 44 957 B/s instead of
+  12 288, and sent 1.15 MB of world group instead of 0.19-0.23 MB.
+  World group sent / as full states was 478 782 / 766 755 (62 %) against
+  225 669 / 366 456 (62 %) and 193 076 / 314 802 (61 %) with the cuts.
+- **Bulk under loss:** the baselined saving for the world group is the same
+  (61-62 %) with or without the cuts, so Bulk holds under loss. What the
+  cuts change is how much world state gets through at all (about a fifth),
+  not how well it compresses.
+- **Not decided here:** whether retransmits should stop being a verdict, or
+  count only above a rate. Filed as a follow-up, since it changes the
+  join-time burst behaviour of #2126.
+
+
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 
 Per-seat `input_ack` in `Snap` says how far the host has *finalized* a

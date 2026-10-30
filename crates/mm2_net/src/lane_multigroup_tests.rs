@@ -333,3 +333,28 @@ fn the_delivery_report_survives_a_lossy_return_path() {
         "rate {mean} B/s far above the link {link}: {p:?}"
     );
 }
+
+/// The #2227 recipe: 3 % random loss, 2 % reorder and 20 ms each way, no
+/// rate cap.
+fn random_loss_3pct() -> UdpImpair {
+    UdpImpair {
+        link: crate::Impair {
+            delay: Duration::from_millis(20),
+            loss: 0.03,
+            reorder: 0.02,
+            ..crate::Impair::default()
+        },
+        ..UdpImpair::default()
+    }
+}
+
+// Random loss on the data path alone is not congestion: the delivery report
+// reads 3 % as under its 10 % verdict and acks are no loss evidence. The cuts
+// seen under this recipe on retail (#2238) come from reliable retransmits,
+// which this snapshot-only drive has none of.
+#[test]
+fn three_percent_random_loss_on_snapshots_alone_does_not_cut_the_rate() {
+    let (p, _) = heavy_through_mean(8.0, (random_loss_3pct(), random_loss_3pct()));
+    assert_eq!(p.decreases, 0, "{p:?}");
+    assert_eq!(p.rate, p.ceiling, "{p:?}");
+}
