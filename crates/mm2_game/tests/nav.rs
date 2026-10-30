@@ -1866,3 +1866,37 @@ fn route_candidates_at_level_enters_only_the_goals_own_level() {
     let r = g.route_candidates_at_level(from, to, &opts, 1.0).unwrap();
     assert_eq!(g.arc(r.steps[0]).road, 0);
 }
+
+#[test]
+fn route_candidates_between_levels_starts_on_the_cars_own_level() {
+    // The stacked fixture. A car 6 m up has only the bridge lane within
+    // 5 m of its height, so it starts there even though a goal on the
+    // ground road is reached only from the ground lane (the roads do not
+    // join); when no route leaves from its own level the plain entries
+    // stand.
+    let cg = [[0.0, 0.0, -20.0], [0.0, 0.0, 20.0]];
+    let cb = [[0.0, 10.0, -20.0], [0.0, 10.0, 20.0]];
+    let mk = |id: u16, c: &[[f32; 3]], room: u16| {
+        road(
+            id,
+            c,
+            vec![room],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            dead_end(),
+            dead_end(),
+        )
+    };
+    let g = NavGraph::build(&bai(vec![mk(0, &cg, 1), mk(1, &cb, 2)], Vec::new())).graph;
+    let opts = RouteOptions::default();
+    let to = [0.0, 0.0, 10.0];
+    let r = g
+        .route_candidates_between_levels([0.0, 6.0, -10.0], to, &opts, 5.0, 5.0)
+        .unwrap();
+    assert_eq!(g.arc(r.steps[0]).road, 0);
+    // A car on the ground road keeps its own lane.
+    let r = g
+        .route_candidates_between_levels([0.0, 0.0, -10.0], to, &opts, 5.0, 5.0)
+        .unwrap();
+    assert_eq!(g.arc(r.steps[0]).road, 0);
+}

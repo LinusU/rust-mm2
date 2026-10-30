@@ -1670,6 +1670,35 @@ impl NavGraph {
         options: &RouteOptions,
         goal_level: f32,
     ) -> Result<Route, RouteError> {
+        self.route_between_levels(from, to, options, None, goal_level)
+    }
+
+    /// [`NavGraph::route_candidates_at_level`] for a driver that stands on
+    /// a road of its own: its entries are the lanes within `start_level`
+    /// metres of its height when any lie within the snap radius, even
+    /// where a lane on another level is nearer in 3D. A car under a
+    /// bridge deck snaps to the deck above it otherwise, and the line it
+    /// is given starts in the air over its roof. When no route leaves
+    /// from those lanes, the plain entries are tried as well.
+    pub fn route_candidates_between_levels(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        options: &RouteOptions,
+        start_level: f32,
+        goal_level: f32,
+    ) -> Result<Route, RouteError> {
+        self.route_between_levels(from, to, options, Some(start_level), goal_level)
+    }
+
+    fn route_between_levels(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        options: &RouteOptions,
+        start_level: Option<f32>,
+        goal_level: f32,
+    ) -> Result<Route, RouteError> {
         let query = LaneQuery::vehicles(options.max_snap);
         let starts = self.lane_hits(from, &query);
         if starts.is_empty() {
@@ -1696,6 +1725,20 @@ impl NavGraph {
         } else {
             plausible(&level)
         };
+        let own: Vec<LaneHit> = start_level
+            .map(|l| {
+                starts
+                    .iter()
+                    .filter(|h| (h.point[1] - from[1]).abs() <= l)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !own.is_empty()
+            && let Ok(route) = self.route_search(&plausible(&own), &goals, to, options)
+        {
+            return Ok(route);
+        }
         self.route_search(&plausible(&starts), &goals, to, options)
     }
 
@@ -2028,8 +2071,10 @@ impl NavGraph {
         Ok(self.sample_line(&route, from, to, step))
     }
 
-    /// [`NavGraph::drive_line`] to a goal that must be met on its own
-    /// level ([`NavGraph::route_candidates_at_level`]).
+    /// [`NavGraph::drive_line`] from a car on its own level to a goal
+    /// that must be met on its own level
+    /// ([`NavGraph::route_candidates_between_levels`]); `goal_level`
+    /// bounds both.
     pub fn drive_line_at_level(
         &self,
         from: Vec3,
@@ -2038,7 +2083,13 @@ impl NavGraph {
         step: f32,
         goal_level: f32,
     ) -> Result<Vec<Vec3>, RouteError> {
-        let route = self.route_candidates_at_level(from.into(), to.into(), options, goal_level)?;
+        let route = self.route_candidates_between_levels(
+            from.into(),
+            to.into(),
+            options,
+            goal_level,
+            goal_level,
+        )?;
         Ok(self.sample_line(&route, from, to, step))
     }
 

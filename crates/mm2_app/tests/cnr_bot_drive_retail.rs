@@ -1144,3 +1144,68 @@ fn a_scripted_driver_leaves_the_sf_hill_road_it_was_wedged_on() {
         "took {ticks} ticks to get 60 m from the wedge pose"
     );
 }
+
+/// The lossy Cops & Robbers wedge on the sf ground road under a bridge
+/// near (-1480, 35, 905) on seed 49 (#2230), run as the scripted carrier.
+/// The car stands on the ground 15 m below the bridge deck, which is the
+/// nearest lane in 3D; the road line to the hideout used to start on that
+/// deck, so the car drove at an aim 16 m over its roof and never moved
+/// for thousands of ticks. Its line now starts on the ground lane under
+/// it and it is away within 40 s.
+#[test]
+fn a_scripted_driver_under_the_sf_bridge_plans_from_its_own_road() {
+    use mm2_app::scripted::scripted_drive;
+    use mm2_game::gold::Contact;
+    use mm2_game::{Mm2Vfs, PlayerVehicle};
+
+    const LEAVE_SECONDS: u32 = 40;
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let (mut app, _) = city_app(&retail, "sf", 49, false, CnrVariant::FreeForAll);
+    let vfs = mount(&retail);
+    app.insert_resource(Mm2Vfs(vfs));
+    app.add_systems(FixedUpdate, scripted_drive.before(cnr_bot_drive));
+    let sites = app.world().resource::<CnrHost>().game.sites();
+    let start = Vec3::new(-1479.8, 35.3, 905.6);
+    let bots = spawn(
+        &mut app,
+        vec![BotSlot {
+            position: start,
+            yaw: -2.957,
+        }],
+    );
+    let (bot, id) = bots[0];
+    app.world_mut()
+        .entity_mut(bot)
+        .remove::<CnrBotDriver>()
+        .insert(PlayerVehicle);
+    for _ in 0..3 {
+        app.update();
+    }
+    let round = app.world().resource::<CnrHost>().game.round();
+    let verdicts = app
+        .world_mut()
+        .resource_mut::<CnrHost>()
+        .game
+        .resolve_pickups(&[Contact {
+            player: id,
+            round,
+            position: sites.gold,
+        }]);
+    assert!(
+        matches!(verdicts[0], mm2_game::gold::PickupVerdict::Granted { .. }),
+        "{verdicts:?}"
+    );
+    let left = (0..HZ * 240).find(|_| {
+        app.update();
+        pos(&app, bot).distance(start) > 60.0
+    });
+    let ticks = left.expect("the car never got 60 m from the wedge pose");
+    assert!(
+        ticks <= HZ * LEAVE_SECONDS,
+        "took {ticks} ticks to get 60 m from the wedge pose"
+    );
+}
