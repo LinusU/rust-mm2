@@ -1432,31 +1432,29 @@ pub fn scripted_drive(
     }
 }
 
+/// A prop's phase, fragment marker and name, as the wedge dump reads it.
+type PropData = (
+    &'static Banger,
+    Option<&'static BangerFragment>,
+    Option<&'static Name>,
+);
+
+/// [`PropData`] plus where the prop is and whether it has a collider.
+type NearbyPropData = (
+    &'static Banger,
+    Option<&'static BangerFragment>,
+    Option<&'static Name>,
+    &'static GlobalTransform,
+    Has<Collider>,
+);
+
 /// What the wedge dump reads beyond the driver's own queries.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct WedgeProbe<'w, 's> {
     snaps: Option<Res<'w, RemoteSnaps>>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
-    props: Query<
-        'w,
-        's,
-        (
-            &'static Banger,
-            Option<&'static BangerFragment>,
-            Option<&'static Name>,
-        ),
-    >,
-    nearby: Query<
-        'w,
-        's,
-        (
-            &'static Banger,
-            Option<&'static BangerFragment>,
-            Option<&'static Name>,
-            &'static GlobalTransform,
-            Has<Collider>,
-        ),
-    >,
+    props: Query<'w, 's, PropData>,
+    nearby: Query<'w, 's, NearbyPropData>,
     dumps: Local<'s, u32>,
 }
 
@@ -1483,14 +1481,8 @@ const PROP_REACH: f32 = 8.0;
 fn dump_wedge(
     spatial: Option<&SpatialQuery>,
     aabbs: &Query<&ColliderAabb>,
-    props: &Query<(&Banger, Option<&BangerFragment>, Option<&Name>)>,
-    nearby: &Query<(
-        &Banger,
-        Option<&BangerFragment>,
-        Option<&Name>,
-        &GlobalTransform,
-        Has<Collider>,
-    )>,
+    props: &Query<PropData>,
+    nearby: &Query<NearbyPropData>,
     colliders: &Query<&ColliderOf>,
     entity: Entity,
     side: &str,

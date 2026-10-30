@@ -2256,3 +2256,102 @@ fn retail_impulse_limit_ladder_is_reachable_by_a_one_tonne_striker() {
         "most of the ladder is reachable"
     );
 }
+
+/// #2240: the lossy Cops & Robbers bot sat at (-1618, 36, 460) on the
+/// host with a settled bench ahead of its nose and a fallen street-light
+/// pole (an Active fragment) under it. This is that geometry on flat
+/// ground: a static bench-sized box just past the nose, a thin Active
+/// pole lying across the ground under the chassis, and the scripted
+/// driver's bounded escape aiming at a point beyond the bench. The
+/// pole is laid on its side (its 7.7 m axis along X) because stood on
+/// end it would pierce the chassis rather than hold it.
+fn held_car_escapes(with_pole: bool) -> (bool, u32, f32) {
+    use mm2_app::scripted::{ScriptedBot, scripted_input};
+    use mm2_game::relative_bearing;
+    use mm2_vehicle::{VehicleInput, VehicleState};
+
+    let mut app = test_app_full(SessionAuthority::Local, 32, true);
+    let config = VehicleConfig::default();
+    let nose = config.chassis_size[2] * 0.5;
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&config),
+            ScriptedBot::default(),
+            Position(Vec3::new(0.0, 1.0, 0.0)),
+            Transform::from_xyz(0.0, 1.0, 0.0),
+        ))
+        .id();
+    // The bench: 0.87 x 1.17 x 1.47 m, a hand's width past the nose.
+    let bench = Vec3::new(0.0, 0.585, -(nose + 0.1 + 0.735));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(0.87, 1.17, 1.47),
+        Position(bench),
+        Transform::from_translation(bench),
+    ));
+    if with_pole {
+        let pole = Vec3::new(0.0, 0.08, 0.0);
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let (entity, _) = spawn_banger(&mut app, pole, banger_def("pole", f32::MAX));
+        let mut world = app.world_mut().entity_mut(entity);
+        world.insert((
+            RigidBody::Dynamic,
+            Collider::cuboid(0.14, 7.7, 0.16),
+            Position(pole),
+            Rotation(rotation),
+            Transform::from_translation(pole).with_rotation(rotation),
+        ));
+        world.get_mut::<Banger>().unwrap().phase = BangerPhase::Active;
+    }
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+    }
+    let target = Vec3::new(0.0, 1.0, -60.0);
+    let start = app.world().get::<Position>(car).unwrap().0;
+    let mut far = 0.0f32;
+    let mut escaped = false;
+    for _ in 0..FRAMES_PER_SECOND * 40 {
+        let (pos, rot) = {
+            let w = app.world();
+            (
+                w.get::<Position>(car).unwrap().0,
+                w.get::<Rotation>(car).unwrap().0,
+            )
+        };
+        let (speed, grounded) = {
+            let s = app.world().get::<VehicleState>(car).unwrap();
+            (s.forward_speed, s.grounded)
+        };
+        let yaw = rot.to_euler(EulerRot::YXZ).0;
+        let bearing = relative_bearing(yaw, pos, target);
+        let input: VehicleInput = {
+            let mut entity = app.world_mut().entity_mut(car);
+            let mut bot = entity.get_mut::<ScriptedBot>().unwrap();
+            scripted_input(&mut bot, bearing, speed, grounded)
+        };
+        *app.world_mut().get_mut::<VehicleInput>(car).unwrap() = input;
+        app.update();
+        far = far.max(app.world().get::<Position>(car).unwrap().0.distance(start));
+        if far > 15.0 {
+            escaped = true;
+            break;
+        }
+    }
+    let escapes = app.world().get::<ScriptedBot>(car).unwrap().escapes;
+    (escaped, escapes, far)
+}
+
+#[test]
+fn the_bounded_escape_frees_a_car_nosed_against_a_settled_bench() {
+    let (escaped, escapes, far) = held_car_escapes(false);
+    eprintln!("bench only: escaped={escaped} escapes={escapes} far={far:.1}");
+    assert!(escaped, "{escapes} escapes, furthest {far:.1} m");
+}
+
+#[test]
+fn the_bounded_escape_frees_a_car_nosed_against_a_bench_over_a_fallen_pole() {
+    let (escaped, escapes, far) = held_car_escapes(true);
+    eprintln!("bench + pole: escaped={escaped} escapes={escapes} far={far:.1}");
+    assert!(escaped, "{escapes} escapes, furthest {far:.1} m");
+}
