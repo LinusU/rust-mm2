@@ -26,6 +26,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::gold::{GoldState, GoldView};
+use mm2_game::{Banger, BangerFragment};
 use mm2_game::{
     CheckpointRule, Mm2Vfs, NavGraph, ObjectId, ObjectIdentity, OpponentRoster, OpponentRoute,
     OpponentRoutePoint, ParticipantState, Player, PlayerId, PlayerVehicle, RaceDefinition,
@@ -1411,6 +1412,7 @@ pub fn scripted_drive(
                 dump_wedge(
                     spatial.as_ref(),
                     &probe.aabbs,
+                    &probe.props,
                     &colliders,
                     entity,
                     host,
@@ -1434,6 +1436,15 @@ pub fn scripted_drive(
 pub struct WedgeProbe<'w, 's> {
     snaps: Option<Res<'w, RemoteSnaps>>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
+    props: Query<
+        'w,
+        's,
+        (
+            &'static Banger,
+            Option<&'static BangerFragment>,
+            Option<&'static Name>,
+        ),
+    >,
     dumps: Local<'s, u32>,
 }
 
@@ -1456,6 +1467,7 @@ const WEDGE_REACH: f32 = 2.0;
 fn dump_wedge(
     spatial: Option<&SpatialQuery>,
     aabbs: &Query<&ColliderAabb>,
+    props: &Query<(&Banger, Option<&BangerFragment>, Option<&Name>)>,
     colliders: &Query<&ColliderOf>,
     entity: Entity,
     side: &str,
@@ -1482,7 +1494,18 @@ fn dump_wedge(
                 let (min, max) = aabbs
                     .get(hit)
                     .map_or((Vec3::NAN, Vec3::NAN), |a| (a.min, a.max));
-                format!("{hit:?} body={body:?} aabb={min:?}..{max:?}")
+                let prop = props.get(body).map_or_else(
+                    |_| String::new(),
+                    |(banger, fragment, name)| {
+                        format!(
+                            " prop={:?} phase={:?} fragment={}",
+                            name.map(Name::as_str),
+                            banger.phase,
+                            fragment.is_some()
+                        )
+                    },
+                );
+                format!("{hit:?} body={body:?} aabb={min:?}..{max:?}{prop}")
             })
             .collect()
         })
