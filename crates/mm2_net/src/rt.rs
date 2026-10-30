@@ -808,15 +808,17 @@ pub(crate) struct PaceState {
     group_frames: VecDeque<GroupFrame>,
     /// Group states acknowledged, ever.
     group_acked: [u64; MAX_GROUPS],
-    /// Group states a newer acknowledgement of the same group passed over,
-    /// or that timed out.
+    /// Group states that went `GROUP_ACK_TIMEOUT` unacknowledged after
+    /// some ack proved the return path.
     group_passed: [u64; MAX_GROUPS],
-    /// Group states that went `GROUP_ACK_TIMEOUT` unacknowledged with no
-    /// newer state of their group acknowledged either.
+    /// Of those, the states with no later state of their group
+    /// acknowledged either.
     group_starved: u64,
     /// When any group's acknowledgement last arrived: a state counts as
     /// lost only if the return path demonstrably worked after it was sent.
     last_group_ack: Option<Instant>,
+    /// Per group, the newest tick acknowledged.
+    group_last_acked: [Option<u64>; MAX_GROUPS],
 }
 
 /// Credit bulk leaves in the bucket for movement: world catch-up never
@@ -830,6 +832,10 @@ const WORLD_SHARE_DIV: u32 = 4;
 fn is_world_tag(tag: LaneTag) -> bool {
     WorldKind::from_tag(tag).is_some()
 }
+
+/// Unacknowledged group states remembered per group: more than a whole
+/// timeout of a 150 Hz group.
+const GROUP_LOG_CAP: usize = 256;
 
 /// A group state sent this long ago and never acknowledged counts as lost.
 const GROUP_ACK_TIMEOUT: Duration = Duration::from_secs(1);
@@ -848,6 +854,21 @@ struct GroupFrame {
 }
 
 impl PaceState {
+    /// The state of `group` at `tick`, sent at `at`, went unacknowledged.
+    /// It counts as lost only if some ack arrived after it was sent: with
+    /// every ack silent the return path is the suspect, and the `silent`
+    /// verdict covers it. It is *starved* if no state of its group sent
+    /// later was acknowledged either.
+    fn lose_group_state(&mut self, group: usize, tick: u64, at: Instant) {
+        if !self.last_group_ack.is_some_and(|a| a > at) {
+            return;
+        }
+        self.group_passed[group] += 1;
+        if self.group_last_acked[group].is_none_or(|n| n < tick) {
+            self.group_starved += 1;
+        }
+    }
+
     /// A datagram of `item` left: once every fragment of a named group
     /// frame has, that group's state is in flight at its tick. A frame the
     /// sender shed in part (bulk fragments expire one by one) never
@@ -875,27 +896,22 @@ impl PaceState {
             return;
         };
         let g = usize::from(group);
-        let (Some(log), Some(passed), starved, last_ack) = (
-            self.group_ticks.get_mut(g),
-            self.group_passed.get_mut(g),
-            &mut self.group_starved,
-            self.last_group_ack,
-        ) else {
+        let Some(log) = self.group_ticks.get_mut(g) else {
             return;
         };
         if log.back().is_some_and(|&(t, _)| t >= tick) {
             // A restarted clock.
             log.clear();
         }
-        if log.len() >= TICK_LOG_CAP {
-            // Pushed out unacknowledged by the newer states: lost.
-            if let Some((_, at)) = log.pop_front()
-                && last_ack.is_some_and(|a| a > at)
-            {
-                *passed += 1;
-                *starved += 1;
+        if log.len() >= GROUP_LOG_CAP {
+            // Pushed out unacknowledged by the newer states.
+            if let Some((t, at)) = log.pop_front() {
+                self.lose_group_state(g, t, at);
             }
         }
+        let Some(log) = self.group_ticks.get_mut(g) else {
+            return;
+        };
         log.push_back((tick, now));
     }
 }
@@ -940,6 +956,7 @@ impl SeatOut {
                 group_passed: [0; MAX_GROUPS],
                 group_starved: 0,
                 last_group_ack: None,
+                group_last_acked: [None; MAX_GROUPS],
             }),
         }
     }
@@ -1198,28 +1215,27 @@ impl SeatOut {
     /// sample per tick (the first group acked; the tick leaves the log, so
     /// its other group gives none). Older ticks are dropped, not counted
     /// as passed over: a tick carries only the groups that changed, so a
-    /// tick without an ack is no evidence of loss.
+    /// tick without an ack is no evidence of loss. The group's own state
+    /// of `tick` is marked acknowledged; an older one still waiting is
+    /// judged only by [`GROUP_ACK_TIMEOUT`], since a jittery return path
+    /// reorders acknowledgements.
     pub(crate) fn on_group_ack(&self, group: u8, tick: u64, now: Instant) {
         self.take_ack(tick, now, false);
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(log) = pace.group_ticks.get_mut(usize::from(group)) else {
+        let g = usize::from(group);
+        let Some(log) = pace.group_ticks.get_mut(g) else {
             return;
         };
-        let (mut acked, mut passed) = (0, 0);
-        while let Some(&(t, _)) = log.front() {
-            if t > tick {
-                break;
-            }
-            log.pop_front();
-            if t == tick {
-                acked += 1;
-            } else {
-                passed += 1;
-            }
+        let found = log.iter().position(|&(t, _)| t == tick);
+        if let Some(i) = found {
+            log.remove(i);
         }
         pace.last_group_ack = Some(now);
-        pace.group_acked[usize::from(group)] += acked;
-        pace.group_passed[usize::from(group)] += passed;
+        if found.is_some() {
+            pace.group_acked[g] += 1;
+            let newest = &mut pace.group_last_acked[g];
+            *newest = Some(newest.map_or(tick, |n| n.max(tick)));
+        }
     }
 
     /// Name the logical `group` whose state the tick's frame `frame`
@@ -1280,19 +1296,13 @@ impl SeatOut {
         // no newer ack of its group ever comes: a group the link starves
         // entirely is never passed over, only silent.
         let pace = &mut *pace;
-        let last_ack = pace.last_group_ack;
-        for (g, log) in pace.group_ticks.iter_mut().enumerate() {
-            while let Some(&(_, at)) = log.front() {
+        for g in 0..pace.group_ticks.len() {
+            while let Some(&(t, at)) = pace.group_ticks[g].front() {
                 if now.saturating_duration_since(at) < GROUP_ACK_TIMEOUT {
                     break;
                 }
-                log.pop_front();
-                // With every ack silent the return path is the suspect,
-                // and the `silent` verdict already covers it.
-                if last_ack.is_some_and(|a| a > at) {
-                    pace.group_passed[g] += 1;
-                    pace.group_starved += 1;
-                }
+                pace.group_ticks[g].pop_front();
+                pace.lose_group_state(g, t, at);
             }
         }
         let fb = Feedback {

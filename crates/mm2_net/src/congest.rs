@@ -104,18 +104,19 @@ const RECOVERY_DEN: u64 = 4;
 const USED_NUM: u64 = 1;
 const USED_DEN: u64 = 2;
 /// Baselined group states are judged in windows of at least this many
-/// resolved states (acknowledged or passed over).
+/// resolved states (acknowledged, or unacknowledged for a whole timeout).
 const GROUP_WINDOW: u64 = 30;
 /// A window in which at least this share (3/5) of the resolved group
-/// states were passed over is loss. A single passed-over state is no
-/// evidence (a lost ack looks the same, and the next state repairs it);
-/// a share this high is a link that cannot carry the stream, which the
-/// whole-tick `skipped` count cannot see because a tick carries only the
-/// groups that changed.
+/// states went unacknowledged is loss. A single one is no evidence (a
+/// lost ack looks the same, and the next state repairs it); a share this
+/// high is a link that cannot carry the stream, which the whole-tick
+/// `skipped` count cannot see because a tick carries only the groups that
+/// changed.
 const GROUP_LOSS_NUM: u64 = 3;
 /// This many starved group states since the last verdict is loss however
-/// few states the group resolved: the ack path is working (another group,
-/// or the same group's older states, came back) and this one's did not.
+/// few states the group resolved: the ack path is working (another
+/// group's, or this group's earlier states, came back) and this group's
+/// later ones did not.
 const GROUP_STARVED_MIN: u64 = 3;
 /// ...within this long: isolated losses of a rarely sent group are not a
 /// pattern.
@@ -212,13 +213,11 @@ pub struct Feedback {
     pub skipped: u64,
     /// Per logical group, baselined states ever acknowledged.
     pub group_acked: [u64; MAX_GROUPS],
-    /// Per logical group, baselined states ever lost to the controller: a
-    /// newer state of the group was acknowledged first, or none came
-    /// within the ack timeout.
+    /// Per logical group, baselined states ever left unacknowledged for
+    /// the ack timeout while other acks showed the return path working.
     pub group_passed: [u64; MAX_GROUPS],
-    /// Of those, the states no acknowledgement of their group, newer or
-    /// not, followed for a whole ack timeout: a group the link starves
-    /// entirely is never passed over, only silent.
+    /// Of those, the states with no later state of their group
+    /// acknowledged either: a group the link starves entirely.
     pub group_starved: u64,
 }
 
