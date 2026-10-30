@@ -979,9 +979,24 @@ first motion 272 ticks late):
 The verdict is still **off** (`RTT_VERDICT`). With the jitter-scaled slack
 the high-latency cases passed 3 of 3 locally with it forced on, on an
 unloaded machine; the earlier CI failures were on loaded runners, where a
-stall lifts every sample together. The 5-runs-on / 5-runs-off CI comparison
-on one commit, and three green runs in a row, are still owed before it is
-enabled by default.
+stall lifts every sample together.
+
+The CI A/B (#2229) ran on one commit (`fd1cdb28`, verdict off) against the
+same commit with only `RTT_VERDICT = true`, on five throwaway branches each
+so the per-ref concurrency group did not cancel runs. Verdict off: 5 of 5
+green (runs 41009274092, 41009276947, 41009280009, 41009283882,
+41009291486). Verdict on: 0 of 5 green (41009274089, 41009277057,
+41009280338, 41009284215, 41009291530). Four of the five failed in
+`mm2_net` unit tests that are deterministic under the flag, not flaky:
+`congest::tests::the_round_trip_verdict_is_off_by_default` asserts the
+default itself, and `congest_sim_tests::congest_sim_a_cut_uplink_is_divided_not_queued`
+(`snapshot_divisor > 1`) fails because the standing-queue cut changes the
+simulated outcome. The fifth (41009277057) passed those but failed
+`net_contact::a_sustained_push_is_measured_on_high_latency_links`
+(net_contact.rs:560, no parked seat displaced), the starvation the verdict
+was suspected of. The verdict stays **off**. Enabling it needs those two
+tests re-derived for the verdict and the high-latency net_contact case
+fixed first; then repeat the A/B.
 
 ### Not done / open
 
