@@ -281,9 +281,9 @@ fn capped(kbit: u32, secs: f64) -> (PaceStats, u32) {
 // 8 s run (the link carries `kbit * 125` B/s):
 //   1000 kbit  rate stays at the 131072 B/s ceiling, no decrease: the
 //              ceiling is about the link speed, so there is nothing to cut
-//    500 kbit  mean ~70000 B/s (link 62500), 9 decreases
-//    250 kbit  mean ~42000 B/s (link 31250), 9 decreases
-//    100 kbit  mean ~12000 B/s (link 12500), 19 decreases
+//    500 kbit  mean ~65000 B/s (link 62500), 10 decreases
+//    250 kbit  mean ~43000 B/s (link 31250), 11 decreases
+//    100 kbit  mean ~12300 B/s (link 12500), 19 decreases
 // Without the report the rate stayed at the ceiling at every one of them.
 
 #[test]

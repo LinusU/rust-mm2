@@ -1088,9 +1088,10 @@ groups that changed, so a missing ack is as likely a lost or late *ack*
 for that reason). So the client reports what it received.
 
 - **Wire**: `LaneTag::Report` (9), client to host, payload
-  `top u64 | count u64` (little endian, exactly 16 bytes): the newest host
-  datagram sequence the client accepted and how many host datagrams it has
-  accepted. Sent every 100 ms while `top` advances, through the movement
+  `top u64 | missed u64` (little endian, exactly 16 bytes): the newest host
+  datagram sequence the client accepted and how many host sequences have
+  slid out of its replay window (`SeqWindow`, 64 wide) without ever being
+  seen. Sent every 100 ms while `top` advances, through the movement
   queue, generation 0; the host admits it under any generation. It is
   **cumulative**, so a dropped report is covered by the next (tested with a
   50 % lossy return path, `the_delivery_report_survives_a_lossy_return_path`).
@@ -1099,18 +1100,24 @@ for that reason). So the client reports what it received.
   that receives one counts it unexpected.
 - **Measure**: the host numbers its datagrams to a seat contiguously at
   send time (shed or expired datagrams never get a number), so between two
-  reports `Δtop - Δcount` is the number sent and never accepted. A report
-  that goes backwards in `top` is ignored (reordered); one whose count goes
-  backwards restarts the baseline (`SeatOut::on_report`).
+  reports `Δtop` were sent and `Δmissed` of them never arrived. A datagram
+  is a miss only once the window has moved 64 past it, so delay jitter and
+  reordering are not loss: a first version that compared `Δtop` with an
+  accepted-count read the jitter of `net_contact`'s high-latency links as
+  10 %+ loss and cut the rate (`a_sustained_push_is_measured_on_high_latency_links`
+  diverged by 1.1 m). A report that goes backwards in `top` is ignored
+  (reordered); one whose `missed` goes backwards restarts the baseline
+  (`SeatOut::on_report`).
 - **Verdict**: `PeerController::take_report` sums the deltas over the last
   second; at least 40 datagrams and at least 10 % lost is congestion (a
   decrease, ignored at the floor). Under 10 % is left to the repair
   mechanisms, since a drop-tail bottleneck loses far more once the rate is
   above the link. It is independent of the ack path, which is why the
   50 % ack loss and 150 ms delay / 300 ms jitter cases keep the ceiling.
-- **Known blind spot**: datagrams the client rejects for a stale generation
-  never reach the count and read as loss; that is brief around a generation
-  change.
+- **Known blind spots**: loss is seen up to 64 datagrams late; datagrams
+  the client rejects for a stale generation or a bad header are never
+  accepted into the window and read as loss, which is brief around a
+  generation change.
 
 Measured (`lane_multigroup_tests`, heavy two-group Snaps at 150 Hz, relay
 link capped with a 100 ms buffer, 8 s, mean rate over the second half;
@@ -1119,9 +1126,9 @@ evidence level: synthetic integration over loopback):
 | Link | Mean rate | Decreases |
 |---|---|---|
 | 1000 kbit (125 000 B/s) | stays at the 131 072 B/s ceiling | 0 (the ceiling is about the link) |
-| 500 kbit (62 500 B/s) | about 70 000 B/s | 9 |
-| 250 kbit (31 250 B/s) | about 42 000 B/s | 9 |
-| 100 kbit (12 500 B/s) | about 12 000 B/s | 19 |
+| 500 kbit (62 500 B/s) | about 65 000 B/s | 10 |
+| 250 kbit (31 250 B/s) | about 43 000 B/s | 11 |
+| 100 kbit (12 500 B/s) | about 12 300 B/s | 19 |
 
 At a 20 % threshold the same runs settled 1.5-2.5x above the link speed, so
 10 % was chosen. At 1 Mbit/s the host ceiling is the link speed, so the

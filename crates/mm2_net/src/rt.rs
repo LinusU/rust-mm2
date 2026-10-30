@@ -281,11 +281,11 @@ impl LaneTag {
     }
 }
 
-/// Serialise a delivery report: `top u64 | count u64`, little endian.
-pub(crate) fn encode_report(top: u64, count: u64) -> Vec<u8> {
+/// Serialise a delivery report: `top u64 | missed u64`, little endian.
+pub(crate) fn encode_report(top: u64, missed: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
     out.extend_from_slice(&top.to_le_bytes());
-    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&missed.to_le_bytes());
     out
 }
 
@@ -295,8 +295,8 @@ pub(crate) fn decode_report(p: &[u8]) -> Option<(u64, u64)> {
         return None;
     }
     let top = u64::from_le_bytes(p[..8].try_into().ok()?);
-    let count = u64::from_le_bytes(p[8..].try_into().ok()?);
-    Some((top, count))
+    let missed = u64::from_le_bytes(p[8..].try_into().ok()?);
+    Some((top, missed))
 }
 
 /// How often the client reports what it has received.
@@ -366,9 +366,41 @@ pub fn decode_datagram(buf: &[u8]) -> Option<(Header, &[u8])> {
 pub struct SeqWindow {
     top: u64,
     seen: u64,
+    /// The first sequence ever accepted: earlier ones were never owed.
+    first: u64,
+    /// Sequences that slid out of the window never having been seen: they
+    /// can no longer be accepted, so they are lost to this receiver.
+    missed: u64,
 }
 
 impl SeqWindow {
+    /// The newest sequence accepted (0: none).
+    pub fn top(&self) -> u64 {
+        self.top
+    }
+
+    /// Sequences that fell out of the window unseen (see [`Self::accept`]).
+    pub fn missed(&self) -> u64 {
+        self.missed
+    }
+
+    /// How many sequences the window would drop unseen if `top` advanced
+    /// by `shift`: the unset bits among the positions that leave it, plus
+    /// the sequences skipped over entirely.
+    fn leaving_unseen(&self, shift: u64) -> u64 {
+        let valid = (self.top - self.first + 1).min(SEQ_WINDOW);
+        let skipped = shift.saturating_sub(SEQ_WINDOW);
+        let from = SEQ_WINDOW.saturating_sub(shift);
+        // Positions `from..valid` (0 is the newest) leave the window.
+        let leaving = valid.saturating_sub(from);
+        let mask = if leaving == 0 {
+            0
+        } else {
+            (u64::MAX >> (SEQ_WINDOW - leaving)) << (valid - leaving)
+        };
+        skipped + u64::from((mask & !self.seen).count_ones())
+    }
+
     /// Record `seq`; `false` when it is a duplicate or too old.
     pub fn accept(&mut self, seq: u64) -> bool {
         if seq == 0 {
@@ -376,6 +408,11 @@ impl SeqWindow {
         }
         if seq > self.top {
             let shift = seq - self.top;
+            if self.first == 0 {
+                self.first = seq;
+            } else {
+                self.missed += self.leaving_unseen(shift);
+            }
             self.seen = if shift >= 64 { 0 } else { self.seen << shift };
             self.seen |= 1;
             self.top = seq;
@@ -1175,26 +1212,27 @@ impl SeatOut {
     }
 
     /// The peer's cumulative delivery report: the newest of our datagram
-    /// sequences it saw (`top`) and how many it accepted (`count`). The
-    /// sequences are contiguous per seat, so between two reports
-    /// `Δtop - Δcount` datagrams were sent and never arrived, whatever
-    /// the ack path did. A report that goes backwards (a restarted peer)
-    /// only restarts the baseline.
-    pub(crate) fn on_report(&self, top: u64, count: u64) {
+    /// sequences it saw (`top`) and how many sequences slid out of its
+    /// replay window unseen (`missed`; see [`SeqWindow`]). Sequences are
+    /// contiguous per seat, so between two reports `Δtop` were sent and
+    /// `Δmissed` of the ones it can no longer accept never arrived. A late
+    /// datagram is not a miss until the window has passed it, so jitter
+    /// and reordering are not read as loss. A report older than the last,
+    /// or one whose `missed` went backwards (a restarted peer), only moves
+    /// the baseline.
+    pub(crate) fn on_report(&self, top: u64, missed: u64) {
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((t0, c0)) = pace.report
-            && top > t0
-            && count >= c0
-        {
-            let sent = top - t0;
-            let got = (count - c0).min(sent);
-            pace.report_sent += sent;
-            pace.report_lost += sent - got;
+        if let Some((t0, m0)) = pace.report {
+            if top < t0 {
+                return;
+            }
+            if top > t0 && missed >= m0 {
+                let sent = top - t0;
+                pace.report_sent += sent;
+                pace.report_lost += (missed - m0).min(sent);
+            }
         }
-        // A reordered older report must not move the baseline back.
-        if pace.report.is_none_or(|(t0, _)| top >= t0) {
-            pace.report = Some((top, count));
-        }
+        pace.report = Some((top, missed));
     }
 
     /// The controller's input from the send loop: the reliable channel's
@@ -1551,8 +1589,8 @@ fn ingest(
             None => Verdict::Dropped(Refuse::Malformed),
         },
         LaneTag::Report => match decode_report(payload) {
-            Some((top, count)) => {
-                seat.out.on_report(top, count);
+            Some((top, missed)) => {
+                seat.out.on_report(top, missed);
                 Verdict::Accepted
             }
             None => Verdict::Dropped(Refuse::Malformed),
@@ -2164,10 +2202,11 @@ pub(crate) struct ClientLane {
     wake: Arc<Wake>,
     counters: Counters,
     stop: AtomicBool,
-    /// Newest host datagram sequence accepted, and how many were accepted:
-    /// the cumulative delivery report.
+    /// Newest host datagram sequence accepted, and how many sequences
+    /// slid out of the replay window unseen: the cumulative delivery
+    /// report.
     rx_top: AtomicU64,
-    rx_count: AtomicU64,
+    rx_missed: AtomicU64,
     /// Newest `Start` generation the client consumed (0: none) — a
     /// datagram naming an older one is stale.
     started: AtomicU64,
@@ -2187,7 +2226,8 @@ pub(crate) struct ClientLane {
     /// stood still ([`LOCAL_STALL`]): not evidence about the path.
     stalled_ms: AtomicU64,
     /// Test seam: probe only after a quiet `probe_every_ms` (the pre-10D
-    /// keepalive), so a test that fixes datagram counts is not perturbed.
+    /// keepalive) and send no delivery reports, so a test that fixes
+    /// datagram counts is not perturbed.
     idle_probe_only: AtomicBool,
     /// One assembler per [`WorldKind`] (indexed by it): each kind has its
     /// own tick domain.
@@ -2217,7 +2257,7 @@ impl ClientLane {
             token,
             out: SeatOut::new(wake.clone(), None, Instant::now()),
             rx_top: AtomicU64::new(0),
-            rx_count: AtomicU64::new(0),
+            rx_missed: AtomicU64::new(0),
             wake,
             counters: Counters::default(),
             stop: AtomicBool::new(false),
@@ -2326,8 +2366,8 @@ impl ClientLane {
         if !window.accept(h.seq) {
             return Err(Refuse::Replayed);
         }
-        self.rx_top.fetch_max(h.seq, Ordering::Relaxed);
-        self.rx_count.fetch_add(1, Ordering::Relaxed);
+        self.rx_top.store(window.top(), Ordering::Relaxed);
+        self.rx_missed.store(window.missed(), Ordering::Relaxed);
         Ok((h, payload))
     }
 
@@ -2653,12 +2693,14 @@ impl ClientLane {
             }
             // The delivery report is cumulative, so a lost one costs only
             // time; it is sent only when something new arrived.
-            if last_report.elapsed() >= REPORT_INTERVAL {
+            if last_report.elapsed() >= REPORT_INTERVAL
+                && !self.idle_probe_only.load(Ordering::Relaxed)
+            {
                 let top = self.rx_top.load(Ordering::Relaxed);
                 if top != reported_top {
-                    let count = self.rx_count.load(Ordering::Relaxed);
+                    let missed = self.rx_missed.load(Ordering::Relaxed);
                     self.out
-                        .push_reliable(LaneTag::Report, 0, encode_report(top, count));
+                        .push_reliable(LaneTag::Report, 0, encode_report(top, missed));
                     reported_top = top;
                 }
                 last_report = Instant::now();
@@ -3005,22 +3047,52 @@ mod tests {
             (p.report_sent, p.report_lost)
         };
         // The first report is only a baseline.
-        out.on_report(100, 90);
+        out.on_report(100, 3);
         assert_eq!(lost(&out), (0, 0));
-        // 50 sent since, 40 arrived.
-        out.on_report(150, 130);
+        out.on_report(150, 13);
         assert_eq!(lost(&out), (50, 10));
         // A reordered older report moves nothing; a repeat adds nothing.
-        out.on_report(120, 110);
-        out.on_report(150, 130);
+        out.on_report(120, 5);
+        out.on_report(150, 13);
         assert_eq!(lost(&out), (50, 10));
         // A report lost in between is covered by the next cumulative one.
-        out.on_report(250, 220);
+        out.on_report(250, 43);
         assert_eq!(lost(&out), (150, 40));
         // A peer that restarted its count only restarts the baseline.
-        out.on_report(260, 5);
+        out.on_report(260, 0);
         assert_eq!(lost(&out), (150, 40));
-        out.on_report(270, 15);
-        assert_eq!(lost(&out), (160, 40));
+        out.on_report(270, 2);
+        assert_eq!(lost(&out), (160, 42));
+    }
+
+    #[test]
+    fn a_window_counts_only_the_sequences_that_slid_out_unseen() {
+        let mut w = SeqWindow::default();
+        // Sequences before the first are never owed.
+        assert!(w.accept(5));
+        assert_eq!((w.top(), w.missed()), (5, 0));
+        // 6 and 7 are late, not missed: still inside the window.
+        assert!(w.accept(8));
+        assert_eq!(w.missed(), 0);
+        assert!(w.accept(7));
+        // 6 slides out unseen once the window's top is 64 past it.
+        assert!(w.accept(6 + SEQ_WINDOW - 1));
+        assert_eq!(w.missed(), 0);
+        assert!(w.accept(6 + SEQ_WINDOW));
+        assert_eq!(w.missed(), 1);
+        assert!(!w.accept(6), "now out of the window");
+    }
+
+    #[test]
+    fn a_jump_past_the_whole_window_misses_everything_skipped() {
+        let mut w = SeqWindow::default();
+        for seq in 1..=10 {
+            assert!(w.accept(seq));
+        }
+        assert_eq!(w.missed(), 0);
+        // 11..=109 skipped; the window then holds 47..=110, so 11..=46 slid
+        // out unseen.
+        assert!(w.accept(110));
+        assert_eq!(w.missed(), 36);
     }
 }
