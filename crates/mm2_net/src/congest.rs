@@ -96,6 +96,17 @@ const RTT_BASELINE_WINDOW: Duration = Duration::from_secs(10);
 pub const INCREASE_STEP: u32 = 4 * 1024;
 /// ...and by a quarter of itself per interval while it is still below the
 /// last rate that was known to work (recovery after a capacity dip).
+/// Delivery-report loss is judged over this much recent time...
+const REPORT_WINDOW: Duration = Duration::from_secs(1);
+
+/// ...needs at least this many datagrams reported sent in it...
+const REPORT_MIN_SENT: u64 = 40;
+
+/// ...and counts as congestion at this share lost (percent). Random loss
+/// below it is left to the repair mechanisms; a drop-tail bottleneck
+/// loses far more.
+const REPORT_LOSS_PCT: u64 = 10;
+
 const RECOVERY_NUM: u64 = 5;
 const RECOVERY_DEN: u64 = 4;
 /// The controller only raises a rate it uses: the bytes sent over a clean
@@ -191,6 +202,11 @@ pub struct Feedback {
     /// Snapshots ever passed over: a newer snapshot was acknowledged
     /// while an older one never was (loss, or a stale one dropped).
     pub skipped: u64,
+    /// Datagrams the peer's delivery reports say were sent to it, ever.
+    pub report_sent: u64,
+    /// Of those, the ones that never arrived: loss on the data path,
+    /// independent of the acknowledgement path.
+    pub report_lost: u64,
 }
 
 /// A peer's send-rate controller: AIMD on congestion evidence.
@@ -219,6 +235,8 @@ pub struct PeerController {
     increase_every: Duration,
     /// Whether `take_rtt`'s standing-queue verdict counts as congestion.
     rtt_verdict: bool,
+    /// Recent delivery-report deltas: (when, sent, lost).
+    reports: VecDeque<(Instant, u64, u64)>,
 }
 
 impl PeerController {
@@ -242,6 +260,7 @@ impl PeerController {
             recent_rtts: VecDeque::new(),
             increase_every: INCREASE_INTERVAL,
             rtt_verdict: RTT_VERDICT,
+            reports: VecDeque::new(),
         }
     }
 
@@ -312,6 +331,28 @@ impl PeerController {
             && lowest.is_some_and(|l| l > m + RTT_SLACK + self.rtt_jitter * RTT_JITTER_FACTOR)
     }
 
+    /// Fold in the delivery-report counters; whether the data path lost
+    /// enough of what was sent over the last [`REPORT_WINDOW`] to count as
+    /// congestion. Ignored at the floor, where there is nothing left to cut.
+    fn take_report(&mut self, fb: &Feedback, now: Instant) -> bool {
+        let sent = fb.report_sent.saturating_sub(self.seen.report_sent);
+        let lost = fb.report_lost.saturating_sub(self.seen.report_lost);
+        if sent > 0 {
+            self.reports.push_back((now, sent, lost));
+        }
+        while let Some(&(at, _, _)) = self.reports.front() {
+            if now.saturating_duration_since(at) <= REPORT_WINDOW {
+                break;
+            }
+            self.reports.pop_front();
+        }
+        let (sent, lost) = self
+            .reports
+            .iter()
+            .fold((0, 0), |(s, l), &(_, a, b)| (s + a, l + b));
+        sent >= REPORT_MIN_SENT && lost * 100 >= sent * REPORT_LOSS_PCT
+    }
+
     /// Fold in the sender's counters at `now` and return the new rate.
     pub fn on_feedback(&mut self, fb: Feedback, now: Instant) -> u32 {
         let lost = fb.retransmits > self.seen.retransmits;
@@ -325,12 +366,13 @@ impl PeerController {
         let slow_queue = fb.queue_age >= CONGESTED_QUEUE_AGE && !at_floor;
         let silent = fb.ack_age.is_some_and(|a| a >= CONGESTED_ACK_AGE);
         let skipped = fb.skipped > self.seen.skipped;
+        let data_loss = self.take_report(&fb, now) && !at_floor;
         let standing_queue = self.take_rtt(fb.rtt, now);
         let delayed = self.rtt_verdict && standing_queue;
         self.interval_sent += fb.wire_sent.saturating_sub(self.seen.wire_sent);
         self.seen = fb;
 
-        if lost || expired || slow_queue || silent || skipped || delayed {
+        if lost || expired || slow_queue || silent || skipped || delayed || data_loss {
             self.clean_since = now;
             let held = self
                 .last_decrease
@@ -531,7 +573,65 @@ mod tests {
             ack_age: None,
             rtt: None,
             skipped: 0,
+            ..Feedback::default()
         }
+    }
+
+    fn report(sent: u64, lost: u64) -> Feedback {
+        Feedback {
+            report_sent: sent,
+            report_lost: lost,
+            ..Feedback::default()
+        }
+    }
+
+    #[test]
+    fn heavy_data_path_loss_in_the_reports_cuts_the_rate() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(100_000, t0);
+        let step = Duration::from_millis(100);
+        // 60 of 100 datagrams lost per second, reported every 100 ms.
+        let (mut sent, mut lost, mut t) = (0, 0, t0);
+        for _ in 0..10 {
+            t += step;
+            sent += 10;
+            lost += 6;
+            c.on_feedback(report(sent, lost), t);
+        }
+        assert!(c.decreases() > 0, "{c:?}");
+        assert!(c.rate() < 100_000);
+    }
+
+    #[test]
+    fn light_or_sparse_data_path_loss_is_no_congestion() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(100_000, t0);
+        let step = Duration::from_millis(100);
+        // 5 % loss over plenty of datagrams, then total loss of too few.
+        let (mut sent, mut lost, mut t) = (0, 0, t0);
+        for _ in 0..30 {
+            t += step;
+            sent += 20;
+            lost += 1;
+            c.on_feedback(report(sent, lost), t);
+        }
+        t += Duration::from_secs(2);
+        c.on_feedback(report(sent + 10, lost + 10), t);
+        assert_eq!(c.decreases(), 0, "{c:?}");
+    }
+
+    #[test]
+    fn data_path_loss_is_ignored_at_the_floor() {
+        let t0 = Instant::now();
+        let mut c = PeerController::new(MIN_PEER_BYTES_PER_SEC, t0);
+        let (mut sent, mut lost, mut t) = (0, 0, t0);
+        for _ in 0..20 {
+            t += Duration::from_millis(100);
+            sent += 20;
+            lost += 20;
+            c.on_feedback(report(sent, lost), t);
+        }
+        assert_eq!(c.decreases(), 0, "{c:?}");
     }
 
     #[test]

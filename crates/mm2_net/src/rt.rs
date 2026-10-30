@@ -207,6 +207,13 @@ pub enum LaneTag {
     /// One fragment of a traffic-signal frame ([`WorldKind::Signals`],
     /// host to client).
     WorldSignals = 8,
+    /// The client's cumulative delivery report (client to host): the
+    /// newest host datagram sequence it saw and how many host datagrams it
+    /// accepted. Cumulative, so a lost report is covered by the next; the
+    /// host compares it with what it sent to measure data-path loss
+    /// independent of the ack path. A host that predates it counts the
+    /// datagram as malformed and ignores it.
+    Report = 9,
 }
 
 /// The world-state messages that ride the lane as [`Priority::Bulk`]
@@ -268,10 +275,32 @@ impl LaneTag {
             6 => Some(Self::ReliableAck),
             7 => Some(Self::WorldCars),
             8 => Some(Self::WorldSignals),
+            9 => Some(Self::Report),
             _ => None,
         }
     }
 }
+
+/// Serialise a delivery report: `top u64 | count u64`, little endian.
+pub(crate) fn encode_report(top: u64, count: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&top.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out
+}
+
+/// Parse a delivery report; `None` unless it is exactly 16 bytes.
+pub(crate) fn decode_report(p: &[u8]) -> Option<(u64, u64)> {
+    if p.len() != 16 {
+        return None;
+    }
+    let top = u64::from_le_bytes(p[..8].try_into().ok()?);
+    let count = u64::from_le_bytes(p[8..].try_into().ok()?);
+    Some((top, count))
+}
+
+/// How often the client reports what it has received.
+const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A decoded datagram header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -801,6 +830,12 @@ pub(crate) struct PaceState {
     rtt: Option<Duration>,
     /// Snapshots a newer acknowledgement passed over.
     skipped: u64,
+    /// The peer's last delivery report (newest sequence, datagrams
+    /// accepted).
+    report: Option<(u64, u64)>,
+    /// Datagrams the reports say were sent, and that never arrived.
+    report_sent: u64,
+    report_lost: u64,
 }
 
 /// Credit bulk leaves in the bucket for movement: world catch-up never
@@ -849,6 +884,9 @@ impl SeatOut {
                 ticks: VecDeque::new(),
                 rtt: None,
                 skipped: 0,
+                report: None,
+                report_sent: 0,
+                report_lost: 0,
             }),
         }
     }
@@ -1136,6 +1174,29 @@ impl SeatOut {
         }
     }
 
+    /// The peer's cumulative delivery report: the newest of our datagram
+    /// sequences it saw (`top`) and how many it accepted (`count`). The
+    /// sequences are contiguous per seat, so between two reports
+    /// `Δtop - Δcount` datagrams were sent and never arrived, whatever
+    /// the ack path did. A report that goes backwards (a restarted peer)
+    /// only restarts the baseline.
+    pub(crate) fn on_report(&self, top: u64, count: u64) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t0, c0)) = pace.report
+            && top > t0
+            && count >= c0
+        {
+            let sent = top - t0;
+            let got = (count - c0).min(sent);
+            pace.report_sent += sent;
+            pace.report_lost += sent - got;
+        }
+        // A reordered older report must not move the baseline back.
+        if pace.report.is_none_or(|(t0, _)| top >= t0) {
+            pace.report = Some((top, count));
+        }
+    }
+
     /// The controller's input from the send loop: the reliable channel's
     /// retransmission count and the age of the peer's newest
     /// acknowledgement (`None`: nothing to acknowledge yet).
@@ -1157,6 +1218,8 @@ impl SeatOut {
             ack_age: ack_age.filter(|_| flowing),
             rtt: pace.rtt.take(),
             skipped: pace.skipped,
+            report_sent: pace.report_sent,
+            report_lost: pace.report_lost,
         };
         pace.ctl.on_feedback(fb, now);
         let rate = effective_rate(pace.ctl.rate(), pace.share);
@@ -1364,6 +1427,8 @@ fn is_reliable_tag(tag: LaneTag) -> bool {
 fn generation_admits(h: &Header, running: u64) -> bool {
     match h.tag {
         LaneTag::Probe => true,
+        // Counts about the path, not a session.
+        LaneTag::Report => true,
         // An ack names a position in the session-independent channel, not
         // a session: one for a generation that ended meanwhile (a cancel
         // lands while the peer's ack is in flight) still retires what it
@@ -1481,6 +1546,13 @@ fn ingest(
         LaneTag::ReliableAck => match decode_rel_ack(payload) {
             Some((cum, mask)) => {
                 seat.rel.sender.on_ack(cum, mask);
+                Verdict::Accepted
+            }
+            None => Verdict::Dropped(Refuse::Malformed),
+        },
+        LaneTag::Report => match decode_report(payload) {
+            Some((top, count)) => {
+                seat.out.on_report(top, count);
                 Verdict::Accepted
             }
             None => Verdict::Dropped(Refuse::Malformed),
@@ -2092,6 +2164,10 @@ pub(crate) struct ClientLane {
     wake: Arc<Wake>,
     counters: Counters,
     stop: AtomicBool,
+    /// Newest host datagram sequence accepted, and how many were accepted:
+    /// the cumulative delivery report.
+    rx_top: AtomicU64,
+    rx_count: AtomicU64,
     /// Newest `Start` generation the client consumed (0: none) — a
     /// datagram naming an older one is stale.
     started: AtomicU64,
@@ -2140,6 +2216,8 @@ impl ClientLane {
             seat,
             token,
             out: SeatOut::new(wake.clone(), None, Instant::now()),
+            rx_top: AtomicU64::new(0),
+            rx_count: AtomicU64::new(0),
             wake,
             counters: Counters::default(),
             stop: AtomicBool::new(false),
@@ -2248,6 +2326,8 @@ impl ClientLane {
         if !window.accept(h.seq) {
             return Err(Refuse::Replayed);
         }
+        self.rx_top.fetch_max(h.seq, Ordering::Relaxed);
+        self.rx_count.fetch_add(1, Ordering::Relaxed);
         Ok((h, payload))
     }
 
@@ -2317,7 +2397,7 @@ impl ClientLane {
                 LaneTag::WorldCars | LaneTag::WorldSignals => {
                     self.on_world_fragment(&header, payload)
                 }
-                LaneTag::Ack => self.counters.drop_for(Refuse::Unexpected),
+                LaneTag::Ack | LaneTag::Report => self.counters.drop_for(Refuse::Unexpected),
                 LaneTag::Reliable => match decode_data(payload) {
                     Some((id, more, body)) => {
                         let ack = self
@@ -2557,6 +2637,8 @@ impl ClientLane {
         // for a keepalive interval.
         let mut last_probe = Instant::now();
         let mut last_sent = Instant::now();
+        let mut last_report = Instant::now();
+        let mut reported_top = 0;
         while !self.stop.load(Ordering::Relaxed) {
             self.wake.wait(POLL);
             let due = self
@@ -2568,6 +2650,18 @@ impl ClientLane {
             for (generation, payload) in due {
                 self.out
                     .push_reliable(LaneTag::Reliable, generation, payload);
+            }
+            // The delivery report is cumulative, so a lost one costs only
+            // time; it is sent only when something new arrived.
+            if last_report.elapsed() >= REPORT_INTERVAL {
+                let top = self.rx_top.load(Ordering::Relaxed);
+                if top != reported_top {
+                    let count = self.rx_count.load(Ordering::Relaxed);
+                    self.out
+                        .push_reliable(LaneTag::Report, 0, encode_report(top, count));
+                    reported_top = top;
+                }
+                last_report = Instant::now();
             }
             while let Some(item) = self.out.queue.pop() {
                 let header = self.header(item.tag, item.generation);
@@ -2889,5 +2983,44 @@ mod tests {
             panic!("expected closed");
         };
         assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn a_delivery_report_round_trips_and_rejects_other_lengths() {
+        let p = encode_report(u64::MAX - 1, 7);
+        assert_eq!(decode_report(&p), Some((u64::MAX - 1, 7)));
+        assert_eq!(decode_report(&p[..15]), None);
+        assert_eq!(decode_report(&[p.as_slice(), &[0]].concat()), None);
+        assert_eq!(
+            LaneTag::from_u8(LaneTag::Report as u8),
+            Some(LaneTag::Report)
+        );
+    }
+
+    #[test]
+    fn reports_count_the_sequences_that_never_arrived() {
+        let out = SeatOut::new(Arc::new(Wake::default()), None, Instant::now());
+        let lost = |o: &SeatOut| {
+            let p = o.pace.lock().unwrap();
+            (p.report_sent, p.report_lost)
+        };
+        // The first report is only a baseline.
+        out.on_report(100, 90);
+        assert_eq!(lost(&out), (0, 0));
+        // 50 sent since, 40 arrived.
+        out.on_report(150, 130);
+        assert_eq!(lost(&out), (50, 10));
+        // A reordered older report moves nothing; a repeat adds nothing.
+        out.on_report(120, 110);
+        out.on_report(150, 130);
+        assert_eq!(lost(&out), (50, 10));
+        // A report lost in between is covered by the next cumulative one.
+        out.on_report(250, 220);
+        assert_eq!(lost(&out), (150, 40));
+        // A peer that restarted its count only restarts the baseline.
+        out.on_report(260, 5);
+        assert_eq!(lost(&out), (150, 40));
+        out.on_report(270, 15);
+        assert_eq!(lost(&out), (160, 40));
     }
 }

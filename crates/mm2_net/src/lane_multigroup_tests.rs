@@ -24,19 +24,22 @@ use crate::{
 /// Drive one seat with `groups` groups per tick at `hz` for `secs`, a client
 /// reading throughout, and return the host's pacing stats for the seat.
 fn drive(groups: usize, hz: u32, secs: f64, heavy: bool) -> (PaceStats, u64) {
-    drive_via(groups, hz, secs, heavy, None)
+    let (p, ticks, _) = drive_via(groups, hz, secs, heavy, None);
+    (p, ticks)
 }
 
 /// [`drive`] with the client dialling through a wall-clock relay applying
 /// `(down, up)` recipes: `down` is host to client, `up` the client's acks
-/// back. `None` dials direct.
+/// back. `None` dials direct. The third value is the seat's mean rate over
+/// the second half of the run (the rate is a sawtooth, so its last value
+/// says little).
 fn drive_via(
     groups: usize,
     hz: u32,
     secs: f64,
     heavy: bool,
     link: Option<(UdpImpair, UdpImpair)>,
-) -> (PaceStats, u64) {
+) -> (PaceStats, u64, u32) {
     let host = host();
     let proxy = link.map(|(down, up)| {
         let target = SocketAddr::new(host.addr().ip(), host.lane_port());
@@ -75,7 +78,15 @@ fn drive_via(
         proxy.set(LinkDir::Down, *down);
         proxy.set(LinkDir::Up, *up);
     }
+    let half = Instant::now() + Duration::from_secs_f64(secs / 2.0);
+    let (mut rate_sum, mut rate_n) = (0u64, 0u64);
     while Instant::now() < end {
+        if Instant::now() >= half
+            && let Some(p) = host.lane_pace(id)
+        {
+            rate_sum += u64::from(p.rate);
+            rate_n += 1;
+        }
         tick += 1;
         let ids: Vec<(u8, Message)> = (0..groups)
             .map(|g| (g as u8, group(generation, tick, g, heavy)))
@@ -97,7 +108,7 @@ fn drive_via(
     let pace = host.lane_pace(id).unwrap();
     stop.store(true, Ordering::Relaxed);
     reader.join().unwrap();
-    (pace, tick)
+    (pace, tick, (rate_sum / rate_n.max(1)) as u32)
 }
 
 /// A group of `Snap` rows: group 0 holds the owner's row, the others a
@@ -198,20 +209,26 @@ fn ack_path(link: crate::Impair) -> (UdpImpair, UdpImpair) {
 /// Heavy two-group demand at 150 Hz for `secs` through a relay applying
 /// `recipe` once the session runs; the seat's pacing stats.
 fn heavy_through(secs: f64, recipe: (UdpImpair, UdpImpair)) -> PaceStats {
-    let (p, ticks) = drive_via(2, 150, secs, true, Some(recipe));
+    heavy_through_mean(secs, recipe).0
+}
+
+/// [`heavy_through`] and the mean rate over the second half of the run.
+fn heavy_through_mean(secs: f64, recipe: (UdpImpair, UdpImpair)) -> (PaceStats, u32) {
+    let (p, ticks, mean) = drive_via(2, 150, secs, true, Some(recipe));
     eprintln!(
-        "{ticks} ticks, rate {} of {}, decreases {}",
+        "{ticks} ticks, rate {} (late mean {mean}) of {}, decreases {}",
         p.rate, p.ceiling, p.decreases
     );
-    p
+    (p, mean)
 }
 
 // Why the lane alone does not reproduce the #2085 collapse
 // (net_cnr_bots_mp, 131072 -> 12288), measured here without retail data:
 // baselined group acks are deliberately no loss evidence (`on_group_ack`),
-// so 5x demand, a lossy or jittery ack path and a rate-capped host-to-client
-// link all leave the controller at its ceiling. Only the ack path going
-// silent (`CONGESTED_ACK_AGE`) cuts the rate, which is the first test below.
+// so 5x demand and a lossy or jittery ack path leave the controller at its
+// ceiling. Only the ack path going silent (`CONGESTED_ACK_AGE`) cuts the
+// rate, which is the first test below. A rate-capped host-to-client link is
+// seen through the client's delivery report (#2235), not through acks.
 
 #[test]
 fn a_silent_ack_path_collapses_the_rate_under_heavy_demand() {
@@ -249,15 +266,70 @@ fn a_lossy_or_jittery_ack_path_does_not_collapse_the_rate_under_heavy_demand() {
     }
 }
 
-#[test]
-fn a_capped_host_to_client_link_does_not_collapse_the_rate_under_heavy_demand() {
-    // 1 Mbit/s with 100 ms of buffer against ~1 MB/s offered: the link
-    // drops most of the stream. Baselined states recover on their own, so
-    // the controller sees no loss evidence and keeps the ceiling.
+/// Heavy two-group demand through a host-to-client link capped at `kbit`
+/// with 100 ms of buffer: the seat's stats and its late mean rate.
+fn capped(kbit: u32, secs: f64) -> (PaceStats, u32) {
     let down = UdpImpair {
-        rate: Some(LinkRate::kbit(1000, Duration::from_millis(100))),
+        rate: Some(LinkRate::kbit(kbit, Duration::from_millis(100))),
         ..UdpImpair::default()
     };
-    let p = heavy_through(3.0, (down, UdpImpair::default()));
-    assert!(p.rate * 2 >= p.ceiling, "rate collapsed: {p:?}");
+    heavy_through_mean(secs, (down, UdpImpair::default()))
+}
+
+// Measured with the client's delivery report (#2235), heavy two-group
+// demand at 150 Hz, 100 ms of buffer, mean rate over the second half of an
+// 8 s run (the link carries `kbit * 125` B/s):
+//   1000 kbit  rate stays at the 131072 B/s ceiling, no decrease: the
+//              ceiling is about the link speed, so there is nothing to cut
+//    500 kbit  mean ~70000 B/s (link 62500), 9 decreases
+//    250 kbit  mean ~42000 B/s (link 31250), 9 decreases
+//    100 kbit  mean ~12000 B/s (link 12500), 19 decreases
+// Without the report the rate stayed at the ceiling at every one of them.
+
+#[test]
+fn a_capped_host_to_client_link_slows_the_rate_to_about_its_speed() {
+    let link = 250 * 125;
+    let (p, mean) = capped(250, 8.0);
+    assert!(p.decreases > 0, "no decrease: {p:?}");
+    assert!(
+        mean <= 2 * link,
+        "rate {mean} B/s far above the link {link}: {p:?}"
+    );
+    assert!(
+        mean * 2 >= link,
+        "rate {mean} B/s far below the link {link}: {p:?}"
+    );
+}
+
+#[test]
+fn a_link_at_the_ceiling_is_not_cut() {
+    // 1 Mbit/s is about the 131072 B/s ceiling: the host cannot offer more
+    // than the link carries.
+    let (p, mean) = capped(1000, 4.0);
+    assert!(mean * 2 >= p.ceiling, "rate collapsed: {p:?}");
+}
+
+#[test]
+fn the_delivery_report_survives_a_lossy_return_path() {
+    // A capped data path and a return path losing half of the client's
+    // datagrams, reports included: the reports are cumulative, so the next
+    // one carries what a lost one did.
+    let link = 250 * 125;
+    let down = UdpImpair {
+        rate: Some(LinkRate::kbit(250, Duration::from_millis(100))),
+        ..UdpImpair::default()
+    };
+    let up = UdpImpair {
+        link: crate::Impair {
+            loss: 0.5,
+            ..crate::Impair::default()
+        },
+        ..UdpImpair::default()
+    };
+    let (p, mean) = heavy_through_mean(8.0, (down, up));
+    assert!(p.decreases > 0, "no decrease: {p:?}");
+    assert!(
+        mean <= 2 * link,
+        "rate {mean} B/s far above the link {link}: {p:?}"
+    );
 }
