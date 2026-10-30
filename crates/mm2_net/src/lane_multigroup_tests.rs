@@ -208,10 +208,11 @@ fn heavy_through(secs: f64, recipe: (UdpImpair, UdpImpair)) -> PaceStats {
 
 // Why the lane alone does not reproduce the #2085 collapse
 // (net_cnr_bots_mp, 131072 -> 12288), measured here without retail data:
-// baselined group acks are deliberately no loss evidence (`on_group_ack`),
-// so 5x demand, a lossy or jittery ack path and a rate-capped host-to-client
-// link all leave the controller at its ceiling. Only the ack path going
-// silent (`CONGESTED_ACK_AGE`) cuts the rate, which is the first test below.
+// whole-tick acks are deliberately no loss evidence (`on_group_ack`), so 5x
+// demand, a lossy or jittery ack path and a rate-capped host-to-client link
+// leave the controller at its ceiling unless the groups themselves show
+// loss (#2233, the last test). Only the ack path going silent
+// (`CONGESTED_ACK_AGE`) cuts the rate at once, which is the first test below.
 
 #[test]
 fn a_silent_ack_path_collapses_the_rate_under_heavy_demand() {
@@ -260,4 +261,21 @@ fn a_capped_host_to_client_link_does_not_collapse_the_rate_under_heavy_demand() 
     };
     let p = heavy_through(3.0, (down, UdpImpair::default()));
     assert!(p.rate * 2 >= p.ceiling, "rate collapsed: {p:?}");
+}
+
+#[test]
+fn a_starved_host_to_client_link_is_seen_as_loss_of_baselined_groups() {
+    // 100 kbit/s with 100 ms of buffer against a 128 KiB/s ceiling: the
+    // relay starves the bulk group and drops a share of the movement
+    // group. Baselined states recover on their own, so before #2233 the
+    // controller saw no loss evidence and made no decrease at all. The
+    // evidence is sparse (the sender sheds most of the bulk group before
+    // its frames complete), so the rate is not asserted to settle near
+    // the link speed: that is still open.
+    let down = UdpImpair {
+        rate: Some(LinkRate::kbit(100, Duration::from_millis(100))),
+        ..UdpImpair::default()
+    };
+    let p = heavy_through(6.0, (down, UdpImpair::default()));
+    assert!(p.decreases > 0, "no decrease: {p:?}");
 }

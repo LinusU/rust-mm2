@@ -1388,6 +1388,9 @@ impl HostCtl {
             return Ok(false);
         };
         out.note_tick(tick, Instant::now());
+        for (i, (group, _)) in encoded.iter().enumerate() {
+            out.note_group_frame(tick, i as u8, *group);
+        }
         let slices: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let frags = crate::frag::split(tick, &slices).map_err(oversize_snap)?;
         if priorities.is_empty() {

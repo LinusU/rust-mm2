@@ -801,6 +801,19 @@ pub(crate) struct PaceState {
     rtt: Option<Duration>,
     /// Snapshots a newer acknowledgement passed over.
     skipped: u64,
+    /// Per logical group, the ticks whose movement state was queued and
+    /// not yet acknowledged or passed over, oldest first.
+    group_ticks: Vec<VecDeque<(u64, Instant)>>,
+    /// Frames named by `note_group_frame` that have not left yet.
+    group_frames: VecDeque<GroupFrame>,
+    /// Group states acknowledged, ever.
+    group_acked: [u64; MAX_GROUPS],
+    /// Group states a newer acknowledgement of the same group passed over,
+    /// or that timed out.
+    group_passed: [u64; MAX_GROUPS],
+    /// Group states that went `GROUP_ACK_TIMEOUT` unacknowledged with no
+    /// newer state of their group acknowledged either.
+    group_starved: u64,
 }
 
 /// Credit bulk leaves in the bucket for movement: world catch-up never
@@ -813,6 +826,71 @@ const WORLD_SHARE_DIV: u32 = 4;
 
 fn is_world_tag(tag: LaneTag) -> bool {
     WorldKind::from_tag(tag).is_some()
+}
+
+/// A group state sent this long ago and never acknowledged counts as lost.
+const GROUP_ACK_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Named group frames remembered per seat until a datagram of them leaves.
+const GROUP_FRAME_CAP: usize = 256;
+
+/// A group frame queued for a seat, waiting for its fragments to leave.
+#[derive(Debug)]
+struct GroupFrame {
+    tick: u64,
+    frame: u8,
+    group: u8,
+    /// Fragments sent so far.
+    sent: u8,
+}
+
+impl PaceState {
+    /// A datagram of `item` left: once every fragment of a named group
+    /// frame has, that group's state is in flight at its tick. A frame the
+    /// sender shed in part (bulk fragments expire one by one) never
+    /// completes, so it is never expected to be acknowledged.
+    fn log_sent(&mut self, item: &OutItem, now: Instant) {
+        // Fragment payload: tick (8), frame (1), frames (1), index (1),
+        // count (1), data.
+        if item.tag != LaneTag::Fragment || item.payload.len() < 12 {
+            return;
+        }
+        let tick = u64::from_le_bytes(item.payload[..8].try_into().unwrap_or([0; 8]));
+        let (frame, count) = (item.payload[8], item.payload[11]);
+        let Some(i) = self
+            .group_frames
+            .iter()
+            .position(|f| f.tick == tick && f.frame == frame)
+        else {
+            return;
+        };
+        self.group_frames[i].sent += 1;
+        if self.group_frames[i].sent < count {
+            return;
+        }
+        let Some(GroupFrame { group, .. }) = self.group_frames.remove(i) else {
+            return;
+        };
+        let g = usize::from(group);
+        let (Some(log), Some(passed), starved) = (
+            self.group_ticks.get_mut(g),
+            self.group_passed.get_mut(g),
+            &mut self.group_starved,
+        ) else {
+            return;
+        };
+        if log.back().is_some_and(|&(t, _)| t >= tick) {
+            // A restarted clock.
+            log.clear();
+        }
+        if log.len() >= TICK_LOG_CAP {
+            // Pushed out unacknowledged by the newer states: lost.
+            log.pop_front();
+            *passed += 1;
+            *starved += 1;
+        }
+        log.push_back((tick, now));
+    }
 }
 
 /// Unacknowledged snapshot ticks remembered per seat.
@@ -849,6 +927,11 @@ impl SeatOut {
                 ticks: VecDeque::new(),
                 rtt: None,
                 skipped: 0,
+                group_ticks: vec![VecDeque::new(); MAX_GROUPS],
+                group_frames: VecDeque::new(),
+                group_acked: [0; MAX_GROUPS],
+                group_passed: [0; MAX_GROUPS],
+                group_starved: 0,
             }),
         }
     }
@@ -1001,6 +1084,7 @@ impl SeatOut {
         });
         if let Some((item, wait)) = got {
             pace.movement_sent += 1;
+            pace.log_sent(&item, now);
             pace.wire_sent += wire_bytes(item.payload.len()) as u64;
             pace.last_sent = Some(now);
             pace.movement_waits.add(wait.as_micros() as u64);
@@ -1064,6 +1148,7 @@ impl SeatOut {
         }
         let (item, _) = got?;
         pace.bulk_sent += 1;
+        pace.log_sent(&item, now);
         if is_world_tag(item.tag) {
             pace.world_sent += 1;
         }
@@ -1106,8 +1191,43 @@ impl SeatOut {
     /// its other group gives none). Older ticks are dropped, not counted
     /// as passed over: a tick carries only the groups that changed, so a
     /// tick without an ack is no evidence of loss.
-    pub(crate) fn on_group_ack(&self, tick: u64, now: Instant) {
+    pub(crate) fn on_group_ack(&self, group: u8, tick: u64, now: Instant) {
         self.take_ack(tick, now, false);
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(log) = pace.group_ticks.get_mut(usize::from(group)) else {
+            return;
+        };
+        let (mut acked, mut passed) = (0, 0);
+        while let Some(&(t, _)) = log.front() {
+            if t > tick {
+                break;
+            }
+            log.pop_front();
+            if t == tick {
+                acked += 1;
+            } else {
+                passed += 1;
+            }
+        }
+        pace.group_acked[usize::from(group)] += acked;
+        pace.group_passed[usize::from(group)] += passed;
+    }
+
+    /// Name the logical `group` whose state the tick's frame `frame`
+    /// carries. The state is logged as sent only once a datagram of it
+    /// leaves ([`PaceState::log_sent`]): bulk is shed unsent by design, and
+    /// a state that never left is no evidence about the link.
+    pub(crate) fn note_group_frame(&self, tick: u64, frame: u8, group: u8) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if pace.group_frames.len() >= GROUP_FRAME_CAP {
+            pace.group_frames.pop_front();
+        }
+        pace.group_frames.push_back(GroupFrame {
+            tick,
+            frame,
+            group,
+            sent: 0,
+        });
     }
 
     fn take_ack(&self, tick: u64, now: Instant, count_skipped: bool) {
@@ -1147,6 +1267,20 @@ impl SeatOut {
         let flowing = pace
             .last_sent
             .is_some_and(|t| now.saturating_duration_since(t) <= CONGESTED_ACK_AGE);
+        // A state unacknowledged this long is lost to the controller even if
+        // no newer ack of its group ever comes: a group the link starves
+        // entirely is never passed over, only silent.
+        let pace = &mut *pace;
+        for (g, log) in pace.group_ticks.iter_mut().enumerate() {
+            while let Some(&(_, at)) = log.front() {
+                if now.saturating_duration_since(at) < GROUP_ACK_TIMEOUT {
+                    break;
+                }
+                log.pop_front();
+                pace.group_passed[g] += 1;
+                pace.group_starved += 1;
+            }
+        }
         let fb = Feedback {
             retransmits,
             // Bulk is meant to expire when the budget is spent on
@@ -1157,6 +1291,9 @@ impl SeatOut {
             ack_age: ack_age.filter(|_| flowing),
             rtt: pace.rtt.take(),
             skipped: pace.skipped,
+            group_acked: pace.group_acked,
+            group_passed: pace.group_passed,
+            group_starved: pace.group_starved,
         };
         pace.ctl.on_feedback(fb, now);
         let rate = effective_rate(pace.ctl.rate(), pace.share);
@@ -1495,7 +1632,7 @@ fn ingest(
                     // The controller takes the round trip from it, not the
                     // ack's age: a quiet scene sends no group to acknowledge.
                     let now = Instant::now();
-                    seat.out.on_group_ack(tick, now);
+                    seat.out.on_group_ack(group, tick, now);
                     // The sender judges scope and retention itself; an
                     // ack it cannot match is simply not a baseline.
                     seat.baselines

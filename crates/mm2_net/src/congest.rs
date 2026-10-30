@@ -29,6 +29,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::frag::MAX_GROUPS;
 use crate::pace::{Budget, PEER_BYTES_PER_SEC};
 use crate::rt::HEADER_LEN;
 
@@ -102,6 +103,24 @@ const RECOVERY_DEN: u64 = 4;
 /// interval must reach this share of it.
 const USED_NUM: u64 = 1;
 const USED_DEN: u64 = 2;
+/// Baselined group states are judged in windows of at least this many
+/// resolved states (acknowledged or passed over).
+const GROUP_WINDOW: u64 = 30;
+/// A window in which at least this share (3/5) of the resolved group
+/// states were passed over is loss. A single passed-over state is no
+/// evidence (a lost ack looks the same, and the next state repairs it);
+/// a share this high is a link that cannot carry the stream, which the
+/// whole-tick `skipped` count cannot see because a tick carries only the
+/// groups that changed.
+const GROUP_LOSS_NUM: u64 = 3;
+/// This many starved group states since the last verdict is loss however
+/// few states the group resolved: the ack path is working (another group,
+/// or the same group's older states, came back) and this one's did not.
+const GROUP_STARVED_MIN: u64 = 3;
+/// ...within this long: isolated losses of a rarely sent group are not a
+/// pattern.
+const GROUP_STARVED_WINDOW: Duration = Duration::from_secs(3);
+const GROUP_LOSS_DEN: u64 = 5;
 
 /// Bytes a datagram carrying `payload` bytes costs on the wire.
 pub fn wire_bytes(payload: usize) -> usize {
@@ -191,6 +210,16 @@ pub struct Feedback {
     /// Snapshots ever passed over: a newer snapshot was acknowledged
     /// while an older one never was (loss, or a stale one dropped).
     pub skipped: u64,
+    /// Per logical group, baselined states ever acknowledged.
+    pub group_acked: [u64; MAX_GROUPS],
+    /// Per logical group, baselined states ever lost to the controller: a
+    /// newer state of the group was acknowledged first, or none came
+    /// within the ack timeout.
+    pub group_passed: [u64; MAX_GROUPS],
+    /// Of those, the states no acknowledgement of their group, newer or
+    /// not, followed for a whole ack timeout: a group the link starves
+    /// entirely is never passed over, only silent.
+    pub group_starved: u64,
 }
 
 /// A peer's send-rate controller: AIMD on congestion evidence.
@@ -207,6 +236,10 @@ pub struct PeerController {
     interval_start: Instant,
     interval_sent: u64,
     seen: Feedback,
+    /// The group counters at the start of the current judging window.
+    group_window: [(u64, u64); MAX_GROUPS],
+    /// `Feedback::group_starved` at the last starvation verdict.
+    starved_mark: (u64, Instant),
     decreases: u64,
     min_rtt: Option<(Duration, Instant)>,
     srtt: Option<Duration>,
@@ -235,6 +268,8 @@ impl PeerController {
             interval_start: now,
             interval_sent: 0,
             seen: Feedback::default(),
+            group_window: [(0, 0); MAX_GROUPS],
+            starved_mark: (0, now),
             decreases: 0,
             min_rtt: None,
             srtt: None,
@@ -325,12 +360,29 @@ impl PeerController {
         let slow_queue = fb.queue_age >= CONGESTED_QUEUE_AGE && !at_floor;
         let silent = fb.ack_age.is_some_and(|a| a >= CONGESTED_ACK_AGE);
         let skipped = fb.skipped > self.seen.skipped;
+        // Each group is judged on its own: a starved bulk group is no less
+        // lost for the movement group beside it getting through.
+        let mut group_loss = false;
+        for (g, w) in self.group_window.iter_mut().enumerate() {
+            let acked = fb.group_acked[g].saturating_sub(w.0);
+            let passed = fb.group_passed[g].saturating_sub(w.1);
+            if acked + passed >= GROUP_WINDOW {
+                *w = (fb.group_acked[g], fb.group_passed[g]);
+                group_loss |= passed * GROUP_LOSS_DEN >= (acked + passed) * GROUP_LOSS_NUM;
+            }
+        }
+        if now.saturating_duration_since(self.starved_mark.1) > GROUP_STARVED_WINDOW {
+            self.starved_mark = (fb.group_starved, now);
+        } else if fb.group_starved.saturating_sub(self.starved_mark.0) >= GROUP_STARVED_MIN {
+            self.starved_mark = (fb.group_starved, now);
+            group_loss = true;
+        }
         let standing_queue = self.take_rtt(fb.rtt, now);
         let delayed = self.rtt_verdict && standing_queue;
         self.interval_sent += fb.wire_sent.saturating_sub(self.seen.wire_sent);
         self.seen = fb;
 
-        if lost || expired || slow_queue || silent || skipped || delayed {
+        if lost || expired || slow_queue || silent || skipped || group_loss || delayed {
             self.clean_since = now;
             let held = self
                 .last_decrease
@@ -531,7 +583,31 @@ mod tests {
             ack_age: None,
             rtt: None,
             skipped: 0,
+            group_acked: [0; MAX_GROUPS],
+            group_passed: [0; MAX_GROUPS],
+            group_starved: 0,
         }
+    }
+
+    #[test]
+    fn mostly_passed_over_group_states_are_loss_and_a_few_are_not() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let groups = |acked, passed| Feedback {
+            group_acked: [acked, 0, 0, 0, 0, 0, 0, 0],
+            group_passed: [passed, 0, 0, 0, 0, 0, 0, 0],
+            ..fb(0, 0, 0, 0)
+        };
+        // A lossy ack path: half passed over is not a link that is full.
+        let mut c = PeerController::new(100_000, t0);
+        c.on_feedback(groups(50, 50), at(100));
+        assert_eq!(c.decreases(), 0);
+        // Too few resolved states to judge.
+        c.on_feedback(groups(55, 60), at(200));
+        assert_eq!(c.decreases(), 0);
+        // 60 of the next 100 resolved states passed over.
+        c.on_feedback(groups(95, 120), at(300));
+        assert_eq!(c.decreases(), 1);
     }
 
     #[test]
