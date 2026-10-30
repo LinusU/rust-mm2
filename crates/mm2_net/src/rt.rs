@@ -814,6 +814,9 @@ pub(crate) struct PaceState {
     /// Group states that went `GROUP_ACK_TIMEOUT` unacknowledged with no
     /// newer state of their group acknowledged either.
     group_starved: u64,
+    /// When any group's acknowledgement last arrived: a state counts as
+    /// lost only if the return path demonstrably worked after it was sent.
+    last_group_ack: Option<Instant>,
 }
 
 /// Credit bulk leaves in the bucket for movement: world catch-up never
@@ -872,10 +875,11 @@ impl PaceState {
             return;
         };
         let g = usize::from(group);
-        let (Some(log), Some(passed), starved) = (
+        let (Some(log), Some(passed), starved, last_ack) = (
             self.group_ticks.get_mut(g),
             self.group_passed.get_mut(g),
             &mut self.group_starved,
+            self.last_group_ack,
         ) else {
             return;
         };
@@ -885,9 +889,12 @@ impl PaceState {
         }
         if log.len() >= TICK_LOG_CAP {
             // Pushed out unacknowledged by the newer states: lost.
-            log.pop_front();
-            *passed += 1;
-            *starved += 1;
+            if let Some((_, at)) = log.pop_front()
+                && last_ack.is_some_and(|a| a > at)
+            {
+                *passed += 1;
+                *starved += 1;
+            }
         }
         log.push_back((tick, now));
     }
@@ -932,6 +939,7 @@ impl SeatOut {
                 group_acked: [0; MAX_GROUPS],
                 group_passed: [0; MAX_GROUPS],
                 group_starved: 0,
+                last_group_ack: None,
             }),
         }
     }
@@ -1209,6 +1217,7 @@ impl SeatOut {
                 passed += 1;
             }
         }
+        pace.last_group_ack = Some(now);
         pace.group_acked[usize::from(group)] += acked;
         pace.group_passed[usize::from(group)] += passed;
     }
@@ -1271,14 +1280,19 @@ impl SeatOut {
         // no newer ack of its group ever comes: a group the link starves
         // entirely is never passed over, only silent.
         let pace = &mut *pace;
+        let last_ack = pace.last_group_ack;
         for (g, log) in pace.group_ticks.iter_mut().enumerate() {
             while let Some(&(_, at)) = log.front() {
                 if now.saturating_duration_since(at) < GROUP_ACK_TIMEOUT {
                     break;
                 }
                 log.pop_front();
-                pace.group_passed[g] += 1;
-                pace.group_starved += 1;
+                // With every ack silent the return path is the suspect,
+                // and the `silent` verdict already covers it.
+                if last_ack.is_some_and(|a| a > at) {
+                    pace.group_passed[g] += 1;
+                    pace.group_starved += 1;
+                }
             }
         }
         let fb = Feedback {

@@ -362,6 +362,9 @@ impl PeerController {
         let skipped = fb.skipped > self.seen.skipped;
         // Each group is judged on its own: a starved bulk group is no less
         // lost for the movement group beside it getting through.
+        // Like expiry, ignored at the floor: nothing is left to cut, and
+        // the states a starved rate left unacknowledged would hold the
+        // rate there after the link has recovered.
         let mut group_loss = false;
         for (g, w) in self.group_window.iter_mut().enumerate() {
             let acked = fb.group_acked[g].saturating_sub(w.0);
@@ -382,7 +385,14 @@ impl PeerController {
         self.interval_sent += fb.wire_sent.saturating_sub(self.seen.wire_sent);
         self.seen = fb;
 
-        if lost || expired || slow_queue || silent || skipped || group_loss || delayed {
+        if lost
+            || expired
+            || slow_queue
+            || silent
+            || skipped
+            || (group_loss && !at_floor)
+            || delayed
+        {
             self.clean_since = now;
             let held = self
                 .last_decrease

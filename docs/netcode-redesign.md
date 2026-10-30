@@ -2609,7 +2609,8 @@ All numbers are *designed*, none recovered from the retail game.
   judged against its own sent sequence (a tick carries only the groups that
   changed, so whole ticks say nothing): at least 60 % of 30 or more resolved
   states passed over by a newer ack of the same group, or three states that
-  went a second with no ack of the group at all within 3 s (#2233). Only
+  went a second unacknowledged after some other ack proved the return path
+  worked, within 3 s (#2233). Only
   states every fragment of which left the sender count, since bulk fragments
   are shed unsent one by one. Open: on a link that starves only the bulk
   group this evidence is sparse and the rate recovers between verdicts; it
