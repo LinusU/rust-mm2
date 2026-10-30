@@ -72,10 +72,15 @@ fn a_driven_client_behind_a_lossy_link_crosses_islands_on_retail_sf() {
 
     let proxy =
         UdpImpairProxy::loopback_seeded(SocketAddr::new(addr.ip(), lane_port), 0x2227).unwrap();
+    // #2237 attribution knobs: `MM2_ISLAND_LOSS` (default 0.03) and, set
+    // in the environment of this test, `MM2_LANE_PIN` (inherited by the
+    // host process: no lane rate cuts).
+    let loss: f64 = std::env::var("MM2_ISLAND_LOSS")
+        .map_or(0.03, |v| v.parse().expect("MM2_ISLAND_LOSS is a number"));
     let lossy = UdpImpair {
         link: Impair {
             delay: Duration::from_millis(20),
-            loss: 0.03,
+            loss,
             reorder: 0.02,
             ..Impair::default()
         },

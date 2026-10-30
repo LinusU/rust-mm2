@@ -263,6 +263,15 @@ impl PeerController {
         }
     }
 
+    /// Hold the rate at the ceiling whatever the evidence says: congestion
+    /// still counts as a decrease, but the rate never leaves the ceiling.
+    /// A measurement switch (`MM2_LANE_PIN`, #2237) that separates the
+    /// effect of rate cuts from the effect of loss; never on in play.
+    pub fn pinned(mut self) -> Self {
+        self.floor = self.ceiling;
+        self
+    }
+
     /// Let the RTT standing-queue verdict cut the rate (off by default).
     #[cfg(test)]
     fn with_rtt_verdict(mut self) -> Self {

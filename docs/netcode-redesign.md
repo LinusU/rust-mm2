@@ -1256,6 +1256,37 @@ test hangs rather than failing fast (not fixed here).
 - To reach the contact radius, the client's route must drive at a bot, or
   the knob must offer non-midpoint start poses; filed as a follow-up.
 
+### Attributing the 1.5 s own-car correction gap (NETPLAY-10D-7, #2237)
+
+Evidence level: **original-content validation**, same test and seed as
+above, three variants of `net_island_retail` (`MM2_ISLAND_LOSS=<p>` sets
+the proxy loss; `MM2_LANE_PIN=1` holds the host lane rate at its ceiling,
+`PeerController::pinned`: congestion is still counted but never lowers
+the rate). Client `corr=<n>/<p95 ms>/<max ms>`:
+
+| Run | lane (min/ceiling/cuts) | owner flips/flaps | corr |
+|---|---|---|---|
+| 3 % loss, rate controller free | 12 288/131 072/90 | 6/2 | 3300/63/**1429** |
+| 3 % loss, rate controller free (repeat) | 12 288/131 072/206 | 0/0 | 1850/149/**1383** |
+| 3 % loss, rate pinned | 131 072/131 072/94 | 2/0 | 3523/51/**105** |
+| 3 % loss, rate pinned (repeat) | 131 072/131 072/93 | 4/0 | 3472/53/**122** |
+| 0 % loss, rate controller free | 131 072/131 072/0 | 4/0 | 3647/51/**114** |
+
+Reading it:
+
+- **The lane rate cuts produce the gap.** Both free runs reach 1.4 s; both
+  pinned runs and the loss-free run stay at 105-122 ms, the parked run's
+  level (116 ms). Loss alone (pinned) does not produce it.
+- **Not the owner-group flips:** the second free run had 0 flips and still
+  hit 1.38 s; a pinned run with 4 flips stayed at 122 ms.
+- The cuts are the controller reading 3 % random loss as congestion (the
+  loopback link has no rate cap), dropping to the 12 KB/s floor, where
+  the own car's correction stream starves. That is a rate-controller
+  problem (loss without a queue or delay signal), not an island one.
+  Whether the controller should discount random loss is a separate task.
+- Runs are not bit-reproducible (real processes, wall clock): flip counts
+  differ between repeats, so read the pattern across the runs, not one cell.
+
 
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 

@@ -907,7 +907,15 @@ impl SeatOut {
                     now,
                 ),
                 world_sent: 0,
-                ctl: PeerController::new(DEFAULT_PEER_CEILING, now),
+                ctl: {
+                    let ctl = PeerController::new(DEFAULT_PEER_CEILING, now);
+                    // Measurement switch (#2237): no rate cuts.
+                    if std::env::var_os("MM2_LANE_PIN").is_some() {
+                        ctl.pinned()
+                    } else {
+                        ctl
+                    }
+                },
                 share: DEFAULT_PEER_CEILING,
                 movement_sent: 0,
                 bulk_sent: 0,
