@@ -2002,6 +2002,8 @@ fn run_headless(
     // flip=<flips>/<flaps>/<flip sends>/<flip B>/<flip fulls>/<calm sends>/
     // <calm B>/<calm fulls>` (NETPLAY-10D-4): the host's baselined-state
     // saving, the group sizes and the owner group's membership churn.
+    // ` gb=<owner sent B>/<owner raw B>/<world sent B>/<world raw B>`
+    // splits the bytes by group (#2227).
     // Absent until a baselined state was sent.
     let net_detail = net_detail
         + &world_ecs
@@ -2010,7 +2012,7 @@ fn run_headless(
             .map(|r| {
                 let (s, c) = (&r.state_stats, &r.churn);
                 format!(
-                    " grp={}/{}/{}/{}/{}/{} flip={}/{}/{}/{}/{}/{}/{}/{}",
+                    " grp={}/{}/{}/{}/{}/{} flip={}/{}/{}/{}/{}/{}/{}/{} gb={}/{}/{}/{}",
                     s.sent_full,
                     s.sent_delta,
                     s.sent_bytes,
@@ -2024,7 +2026,11 @@ fn run_headless(
                     c.flip_fulls,
                     c.calm_sends,
                     c.calm_bytes,
-                    c.calm_fulls
+                    c.calm_fulls,
+                    s.group_sent_bytes[0],
+                    s.group_raw_bytes[0],
+                    s.group_sent_bytes[1],
+                    s.group_raw_bytes[1]
                 )
             })
             .unwrap_or_default();

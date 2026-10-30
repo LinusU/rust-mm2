@@ -1301,6 +1301,10 @@ pub struct StateStats {
     pub sent_bytes: u64,
     /// Host: bytes the same groups would have taken as full states.
     pub raw_bytes: u64,
+    /// Host: `sent_bytes` / `raw_bytes` split by group, owner group (id 0)
+    /// first and every other group summed into the second slot.
+    pub group_sent_bytes: [u64; 2],
+    pub group_raw_bytes: [u64; 2],
     /// Client: states applied and acknowledged.
     pub applied: u64,
     /// Client: deltas refused because their base is not held.
@@ -1702,6 +1706,9 @@ impl HostLane {
                     }
                     stats.sent_bytes += payload.len() as u64;
                     stats.raw_bytes += bytes.len() as u64;
+                    let slot = usize::from(*group).min(1);
+                    stats.group_sent_bytes[slot] += payload.len() as u64;
+                    stats.group_raw_bytes[slot] += bytes.len() as u64;
                     encode_state_frame(*group, epoch, &payload)
                 })
                 .collect(),

@@ -1113,6 +1113,47 @@ Reading it:
   crowded case (many islands merging near a human) did not occur.
 
 
+### Measured with a driven client over the impairment proxy (NETPLAY-10D-5, #2227)
+
+Evidence level: **original-content validation**, loopback behind a seeded
+`UdpImpairProxy` (3 % loss, 2 % reorder, 20 ms each way, no rate cap).
+`mm2_app --test network net_island_retail -- --ignored` (retail `sf`,
+free-for-all, two lobby bots, host `--ram`, one client driving
+`--net-route slalom` through `--lane-via`, 7 200 ticks). The host record
+gained `gb=<owner sent B>/<owner raw B>/<world sent B>/<world raw B>`
+(`StateStats::group_{sent,raw}_bytes`, per group rather than per lane).
+
+| Reading | Value |
+|---|---|
+| groups sent | 262 full, 3 687 delta |
+| state bytes sent / as full states | 593 087 / 1 049 739 (57 %) |
+| owner group sent / full | 400 011 / 734 937 (54 %) |
+| world group sent / full | 193 076 / 314 802 (61 %) |
+| rows, owner / world | 5 585 / 2 406 |
+| owner-group flips / flaps in 120 s | 6 / 3 |
+| bytes per send, flip sends / calm sends | 323 (6 sends) / 217 (2 739 sends) |
+| host lane | cut 159 times to 12 288 B/s (ceiling 131 072) |
+| client own-row corrections | 2 380, gap p95 99 ms, max 1 538 ms |
+
+A second run with the client `--ram` as well (both humans closing on each
+other) gave 0 flips: the two humans stayed in one island throughout.
+
+Reading it:
+
+- **Driven client:** it crossed the island radius six times, but the max
+  correction gap of 1.5 s is far above the parked run's 116 ms. This run
+  cannot say whether the loss, the lane cuts or the flips caused it.
+- **Flaps appeared (3 of 6).** Few, but hysteresis is **not decided**
+  here: the gap above has to be attributed first.
+- **World group under loss:** Bulk keeps saving (61 % of full bytes), but
+  the lane controller read 3 % random loss as congestion and cut 159
+  times to a 12 KB/s floor, so what Bulk is worth under loss is
+  confounded by the cuts.
+- **Not reached:** the bots never came within 20 m of a human (nearest
+  about 130 m), so the many-island merge/split case did not occur; there
+  is no rate cap on the link.
+
+
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 
 Per-seat `input_ack` in `Snap` says how far the host has *finalized* a

@@ -16,6 +16,7 @@ mod net_drive;
 mod net_edge;
 mod net_focus_handoff;
 mod net_host;
+mod net_island_retail;
 mod net_join;
 mod net_lane_loss;
 mod net_lane_pace;
