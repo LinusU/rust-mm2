@@ -96,6 +96,8 @@ const RTT_BASELINE_WINDOW: Duration = Duration::from_secs(10);
 pub const INCREASE_STEP: u32 = 4 * 1024;
 /// ...and by a quarter of itself per interval while it is still below the
 /// last rate that was known to work (recovery after a capacity dip).
+const RECOVERY_NUM: u64 = 5;
+const RECOVERY_DEN: u64 = 4;
 /// Delivery-report loss is judged over this much recent time...
 const REPORT_WINDOW: Duration = Duration::from_secs(1);
 
@@ -106,9 +108,6 @@ const REPORT_MIN_SENT: u64 = 40;
 /// below it is left to the repair mechanisms; a drop-tail bottleneck
 /// loses far more.
 const REPORT_LOSS_PCT: u64 = 10;
-
-const RECOVERY_NUM: u64 = 5;
-const RECOVERY_DEN: u64 = 4;
 /// The controller only raises a rate it uses: the bytes sent over a clean
 /// interval must reach this share of it.
 const USED_NUM: u64 = 1;

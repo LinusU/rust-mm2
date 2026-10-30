@@ -208,8 +208,8 @@ pub enum LaneTag {
     /// host to client).
     WorldSignals = 8,
     /// The client's cumulative delivery report (client to host): the
-    /// newest host datagram sequence it saw and how many host datagrams it
-    /// accepted. Cumulative, so a lost report is covered by the next; the
+    /// newest host datagram sequence it saw and how many host sequences
+    /// slid out of its replay window unseen. Cumulative, so a lost report is covered by the next; the
     /// host compares it with what it sent to measure data-path loss
     /// independent of the ack path. A host that predates it counts the
     /// datagram as malformed and ignores it.
