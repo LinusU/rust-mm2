@@ -1370,6 +1370,12 @@ pub struct NetDriveReport {
     pub group_rows: [u64; 2],
     /// Membership churn of the owner group's other-seat rows (NETPLAY-10D-4).
     pub churn: GroupChurn,
+    /// Closest approach (m) of a bot to a human car over the run, and the
+    /// ticks a bot was inside a human's island reach (#2236):
+    /// whether the merge/split case was reached at all. `None` until a
+    /// snapshot held both a bot and a human.
+    pub bot_human_min_m: Option<f32>,
+    pub bot_human_near_ticks: u64,
     /// Per seat (the wire id), the host movement queue's wait of sent
     /// datagrams as read after the seat's latest snapshot: 95th
     /// percentile and maximum, in microseconds (NETPLAY-10 gate).
@@ -1587,6 +1593,36 @@ pub struct NetDriveReport {
     /// Cops & Robbers frames a client refused: malformed, or another
     /// generation's.
     pub cnr_refused: u64,
+}
+
+impl NetDriveReport {
+    /// Fold one tick's rows into the bot-to-human closest approach and the
+    /// ticks a bot was inside a human's island reach (the radius grown by
+    /// the closing speed, as [`ContactIslands`] merges them).
+    fn note_bot_proximity(&mut self, entries: &[SnapEntry]) {
+        let bot = crate::cnr_bots::NET_BOT_PLAYER_BASE;
+        let speed = |e: &SnapEntry| e.vel.iter().map(|c| c * c).sum::<f32>().sqrt();
+        let mut closest: Option<f32> = None;
+        let mut merged = false;
+        for b in entries.iter().filter(|e| e.player >= bot) {
+            for h in entries.iter().filter(|e| e.player < bot) {
+                let d = (0..3)
+                    .map(|k| (b.pos[k] - h.pos[k]).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                if d.is_finite() {
+                    closest = Some(closest.map_or(d, |c| c.min(d)));
+                    let reach =
+                        CONTACT_ISLAND_RADIUS_M + (speed(b) + speed(h)) * CONTACT_ISLAND_HORIZON_S;
+                    merged |= d <= reach;
+                }
+            }
+        }
+        if let Some(d) = closest {
+            self.bot_human_min_m = Some(self.bot_human_min_m.map_or(d, |m| m.min(d)));
+        }
+        self.bot_human_near_ticks += u64::from(merged);
+    }
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -3723,6 +3759,9 @@ pub fn publish_snapshots(
         // briefly while the wire id has already moved).
         race: race_row,
     };
+    if let Message::Snap { entries, .. } = &full {
+        report.note_bot_proximity(entries);
+    }
     // `Playing` frames go out as baselined states (deltas against what the
     // seat acknowledged, one baseline per logical group id: 0 owner, 1
     // world). Ready, Countdown and Results frames repeat a tick or carry the

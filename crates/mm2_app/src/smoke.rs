@@ -2034,6 +2034,16 @@ fn run_headless(
                 )
             })
             .unwrap_or_default();
+    // ` bnear=<closest bot-to-human m>/<ticks inside the island reach>`
+    // (#2236): whether a run reached the crowded merge/split case.
+    let net_detail = net_detail
+        + &world_ecs
+            .get_resource::<crate::netdrive::NetDriveReport>()
+            .and_then(|r| {
+                r.bot_human_min_m
+                    .map(|m| format!(" bnear={m:.0}/{}", r.bot_human_near_ticks))
+            })
+            .unwrap_or_default();
     // ` qwait=<seat>:<p95>/<max>,...` (host, microseconds) and
     // ` corr=<n>/<p95>/<max>` (client, ms): the NETPLAY-10 queue-wait and
     // usable-correction-gap readings a process-level run gates on.

@@ -347,6 +347,25 @@ pub fn plan_bots(
     plan_bots_avoiding(vfs, candidates, n, seed, &[human], sites)
 }
 
+/// Environment knob (metres): when set, bots are drawn only from lane
+/// poses within this distance of a human start, so a test can force the
+/// crowded merge/split case. Unset, placement is citywide as before.
+pub const BOTS_NEAR_ENV: &str = "MM2_BOTS_NEAR_HUMANS";
+
+/// Keep the candidates within `radius` of some human start (water flags
+/// kept as they were). Placement then still honours [`HUMAN_CLEARANCE`].
+pub fn candidates_near(
+    candidates: &[(BotSlot, bool)],
+    humans: &[Vec3],
+    radius: f32,
+) -> Vec<(BotSlot, bool)> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|(s, _)| humans.iter().any(|h| s.position.distance(*h) <= radius))
+        .collect()
+}
+
 /// [`plan_bots`] keeping clear of every start in `humans`.
 pub fn plan_bots_avoiding(
     vfs: &Vfs,

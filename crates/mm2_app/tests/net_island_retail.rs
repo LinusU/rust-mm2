@@ -25,6 +25,8 @@ const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 const SEED: u64 = 1291;
 /// The client leaves at this session tick (60 Hz): two minutes.
 const SNAP_TICK: u32 = 7200;
+/// Bots start within this many metres of a human start (#2236).
+const NEAR_M: u32 = 120;
 const BOUND: Duration = Duration::from_secs(600);
 
 fn cells(rec: &str, key: &str) -> Vec<u64> {
@@ -58,7 +60,10 @@ fn a_driven_client_behind_a_lossy_link_crosses_islands_on_retail_sf() {
         ]
         .map(String::from),
     );
-    let mut host = Proc::spawn(MM2_EXE, &args);
+    // Bots are drawn within 120 m of a human start, so they close on the
+    // human at once instead of starting about 130 m away (#2236).
+    let near = NEAR_M.to_string();
+    let mut host = Proc::spawn_env(MM2_EXE, &args, &[("MM2_BOTS_NEAR_HUMANS", &near)]);
     let listening = host.until("listening=");
     let addr: SocketAddr = field(&listening, "listening").parse().unwrap();
     let lane_port: u16 = field(&listening, "lane_port").parse().unwrap();
@@ -98,7 +103,7 @@ fn a_driven_client_behind_a_lossy_link_crosses_islands_on_retail_sf() {
     start_when_ready(&mut host, 1);
 
     let crec = client.until_within("smoke=headless-physics", BOUND);
-    assert!(client.wait().success(), "the client did not exit cleanly");
+    client.wait_success("the client", &crec);
     host.cmd("quit");
     let hrec = host.until_within("smoke=headless-physics", BOUND);
     eprintln!("host   {hrec}\nclient {crec}");
@@ -109,6 +114,9 @@ fn a_driven_client_behind_a_lossy_link_crosses_islands_on_retail_sf() {
     let gb = cells(&hrec, "gb");
     assert_eq!(gb[0] + gb[2], sent, "per-group bytes must sum to the total");
     assert_eq!(gb[1] + gb[3], raw, "{hrec}");
+    // The run only answers the crowded case if a bot reached a human.
+    let bnear = field(&hrec, "bnear");
+    eprintln!("bnear (closest m / ticks in island reach): {bnear}");
     let corr = cells(&crec, "corr");
     assert!(corr[0] > 0, "the driven client was never corrected: {crec}");
 }

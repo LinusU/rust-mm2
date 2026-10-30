@@ -187,8 +187,14 @@ impl Proc {
     /// caller's `RUST_LOG=error` shell would otherwise silence it —
     /// the same `env_remove` the `Command`-spawning suites already do.
     pub fn spawn(exe: &str, args: &[String]) -> Self {
+        Self::spawn_env(exe, args, &[])
+    }
+
+    /// [`Proc::spawn`] with extra environment variables on the child.
+    pub fn spawn_env(exe: &str, args: &[String], env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(exe)
             .args(args)
+            .envs(env.iter().copied())
             .env_remove("RUST_LOG")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -1713,6 +1713,14 @@ pub fn load_session_world(
                 // take (the host's and each roster seat's), since the
                 // remote cars appear after this boundary.
                 let humans = crate::netdrive::human_start_poses(&spawn, config.authority);
+                let candidates = match std::env::var(crate::cnr_bots::BOTS_NEAR_ENV)
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|r| r.is_finite() && *r > 0.0)
+                {
+                    Some(r) => crate::cnr_bots::candidates_near(&candidates, &humans, r),
+                    None => candidates,
+                };
                 crate::cnr_bots::plan_bots_avoiding(
                     &vfs.0,
                     &candidates,
