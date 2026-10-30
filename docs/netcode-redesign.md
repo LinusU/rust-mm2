@@ -1225,6 +1225,38 @@ Reading it:
   is no rate cap on the link.
 
 
+### Bots forced near the human (NETPLAY-10D-6, #2236)
+
+Evidence level: **original-content validation**, same run as above with
+the host started under `MM2_BOTS_NEAR_HUMANS=120` (bot starts drawn only
+from lane poses within 120 m of a human seat start; the 25 m clearance
+still applies) and a new host cell `bnear=<closest bot-to-human m>/<ticks
+a bot was inside a human's island reach>`. At 60 m the placement fails
+("only 0 of 2 bot starts found among 4 lane poses", all 4 inside the
+clearance); the host then logs the error and the match never starts, so the
+test hangs rather than failing fast (not fixed here).
+
+| Reading (3 runs, same seed) | Value |
+|---|---|
+| closest bot to human | 73 m (all runs) |
+| ticks a bot was inside a human's island reach | 0 |
+| owner-group flips / flaps in 120 s | 6 / 2, 10 / 0, 2 / 0 |
+| owner / world group rows | 6 009 / 1 699, 5 842 / 325, 4 693 / 171 |
+| client own-row corr= gap p95 / max | 132 / 1 499 ms, 165 / 1 448 ms, 285 / 1 914 ms |
+
+- **The merge case is still not reached.** The lane poses are lane
+  midpoints, so the nearest allowed start is 73 m and the bots then drive
+  their own routes away. The flips seen come from the 300 m world-range
+  criterion (a bot island within sight of a human joins the owner
+  group), not from the 20 m contact radius.
+- **Hysteresis: not decided.** 0-2 flaps per two minutes in these runs;
+  no evidence for it, none against a crowded case.
+- The corr= max of about 1.5 s is the same as the unforced run (1.5 s), so
+  bot distance is not what drives it; it stays unattributed (see above).
+- To reach the contact radius, the client's route must drive at a bot, or
+  the knob must offer non-midpoint start poses; filed as a follow-up.
+
+
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 
 Per-seat `input_ack` in `Snap` says how far the host has *finalized* a
