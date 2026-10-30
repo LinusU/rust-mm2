@@ -1413,6 +1413,7 @@ pub fn scripted_drive(
                     spatial.as_ref(),
                     &probe.aabbs,
                     &probe.props,
+                    &probe.nearby,
                     &colliders,
                     entity,
                     host,
@@ -1445,6 +1446,17 @@ pub struct WedgeProbe<'w, 's> {
             Option<&'static Name>,
         ),
     >,
+    nearby: Query<
+        'w,
+        's,
+        (
+            &'static Banger,
+            Option<&'static BangerFragment>,
+            Option<&'static Name>,
+            &'static GlobalTransform,
+            Has<Collider>,
+        ),
+    >,
     dumps: Local<'s, u32>,
 }
 
@@ -1458,6 +1470,10 @@ const WEDGE_DUMPS_MAX: u32 = 8;
 /// lists colliders.
 const WEDGE_REACH: f32 = 2.0;
 
+/// Metres from the car (or the host's copy of it) within which the wedge
+/// dump lists every prop, collider or not.
+const PROP_REACH: f32 = 8.0;
+
 /// One-shot diagnostic (#2231) for a seat that keeps escaping at one
 /// spot: what the car overlaps within [`WEDGE_REACH`], its velocity and
 /// wheel contacts, which side of the link this process is, and for a
@@ -1468,6 +1484,13 @@ fn dump_wedge(
     spatial: Option<&SpatialQuery>,
     aabbs: &Query<&ColliderAabb>,
     props: &Query<(&Banger, Option<&BangerFragment>, Option<&Name>)>,
+    nearby: &Query<(
+        &Banger,
+        Option<&BangerFragment>,
+        Option<&Name>,
+        &GlobalTransform,
+        Has<Collider>,
+    )>,
     colliders: &Query<&ColliderOf>,
     entity: Entity,
     side: &str,
@@ -1523,6 +1546,30 @@ fn dump_wedge(
         })
         .collect();
     let delta = host_copy.map(|(t, p, v)| (t, p, v, pos.distance(p)));
+    // Every prop within reach of this process's car or of the host's
+    // copy of it, whether or not it has a collider: the host and the
+    // client dumps of one wedge are compared line by line (#2242).
+    let centres = [Some(pos), host_copy.map(|(_, p, _)| p)];
+    let props_near: Vec<String> = nearby
+        .iter()
+        .filter(|(.., gt, _)| {
+            let at = gt.translation();
+            centres
+                .iter()
+                .flatten()
+                .any(|c| c.distance(at) <= PROP_REACH)
+        })
+        .map(|(banger, fragment, name, gt, has_collider)| {
+            format!(
+                "{:?} phase={:?} fragment={} collider={} at={:?}",
+                name.map(Name::as_str),
+                banger.phase,
+                fragment.is_some(),
+                has_collider,
+                gt.translation()
+            )
+        })
+        .collect();
     info!(
         target: "wedge",
         tick,
@@ -1535,6 +1582,7 @@ fn dump_wedge(
         wheels = ?wheels,
         overlaps = overlaps.len(),
         colliders = ?overlaps,
+        props_near = ?props_near,
         host_copy = ?delta,
         "wedge dump at a repeated bounded escape"
     );
