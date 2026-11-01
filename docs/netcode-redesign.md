@@ -1362,6 +1362,42 @@ Which signal cut the rate, from a temporary per-cut log of the trigger flags
   join-time burst behaviour of #2126.
 
 
+### Retransmits as a verdict: what each option does (NETPLAY-10D-9, #2245)
+
+Evidence level: synthetic integration plus original-content validation
+(`net_island_retail` as above, one run per row; runs are not
+bit-reproducible). `lane=` is final rate / ceiling / cuts; world group is
+the `gb=` world sent / raw bytes.
+
+| Variant | Final rate | Cuts | World sent / raw |
+|---|---|---|---|
+| main (every retransmit cuts) | 12 288 | 147-327 | 0.19-0.23 MB / 0.31-0.37 MB |
+| retransmit cuts only while rate > ceiling/4 | 12 288 | 99 | 114 208 / 177 741 |
+| retransmit cuts only while rate > ceiling/2 | 27 535 | 71 | 298 717 / 464 523 |
+| trigger removed (#2238 experiment) | 44 957 | 3 | 478 782 / 766 755 |
+
+- **Gating by rate does not fix it.** At ceiling/4 the retail run still ends
+  at the floor with 99 cuts: once retransmits have brought the rate down,
+  the other triggers (slow queue at the lower budget, expiry) carry it the
+  rest of the way. At ceiling/2 the run is better but the two tests below
+  fail.
+- **Only removing the trigger gives the #2238 result, and it breaks tests
+  that depend on it.** With it removed, `congest_sim_join_time_retransmit_burst_recovers_bulk`
+  (never cuts, so bulk is never off), `a_silent_ack_path_collapses_the_rate_under_heavy_demand`
+  (rate stays at the ceiling) and three `congest::tests` unit cases fail.
+- **A burst threshold (>= 3 retransmits in 1 s) passes the join burst but not
+  the silent-ack test**: the reliable channel's backoff keeps its retransmits
+  under 3 per second, which is the same rate as 3 % random loss.
+- **Why the silent-ack test needs retransmits:** `SeatState::ack_at` in
+  `rt.rs` is only ever initialised to `None`, so `ack_age` reaches the
+  controller as `None` in play and the `silent` trigger (`CONGESTED_ACK_AGE`)
+  never fires. A retransmit is the only evidence that the return path is dead.
+  Setting `ack_at` where datagram acknowledgements arrive would make `silent`
+  the signal for that case, and the retransmit trigger could then go.
+
+Nothing in the controller changed in this task.
+
+
 ## Remote controls on the wire (NETPLAY-05A-1, #1892)
 
 Per-seat `input_ack` in `Snap` says how far the host has *finalized* a
