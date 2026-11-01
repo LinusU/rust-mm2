@@ -2015,9 +2015,13 @@ fn flush(socket: &UdpSocket, to: SocketAddr, header: &Header, payload: &[u8], c:
         Counters::bump(&c.send_errors);
         return;
     };
-    match socket.send_to(&datagram, to) {
-        Ok(_) => Counters::bump(&c.sent),
-        Err(_) => Counters::bump(&c.send_errors),
+    // Counted before the write: once the datagram is on the wire the peer
+    // can receive it and a reader can sample the counter before this
+    // thread runs again, so counting afterwards under-reports by one.
+    Counters::bump(&c.sent);
+    if socket.send_to(&datagram, to).is_err() {
+        c.sent.fetch_sub(1, Ordering::Relaxed);
+        Counters::bump(&c.send_errors);
     }
 }
 
