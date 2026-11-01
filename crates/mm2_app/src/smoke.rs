@@ -1447,9 +1447,11 @@ fn run_headless(
         RunSource::Lobby(link) => {
             app.insert_resource(*link);
             add_lobby_client_systems(&mut app);
+            crate::lanepace::add_client_systems(&mut app);
         }
         RunSource::Host(link) => {
             crate::netremote::add_host_systems(&mut app);
+            crate::lanepace::add_host_systems(&mut app);
             app.add_systems(
                 FixedUpdate,
                 crate::netdrive::consume_seat_commands

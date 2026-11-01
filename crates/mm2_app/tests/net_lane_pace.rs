@@ -18,6 +18,8 @@ use mm2_net::{Client, Message, hello};
 use crate::net_app::{
     dev_cruise, host_and_link, host_app, host_link, hosted_playing, spin, until_wire,
 };
+use crate::net_drive::{host_args, join_args, listening_addr, start_when_ready};
+use crate::support::Proc;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -145,4 +147,42 @@ fn spin_bounded(app: &mut App, pred: impl Fn(&App) -> bool) {
         app.update();
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
+
+/// Two real `mm2` processes over loopback: the host prints a
+/// `role=host` record for the joined seat and the client a
+/// `role=client` one, each on its own stdout (the lines an owner pastes
+/// into the reachability report).
+#[test]
+fn two_mm2_processes_print_lane_pace_records() {
+    let install = tempfile::tempdir().unwrap();
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 20_000));
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 20_000));
+    start_when_ready(&mut host, 1);
+
+    let line = host.until("event=lane_pace role=host");
+    for field in [
+        "seat=",
+        "rate_kbit=",
+        "ceil_kbit=",
+        "share_kbit=",
+        "sent_kbit=",
+        "up_cap_kbit=",
+        "headroom_kbit=",
+        "wait_p95_ms=",
+        "age_ms=",
+        "adapt=",
+    ] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+    let line = client.until("event=lane_pace role=client");
+    for field in ["seat=", "tx_dps=", "rx_dps=", "accepted_dps="] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+    drop(client);
+    host.cmd("quit");
+    assert!(host.wait().success(), "host did not exit cleanly");
 }
