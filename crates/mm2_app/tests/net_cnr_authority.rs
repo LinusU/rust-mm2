@@ -38,13 +38,19 @@ use crate::net_drive::{cnr_cell, field, host_args, join_args, until_live};
 use crate::support::{self, Proc};
 
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
-/// A retail `sf` seed whose gold lies ~340 m from the host's parked seat 0
-/// (the roam origin, -1319,221) with neither the gold-to-hideout nor the
-/// gold-to-bank leg running near it, so the parked host car cannot knock
-/// the gold loose or pick it up. Seed 1291 puts the gold ~40 m from that
-/// car, and the host occasionally scored ("the parked host seat scored").
-/// A hosted session rejects `--spawn`, so the seed is the only lever.
-const SEED: u64 = 49;
+/// A retail `sf` seed whose gold, hideout and bank all lie on a street
+/// lane, with the gold ~600 m from the host's parked seat 0 (the roam
+/// origin, -1319,221) and neither the gold-to-hideout nor the
+/// gold-to-bank leg running within ~400 m of it, so the parked host car
+/// cannot knock the gold loose or pick it up (seed 1291 puts the gold
+/// ~40 m from that car, and the host occasionally scored "the parked
+/// host seat scored"). A hosted session rejects `--spawn`, so the seed
+/// is the only lever. The sites are on a lane because the clients are
+/// street-following bots (`docs/research/cnr.md`): seed 49 put the bank
+/// 55 m from any lane, behind a wall, and the carrier crept along that
+/// wall for the rest of the run (#2253). `the_seed_puts_every_site_on_a_lane`
+/// holds the property.
+const SEED: u64 = 213;
 const STEP: Duration = Duration::from_secs(60);
 const BOUND: Duration = Duration::from_secs(1200);
 
@@ -326,6 +332,47 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
                 "{name} {dir:?} saw no impairment: {s:?}"
             );
         }
+    }
+}
+
+/// The seed's three sites are all on a street lane, which a scripted
+/// street-following client needs to take and deliver the gold.
+#[test]
+fn the_seed_puts_every_site_on_a_lane() {
+    use mm2_app::cnr::CnrHost;
+    use mm2_app::cnr_bots::{load_graph, site_on_lane};
+    use mm2_content::cnr::{CnrContent, CnrSettings};
+
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    let graph = load_graph(&vfs, "sf").unwrap();
+    let host = CnrHost::from_content(
+        &CnrContent::load(&vfs, "sf"),
+        &CnrSettings::default(),
+        60,
+        1,
+        mm2_game::ObjectId {
+            generation: 1,
+            slot: 1,
+        },
+        SEED,
+        &[],
+    )
+    .unwrap();
+    let sites = host.game.sites();
+    for (name, p) in [
+        ("gold", sites.gold),
+        ("hideout", sites.hideout),
+        ("bank", sites.bank),
+    ] {
+        assert!(
+            site_on_lane(&graph, p.into()),
+            "seed {SEED}: the {name} site {p:?} is off every street lane"
+        );
     }
 }
 
