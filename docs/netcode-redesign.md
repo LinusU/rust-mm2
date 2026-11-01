@@ -1256,6 +1256,35 @@ test hangs rather than failing fast (not fixed here).
 - To reach the contact radius, the client's route must drive at a bot, or
   the knob must offer non-midpoint start poses; filed as a follow-up.
 
+### Reaching the 20 m merge (NETPLAY-10D-7b, #2239)
+
+Evidence level: **original-content validation**, the #2227 run again
+(`net_island_retail`, seed 1291, 3 % loss, rate controller free). With
+`MM2_BOTS_NEAR_HUMANS` set, placement now samples every lane at nine
+fractions (0.1-0.9, `NEAR_FRACTIONS`) instead of midpoints only, so
+starts exist between the 25 m human clearance and the knob radius. Unset,
+placement is the midpoint list as before. The test also fails at once with
+the host's reason when the roster "cannot be fielded", instead of idling
+to its 600 s bound.
+
+| Reading (1 run) | Value |
+|---|---|
+| closest bot to human | 2 m |
+| ticks a bot was inside a human's island reach (`bnear=`) | 163 |
+| owner-group flips / flaps (`flip=`) | 6 / 2 |
+| owner / world group rows (`grp=`) | 5 109 / 733 |
+| group bytes (`gb=`) | 383 340 / 663 486 / 63 451 / 99 138 |
+| client own-row `corr=` | 1 560 / 202 / 1 484 ms |
+
+- **The merge case is reached**: a bot spent 163 ticks inside a human's
+  island reach, and the run completed.
+- **Hysteresis: not added.** 2 flaps in two minutes with the contact case
+  exercised is not evidence of churn; one run only, and runs are not
+  bit-reproducible.
+- `corr=` max 1.48 s matches the free-rate runs of #2237, which
+  attributed that gap to lane rate cuts, not islands.
+
+
 ### Attributing the 1.5 s own-car correction gap (NETPLAY-10D-7, #2237)
 
 Evidence level: **original-content validation**, same test and seed as

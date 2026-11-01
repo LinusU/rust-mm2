@@ -185,12 +185,23 @@ pub struct PlannedBot {
 /// water, in graph order (deterministic). Position is on the lane,
 /// yaw faces its travel direction.
 pub fn lane_slots(graph: &NavGraph, water: Option<&CityWater>) -> Vec<(BotSlot, bool)> {
+    lane_slots_at(graph, water, &[0.5])
+}
+
+/// [`lane_slots`] sampling each lane at every fraction of its length in
+/// `fractions` (lane-major, then fraction order: deterministic).
+pub fn lane_slots_at(
+    graph: &NavGraph,
+    water: Option<&CityWater>,
+    fractions: &[f32],
+) -> Vec<(BotSlot, bool)> {
     graph
         .lanes()
         .iter()
         .filter(|l| l.id.kind == LaneKind::Vehicle && l.length >= MIN_LANE_LENGTH)
-        .filter_map(|l| {
-            let s = graph.sample_lane(l.id, l.length * 0.5)?;
+        .flat_map(|l| fractions.iter().map(move |f| (l, *f)))
+        .filter_map(|(l, f)| {
+            let s = graph.sample_lane(l.id, l.length * f)?;
             let position = Vec3::from(s.position);
             let tangent = Vec3::from(s.tangent);
             if !position.is_finite() || !tangent.is_finite() {
@@ -351,6 +362,18 @@ pub fn plan_bots(
 /// poses within this distance of a human start, so a test can force the
 /// crowded merge/split case. Unset, placement is citywide as before.
 pub const BOTS_NEAR_ENV: &str = "MM2_BOTS_NEAR_HUMANS";
+
+/// Lane fractions sampled when [`BOTS_NEAR_ENV`] is set: midpoints alone
+/// leave no start between the 25 m human clearance and the island reach.
+pub const NEAR_FRACTIONS: [f32; 9] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+
+/// The [`BOTS_NEAR_ENV`] radius, when set to a positive finite number.
+pub fn bots_near_radius() -> Option<f32> {
+    std::env::var(BOTS_NEAR_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|r| r.is_finite() && *r > 0.0)
+}
 
 /// Keep the candidates within `radius` of some human start (water flags
 /// kept as they were). Placement then still honours [`HUMAN_CLEARANCE`].

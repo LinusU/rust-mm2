@@ -882,8 +882,15 @@ pub fn load_session_world(
                         bot_candidates = Some(
                             crate::cnr_bots::load_graph(&vfs.0, stem)
                                 .map(|g| {
-                                    let slots =
-                                        crate::cnr_bots::lane_slots(&g, loaded.water.as_ref());
+                                    let slots = if crate::cnr_bots::bots_near_radius().is_some() {
+                                        crate::cnr_bots::lane_slots_at(
+                                            &g,
+                                            loaded.water.as_ref(),
+                                            &crate::cnr_bots::NEAR_FRACTIONS,
+                                        )
+                                    } else {
+                                        crate::cnr_bots::lane_slots(&g, loaded.water.as_ref())
+                                    };
                                     bot_graph = Some(std::sync::Arc::new(g));
                                     slots
                                 })
@@ -1713,11 +1720,7 @@ pub fn load_session_world(
                 // take (the host's and each roster seat's), since the
                 // remote cars appear after this boundary.
                 let humans = crate::netdrive::human_start_poses(&spawn, config.authority);
-                let candidates = match std::env::var(crate::cnr_bots::BOTS_NEAR_ENV)
-                    .ok()
-                    .and_then(|v| v.parse::<f32>().ok())
-                    .filter(|r| r.is_finite() && *r > 0.0)
-                {
+                let candidates = match crate::cnr_bots::bots_near_radius() {
                     Some(r) => crate::cnr_bots::candidates_near(&candidates, &humans, r),
                     None => candidates,
                 };

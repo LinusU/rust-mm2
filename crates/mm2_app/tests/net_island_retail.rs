@@ -106,6 +106,13 @@ fn a_driven_client_behind_a_lossy_link_crosses_islands_on_retail_sf() {
     );
     let client = Proc::spawn(MM2_EXE, &cargs);
     start_when_ready(&mut host, 1);
+    // A roster the city cannot field only logs an ERROR on the host and
+    // the run would idle to its bound: fail at once with the reason.
+    let early = host.stderr_containing("cannot be fielded", Duration::from_secs(5));
+    assert!(
+        !early.contains("cannot be fielded"),
+        "the host could not field the bots (try a smaller MM2_BOTS_NEAR_HUMANS spread or a larger radius):\n{early}"
+    );
 
     let crec = client.until_within("smoke=headless-physics", BOUND);
     client.wait_success("the client", &crec);
