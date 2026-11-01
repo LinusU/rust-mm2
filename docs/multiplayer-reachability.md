@@ -191,6 +191,7 @@ LAN rows L1-L7:
 Internet rows I1-I6:
 NAT/firewall behaviour observed (silent drop, refusal, prompt):
 Time to failure when blocked:
+Lane pace (host and client `event=lane_pace` lines, a few per run):
 Gaps / not run:
 ```
 
