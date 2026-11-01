@@ -98,7 +98,15 @@ fn start_reset_rematch_and_leave_apply_once_over_a_lossy_lane_between_processes(
     );
     let net = net_field(&rec);
     assert!(net.snaps_applied > 0 && net.inputs_sent > 0, "{rec}");
-    assert_eq!(net.requests_sent, 1, "the reset ask went out: {rec}");
+    // The ask repeats every `RESET_RETRY_TICKS` until the epoch snap
+    // comes back, and this lane drops both directions, so the count of
+    // wire asks is a floor and a bound, not an exact figure. The
+    // property is that the reset *applied* once.
+    assert!(
+        (1..mm2_app::netdrive::MAX_RESET_ASKS as u64).contains(&net.requests_sent),
+        "the reset ask went out, but not once per update: {rec}"
+    );
+    assert_eq!(net.resets, 1, "the reset applied exactly once: {rec}");
 
     // The relay held up its end: it really dropped and duplicated.
     for dir in [LinkDir::Up, LinkDir::Down] {
@@ -121,5 +129,9 @@ fn start_reset_rematch_and_leave_apply_once_over_a_lossy_lane_between_processes(
         host_net.requests_granted, 1,
         "the host granted the one reset it was asked for"
     );
-    assert_eq!(host_net.requests_dropped, 0);
+    // A repeat that crossed the grant is dropped (cooldown), never granted.
+    assert!(
+        host_net.requests_granted + host_net.requests_dropped <= net.requests_sent,
+        "the host answered no more asks than the client sent"
+    );
 }
