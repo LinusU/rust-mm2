@@ -1276,9 +1276,19 @@ Which signal cut the rate, from a temporary per-cut log of the trigger flags
   (61-62 %) with or without the cuts, so Bulk holds under loss. What the
   cuts change is how much world state gets through at all (about a fifth),
   not how well it compresses.
-- **Not decided here:** whether retransmits should stop being a verdict, or
-  count only above a rate. Filed as a follow-up, since it changes the
-  join-time burst behaviour of #2126.
+- **Decided in #2247: retransmits stop being a verdict.** `lost` is gone
+  from `PeerController::on_feedback`. `SeatState::ack_at` was never set, so
+  `Feedback::ack_age` was always `None` in play and the silent-ack verdict
+  (`CONGESTED_ACK_AGE`) could not fire either; the host now stamps it when a
+  `LaneTag::Ack` or `ReliableAck` arrives. The silent verdict only counts
+  while *movement* (snapshot groups and reliable data, the datagrams a peer
+  acknowledges) left within `CONGESTED_ACK_AGE`: bulk world frames are never
+  acknowledged, so a stale ack beside a bulk-only stream is no evidence.
+  Same run as above (`net_island_retail`, retail `sf`, 3 % random loss, 120 s)
+  after the change: `lane=56196/131072/3c`, three cuts, a final rate of
+  56 196 B/s (floor 12 288), and `gb=` third cell 512 228 B of world group
+  sent (0.19-0.23 MB with the cuts). Evidence level: original-content
+  validation, one run.
 
 
 ### Retransmits as a verdict: what each option does (NETPLAY-10D-9, #2245)
@@ -2872,6 +2882,8 @@ allowed, every admitted byte attributed to a seat, movement wait <= 100 ms.
 
 ### Bounded recovery after a join-time loss burst (#2126)
 
+(Retransmits were later dropped as a verdict, #2247; a join-time burst now
+reaches the controller as a silent ack path, which the sim below models.)
 A few reliable retransmits around join time (roster/Props catch-up) cut the
 rate 0.7 x each, and every cut doubled the clean wait before the next step up
 (up to 4 s). Two or three cuts put the rate under half the ceiling, so
@@ -2882,8 +2894,9 @@ rate is below the last one that worked (`last_good`), the wait is capped at
 `MAX_RECOVERY_INTERVAL` (500 ms). The back-off keeps spacing probes *above*
 `last_good`, which is what it exists for.
 
-`congest_sim_join_time_retransmit_burst_recovers_bulk`: three retransmits
-300 ms apart on an adequate link, then clean. Bulk is back 0.75 s after the
+`congest_sim_join_time_retransmit_burst_recovers_bulk`: (since #2247) acks
+lost for 1.1 s on an adequate link (three silent-ack cuts), then clean; it
+began as three retransmits 300 ms apart. Bulk is back 0.75 s after the
 burst and the rate is within 90% of the ceiling after 2.25 s; the test bounds
 both at 3 s.
 
