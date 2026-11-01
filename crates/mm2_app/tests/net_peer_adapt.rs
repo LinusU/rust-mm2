@@ -33,9 +33,12 @@ fn seat_snaps(app: &App, seat: u16) -> u64 {
         .unwrap_or(0)
 }
 
-/// A ~4 kB filler `Snap` group for a tick the session never reaches: the
-/// load that makes a capped uplink congest (the real snapshots of a
-/// two-seat cruise are far below the 12 kB/s floor of the cap).
+/// A ~4 kB filler `Snap` group for a tick the session has already passed
+/// (the client drops it as stale): the load that makes a capped uplink congest (the real snapshots of a
+/// two-seat cruise are far below the 12 kB/s floor of the cap). It must not
+/// be a tick *ahead* of the session: the client would then never apply, and
+/// so never acknowledge, a real snapshot again, and the silent-ack verdict
+/// (#2247) would rightly hold the seat at the floor.
 fn filler(generation: u64, tick: u64) -> Message {
     Message::Snap {
         generation,
@@ -74,7 +77,7 @@ fn run(app: &mut App, window: Duration, seats: [u16; 2], load: bool) -> ([u64; 2
     let mut next_load = 0u64;
     while started.elapsed() < window {
         if load && started.elapsed().as_millis() as u64 >= next_load * 16 {
-            let tick = (1 << 40) + FILLER_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tick = FILLER_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = ctl.send_snap_groups_prio(
                 seats[0],
                 generation,

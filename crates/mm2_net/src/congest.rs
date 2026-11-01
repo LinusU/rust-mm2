@@ -363,7 +363,6 @@ impl PeerController {
 
     /// Fold in the sender's counters at `now` and return the new rate.
     pub fn on_feedback(&mut self, fb: Feedback, now: Instant) -> u32 {
-        let lost = fb.retransmits > self.seen.retransmits;
         // Expiry and queue age at the floor are the rate's own doing: the
         // queue is behind a budget the controller set, with nothing left to
         // cut. Counting them would hold `clean_since` back for ever and the
@@ -380,7 +379,7 @@ impl PeerController {
         self.interval_sent += fb.wire_sent.saturating_sub(self.seen.wire_sent);
         self.seen = fb;
 
-        if lost || expired || slow_queue || silent || skipped || delayed || data_loss {
+        if expired || slow_queue || silent || skipped || delayed || data_loss {
             self.clean_since = now;
             let held = self
                 .last_decrease
@@ -572,13 +571,16 @@ impl Quantiles {
 mod tests {
     use super::*;
 
-    fn fb(retx: u64, expired: u64, sent: u64, age_ms: u64) -> Feedback {
+    /// Ack age (ms) that counts as the ack path gone silent.
+    const LOSS: u64 = CONGESTED_ACK_AGE.as_millis() as u64;
+
+    /// `ack_ms` 0 is no ack evidence; [`LOSS`] is a silent ack path.
+    fn fb(ack_ms: u64, expired: u64, sent: u64, age_ms: u64) -> Feedback {
         Feedback {
-            retransmits: retx,
             expired,
             wire_sent: sent,
             queue_age: Duration::from_millis(age_ms),
-            ack_age: None,
+            ack_age: (ack_ms > 0).then(|| Duration::from_millis(ack_ms)),
             rtt: None,
             skipped: 0,
             ..Feedback::default()
@@ -652,16 +654,16 @@ mod tests {
     fn congestion_cuts_once_per_hold_and_floors() {
         let t0 = Instant::now();
         let mut c = PeerController::new(100_000, t0);
-        assert_eq!(c.on_feedback(fb(1, 0, 0, 0), t0), 70_000);
+        assert_eq!(c.on_feedback(fb(LOSS, 0, 0, 0), t0), 70_000);
         // More evidence inside the hold is the same congestion event.
         let t1 = t0 + Duration::from_millis(100);
-        assert_eq!(c.on_feedback(fb(2, 0, 0, 0), t1), 70_000);
+        assert_eq!(c.on_feedback(fb(LOSS, 0, 0, 0), t1), 70_000);
         let t2 = t0 + DECREASE_HOLD;
-        assert_eq!(c.on_feedback(fb(3, 0, 0, 0), t2), 49_000);
+        assert_eq!(c.on_feedback(fb(LOSS, 0, 0, 0), t2), 49_000);
         let mut t = t2;
-        for n in 4..60 {
+        for _ in 4..60 {
             t += DECREASE_HOLD;
-            c.on_feedback(fb(n, 0, 0, 0), t);
+            c.on_feedback(fb(LOSS, 0, 0, 0), t);
         }
         assert_eq!(c.rate(), MIN_PEER_BYTES_PER_SEC);
         assert_eq!(c.adapt().snapshot_divisor, 3);
@@ -671,14 +673,13 @@ mod tests {
     fn rate_rises_only_when_clean_and_used_and_never_past_the_ceiling() {
         let t0 = Instant::now();
         let mut c = PeerController::new(100_000, t0);
-        c.on_feedback(fb(1, 0, 0, 0), t0);
+        c.on_feedback(fb(LOSS, 0, 0, 0), t0);
         assert_eq!(c.rate(), 70_000);
         // Clean but idle: the rate is not used, so it is not raised.
         let mut t = t0;
-        let mut retx = 1;
         for _ in 0..8 {
             t += INCREASE_INTERVAL;
-            c.on_feedback(fb(retx, 0, 0, 0), t);
+            c.on_feedback(fb(0, 0, 0, 0), t);
         }
         assert_eq!(c.rate(), 70_000, "an unused rate is not probed upward");
         // Clean and used: it recovers towards the last good rate quickly,
@@ -688,13 +689,12 @@ mod tests {
         for _ in 0..40 {
             t += INCREASE_INTERVAL;
             sent += u64::from(c.rate()) / 4 + 1;
-            c.on_feedback(fb(retx, 0, sent, 0), t);
+            c.on_feedback(fb(0, 0, sent, 0), t);
             assert!(c.rate() >= prev);
             prev = c.rate();
         }
         assert_eq!(c.rate(), 100_000);
-        retx += 1;
-        c.on_feedback(fb(retx, 0, sent, 0), t + INCREASE_INTERVAL);
+        c.on_feedback(fb(LOSS, 0, sent, 0), t + INCREASE_INTERVAL);
         assert!(c.rate() < 100_000);
     }
 
@@ -827,9 +827,9 @@ mod tests {
         let mut now = t0;
         let mut expired = 0;
         // Cut to the floor by genuine loss.
-        for i in 1..=40u64 {
+        for _ in 1..=40u64 {
             now += Duration::from_millis(250);
-            c.on_feedback(fb(i, 0, 0, 0), now);
+            c.on_feedback(fb(LOSS, 0, 0, 0), now);
         }
         assert_eq!(c.rate(), MIN_PEER_BYTES_PER_SEC);
         // The loss is over, but the throttled queue expires every report.
@@ -837,7 +837,7 @@ mod tests {
         for _ in 0..400 {
             now += Duration::from_millis(250);
             expired += 3;
-            probed |= c.on_feedback(fb(40, expired, 0, 100), now) > MIN_PEER_BYTES_PER_SEC;
+            probed |= c.on_feedback(fb(0, expired, 0, 100), now) > MIN_PEER_BYTES_PER_SEC;
         }
         assert!(probed, "rate stuck at the floor");
     }

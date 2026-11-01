@@ -50,6 +50,8 @@ struct Peer {
     last_ack: Option<Duration>,
     retx: VecDeque<Duration>,
     retransmits: u64,
+    /// Acks arriving before this virtual time are lost on the way back.
+    ack_blackout_until: Duration,
     link_drops: u64,
     delivered: u64,
     /// Queue plus link age of delivered movement, microseconds.
@@ -89,6 +91,7 @@ impl Sim {
                 last_ack: None,
                 retx: VecDeque::new(),
                 retransmits: 0,
+                ack_blackout_until: Duration::ZERO,
                 link_drops: 0,
                 delivered: 0,
                 state_age: Quantiles::new(1 << 16),
@@ -193,6 +196,9 @@ impl Sim {
         for p in &mut self.peers {
             while p.acks.front().is_some_and(|(at, _)| *at <= self.now) {
                 let (at, tick) = p.acks.pop_front().unwrap();
+                if at < p.ack_blackout_until {
+                    continue;
+                }
                 p.out.on_ack(tick, self.base + at);
                 p.last_ack = Some(at);
             }
@@ -613,8 +619,9 @@ fn congest_sim_bulk_fragments_leave_multi_fragment_movement_its_rate() {
     }
 }
 
-/// A join-time burst of reliable retransmits on an adequate link (#2126):
-/// the roster/Props catch-up is lost a few times as the client connects,
+/// A join-time burst of lost acks on an adequate link (#2126): the client's
+/// acknowledgements are lost for a spell as it connects, so the ack path
+/// reads as silent (a reliable retransmit alone is no verdict, #2247),
 /// which cuts the rate below half the ceiling and switches bulk off. Once
 /// the link is clean the controller must be back at bulk and near the
 /// ceiling within `JOIN_BURST_RECOVERY`.
@@ -622,11 +629,10 @@ fn congest_sim_bulk_fragments_leave_multi_fragment_movement_its_rate() {
 fn congest_sim_join_time_retransmit_burst_recovers_bulk() {
     let mut sim = Sim::new(1, 40 * MBIT, f64::from(10 * MBIT));
     sim.run(Duration::from_secs(1));
-    // Retransmits at 0.0, 0.3 and 0.6 s into the burst: three cuts.
-    for _ in 0..3 {
-        sim.peers[0].retransmits += 1;
-        sim.run(Duration::from_millis(300));
-    }
+    // No ack arrives for 1.1 s: the verdict fires from 0.5 s on, three
+    // cuts, one per hold interval.
+    sim.peers[0].ack_blackout_until = sim.now + Duration::from_millis(1100);
+    sim.run(Duration::from_millis(1100));
     let burst_end = sim.now;
     let s = sim.peers[0].out.pace_stats_at(sim.at(sim.now));
     println!("after burst: {s:?}");

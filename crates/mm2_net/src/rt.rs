@@ -860,6 +860,9 @@ pub(crate) struct PaceState {
     wire_sent: u64,
     /// When something was last sent, for the silent-peer test.
     last_sent: Option<Instant>,
+    /// When movement last left (snapshot groups and reliable data, the
+    /// datagrams the peer acknowledges; bulk and probes are not).
+    last_movement_sent: Option<Instant>,
     pub(crate) movement_waits: Quantiles,
     /// Snapshot ticks queued and not yet acknowledged, oldest first.
     pub(crate) ticks: VecDeque<(u64, Instant)>,
@@ -925,6 +928,7 @@ impl SeatOut {
                 max_debt: 0,
                 wire_sent: 0,
                 last_sent: None,
+                last_movement_sent: None,
                 movement_waits: Quantiles::new(WAIT_SAMPLES),
                 ticks: VecDeque::new(),
                 rtt: None,
@@ -1086,6 +1090,7 @@ impl SeatOut {
             pace.movement_sent += 1;
             pace.wire_sent += wire_bytes(item.payload.len()) as u64;
             pace.last_sent = Some(now);
+            pace.last_movement_sent = Some(now);
             pace.movement_waits.add(wait.as_micros() as u64);
             let debt = (-pace.budget.credit(now)).max(0) as u64;
             pace.max_debt = pace.max_debt.max(debt);
@@ -1249,10 +1254,11 @@ impl SeatOut {
     pub(crate) fn update_control(&self, now: Instant, retransmits: u64, ack_age: Option<Duration>) {
         let mv = self.queue.stats_at(now);
         let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
-        // An ack that is merely quiet because nothing was sent is no
-        // evidence: only count it while datagrams flow.
+        // An ack that is merely quiet because nothing was sent for the
+        // peer to acknowledge is no evidence: only count it while movement
+        // flows (bulk world frames are never acknowledged).
         let flowing = pace
-            .last_sent
+            .last_movement_sent
             .is_some_and(|t| now.saturating_duration_since(t) <= CONGESTED_ACK_AGE);
         let fb = Feedback {
             retransmits,
@@ -1376,7 +1382,7 @@ pub(crate) struct LaneSeat {
     out: Arc<SeatOut>,
     /// The newest acknowledgement per logical snapshot group.
     acks: [Option<LaneAck>; MAX_GROUPS],
-    /// When an `acks` entry last advanced.
+    /// When the peer's newest datagram or reliable acknowledgement arrived.
     ack_at: Option<Instant>,
     /// The seat's baselines, one sender per logical group. Born with the
     /// lane seat, so a client that rejoins under the same id starts from
@@ -1592,6 +1598,7 @@ fn ingest(
         LaneTag::ReliableAck => match decode_rel_ack(payload) {
             Some((cum, mask)) => {
                 seat.rel.sender.on_ack(cum, mask);
+                seat.ack_at = Some(Instant::now());
                 Verdict::Accepted
             }
             None => Verdict::Dropped(Refuse::Malformed),
@@ -1605,6 +1612,9 @@ fn ingest(
         },
         LaneTag::Ack => match decode_ack(payload) {
             Some((epoch, group, tick)) => {
+                // Any authenticated ack proves the return path is alive,
+                // newer or not: the silent-ack verdict reads this clock.
+                seat.ack_at = Some(Instant::now());
                 let slot = &mut seat.acks[usize::from(group)];
                 let newer = slot.is_none_or(|a| a.generation != h.generation || a.tick < tick);
                 if newer {
