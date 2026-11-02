@@ -1026,3 +1026,98 @@ pub fn settle_bangers(
         );
     }
 }
+
+/// Wake a settled break fragment a car is pressing on (`Settled` →
+/// `Active`; implementation choice under UNK-22, docs/research/banger.md).
+///
+/// Settling freezes a fragment where it lies, and a fragment can lie in
+/// a pose a car then high-centres on — wheels in the air, chassis on a
+/// static piece nothing can push (#2265). Retail has no timed despawn
+/// to clear it, so the fragment is made a live body again instead: it
+/// is a fragment (never a placement) and a non-banger dynamic body
+/// touches it with a nonzero normal impulse, i.e. the solver is
+/// already loading it. No speed or time threshold is involved — a car
+/// merely resting against the fragment without load does not wake it,
+/// and one that drives over it wakes it exactly as the unbroken
+/// prop would have reacted. It claims a pool slot (reclaiming the
+/// oldest active as usual) and emits one `BangerStateChanged`; a
+/// full pool with nothing reclaimable leaves it settled.
+// Bevy system params: the contact graph, the body queries and the pool
+// are each a separate borrow.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn wake_settled_fragments(
+    session: Res<Session>,
+    pool: Res<BangerPool>,
+    collisions: Collisions,
+    mut bangers: Query<BangerMut>,
+    fragments: Query<(), With<BangerFragment>>,
+    colliders: Query<&ColliderOf>,
+    bodies: Query<&RigidBody, Without<Banger>>,
+    mut writer: MessageWriter<BangerStateChanged>,
+    mut commands: Commands,
+) {
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let tick = session.tick();
+    let generation = session.generation();
+    let mut woken: Vec<Entity> = bangers
+        .iter()
+        .filter(|(e, _, b, _, _, _, _)| b.phase == BangerPhase::Settled && fragments.contains(*e))
+        .filter(|(e, ..)| {
+            collisions.collisions_with(*e).any(|pair| {
+                let other = if pair.collider1 == *e {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                };
+                let body = colliders.get(other).map_or(other, |c| c.body);
+                bodies.get(body).is_ok_and(|b| b.is_dynamic())
+                    && pair
+                        .manifolds
+                        .iter()
+                        .flat_map(|m| m.points.iter())
+                        .any(|p| p.normal_impulse > 0.0)
+            })
+        })
+        .map(|(e, ..)| e)
+        .collect();
+    if woken.is_empty() {
+        return;
+    }
+    woken.sort();
+    let mut occupied = bangers
+        .iter()
+        .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
+        .count();
+    for entity in woken {
+        if !claim_slot(
+            &mut occupied,
+            tick,
+            generation,
+            &pool,
+            &mut bangers,
+            &mut writer,
+            &mut commands,
+        ) {
+            break;
+        }
+        let Ok((_, identity, mut banger, ..)) = bangers.get_mut(entity) else {
+            occupied -= 1;
+            continue;
+        };
+        banger.phase = BangerPhase::Active;
+        banger.activated = Some(tick);
+        commands
+            .entity(entity)
+            .insert((RigidBody::Dynamic, SleepTimer(0.0)))
+            .remove::<Sleeping>();
+        writer.write(BangerStateChanged {
+            object: identity.0,
+            generation,
+            tick,
+            phase: BangerPhase::Active,
+            cause: BangerCause::Disturbed,
+        });
+    }
+}

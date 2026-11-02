@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::banger::{
     BangerPieces, FragmentPiece, activate_bangers, banger_bundle, settle_bangers,
+    wake_settled_fragments,
 };
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
@@ -84,7 +85,10 @@ fn test_app_full(authority: SessionAuthority, pool: usize, vehicles: bool) -> Ap
         .add_message::<BangerStateChanged>()
         .insert_resource(BangerPool { max_active: pool })
         .add_systems(FixedUpdate, advance_session_tick)
-        .add_systems(FixedLast, (activate_bangers, settle_bangers).chain());
+        .add_systems(
+            FixedLast,
+            (activate_bangers, settle_bangers, wake_settled_fragments).chain(),
+        );
     if vehicles {
         app.add_plugins(VehiclePlugin);
     }
@@ -268,6 +272,64 @@ fn a_sleeping_fragment_does_not_settle_around_a_body_inside_it() {
     assert!(
         events.iter().any(|e| e.phase == BangerPhase::Settled),
         "once the body is gone the fragment settles: {events:?}"
+    );
+}
+
+/// Stamp a settled (static) cube standing on the ground, tagged as a
+/// break fragment when `fragment` is set.
+fn spawn_settled(app: &mut App, pos: Vec3, fragment: bool) -> Entity {
+    let (entity, _) = spawn_banger(app, pos, banger_def("frag", 0.0));
+    let mut e = app.world_mut().entity_mut(entity);
+    e.remove::<Sensor>().insert((
+        RigidBody::Static,
+        CollisionLayers::default(),
+        Banger {
+            phase: BangerPhase::Settled,
+            ..Banger::new(banger_def("frag", 0.0))
+        },
+    ));
+    if fragment {
+        e.insert(BangerFragment {
+            parent: Entity::PLACEHOLDER,
+            index: 0,
+        });
+    }
+    entity
+}
+
+#[test]
+fn a_car_pressing_a_settled_fragment_wakes_it_and_it_moves() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let fragment = spawn_settled(&mut app, Vec3::new(0.0, 0.25, 0.0), true);
+    let placement = spawn_settled(&mut app, Vec3::new(20.0, 0.25, 0.0), false);
+    // Nothing touches either: they stay settled.
+    assert!(run(&mut app, FRAMES_PER_SECOND).is_empty());
+    // A heavy body comes down on the fragment's edge and on the
+    // placement's, loading both.
+    spawn_striker(&mut app, Vec3::new(0.4, 1.0, 0.0), Vec3::ZERO);
+    spawn_striker(&mut app, Vec3::new(20.4, 1.0, 0.0), Vec3::ZERO);
+    let events = run(&mut app, FRAMES_PER_SECOND * 2);
+    let woke: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Active && e.cause == BangerCause::Disturbed)
+        .collect();
+    assert_eq!(woke.len(), 1, "exactly the fragment wakes: {events:?}");
+    let b = app.world().get::<Banger>(fragment).unwrap();
+    assert_eq!(b.phase, BangerPhase::Active);
+    assert!(b.activated.is_some());
+    assert_eq!(
+        *app.world().get::<RigidBody>(fragment).unwrap(),
+        RigidBody::Dynamic
+    );
+    let moved = app.world().get::<Position>(fragment).unwrap().0;
+    assert!(
+        moved.distance(Vec3::new(0.0, 0.25, 0.0)) > 1e-3,
+        "the woken fragment is pushed: {moved:?}"
+    );
+    assert_eq!(
+        app.world().get::<Banger>(placement).unwrap().phase,
+        BangerPhase::Settled,
+        "a placement is never woken"
     );
 }
 

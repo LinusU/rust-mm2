@@ -674,6 +674,7 @@ impl DrivingEnv {
                 crate::drawbridge::drive_drawbridges,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
+                crate::banger::wake_settled_fragments,
             )
                 .chain(),
         );

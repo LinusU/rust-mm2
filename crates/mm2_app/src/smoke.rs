@@ -1096,6 +1096,7 @@ fn run_headless(
                 crate::recovery::resolve_recovery,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
+                crate::banger::wake_settled_fragments,
                 contracts::publish_vehicle_telemetry,
                 race::reanchor_teleported_participants,
                 // The countdown releases in `advance_race`; the lesson

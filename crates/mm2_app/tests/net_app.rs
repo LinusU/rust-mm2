@@ -12670,6 +12670,219 @@ fn the_prop_phases_converge_through_each_impairment_cell() {
     }
 }
 
+/// A settled break fragment a car pressed on wakes on the authority
+/// (`Settled → Active`, #2265): the client takes the newer `Active`
+/// row, and a late `Settled` row from before the wake (older frame
+/// tick) is dropped as stale instead of freezing the fragment again.
+#[test]
+fn a_client_takes_a_fragment_waking_and_ignores_a_stale_settled_row() {
+    use avian3d::prelude::RigidBody;
+    use mm2_app::worldprops::{PROP_ACTIVE, PROP_BROKEN, PROP_SETTLED};
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, mut app, generation) = playing_client(install.path());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let placement = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(20.0, 0.0, 0.0), 1);
+    app.update();
+    let landed = |a: &App| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .landed()
+    };
+    let fragment_of = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &mm2_game::BangerFragment)>();
+        q.iter(app.world())
+            .filter(|(_, f)| f.parent == placement)
+            .map(|(e, _)| e)
+            .collect::<Vec<_>>()
+    };
+    let send = |app: &mut App, tick: u64, rows: Vec<mm2_net::SnapProp>, want: u64| {
+        host.ctl()
+            .broadcast(&props_frame(local_table(app), generation, tick, rows))
+            .unwrap();
+        spin(app, |a| {
+            landed(a) >= want
+                || a.world()
+                    .resource::<netdrive::RemoteSnaps>()
+                    .props()
+                    .stale()
+                    >= want
+        });
+        app.update();
+    };
+    send(
+        &mut app,
+        5,
+        vec![prop_row(0, 0, PROP_ACTIVE, [20.0, 2.0, 0.0])],
+        1,
+    );
+    send(
+        &mut app,
+        6,
+        vec![
+            prop_row(0, 0, PROP_SETTLED, [21.0, 0.0, 0.0]),
+            prop_row(0, mm2_net::SNAP_NO_FRAGMENT, PROP_BROKEN, [20.0, 0.0, 0.0]),
+        ],
+        3,
+    );
+    let piece = fragment_of(&mut app)[0];
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Settled,
+            Some(RigidBody::Static),
+            Vec3::new(21.0, 0.0, 0.0)
+        )
+    );
+
+    // The authority woke it: Active again, driven by the wire.
+    send(
+        &mut app,
+        20,
+        vec![prop_row(0, 0, PROP_ACTIVE, [21.5, 0.1, 0.0])],
+        4,
+    );
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Active,
+            Some(RigidBody::Kinematic),
+            Vec3::new(21.5, 0.1, 0.0)
+        )
+    );
+
+    // A Settled row from before the wake arrives late.
+    let stale = app
+        .world()
+        .resource::<netdrive::RemoteSnaps>()
+        .props()
+        .stale();
+    send(
+        &mut app,
+        12,
+        vec![prop_row(0, 0, PROP_SETTLED, [21.0, 0.0, 0.0])],
+        stale + 1,
+    );
+    assert_eq!(prop_state(&app, piece).0, BangerPhase::Active);
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .stale(),
+        stale + 1
+    );
+
+    // Its real rest follows and wins.
+    send(
+        &mut app,
+        30,
+        vec![prop_row(0, 0, PROP_SETTLED, [22.0, 0.0, 0.0])],
+        5,
+    );
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Settled,
+            Some(RigidBody::Static),
+            Vec3::new(22.0, 0.0, 0.0)
+        )
+    );
+    host.shutdown();
+}
+
+/// #2265 under the seeded impairment matrix: a break fragment cycles
+/// Active → Settled → Active → Settled on the host while the lane
+/// misbehaves, and once it is clean the client holds the host's final
+/// phase and pose — a late `Settled` row never wins over the newer
+/// `Active` one, whatever order or loss the cell delivers.
+#[test]
+fn a_fragment_wake_cycle_converges_through_each_impairment_cell() {
+    use mm2_game::BangerPhase;
+
+    for (index, (name, impair)) in support::impair_cells().into_iter().enumerate() {
+        let (proxy, mut host, mut client) = impaired_pair(name, 200 + index as u64);
+        let host_place = stamp_prop(&mut host, BangerPhase::Broken, Vec3::new(10.0, 0.0, 0.0), 1);
+        let client_place = stamp_prop(
+            &mut client,
+            BangerPhase::Dormant,
+            Vec3::new(10.0, 0.0, 0.0),
+            1,
+        );
+        let host_piece = host
+            .world_mut()
+            .spawn((
+                mm2_game::BangerFragment {
+                    parent: host_place,
+                    index: 0,
+                },
+                {
+                    let mut b = mm2_game::Banger::new(prop_def("piece"));
+                    b.phase = BangerPhase::Settled;
+                    b
+                },
+                avian3d::prelude::Position(Vec3::new(11.0, 0.0, 0.0)),
+                avian3d::prelude::Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        let set_host = |host: &mut App, phase: BangerPhase, pos: Vec3| {
+            let world = host.world_mut();
+            world.get_mut::<mm2_game::Banger>(host_piece).unwrap().phase = phase;
+            world
+                .get_mut::<avian3d::prelude::Position>(host_piece)
+                .unwrap()
+                .0 = pos;
+        };
+        proxy.set(LinkDir::Down, impair);
+        for step in 0..120 {
+            match step {
+                20 => set_host(&mut host, BangerPhase::Active, Vec3::new(11.5, 0.1, 0.0)),
+                50 => set_host(&mut host, BangerPhase::Settled, Vec3::new(12.0, 0.0, 0.0)),
+                70 => set_host(&mut host, BangerPhase::Active, Vec3::new(12.5, 0.1, 0.0)),
+                100 => set_host(&mut host, BangerPhase::Settled, Vec3::new(13.0, 0.0, 0.0)),
+                _ => {}
+            }
+            host.update();
+            client.update();
+            thread::sleep(Duration::from_millis(4));
+        }
+        let down = proxy.stats(LinkDir::Down);
+        assert_recipe_fired(name, impair, down);
+        proxy.set(LinkDir::Down, Impair::default());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            host.update();
+            client.update();
+            let mut q = client
+                .world_mut()
+                .query::<(Entity, &mm2_game::BangerFragment)>();
+            let piece = q
+                .iter(client.world())
+                .find(|(_, f)| f.parent == client_place)
+                .map(|(e, _)| e);
+            if let Some(piece) = piece {
+                let (phase, _, pos) = prop_state(&client, piece);
+                if phase == BangerPhase::Settled && pos == Vec3::new(13.0, 0.0, 0.0) {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell {name}: the client never reached the fragment's final rest"
+            );
+            thread::sleep(Duration::from_millis(4));
+        }
+        client.world_mut().resource_mut::<LobbyLink>().leave();
+    }
+}
+
 /// F26-AC01/AC03 (world clock, v20) under impairment: the host's clock
 /// climbs one publish cadence per update through every cell of the
 /// shared matrix while the client consumes the production

@@ -71,7 +71,8 @@ pub enum BangerPhase {
     Active,
     /// Came to rest (or had its pool slot reclaimed): static again at
     /// its new pose, the R4 `dgHitBangerInstance` state. Terminal for
-    /// the session.
+    /// the session, except that a break fragment a car presses on
+    /// wakes back to `Active` (implementation choice, UNK-22).
     Settled,
     /// Shattered into its authored `BREAK<NN>` fragment chunks at
     /// activation: the placement's collider and unified mesh are gone,
@@ -279,6 +280,10 @@ pub enum BangerCause {
     /// The active-pool bound reclaimed this prop's slot for a newer
     /// activation.
     Reclaimed,
+    /// A settled break fragment was woken because a non-banger dynamic
+    /// body (a car) was pressing on it (UNK-22 implementation choice,
+    /// docs/research/banger.md).
+    Disturbed,
 }
 
 /// One banger lifecycle transition — the semantic stream

@@ -1983,6 +1983,7 @@ fn main() {
             // solver's edge stream.
             banger::activate_bangers,
             banger::settle_bangers,
+            banger::wake_settled_fragments,
             contracts::publish_vehicle_telemetry,
             // Teleport re-anchoring must precede the race driver so a
             // reset never sweeps a checkpoint (AC02).

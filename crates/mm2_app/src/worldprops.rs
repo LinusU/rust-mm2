@@ -27,9 +27,14 @@
 //!   wire (the predicted car still collides with it), `Settled` makes
 //!   it a static collider at the row's pose, `Broken` removes the
 //!   unified collider and mesh, and a fragment row spawns the piece
-//!   from the placement's own authored `BangerPieces`. Phases only move
-//!   forward (`Dormant → Active → Settled`, or `→ Broken`), so a
-//!   reordered `Active` row cannot un-settle a prop.
+//!   from the placement's own authored `BangerPieces`. Phases move
+//!   forward (`Dormant → Active → Settled`, or `→ Broken`); the one way
+//!   back is a settled *fragment* the authority woke because a car was
+//!   pressing on it (`Settled → Active`). Ordering is the per-prop
+//!   latest-wins stamp of [`PropStage`] (the frame's generation and
+//!   tick, no wire change), so a late `Settled` row cannot overwrite a
+//!   newer `Active` one and a reordered `Active` row cannot un-settle
+//!   a prop that settled after it.
 //!
 //! - **World agreement.** An ordinal means the same prop on two peers
 //!   only if both stamped the same placements in the same order; a model
@@ -1014,7 +1019,7 @@ fn apply_row(
 }
 
 /// Move one local body to the replicated `phase`/pose. Phases only move
-/// forward: a row older than the body's state resolves (it named a real
+/// forward, except a settled fragment waking `Active` again: a row older than the body's state resolves (it named a real
 /// body) without changing it. `when` is the session tick and the session
 /// clock the row lands at; an active body's pose is blended
 /// ([`PropLerp`]) rather than snapped.
@@ -1037,9 +1042,28 @@ fn apply_body(
     let current = banger.phase;
     match (current, phase) {
         // Terminal states do not regress.
-        (BangerPhase::Broken, _)
-        | (BangerPhase::Settled, BangerPhase::Active | BangerPhase::Broken) => {
+        (BangerPhase::Broken, _) | (BangerPhase::Settled, BangerPhase::Broken) => {
             return true;
+        }
+        // The authority woke a settled fragment a car was pressing on
+        // (`BangerCause::Disturbed`). Rows are ordered per prop by the
+        // frame's (generation, tick) in `PropStage`, so a late Settled
+        // row never reaches here after a newer Active one, and an
+        // Active row this old would have been dropped the same way.
+        (BangerPhase::Settled, BangerPhase::Active) => {
+            if placement {
+                return true;
+            }
+            banger.phase = BangerPhase::Active;
+            banger.activated = Some(tick);
+            commands
+                .entity(entity)
+                .insert((
+                    RigidBody::Kinematic,
+                    PropLerp::at(pos, rot, now),
+                    CollisionLayers::default(),
+                ))
+                .remove::<Sensor>();
         }
         (_, BangerPhase::Broken) => {
             if !placement {
