@@ -165,6 +165,7 @@ fn stop_field<'a>(line: &'a str, leg: &str) -> &'a str {
 pub(crate) struct NetField {
     pub(crate) inputs_sent: u64,
     pub(crate) inputs_applied: u64,
+    pub(crate) inputs_staled: u64,
     pub(crate) snaps_sent: u64,
     pub(crate) snaps_applied: u64,
     pub(crate) snaps_staled: u64,
@@ -235,6 +236,7 @@ pub(crate) fn net_field(line: &str) -> NetField {
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
+        inputs_staled: inputs[2],
         snaps_sent: snaps[0],
         snaps_applied: snaps[1],
         snaps_staled: snaps[2],
