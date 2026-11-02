@@ -329,6 +329,36 @@ fn a_car_pressing_a_settled_banger_wakes_it_and_it_moves() {
     }
 }
 
+/// #2274: a car wedged on break fragments jitters vertically in its
+/// contacts and never drops below `SleepThreshold`, so a wake gated on
+/// total speed never frees it. Bouncing along the contact normal is not
+/// progress: only motion along the surface counts.
+#[test]
+fn a_car_jittering_on_a_settled_fragment_still_wakes_it() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    spawn_settled(&mut app, Vec3::new(0.0, 0.25, 0.0), true);
+    // A perfectly elastic car keeps bouncing on the fragment: every
+    // contact frame loads it at a speed well above the sleep threshold.
+    let car = spawn_striker(
+        &mut app,
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, -6.0, 0.0),
+    );
+    app.world_mut().entity_mut(car).insert((
+        Restitution::new(1.0),
+        Friction::new(0.0),
+        LockedAxes::ROTATION_LOCKED,
+    ));
+    let mut woke = false;
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+        woke |= drain_transitions(&mut app)
+            .iter()
+            .any(|e| e.phase == BangerPhase::Active && e.cause == BangerCause::Disturbed);
+    }
+    assert!(woke, "a jittering car must still free the fragment");
+}
+
 /// Run until `object` fires `phase`, returning that frame's
 /// (striker, prop) velocities — the post-transfer state the momentum
 /// assertions read.

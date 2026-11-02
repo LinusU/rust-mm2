@@ -803,7 +803,14 @@ pool slot with the usual oldest-first reclaim, one
 `BangerStateChanged` with `BangerCause::Disturbed`). A car driving
 over or brushing past a fragment is making progress and leaves it
 alone (a first draft woke on any loaded contact and changed a retail
-bots match outcome); one that has stopped on it is going nowhere. The
+bots match outcome); one that has stopped on it is going nowhere. Only
+the linear speed *along the surface* counts (the velocity with the
+loaded manifold's normal component removed): a wedged car chatters
+along the contact normal and its total speed never falls below the
+threshold, so it would never count as at rest (#2274, lossy C&R seed
+213). The side effect is that a car landing on a fragment loads it at
+once with no motion along the surface and wakes it; the fragment is
+then pushed and settles again. The
 condition adds no constant of ours; a fragment that sleeps again
 settles again as before. Replication needs no wire change: the client's per-prop latest-wins
 stamp (the frame's generation and tick, `PropStage`) already orders
