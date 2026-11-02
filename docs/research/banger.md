@@ -787,6 +787,28 @@ the activation edge removes `Sensor` as the body goes dynamic. The
 activating contact's reduced-mass transfer charged to the striker
 remains the F04-C.4 design choice (UNK-22).
 
+**Settled fragments wake under load (#2265, implementation choice
+under UNK-22).** Settling freezes a fragment as `RigidBody::Static`
+where it lies, and a car can come to rest high-centred on one (wheels
+off the ground, chassis on a piece nothing can push — seen on
+`sp_chinalight_f-break02` and `sp_barricadewood_f-break03/04`). Retail
+has no timed despawn to clear it (the dead branch above), so the port
+makes the fragment a live body again instead: on the authority,
+`wake_settled_fragments` takes a `Settled` *fragment* (never a
+placement) that a non-banger dynamic body touches with a nonzero
+normal impulse — the solver is already loading it — back to `Active`
+(`RigidBody::Dynamic`, claims a pool slot with the usual
+oldest-first reclaim, one `BangerStateChanged` with
+`BangerCause::Disturbed`). The condition has no speed, time or
+distance constant; a car lying against a fragment without load does
+not wake it, and a fragment that sleeps again settles again as before.
+Replication needs no wire change: the client's per-prop latest-wins
+stamp (the frame's generation and tick, `PropStage`) already orders
+rows, so `apply_body` now accepts `Settled → Active` for a fragment
+and a late `Settled` row from before the wake is dropped as stale.
+The original's behaviour here is unrecovered; this is designed, not
+verified_original.
+
 Historical note (the gate before #1179): the `½·m·v²` stand-in is
 the wrong quantity — it is quadratic in speed, the original is
 quadratic in the *impulse* (so linear in the striker's effective mass
