@@ -3067,7 +3067,8 @@ Known limits of the harness, stated rather than hidden:
 
 `mm2 --host` and `mm2 --join` (windowed or headless) print one
 `event=lane_pace` line per lane seat every 2 s of wall clock (host) or one
-line (client), from `mm2_app::lanepace`. Rates are over the window since
+line (client), from `mm2_app::lanepace`; `MM2_LANE_PACE_MS` sets the
+interval for a qualification run that needs finer records. Rates are over the window since
 the previous line (`win_ms`); the first sample is only the baseline.
 
 Host, per established seat (kbit/s are wire bits, as the uplink cap counts):
@@ -3114,7 +3115,25 @@ ms, max <= 0.4 ms; legs and the host pause each stayed under their bounds
 (largest gap 534 ms for the 500 ms blackout). A seat stopped for 10 s was
 reaped by the host (`mp=host(6p)`).
 
-Not reached: the "movement queue steady within 2 s of a leg" gate (the app
-records run-long distributions, not a time series); freshness against the
-host's clock (judged against the stream); a per-phase split of the host
-`lane=` rate (the cap-dip rate trace). No Rocket League parity claim.
+Full run as time series (#2150): `the_congest_qual_plan_holds_across_real_processes`
+runs the whole `congest_qual_tests` plan (same seats, 3 s warm-up, 20 s
+ordinary window with the cap dip and the 10 s `SIGSTOP`ped seat, the same six
+tagged legs at 4 s spacing, the same gates) and reads the series instead of
+the summaries: a client's usable corrections are the instants its
+`--net-trace` shows the applied snapshot tick advance (placed on the harness
+clock by the client's `event=snap_applied first=true` line), and the host's
+queue is the `event=lane_pace` records (the host runs with
+`MM2_LANE_PACE_MS=100`, stamped on arrival). Ordinary gates take the last
+record of the ordinary window per healthy seat; a leg is judged on a usable
+correction within 1 s of its end and queue age within one period for three
+records running within 2 s of its end. A pause must also show as a gap about
+its length in the trace, so a leg that did not happen cannot pass. One run
+(loaded dev machine, debug-optimised build): healthy pooled gap p95 37 ms,
+max 76 ms; queue wait p95 0.2 ms, max 0.6 ms; every leg's first usable
+correction came within 70 ms of its end and the queue was steady within
+345 ms. The `lane_pace` record carries the queue's age, not its length, so
+"steady" lacks the in-process "<= 2 datagrams" half.
+
+Not reached: freshness against the host's clock (judged against the stream);
+a per-phase split of the host `lane=` rate (the cap-dip rate trace). No
+Rocket League parity claim.
