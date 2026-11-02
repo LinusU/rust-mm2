@@ -796,13 +796,16 @@ has no timed despawn to clear it (the dead branch above), so the port
 makes the fragment a live body again instead: on the authority,
 `wake_settled_fragments` takes a `Settled` *fragment* (never a
 placement) that a non-banger dynamic body touches with a nonzero
-normal impulse — the solver is already loading it — back to `Active`
-(`RigidBody::Dynamic`, claims a pool slot with the usual
-oldest-first reclaim, one `BangerStateChanged` with
-`BangerCause::Disturbed`). The condition has no speed, time or
-distance constant; a car lying against a fragment without load does
-not wake it, and a fragment that sleeps again settles again as before.
-Replication needs no wire change: the client's per-prop latest-wins
+normal impulse (the solver is loading it) while that body is at rest
+by Avian's own definition — linear and angular speed below its
+`SleepThreshold` — back to `Active` (`RigidBody::Dynamic`, claims a
+pool slot with the usual oldest-first reclaim, one
+`BangerStateChanged` with `BangerCause::Disturbed`). A car driving
+over or brushing past a fragment is making progress and leaves it
+alone (a first draft woke on any loaded contact and changed a retail
+bots match outcome); one that has stopped on it is going nowhere. The
+condition adds no constant of ours; a fragment that sleeps again
+settles again as before. Replication needs no wire change: the client's per-prop latest-wins
 stamp (the frame's generation and tick, `PropStage`) already orders
 rows, so `apply_body` now accepts `Settled → Active` for a fragment
 and a late `Settled` row from before the wake is dropped as stale.
