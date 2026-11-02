@@ -1478,8 +1478,9 @@ const PROP_REACH: f32 = 8.0;
 /// One-shot diagnostic (#2231) for a seat that keeps escaping at one
 /// spot: what the car overlaps within [`WEDGE_REACH`], its velocity and
 /// wheel contacts, the input the bot demanded and the drivetrain's
-/// answer (direction, gear, rpm, load), which side of the link this process is, and for a
-/// client the pose the host last asserted for the seat. Fires only at
+/// answer (direction, gear, rpm, load), which side of the link this
+/// process is, and for a client the pose the host last asserted for the
+/// seat. Fires only at
 /// the 3rd, 6th... escape, so it is free on the ordinary path.
 #[allow(clippy::too_many_arguments)]
 fn dump_wedge(
