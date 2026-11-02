@@ -1541,6 +1541,17 @@ pub struct NetDriveReport {
     /// Prop rows a client dropped because the host's stamped world
     /// differs from its own (F26-A).
     pub props_mismatched: u64,
+    /// Prop rows a client dropped as older than a staged or applied
+    /// row for the same prop (#2291).
+    pub props_stale: u64,
+    /// Prop rows a client refused because its inbox was full (#2291).
+    pub props_refused: u64,
+    /// Prop rows a client drained without applying: unresolvable,
+    /// unreadable or of another generation (#2291).
+    pub props_unresolved: u64,
+    /// Host: per `(site, fragment)`, how many rows it sent over all
+    /// clients and the last one (#2291). Not in the record.
+    pub prop_rows_sent: BTreeMap<(u32, u8), (u64, Option<mm2_net::SnapProp>)>,
     /// Ambient-car rows the host published (F26-A, protocol v19).
     pub cars_sent: u64,
     /// Live ambient cars the host held back from a frame because the

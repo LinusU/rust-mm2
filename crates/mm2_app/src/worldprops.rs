@@ -417,6 +417,11 @@ impl PropStage {
     }
 }
 
+/// Setting this environment variable makes the host print one line per
+/// prop row it sends, per client (#2291): the evidence for whether a
+/// re-settled fragment's row ever left the host.
+pub const PROP_LOG_ENV: &str = "MM2_PROP_LOG";
+
 /// The host's per-session memory of which props have left `Dormant`.
 #[derive(Default)]
 pub struct PropLedger {
@@ -450,7 +455,7 @@ pub fn publish_props(
     fragments: Query<(Entity, &BangerFragment, &Banger), Changed<Banger>>,
     sites: Query<&BangerSite>,
     poses: Query<(&Banger, &Position, &Rotation)>,
-    report: Option<ResMut<NetDriveReport>>,
+    mut report: Option<ResMut<NetDriveReport>>,
 ) {
     if ledger.generation != session.generation() {
         *ledger = PropLedger {
@@ -467,7 +472,7 @@ pub fn publish_props(
         }
     }
     ledger.sites.refresh();
-    if let Some(mut report) = report {
+    if let Some(report) = report.as_mut() {
         report.prop_world = ledger.sites.table();
     }
     for (entity, site, banger) in &placements {
@@ -541,6 +546,7 @@ pub fn publish_props(
     // ones that are not near it are delivered when they come near
     // (entering the interest set owes the current state).
     let fresh = std::mem::take(&mut ledger.fresh);
+    let log_rows = std::env::var_os(PROP_LOG_ENV).is_some();
     let players: BTreeSet<u16> = lobby.roster.iter().map(|e| e.player_id).collect();
     ledger.clients.retain(|id, _| players.contains(id));
     for id in players {
@@ -577,6 +583,29 @@ pub fn publish_props(
             .send_props(id, session.wire_generation(), &frame)
             .is_ok()
         {
+            if let Some(report) = report.as_mut() {
+                for (_, row) in &rows {
+                    let sent = report
+                        .prop_rows_sent
+                        .entry((row.site, row.fragment))
+                        .or_default();
+                    sent.0 += 1;
+                    sent.1 = Some(*row);
+                }
+            }
+            if log_rows {
+                for (_, row) in &rows {
+                    eprintln!(
+                        "prop-row to={id} gen={} tick={} site={} frag={} phase={} pos={:?}",
+                        session.wire_generation(),
+                        session.tick(),
+                        row.site,
+                        row.fragment,
+                        row.phase,
+                        row.pos
+                    );
+                }
+            }
             let client = ledger.clients.entry(id).or_default();
             client.commit_snapshot(snapshot_slots);
             for (key, _) in &rows {
@@ -865,6 +894,9 @@ pub fn apply_props(
             report.prop_world = snaps.props.local_table();
             report.props_landed = snaps.props.landed();
             report.props_mismatched = snaps.props.mismatched();
+            report.props_stale = snaps.props.stale();
+            report.props_refused = snaps.props.refused();
+            report.props_unresolved = snaps.props.unresolved();
         }
     };
     publish(&snaps);
