@@ -1035,11 +1035,12 @@ pub fn settle_bangers(
 /// static piece nothing can push (#2265). Retail has no timed despawn
 /// to clear it, so the fragment is made a live body again instead: it
 /// is a fragment (never a placement) and a non-banger dynamic body
-/// touches it with a nonzero normal impulse, i.e. the solver is
-/// already loading it. No speed or time threshold is involved — a car
-/// merely resting against the fragment without load does not wake it,
-/// and one that drives over it wakes it exactly as the unbroken
-/// prop would have reacted. It claims a pool slot (reclaiming the
+/// touches it with a nonzero normal impulse (the solver is loading it)
+/// while that body is at rest by Avian's own definition: its linear and
+/// angular speed below its `SleepThreshold`. A car driving over or
+/// brushing past a fragment is making progress and leaves it alone; one
+/// that has stopped on it is not going anywhere. No constant of ours is
+/// involved. It claims a pool slot (reclaiming the
 /// oldest active as usual) and emits one `BangerStateChanged`; a
 /// full pool with nothing reclaimable leaves it settled.
 // Bevy system params: the contact graph, the body queries and the pool
@@ -1052,7 +1053,16 @@ pub fn wake_settled_fragments(
     mut bangers: Query<BangerMut>,
     fragments: Query<(), With<BangerFragment>>,
     colliders: Query<&ColliderOf>,
-    bodies: Query<&RigidBody, Without<Banger>>,
+    bodies: Query<
+        (
+            &RigidBody,
+            &LinearVelocity,
+            &AngularVelocity,
+            &SleepThreshold,
+        ),
+        Without<Banger>,
+    >,
+    length_unit: Res<PhysicsLengthUnit>,
     mut writer: MessageWriter<BangerStateChanged>,
     mut commands: Commands,
 ) {
@@ -1072,12 +1082,15 @@ pub fn wake_settled_fragments(
                     pair.collider1
                 };
                 let body = colliders.get(other).map_or(other, |c| c.body);
-                bodies.get(body).is_ok_and(|b| b.is_dynamic())
-                    && pair
-                        .manifolds
-                        .iter()
-                        .flat_map(|m| m.points.iter())
-                        .any(|p| p.normal_impulse > 0.0)
+                bodies.get(body).is_ok_and(|(b, lin, ang, rest)| {
+                    b.is_dynamic()
+                        && lin.length() < length_unit.0 * rest.linear
+                        && ang.length() < rest.angular
+                }) && pair
+                    .manifolds
+                    .iter()
+                    .flat_map(|m| m.points.iter())
+                    .any(|p| p.normal_impulse > 0.0)
             })
         })
         .map(|(e, ..)| e)

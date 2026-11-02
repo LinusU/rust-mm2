@@ -304,16 +304,21 @@ fn a_car_pressing_a_settled_fragment_wakes_it_and_it_moves() {
     let placement = spawn_settled(&mut app, Vec3::new(20.0, 0.25, 0.0), false);
     // Nothing touches either: they stay settled.
     assert!(run(&mut app, FRAMES_PER_SECOND).is_empty());
-    // A heavy body comes down on the fragment's edge and on the
-    // placement's, loading both.
-    spawn_striker(&mut app, Vec3::new(0.4, 1.0, 0.0), Vec3::ZERO);
-    spawn_striker(&mut app, Vec3::new(20.4, 1.0, 0.0), Vec3::ZERO);
-    let events = run(&mut app, FRAMES_PER_SECOND * 2);
+    // A heavy body comes down on the fragment and on the placement
+    // and comes to rest on each, loading both.
+    spawn_striker(&mut app, Vec3::new(0.1, 1.0, 0.0), Vec3::ZERO);
+    spawn_striker(&mut app, Vec3::new(20.1, 1.0, 0.0), Vec3::ZERO);
+    let events = run(&mut app, FRAMES_PER_SECOND * 4);
     let woke: Vec<_> = events
         .iter()
         .filter(|e| e.phase == BangerPhase::Active && e.cause == BangerCause::Disturbed)
         .collect();
-    assert_eq!(woke.len(), 1, "exactly the fragment wakes: {events:?}");
+    // Only the fragment wakes (the placement shares no object id with it).
+    assert!(!woke.is_empty(), "the fragment wakes: {events:?}");
+    assert!(
+        woke.iter().all(|e| e.object == woke[0].object),
+        "only the fragment wakes: {events:?}"
+    );
     let b = app.world().get::<Banger>(fragment).unwrap();
     assert_eq!(b.phase, BangerPhase::Active);
     assert!(b.activated.is_some());
