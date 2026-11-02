@@ -163,7 +163,13 @@ pub struct Proc {
     last_line: Arc<Mutex<Option<Instant>>>,
     /// How many stdout lines have arrived.
     lines_seen: Arc<AtomicUsize>,
+    /// Arrival time of every stdout line [`Proc::spawn_stamped`] was
+    /// asked to keep, whatever the waits consume from the channel.
+    stamped: Arc<Mutex<Vec<(Instant, String)>>>,
 }
+
+/// Which stdout lines a [`Proc`] keeps with their arrival time.
+type Keep = fn(&str) -> bool;
 
 impl Proc {
     /// The bound this child's waits use — its own `--frames`-derived
@@ -192,6 +198,14 @@ impl Proc {
 
     /// [`Proc::spawn`] with extra environment variables on the child.
     pub fn spawn_env(exe: &str, args: &[String], env: &[(&str, &str)]) -> Self {
+        Self::spawn_stamped(exe, args, env, |_| false)
+    }
+
+    /// [`Proc::spawn_env`] that also keeps every stdout line `keep`
+    /// accepts with the instant it arrived ([`Proc::stamped`]), for a
+    /// leg that places a record on its own clock rather than in the
+    /// order the waits read them.
+    pub fn spawn_stamped(exe: &str, args: &[String], env: &[(&str, &str)], keep: Keep) -> Self {
         let mut child = Command::new(exe)
             .args(args)
             .envs(env.iter().copied())
@@ -221,10 +235,18 @@ impl Proc {
         let lines_seen = Arc::new(AtomicUsize::new(0));
         let stamp = Arc::clone(&last_line);
         let count = Arc::clone(&lines_seen);
+        let stamped = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&stamped);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { return };
-                *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                let now = Instant::now();
+                *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+                if keep(&line) {
+                    kept.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((now, line.clone()));
+                }
                 count.fetch_add(1, Ordering::Relaxed);
                 if tx.send(line).is_err() {
                     return;
@@ -251,7 +273,17 @@ impl Proc {
             spawned: Instant::now(),
             last_line,
             lines_seen,
+            stamped,
         }
+    }
+
+    /// The lines [`Proc::spawn_stamped`] kept so far, oldest first, with
+    /// the instant each arrived on the harness's clock.
+    pub fn stamped(&self) -> Vec<(Instant, String)> {
+        self.stamped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// What this child is and what it has been doing — the "slow or

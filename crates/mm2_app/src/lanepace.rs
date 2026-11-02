@@ -49,9 +49,27 @@ use crate::net::{HostLink, LobbyLink, LobbyState};
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct LanePaceEvery(pub Duration);
 
+/// The environment variable that overrides [`LanePaceEvery`]'s default,
+/// in milliseconds: a qualification run that places a queue's recovery
+/// within a second or two needs records finer than the 2 s an operator
+/// reads.
+pub const LANE_PACE_MS_ENV: &str = "MM2_LANE_PACE_MS";
+
 impl Default for LanePaceEvery {
     fn default() -> Self {
-        Self(Duration::from_secs(2))
+        let default = Duration::from_secs(2);
+        let Ok(raw) = std::env::var(LANE_PACE_MS_ENV) else {
+            return Self(default);
+        };
+        match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => Self(Duration::from_millis(ms)),
+            _ => {
+                warn!(
+                    "{LANE_PACE_MS_ENV}={raw:?} is not a positive number of milliseconds; using 2000"
+                );
+                Self(default)
+            }
+        }
     }
 }
 
