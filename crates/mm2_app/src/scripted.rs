@@ -1412,6 +1412,7 @@ pub fn scripted_drive(
                 dump_wedge(
                     spatial.as_ref(),
                     &probe.aabbs,
+                    &probe.names,
                     &probe.props,
                     &probe.nearby,
                     &colliders,
@@ -1453,6 +1454,7 @@ type NearbyPropData = (
 pub struct WedgeProbe<'w, 's> {
     snaps: Option<Res<'w, RemoteSnaps>>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
+    names: Query<'w, 's, &'static Name>,
     props: Query<'w, 's, PropData>,
     nearby: Query<'w, 's, NearbyPropData>,
     dumps: Local<'s, u32>,
@@ -1481,6 +1483,7 @@ const PROP_REACH: f32 = 8.0;
 fn dump_wedge(
     spatial: Option<&SpatialQuery>,
     aabbs: &Query<&ColliderAabb>,
+    names: &Query<&Name>,
     props: &Query<PropData>,
     nearby: &Query<NearbyPropData>,
     colliders: &Query<&ColliderOf>,
@@ -1520,7 +1523,8 @@ fn dump_wedge(
                         )
                     },
                 );
-                format!("{hit:?} body={body:?} aabb={min:?}..{max:?}{prop}")
+                let label = names.get(hit).map_or("", Name::as_str);
+                format!("{hit:?} {label} body={body:?} aabb={min:?}..{max:?}{prop}")
             })
             .collect()
         })
