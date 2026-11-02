@@ -385,3 +385,66 @@ fn a_client_thief_robs_a_client_carrier_once_over_lossy_links() {
 fn the_same_robbery_with_the_roles_swapped_commits_once_over_lossy_links() {
     contested_transfer(2, [0xD1B3, 0xA2C4], [60, 20]);
 }
+
+/// The parking-garage door beside the junction at (-875, 638) is a solid
+/// wall in retail and the nav route stays clear of it (#2273). The door
+/// is INST-placed static architecture: it has no `tune/banger` record,
+/// so nothing about it is knockable or openable, and the road network
+/// never enters it — the one-way road 71 starts at the junction in front
+/// of it and leaves. A bot that ends up against the door (lossy seed
+/// 213, the carrier cutting wide through the junction curve) left the
+/// line; the line did not lead it in.
+#[test]
+fn the_garage_door_is_solid_and_the_route_keeps_clear_of_it() {
+    use mm2_app::cnr_bots::load_graph;
+    use mm2_game::nav::LaneQuery;
+
+    let Some((retail, _slot)) = support::retail_slot() else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut vfs = mm2_assets::Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default()).unwrap();
+    assert!(
+        vfs.resolve("geometry/sw_4s_parking_garage_door_f.pkg")
+            .is_some(),
+        "the door model is shipped"
+    );
+    assert!(
+        vfs.resolve("tune/banger/sw_4s_parking_garage_door_f.dgbangerdata")
+            .is_none(),
+        "the door has a banger record, so it is not plain static architecture"
+    );
+
+    // The collider's AABB from the wedge dump, grown by a car's half width.
+    let (lo, hi) = ([-902.9, 23.8, 643.4], [-880.1, 40.9, 656.4]);
+    let margin = 3.0;
+    let near_door = |p: &[f32; 3]| (0..3).all(|k| p[k] > lo[k] - margin && p[k] < hi[k] + margin);
+
+    let graph = load_graph(&vfs, "sf").unwrap();
+    // Sidewalks are not driven: the sidewalk of road 71 ends at the door.
+    for lane in graph.lanes().iter().filter(|l| l.arc.is_some()) {
+        assert!(
+            !lane.vertices().iter().any(near_door),
+            "lane {:?} runs into the garage door",
+            lane.id
+        );
+    }
+    let hideout = [-834.71, 37.66, 916.6];
+    // Where the carrier of the lossy round was when it came down the
+    // street, and two points along the way.
+    for from in [[-850.0f32, 24.0, 569.0], [-849.0, 47.0, 272.0]] {
+        let route = mm2_app::scripted::plan_nav_route(&graph, from.into(), hideout.into())
+            .unwrap_or_else(|| panic!("no route from {from:?}"));
+        for point in &route.points {
+            assert!(
+                !near_door(&point.position.into()),
+                "the route from {from:?} passes through the garage door at {:?}",
+                point.position
+            );
+        }
+    }
+    // The lane snap near the door finds a vehicle lane only on road 71.
+    let hits = graph.lane_hits([-885.6, 24.1, 644.3], &LaneQuery::vehicles(20.0));
+    assert!(hits.iter().all(|h| h.lane.road == 71), "{hits:?}");
+}

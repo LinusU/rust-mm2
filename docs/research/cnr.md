@@ -576,3 +576,29 @@ Measured after: sf 6 of 9 delivered (3 more explained: seeds 10, 35 a
 rival; 93, 122 walled — seed 4 delivered after recovering the gold from
 B); london 4 of 9 delivered, seed 12 unreachable level, seeds 92, 98, 162
 a rival, seed 122 picked up and lost to a steal.
+
+### The sf parking-garage door at (-885, 24, 644) (#2273)
+
+The lossy Cops & Robbers round on sf seed 213 wedged its carrier (24
+escapes, a wedge dump naming `city-room88-collider` and
+`prop-sw_4s_parking_garage_door_f-collider`, aabb x -902.9..-880.1,
+z 643.4..656.4) on the way to the hideout, and it drove off again about
+a minute later. Findings:
+
+- **The door is solid in retail (verified by absence).** It is INST
+  placed static architecture and `tune/banger/sw_4s_parking_garage_door_f
+  .dgbangerdata` does not exist, so by the binding rule above it is not
+  knockable, breakable or openable. No door open/close behaviour is known
+  to exist in the original; none is implemented.
+- **The route does not lead into it.** No routable lane vertex is within
+  3 m of the box. One-way road 71 *starts* in front of the door
+  (lane 0 at (-874.7, 23.85, 638.3)) and runs north-east away from it;
+  the planned line from the street to the west crosses the junction in a
+  90° curve through (-886, 629) and (-875, 638), 7 m from the door's
+  corner. The wedge is the car overshooting the outside of that curve
+  after cutting wide (it was at x -889 while the line was at -877), not
+  a line through the door. Pinned by
+  `net_cnr_authority::the_garage_door_is_solid_and_the_route_keeps_clear_of_it`.
+- The remaining question — whether a bot should slow for a junction curve
+  with a wall on its outside — is a driver-pace matter (handling is
+  owner-owned) and is not changed here.
