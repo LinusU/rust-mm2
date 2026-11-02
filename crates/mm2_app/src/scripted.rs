@@ -1421,6 +1421,7 @@ pub fn scripted_drive(
                     (pos.0, rot.0, lin_vel.0),
                     vehicle,
                     vstate,
+                    &input,
                     host_copy,
                     session.tick(),
                     bot.escapes,
@@ -1476,7 +1477,8 @@ const PROP_REACH: f32 = 8.0;
 
 /// One-shot diagnostic (#2231) for a seat that keeps escaping at one
 /// spot: what the car overlaps within [`WEDGE_REACH`], its velocity and
-/// wheel contacts, which side of the link this process is, and for a
+/// wheel contacts, the input the bot demanded and the drivetrain's
+/// answer (direction, gear, rpm, load), which side of the link this process is, and for a
 /// client the pose the host last asserted for the seat. Fires only at
 /// the 3rd, 6th... escape, so it is free on the ordinary path.
 #[allow(clippy::too_many_arguments)]
@@ -1492,6 +1494,7 @@ fn dump_wedge(
     (pos, rot, vel): (Vec3, Quat, Vec3),
     vehicle: &Vehicle,
     vstate: &VehicleState,
+    input: &VehicleInput,
     host_copy: Option<(u64, Vec3, Vec3)>,
     tick: u64,
     escapes: u32,
@@ -1575,6 +1578,11 @@ fn dump_wedge(
         velocity = ?vel,
         forward_speed = vstate.forward_speed,
         grounded = vstate.grounded,
+        input = ?input,
+        direction = ?vstate.direction,
+        gear = vstate.gear,
+        rpm = vstate.rpm,
+        engine_load = vstate.engine_load,
         wheels = ?wheels,
         overlaps = overlaps.len(),
         colliders = ?overlaps,
