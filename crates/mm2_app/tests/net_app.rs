@@ -9897,6 +9897,70 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     host.shutdown();
 }
 
+/// #2285: the host woke a settled fragment, moved it and re-settled it
+/// while every `Active` row was lost. The client only ever hears the
+/// `Settled` resend at the new pose, and its static collider must end
+/// there — pose and transform both — not stay at the old one.
+#[test]
+fn a_client_moves_a_settled_fragment_to_the_hosts_resettled_pose() {
+    use avian3d::prelude::RigidBody;
+    use mm2_app::worldprops::PROP_SETTLED;
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, mut app, generation) = playing_client(install.path());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(20.0, 0.0, 0.0), 2);
+    app.update();
+    let landed = |a: &App| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .landed()
+    };
+    let fragment = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &mm2_game::BangerFragment)>();
+        q.iter(app.world()).map(|(e, _)| e).next().unwrap()
+    };
+    let mut tick = 10;
+    let mut settle_at = |app: &mut App, host: &mut Host, at: [f32; 3], expect: u64| {
+        tick += 5;
+        host.ctl()
+            .broadcast(&props_frame(
+                local_table(app),
+                generation,
+                tick,
+                vec![prop_row(0, 1, PROP_SETTLED, at)],
+            ))
+            .unwrap();
+        spin(app, |a| landed(a) >= expect);
+        app.update();
+    };
+    settle_at(&mut app, &mut host, [21.0, 0.0, 1.0], 1);
+    let piece = fragment(&mut app);
+    // The host's wake/Active/re-settle never reached us; only this did.
+    settle_at(&mut app, &mut host, [21.0, 0.0, 9.0], 2);
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Settled,
+            Some(RigidBody::Static),
+            Vec3::new(21.0, 0.0, 9.0)
+        )
+    );
+    assert_eq!(
+        app.world().get::<Transform>(piece).unwrap().translation,
+        Vec3::new(21.0, 0.0, 9.0)
+    );
+    host.shutdown();
+}
+
 /// F26-A / F26-AC02: rows that arrive while the world is still being
 /// stamped are held, not spent — a joiner whose first props frame beats
 /// its load applies it whole once the session is live.

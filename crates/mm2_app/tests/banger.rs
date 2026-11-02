@@ -2495,3 +2495,43 @@ fn the_bounded_escape_frees_a_car_nosed_against_a_bench_over_a_fallen_pole() {
     eprintln!("bench + pole: escaped={escaped} escapes={escapes} far={far:.1}");
     assert!(escaped, "{escapes} escapes, furthest {far:.1} m");
 }
+
+/// F26-A: a client re-settles a static fragment by rewriting its
+/// `Position`/`Transform` (`worldprops::apply_body`, Settled → Settled).
+/// The physics world must follow: the broad-phase box moves with it and
+/// a car driving at the new pose is stopped by it, not through it.
+#[test]
+fn a_static_collider_moved_by_position_blocks_at_the_new_pose() {
+    let mut app = test_app_with(SessionAuthority::Host, 8);
+    let from = Vec3::new(0.0, 0.5, 0.0);
+    let to = Vec3::new(0.0, 0.5, 10.0);
+    let wall = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(4.0, 1.0, 1.0),
+            Position(from),
+            Transform::from_translation(from),
+        ))
+        .id();
+    for _ in 0..4 {
+        app.update();
+    }
+    let mut entity = app.world_mut().entity_mut(wall);
+    entity.get_mut::<Position>().unwrap().0 = to;
+    entity.get_mut::<Transform>().unwrap().translation = to;
+    for _ in 0..4 {
+        app.update();
+    }
+    let aabb = *app.world().get::<ColliderAabb>(wall).unwrap();
+    assert!(
+        (aabb.center().z - to.z).abs() < 0.1,
+        "the static collider's box follows its pose: {aabb:?}"
+    );
+    let striker = spawn_striker(&mut app, Vec3::new(0.0, 0.5, 4.0), Vec3::new(0.0, 0.0, 8.0));
+    for _ in 0..180 {
+        app.update();
+    }
+    let z = app.world().get::<Position>(striker).unwrap().0.z;
+    assert!(z < to.z, "the striker stopped at the moved wall, z = {z}");
+}
