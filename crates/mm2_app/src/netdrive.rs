@@ -1327,6 +1327,9 @@ pub struct NetDriveReport {
     pub inputs_applied: u64,
     /// Mailbox reads zeroed for staleness or a wrong generation.
     pub inputs_staled: u64,
+    /// `inputs_staled` per remote seat (the wire id): which driver's
+    /// car ran on a substitute rather than its own input.
+    pub seat_staled: BTreeMap<u16, u64>,
     /// `Input` frames the host's mailbox dropped over a seat's rate
     /// bound ([`mm2_net::INPUT_RATE_HZ`] / [`mm2_net::INPUT_BURST`]) —
     /// mirrored from the mailbox's lifetime counter.
@@ -2861,6 +2864,7 @@ pub fn apply_remote_inputs(
             None => {
                 *input = VehicleInput::default();
                 report.inputs_staled += 1;
+                *report.seat_staled.entry(wire.0).or_default() += 1;
             }
         }
     }
@@ -2920,7 +2924,10 @@ pub fn consume_seat_commands(
         }
         match slot.source {
             CommandSource::Command => report.inputs_applied += 1,
-            CommandSource::HeldLast | CommandSource::Neutral => report.inputs_staled += 1,
+            CommandSource::HeldLast | CommandSource::Neutral => {
+                report.inputs_staled += 1;
+                *report.seat_staled.entry(wire.0).or_default() += 1;
+            }
         }
     }
 }

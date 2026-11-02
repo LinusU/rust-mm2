@@ -63,7 +63,7 @@ use tracing::info;
 use crate::city::{MovableModels, WorldFloor, v3};
 use crate::cnr_bots::CnrBot;
 use crate::cnrnet::CnrReplica;
-use crate::netdrive::NetPlayer;
+use crate::netdrive::{NetDriveReport, NetPlayer};
 
 /// Approach speed, m/s, at or above which another participant's car
 /// striking the carrier knocks the gold loose. *Enhanced policy* — the
@@ -800,6 +800,7 @@ pub const CARRIER_MARKER_LIFT: f32 = 2.5;
 pub fn sync_cnr_markers(
     host: Option<Res<CnrHost>>,
     replica: Option<Res<CnrReplica>>,
+    report: Option<Res<NetDriveReport>>,
     cars: Query<(&Player, Option<&NetPlayer>, &Transform), Without<CnrMarker>>,
     mut markers: Query<(&CnrMarker, &mut Transform, &mut Visibility)>,
     mut announced: Local<Option<String>>,
@@ -807,7 +808,8 @@ pub fn sync_cnr_markers(
 ) {
     // The authority's view of every seat, about every 10 s: a client's
     // own log shows its predicted car, which can differ from this one
-    // by hundreds of metres on a lossy link (#2182).
+    // by hundreds of metres on a lossy link (#2182). `x<n>` is how many
+    // of a remote seat's steps ran on a substitute input (#2288).
     if host.is_some() {
         *frames += 1;
         if *frames == 1 || (*frames).is_multiple_of(600) {
@@ -815,8 +817,11 @@ pub fn sync_cnr_markers(
                 .iter()
                 .map(|(player, net, t)| {
                     let at = t.translation;
+                    let staled = net
+                        .and_then(|n| report.as_ref()?.seat_staled.get(&n.0).copied())
+                        .map_or(String::new(), |n| format!("x{n}"));
                     format!(
-                        "p{}@{:.0},{:.0},{:.0}",
+                        "p{}@{:.0},{:.0},{:.0}{staled}",
                         participant_id(player, net).0,
                         at.x,
                         at.y,

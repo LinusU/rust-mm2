@@ -280,6 +280,9 @@ fn contested_transfer(thief: u16, seeds: [u64; 2], delays: [u64; 2]) {
     host.cmd("quit");
     let host_rec = host.until_within("smoke=headless-physics", BOUND);
     eprintln!("alice  {alice_rec}\nbob    {bob_rec}\nhost   {host_rec}");
+    // A pass keeps the host's account too: its `host_seats` lines carry
+    // each seat's stale-input count (#2288).
+    eprintln!("--- host (stderr) ---\n{}", host.pending());
 
     let board = |rec: &str| {
         field(rec, "cnr")
