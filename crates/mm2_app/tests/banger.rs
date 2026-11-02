@@ -219,6 +219,58 @@ fn a_hard_impact_activates_then_settles_once() {
     assert!(pos.x > 0.2, "the impact knocked the prop loose: {pos:?}");
 }
 
+/// #2261: a break fragment that falls asleep inside a car must not
+/// freeze static around it — the car would be pinned for good. It stays
+/// dynamic while the car overlaps it and settles once the car is gone.
+#[test]
+fn a_sleeping_fragment_does_not_settle_around_a_body_inside_it() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("frag", 0.0));
+    app.world_mut()
+        .entity_mut(banger)
+        .remove::<Sensor>()
+        .insert((
+            RigidBody::Dynamic,
+            CollisionLayers::default(),
+            Banger {
+                phase: BangerPhase::Active,
+                ..Banger::new(banger_def("frag", 0.0))
+            },
+        ));
+    // A sensor stands in for the chassis: it overlaps without pushing
+    // the fragment clear, so the fragment is left to fall asleep in it.
+    let car = app
+        .world_mut()
+        .spawn((
+            RigidBody::Kinematic,
+            Sensor,
+            Collider::cuboid(0.9, 0.9, 0.9),
+            Position(Vec3::new(0.0, 0.5, 0.0)),
+            Transform::from_xyz(0.0, 0.5, 0.0),
+        ))
+        .id();
+    let events = run(&mut app, FRAMES_PER_SECOND * 5);
+    assert!(
+        events.iter().all(|e| e.phase != BangerPhase::Settled),
+        "a fragment with a body inside it must not settle: {events:?}"
+    );
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Active
+    );
+    assert_eq!(
+        *app.world().get::<RigidBody>(banger).unwrap(),
+        RigidBody::Dynamic
+    );
+
+    app.world_mut().despawn(car);
+    let events = run(&mut app, FRAMES_PER_SECOND * 10);
+    assert!(
+        events.iter().any(|e| e.phase == BangerPhase::Settled),
+        "once the body is gone the fragment settles: {events:?}"
+    );
+}
+
 /// Run until `object` fires `phase`, returning that frame's
 /// (striker, prop) velocities — the post-transfer state the momentum
 /// assertions read.

@@ -968,10 +968,22 @@ fn settle<F: bevy::ecs::query::QueryFilter>(
 /// put to sleep becomes static where it lies. Runs after
 /// [`activate_bangers`] so a prop that activates and sleeps inside the
 /// same step still settles.
-#[allow(clippy::type_complexity)]
+///
+/// A body some other non-banger body (a car) overlaps does not settle:
+/// break fragments spawn at the struck prop's pose, so a car stopped
+/// by the barricade it broke sits inside them, and freezing a fragment
+/// static around a chassis pins the car for good (#2261). It is woken
+/// instead, so the solver pushes it clear and it settles later.
+// Bevy system params: the overlap test needs the shape, the collider→body
+// map and the body kind as separate queries beside the banger query.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn settle_bangers(
     session: Res<Session>,
     mut bangers: Query<BangerMut, With<Sleeping>>,
+    shapes: Query<(&Collider, &Position, &Rotation)>,
+    colliders: Query<&ColliderOf>,
+    bodies: Query<&RigidBody, Without<Banger>>,
+    spatial: SpatialQuery,
     mut writer: MessageWriter<BangerStateChanged>,
     mut commands: Commands,
 ) {
@@ -986,6 +998,23 @@ pub fn settle_bangers(
         .map(|(e, _, _, _, _, _, _)| e)
         .collect();
     for entity in sleepers {
+        if let Ok((shape, position, rotation)) = shapes.get(entity) {
+            let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+            let pinned = spatial
+                .shape_intersections(shape, position.0, rotation.0, &filter)
+                .into_iter()
+                .any(|hit| {
+                    let body = colliders.get(hit).map_or(hit, |c| c.body);
+                    bodies.get(body).is_ok_and(|b| !b.is_static())
+                });
+            if pinned {
+                commands
+                    .entity(entity)
+                    .remove::<Sleeping>()
+                    .insert(SleepTimer(0.0));
+                continue;
+            }
+        }
         settle(
             entity,
             tick,
