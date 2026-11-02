@@ -1027,14 +1027,14 @@ pub fn settle_bangers(
     }
 }
 
-/// Wake a settled break fragment a car is pressing on (`Settled` →
+/// Wake a settled banger (fragment or placement) a car is pressing on (`Settled` →
 /// `Active`; implementation choice under UNK-22, docs/research/banger.md).
 ///
-/// Settling freezes a fragment where it lies, and a fragment can lie in
-/// a pose a car then high-centres on — wheels in the air, chassis on a
-/// static piece nothing can push (#2265). Retail has no timed despawn
-/// to clear it, so the fragment is made a live body again instead: it
-/// is a fragment (never a placement) and a non-banger dynamic body
+/// Settling freezes a banger where it lies, and it can lie in a pose a
+/// car then high-centres on — wheels in the air, chassis on a static
+/// piece nothing can push (#2265 a fragment, #2271 a knocked-over
+/// mailbox placement). Retail has no timed despawn to clear it, so the
+/// prop is made a live body again instead: a non-banger dynamic body
 /// touches it with a nonzero normal impulse (the solver is loading it)
 /// while that body is at rest by Avian's own definition: its linear and
 /// angular speed below its `SleepThreshold`. A car driving over or
@@ -1051,7 +1051,6 @@ pub fn wake_settled_fragments(
     pool: Res<BangerPool>,
     collisions: Collisions,
     mut bangers: Query<BangerMut>,
-    fragments: Query<(), With<BangerFragment>>,
     colliders: Query<&ColliderOf>,
     bodies: Query<
         (
@@ -1073,7 +1072,7 @@ pub fn wake_settled_fragments(
     let generation = session.generation();
     let mut woken: Vec<Entity> = bangers
         .iter()
-        .filter(|(e, _, b, _, _, _, _)| b.phase == BangerPhase::Settled && fragments.contains(*e))
+        .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Settled)
         .filter(|(e, ..)| {
             collisions.collisions_with(*e).any(|pair| {
                 let other = if pair.collider1 == *e {

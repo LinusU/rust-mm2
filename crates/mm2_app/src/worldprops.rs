@@ -29,7 +29,7 @@
 //!   unified collider and mesh, and a fragment row spawns the piece
 //!   from the placement's own authored `BangerPieces`. Phases move
 //!   forward (`Dormant → Active → Settled`, or `→ Broken`); the one way
-//!   back is a settled *fragment* the authority woke because a car was
+//!   back is a settled prop the authority woke because a car was
 //!   pressing on it (`Settled → Active`). Ordering is the per-prop
 //!   latest-wins stamp of [`PropStage`] (the frame's generation and
 //!   tick, no wire change), so a late `Settled` row cannot overwrite a
@@ -1019,8 +1019,8 @@ fn apply_row(
 }
 
 /// Move one local body to the replicated `phase`/pose. Phases only move
-/// forward, except a settled fragment waking `Active` again: a row older than the body's state resolves (it named a real
-/// body) without changing it. `when` is the session tick and the session
+/// forward, except a settled prop waking `Active` again: a row older than the body's state
+/// resolves (it named a real body) without changing it. `when` is the session tick and the session
 /// clock the row lands at; an active body's pose is blended
 /// ([`PropLerp`]) rather than snapped.
 #[allow(clippy::too_many_arguments)]
@@ -1051,9 +1051,6 @@ fn apply_body(
         // row never reaches here after a newer Active one, and an
         // Active row this old would have been dropped the same way.
         (BangerPhase::Settled, BangerPhase::Active) => {
-            if placement {
-                return true;
-            }
             banger.phase = BangerPhase::Active;
             banger.activated = Some(tick);
             commands

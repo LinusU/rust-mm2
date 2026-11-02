@@ -298,44 +298,35 @@ fn spawn_settled(app: &mut App, pos: Vec3, fragment: bool) -> Entity {
 }
 
 #[test]
-fn a_car_pressing_a_settled_fragment_wakes_it_and_it_moves() {
-    let mut app = test_app_with(SessionAuthority::Local, 32);
-    let fragment = spawn_settled(&mut app, Vec3::new(0.0, 0.25, 0.0), true);
-    let placement = spawn_settled(&mut app, Vec3::new(20.0, 0.25, 0.0), false);
-    // Nothing touches either: they stay settled.
-    assert!(run(&mut app, FRAMES_PER_SECOND).is_empty());
-    // A heavy body comes down on the fragment and on the placement
-    // and comes to rest on each, loading both.
-    spawn_striker(&mut app, Vec3::new(0.1, 1.0, 0.0), Vec3::ZERO);
-    spawn_striker(&mut app, Vec3::new(20.1, 1.0, 0.0), Vec3::ZERO);
-    let events = run(&mut app, FRAMES_PER_SECOND * 4);
-    let woke: Vec<_> = events
-        .iter()
-        .filter(|e| e.phase == BangerPhase::Active && e.cause == BangerCause::Disturbed)
-        .collect();
-    // Only the fragment wakes (the placement shares no object id with it).
-    assert!(!woke.is_empty(), "the fragment wakes: {events:?}");
-    assert!(
-        woke.iter().all(|e| e.object == woke[0].object),
-        "only the fragment wakes: {events:?}"
-    );
-    let b = app.world().get::<Banger>(fragment).unwrap();
-    assert_eq!(b.phase, BangerPhase::Active);
-    assert!(b.activated.is_some());
-    assert_eq!(
-        *app.world().get::<RigidBody>(fragment).unwrap(),
-        RigidBody::Dynamic
-    );
-    let moved = app.world().get::<Position>(fragment).unwrap().0;
-    assert!(
-        moved.distance(Vec3::new(0.0, 0.25, 0.0)) > 1e-3,
-        "the woken fragment is pushed: {moved:?}"
-    );
-    assert_eq!(
-        app.world().get::<Banger>(placement).unwrap().phase,
-        BangerPhase::Settled,
-        "a placement is never woken"
-    );
+fn a_car_pressing_a_settled_banger_wakes_it_and_it_moves() {
+    for fragment in [true, false] {
+        let mut app = test_app_with(SessionAuthority::Local, 32);
+        let origin = Vec3::new(0.0, 0.25, 0.0);
+        let banger = spawn_settled(&mut app, origin, fragment);
+        // Nothing touches it: it stays settled.
+        assert!(run(&mut app, FRAMES_PER_SECOND).is_empty());
+        // A heavy body comes down on it and comes to rest, loading it.
+        spawn_striker(&mut app, Vec3::new(0.1, 1.0, 0.0), Vec3::ZERO);
+        let events = run(&mut app, FRAMES_PER_SECOND * 4);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.phase == BangerPhase::Active && e.cause == BangerCause::Disturbed),
+            "fragment={fragment}: the banger wakes: {events:?}"
+        );
+        let b = app.world().get::<Banger>(banger).unwrap();
+        assert_eq!(b.phase, BangerPhase::Active);
+        assert!(b.activated.is_some());
+        assert_eq!(
+            *app.world().get::<RigidBody>(banger).unwrap(),
+            RigidBody::Dynamic
+        );
+        let moved = app.world().get::<Position>(banger).unwrap().0;
+        assert!(
+            moved.distance(origin) > 1e-3,
+            "fragment={fragment}: the woken banger is pushed: {moved:?}"
+        );
+    }
 }
 
 /// Run until `object` fires `phase`, returning that frame's

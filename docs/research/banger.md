@@ -787,15 +787,15 @@ the activation edge removes `Sensor` as the body goes dynamic. The
 activating contact's reduced-mass transfer charged to the striker
 remains the F04-C.4 design choice (UNK-22).
 
-**Settled fragments wake under load (#2265, implementation choice
+**Settled bangers wake under load (#2265 fragments, #2271 placements, implementation choice
 under UNK-22).** Settling freezes a fragment as `RigidBody::Static`
 where it lies, and a car can come to rest high-centred on one (wheels
 off the ground, chassis on a piece nothing can push — seen on
 `sp_chinalight_f-break02` and `sp_barricadewood_f-break03/04`). Retail
 has no timed despawn to clear it (the dead branch above), so the port
 makes the fragment a live body again instead: on the authority,
-`wake_settled_fragments` takes a `Settled` *fragment* (never a
-placement) that a non-banger dynamic body touches with a nonzero
+`wake_settled_fragments` takes a `Settled` banger (fragment or
+placement; a placement, the mailbox of #2271, can be perched on as well) that a non-banger dynamic body touches with a nonzero
 normal impulse (the solver is loading it) while that body is at rest
 by Avian's own definition — linear and angular speed below its
 `SleepThreshold` — back to `Active` (`RigidBody::Dynamic`, claims a
